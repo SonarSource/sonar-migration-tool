@@ -13,16 +13,12 @@ import (
 // WebPrompter implements wizard.Prompter over a WebSocket connection.
 // Prompt methods block on a per-request channel until the browser responds.
 // Display methods are fire-and-forget.
-// backSentinel is the value the browser sends when the user clicks Back.
-const backSentinel = "__back__"
-
 type WebPrompter struct {
-	done        <-chan struct{}
-	doneErr     func() error
-	sendFn      func(ServerMessage)
-	mu          sync.Mutex
-	pending     map[string]chan ClientMessage
-	backEnabled bool
+	done    <-chan struct{}
+	doneErr func() error
+	sendFn  func(ServerMessage)
+	mu      sync.Mutex
+	pending map[string]chan ClientMessage
 }
 
 // NewWebPrompter returns a WebPrompter that sends messages via sendFn
@@ -111,35 +107,6 @@ func (wp *WebPrompter) ConfirmReview(title string, details []wizard.KV) (bool, e
 	return toBool(resp.Value), nil
 }
 
-func (wp *WebPrompter) PromptChoice(message string, options []string) (int, error) {
-	resp, err := wp.prompt(ServerMessage{
-		Type:    TypePromptChoice,
-		Message: message,
-		Options: options,
-	})
-	if err != nil {
-		return 0, err
-	}
-	// Value comes as float64 from JSON
-	switch v := resp.Value.(type) {
-	case float64:
-		return int(v), nil
-	case string:
-		for i, opt := range options {
-			if opt == v {
-				return i, nil
-			}
-		}
-	}
-	return 0, nil
-}
-
-func (wp *WebPrompter) SetBackEnabled(enabled bool) {
-	wp.mu.Lock()
-	wp.backEnabled = enabled
-	wp.mu.Unlock()
-}
-
 // --- Display methods (fire-and-forget) ---
 
 func (wp *WebPrompter) DisplayWelcome() {
@@ -210,7 +177,6 @@ func (wp *WebPrompter) prompt(msg ServerMessage) (ClientMessage, error) {
 
 	ch := make(chan ClientMessage, 1)
 	wp.mu.Lock()
-	msg.BackEnabled = wp.backEnabled
 	wp.pending[id] = ch
 	wp.mu.Unlock()
 
@@ -218,9 +184,6 @@ func (wp *WebPrompter) prompt(msg ServerMessage) (ClientMessage, error) {
 
 	select {
 	case resp := <-ch:
-		if toString(resp.Value) == backSentinel {
-			return ClientMessage{}, wizard.ErrBack
-		}
 		return resp, nil
 	case <-wp.done:
 		wp.mu.Lock()
