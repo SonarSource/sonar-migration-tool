@@ -86,8 +86,6 @@ var Wizard = (function() {
 
 	// --- Constants ---
 	const HIDDEN = 'hidden';
-	const ID_PROMPT_AREA = 'prompt-area';
-	const ID_PROMPT_INPUT = 'prompt-input';
 
 	const EYE_SVG = `<svg xmlns="http://www.w3.org/2000/svg"
 		viewBox="0 0 24 24" fill="currentColor"><path
@@ -171,9 +169,7 @@ var Wizard = (function() {
 	}
 
 	function scheduleReconnect() {
-		if (reconnectTimer) {
-			return;
-		}
+		if (reconnectTimer) { return; }
 		reconnectTimer = setTimeout(function() {
 			reconnectTimer = null;
 			connect();
@@ -189,9 +185,7 @@ var Wizard = (function() {
 
 	function updateConnectionDot(state) {
 		const dot = document.getElementById('connection-dot');
-		if (!dot) {
-			return;
-		}
+		if (!dot) { return; }
 		dot.className = state === 'connected'
 			? 'connection-dot connected'
 			: 'connection-dot disconnected';
@@ -289,13 +283,9 @@ var Wizard = (function() {
 	// --- Phase input capture ---
 
 	function capturePhaseInput(prompt, value) {
-		if (!currentPhase) {
-			return;
-		}
+		if (!currentPhase) { return; }
 		let label = prompt.message || prompt.title || '';
-		if (!label) {
-			return;
-		}
+		if (!label) { return; }
 
 		let displayValue;
 		if (prompt.type === 'prompt_password') {
@@ -314,27 +304,21 @@ var Wizard = (function() {
 		}
 
 		const key = currentPhase.phase;
-		if (!phaseInputs[key]) {
-			phaseInputs[key] = [];
-		}
+		if (!phaseInputs[key]) { phaseInputs[key] = []; }
 		phaseInputs[key].push({ label: label, value: displayValue });
 		renderPhaseInputs(key);
 	}
 
 	function findStat(stats, key) {
 		for (const stat of stats) {
-			if (stat.key === key) {
-				return stat.value;
-			}
+			if (stat.key === key) { return stat.value; }
 		}
 		return '';
 	}
 
 	function renderPhaseInputs(phaseKey) {
 		const container = document.getElementById(`phase-${phaseKey}-inputs`);
-		if (!container) {
-			return;
-		}
+		if (!container) { return; }
 		const items = phaseInputs[phaseKey] || [];
 		let html = '';
 		for (const item of items) {
@@ -349,59 +333,37 @@ var Wizard = (function() {
 	// --- Stepper rendering ---
 
 	function phaseBadgeText(state) {
-		if (state === 'active') {
-			return 'In Progress';
-		}
-		if (state === 'complete') {
-			return 'Complete';
-		}
+		if (state === 'active') { return 'In Progress'; }
+		if (state === 'complete') { return 'Complete'; }
 		return 'Pending';
 	}
 
 	function getPhaseState(p) {
-		if (!currentPhase || status === 'idle') {
-			return 'pending';
-		}
-		if (status === 'finished') {
-			return 'complete';
-		}
-		if (currentPhase.phase === p.key) {
-			return 'active';
-		}
-		if (p.index < currentPhase.index) {
-			return 'complete';
-		}
+		if (!currentPhase || status === 'idle') { return 'pending'; }
+		if (status === 'finished') { return 'complete'; }
+		if (currentPhase.phase === p.key) { return 'active'; }
+		if (p.index < currentPhase.index) { return 'complete'; }
 		return 'pending';
 	}
 
 	function updatePhaseRow(p) {
 		const state = getPhaseState(p);
 		const row = document.getElementById(`phase-${p.key}`);
-		if (!row) {
-			return;
-		}
+		if (!row) { return; }
 
 		const circle = document.getElementById(`phase-${p.key}-circle`);
 		const badge = document.getElementById(`phase-${p.key}-badge`);
 		const line = document.getElementById(`phase-${p.key}-line`);
 
 		row.className = 'phase-row';
-		if (state === 'active') {
-			row.className += ' active';
-		}
-		if (state === 'complete') {
-			row.className += ' complete';
-		}
+		if (state === 'active') { row.className += ' active'; }
+		if (state === 'complete') { row.className += ' complete'; }
 
 		circle.innerHTML = state === 'complete' ? '&#10003;' : String(p.index);
 
 		badge.className = 'phase-badge';
-		if (state === 'active') {
-			badge.className += ' badge-active';
-		}
-		if (state === 'complete') {
-			badge.className += ' badge-complete';
-		}
+		if (state === 'active') { badge.className += ' badge-active'; }
+		if (state === 'complete') { badge.className += ' badge-complete'; }
 		badge.textContent = phaseBadgeText(state);
 
 		if (line) {
@@ -424,22 +386,14 @@ var Wizard = (function() {
 			const row = document.getElementById(`phase-${p.key}`);
 			const line = document.getElementById(`phase-${p.key}-line`);
 			const inputs = document.getElementById(`phase-${p.key}-inputs`);
-			if (row) {
-				row.className = 'phase-row';
-			}
-			if (circle) {
-				circle.innerHTML = String(p.index);
-			}
+			if (row) { row.className = 'phase-row'; }
+			if (circle) { circle.innerHTML = String(p.index); }
 			if (badge) {
 				badge.className = 'phase-badge';
 				badge.textContent = 'Pending';
 			}
-			if (line) {
-				line.className = 'phase-line';
-			}
-			if (inputs) {
-				inputs.innerHTML = '';
-			}
+			if (line) { line.className = 'phase-line'; }
+			if (inputs) { inputs.innerHTML = ''; }
 		}
 	}
 
@@ -451,12 +405,8 @@ var Wizard = (function() {
 
 	function onResumeInfo(msg) {
 		const parts = ['Previous session detected'];
-		if (msg.phase) {
-			parts.push(`Phase: ${msg.phase}`);
-		}
-		if (msg.source_url) {
-			parts.push(`Source: ${msg.source_url}`);
-		}
+		if (msg.phase) { parts.push(`Phase: ${msg.phase}`); }
+		if (msg.source_url) { parts.push(`Source: ${msg.source_url}`); }
 		addLogEntry(parts.join(' | '), 'display_message');
 	}
 
@@ -464,20 +414,16 @@ var Wizard = (function() {
 		pendingPromptId = msg.id;
 		pendingPromptMsg = msg;
 		hideProcessing();
-		const area = document.getElementById(ID_PROMPT_AREA);
+		const area = document.getElementById('prompt-area');
 		area.innerHTML = renderPrompt(msg);
 		area.classList.remove(HIDDEN);
 
 		const firstInput = area.querySelector('input, select');
-		if (firstInput) {
-			firstInput.focus();
-		}
+		if (firstInput) { firstInput.focus(); }
 	}
 
 	function backButton(msg) {
-		if (!msg.back_enabled) {
-			return '';
-		}
+		if (!msg.back_enabled) { return ''; }
 		return '<button class="btn-secondary" onclick="Wizard.goBack()">&larr; Back</button>';
 	}
 
@@ -498,14 +444,12 @@ var Wizard = (function() {
 	}
 
 	function renderPromptURL(msg) {
-		if (isCloudURLPrompt(msg)) {
-			return renderPromptCloudURL(msg);
-		}
+		if (isCloudURLPrompt(msg)) { return renderPromptCloudURL(msg); }
 		return `<div class="prompt">
 			<label class="prompt-label">${escapeHTML(msg.message)}</label>
 			<div class="input-row">
 				${backButton(msg)}
-				<input type="url" id="${ID_PROMPT_INPUT}" placeholder="https://"
+				<input type="url" id="prompt-input" placeholder="https://"
 					onkeydown="Wizard.onInputKey(event)">
 				<button class="btn-primary"
 					onclick="Wizard.submitInput()">Submit</button>
@@ -531,7 +475,7 @@ var Wizard = (function() {
 					onclick="Wizard.submitCloudURL()">Submit</button>
 			</div>
 			<div id="cloud-url-custom" class="input-row ${HIDDEN}">
-				<input type="url" id="${ID_PROMPT_INPUT}"
+				<input type="url" id="prompt-input"
 					placeholder="https://custom-instance.example.com"
 					onkeydown="Wizard.onInputKey(event)">
 			</div>
@@ -545,7 +489,7 @@ var Wizard = (function() {
 			<label class="prompt-label">${escapeHTML(msg.message)}</label>
 			<div class="input-row">
 				${backButton(msg)}
-				<input type="text" id="${ID_PROMPT_INPUT}"
+				<input type="text" id="prompt-input"
 					value="${escapeAttr(defaultVal)}"
 					onkeydown="Wizard.onInputKey(event)">
 				<button class="btn-primary"
@@ -560,15 +504,15 @@ var Wizard = (function() {
 			<div class="input-row">
 				${backButton(msg)}
 				<div class="password-wrapper">
-					<input type="password" id="${ID_PROMPT_INPUT}"
+					<input type="password" id="prompt-input"
 						autocomplete="off"
 						onkeydown="Wizard.onInputKey(event)">
 					<button type="button" class="btn-eye"
-						onmousedown="document.getElementById('${ID_PROMPT_INPUT}').type='text'"
-						onmouseup="document.getElementById('${ID_PROMPT_INPUT}').type='password'"
-						onmouseleave="document.getElementById('${ID_PROMPT_INPUT}').type='password'"
-						ontouchstart="document.getElementById('${ID_PROMPT_INPUT}').type='text'"
-						ontouchend="document.getElementById('${ID_PROMPT_INPUT}').type='password'">
+						onmousedown="document.getElementById('prompt-input').type='text'"
+						onmouseup="document.getElementById('prompt-input').type='password'"
+						onmouseleave="document.getElementById('prompt-input').type='password'"
+						ontouchstart="document.getElementById('prompt-input').type='text'"
+						ontouchend="document.getElementById('prompt-input').type='password'">
 						${EYE_SVG}
 					</button>
 				</div>
@@ -636,9 +580,7 @@ var Wizard = (function() {
 	}
 
 	function renderSummaryTable(summary) {
-		if (!summary.stats || !summary.stats.length) {
-			return '';
-		}
+		if (!summary.stats || !summary.stats.length) { return ''; }
 		let html = '';
 		if (summary.title) {
 			html += `<h4>${escapeHTML(summary.title)}</h4>`;
@@ -660,10 +602,8 @@ var Wizard = (function() {
 		if (sel.value === 'other') {
 			custom.classList.remove(HIDDEN);
 			custom.style.display = 'flex';
-			const input = document.getElementById(ID_PROMPT_INPUT);
-			if (input) {
-				input.focus();
-			}
+			const input = document.getElementById('prompt-input');
+			if (input) { input.focus(); }
 		} else {
 			custom.classList.add(HIDDEN);
 			custom.style.display = 'none';
@@ -674,10 +614,8 @@ var Wizard = (function() {
 		const sel = document.getElementById('cloud-url-select');
 		let val;
 		if (sel.value === 'other') {
-			const input = document.getElementById(ID_PROMPT_INPUT);
-			if (!input) {
-				return;
-			}
+			const input = document.getElementById('prompt-input');
+			if (!input) { return; }
 			val = input.value.trim();
 			if (!val || !isValidURL(val)) {
 				const errEl = document.getElementById('prompt-error');
@@ -695,14 +633,10 @@ var Wizard = (function() {
 	// --- Response handling ---
 
 	function submitInput() {
-		const input = document.getElementById(ID_PROMPT_INPUT);
-		if (!input) {
-			return;
-		}
+		const input = document.getElementById('prompt-input');
+		if (!input) { return; }
 		const val = input.value.trim();
-		if (!val) {
-			return;
-		}
+		if (!val) { return; }
 
 		const errEl = document.getElementById('prompt-error');
 		if (input.type === 'url' && errEl) {
@@ -717,9 +651,7 @@ var Wizard = (function() {
 	}
 
 	function respond(value) {
-		if (!pendingPromptId) {
-			return;
-		}
+		if (!pendingPromptId) { return; }
 		if (pendingPromptMsg) {
 			capturePhaseInput(pendingPromptMsg, value);
 		}
@@ -735,9 +667,7 @@ var Wizard = (function() {
 		try {
 			const u = new URL(str);
 			return u.protocol === 'http:' || u.protocol === 'https:';
-		} catch (e) {
-			return false;
-		}
+		} catch (e) { return false; }
 	}
 
 	// --- DOM helpers ---
@@ -759,18 +689,12 @@ var Wizard = (function() {
 	}
 
 	function logClass(type) {
-		if (type === 'display_error') {
-			return 'text-error';
-		}
-		if (type === 'display_warning') {
-			return 'text-warning';
-		}
+		if (type === 'display_error') { return 'text-error'; }
+		if (type === 'display_warning') { return 'text-warning'; }
 		if (type === 'display_success' || type === 'display_wizard_complete') {
 			return 'text-success';
 		}
-		if (type === 'display_phase_progress') {
-			return 'text-phase';
-		}
+		if (type === 'display_phase_progress') { return 'text-phase'; }
 		return '';
 	}
 
@@ -779,7 +703,7 @@ var Wizard = (function() {
 	}
 
 	function showProcessing(text) {
-		document.getElementById(ID_PROMPT_AREA).classList.add(HIDDEN);
+		document.getElementById('prompt-area').classList.add(HIDDEN);
 		const proc = document.getElementById('processing');
 		proc.classList.remove(HIDDEN);
 		proc.style.display = 'flex';
@@ -793,9 +717,8 @@ var Wizard = (function() {
 	}
 
 	function hidePrompt() {
-		const area = document.getElementById(ID_PROMPT_AREA);
-		area.innerHTML = '';
-		area.classList.add(HIDDEN);
+		document.getElementById('prompt-area').innerHTML = '';
+		document.getElementById('prompt-area').classList.add(HIDDEN);
 	}
 
 	function showControls(running) {
@@ -826,9 +749,7 @@ var Wizard = (function() {
 	// --- Escaping ---
 
 	function escapeHTML(str) {
-		if (str == null) {
-			return '';
-		}
+		if (str == null) { return ''; }
 		const div = document.createElement('div');
 		div.appendChild(document.createTextNode(String(str)));
 		return div.innerHTML;
@@ -844,9 +765,7 @@ var Wizard = (function() {
 
 	return {
 		start: function() {
-			if (status === 'running') {
-				return;
-			}
+			if (status === 'running') { return; }
 			status = 'running';
 			send({ type: 'start_wizard' });
 		},
@@ -857,16 +776,12 @@ var Wizard = (function() {
 		submitCloudURL: submitCloudURL,
 		submitChoice: function() {
 			const sel = document.getElementById('choice-select');
-			if (sel) {
-				respond(parseInt(sel.value, 10));
-			}
+			if (sel) { respond(parseInt(sel.value, 10)); }
 		},
 		onCloudSelect: onCloudSelect,
 		respond: respond,
 		goBack: function() {
-			if (!pendingPromptId) {
-				return;
-			}
+			if (!pendingPromptId) { return; }
 			if (currentPhase) {
 				const key = currentPhase.phase;
 				if (phaseInputs[key] && phaseInputs[key].length > 0) {
@@ -887,14 +802,10 @@ var Wizard = (function() {
 		},
 		openCloud: function() {
 			const btn = document.getElementById('cloud-btn');
-			if (btn._targetURL) {
-				window.open(btn._targetURL, '_blank');
-			}
+			if (btn._targetURL) { window.open(btn._targetURL, '_blank'); }
 		},
 		onInputKey: function(e) {
-			if (e.key === 'Enter') {
-				submitInput();
-			}
+			if (e.key === 'Enter') { submitInput(); }
 		}
 	};
 })();
