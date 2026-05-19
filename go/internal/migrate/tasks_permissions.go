@@ -139,26 +139,30 @@ func runSetOrgGroupPermissions(ctx context.Context, e *Executor) error {
 			if name == "Anyone" {
 				return nil
 			}
-			perms := extractPermissions(item.Data)
 			orgKey := orgKeys[item.ServerURL]
 			if shouldSkipOrg(orgKey) {
 				return nil
 			}
-			for _, perm := range perms {
-				if !validPermissions[perm] {
-					continue
-				}
-				err := e.Cloud.Permissions.AddGroup(ctx, name, perm, orgKey, "")
-				if err != nil {
-					e.Logger.Warn("setOrgGroupPermissions failed",
-						"group", name, "perm", perm, "err", err)
-				}
-			}
+			applyOrgPermissions(ctx, e, item.Data, name, orgKey)
 			_ = w.WriteOne(item.Data)
 			return nil
 		})
 	}
 	return g.Wait()
+}
+
+func applyOrgPermissions(ctx context.Context, e *Executor, data json.RawMessage, name, orgKey string) {
+	perms := extractPermissions(data)
+	for _, perm := range perms {
+		if !validPermissions[perm] {
+			continue
+		}
+		err := e.Cloud.Permissions.AddGroup(ctx, name, perm, orgKey, "")
+		if err != nil {
+			e.Logger.Warn("setOrgGroupPermissions failed",
+				"group", name, "perm", perm, "err", err)
+		}
+	}
 }
 
 func runSetProfileGroupPermissions(ctx context.Context, e *Executor) error {

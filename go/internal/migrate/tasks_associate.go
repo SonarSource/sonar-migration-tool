@@ -137,26 +137,29 @@ func runSetProjectGroupPermissions(ctx context.Context, e *Executor) error {
 			if !ok {
 				return nil
 			}
-
-			name := extractField(item.Data, "name")
-			permsRaw := extractPermissions(item.Data)
-			for _, perm := range permsRaw {
-				if !validPermissions[perm] {
-					continue
-				}
-				err := e.Cloud.Permissions.AddGroup(ctx, name, perm, pm.OrgKey, pm.CloudKey)
-				if err != nil {
-					e.Logger.Warn("setProjectGroupPermissions failed",
-						"project", pm.CloudKey, "group", name, "perm", perm, "err", err)
-				}
-			}
-			_ = w.WriteOne(common.EnrichRaw(item.Data, map[string]any{
-				"cloud_project_key": pm.CloudKey,
-			}))
+			applyGroupPermissions(ctx, e, item.Data, pm, w)
 			return nil
 		})
 	}
 	return g.Wait()
+}
+
+func applyGroupPermissions(ctx context.Context, e *Executor, data json.RawMessage, pm projectMapping, w *common.ChunkWriter) {
+	name := extractField(data, "name")
+	permsRaw := extractPermissions(data)
+	for _, perm := range permsRaw {
+		if !validPermissions[perm] {
+			continue
+		}
+		err := e.Cloud.Permissions.AddGroup(ctx, name, perm, pm.OrgKey, pm.CloudKey)
+		if err != nil {
+			e.Logger.Warn("setProjectGroupPermissions failed",
+				"project", pm.CloudKey, "group", name, "perm", perm, "err", err)
+		}
+	}
+	_ = w.WriteOne(common.EnrichRaw(data, map[string]any{
+		"cloud_project_key": pm.CloudKey,
+	}))
 }
 
 func runSetProjectSettings(ctx context.Context, e *Executor) error {
