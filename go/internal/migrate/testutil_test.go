@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 
 	sqapi "github.com/sonar-solutions/sq-api-go"
 	"github.com/sonar-solutions/sq-api-go/cloud"
@@ -201,6 +202,25 @@ func newMockCloudServer() *httptest.Server {
 				{"id": "repo-123", "slug": "myorg/myrepo", "label": "myrepo"},
 			},
 		})
+	})
+
+	mux.HandleFunc("/api/organizations/search", func(w http.ResponseWriter, r *http.Request) {
+		// Echo every requested key back as `<key>-uuid`. configurePortfolios
+		// tests pin specific keys and assert the synthetic UUID lands in the
+		// PATCH body.
+		keys := r.URL.Query().Get("organizations")
+		var orgs []map[string]any
+		for _, k := range strings.Split(keys, ",") {
+			if k == "" {
+				continue
+			}
+			orgs = append(orgs, map[string]any{
+				"id":   k + "-uuid",
+				"key":  k,
+				"name": k,
+			})
+		}
+		json.NewEncoder(w).Encode(map[string]any{"organizations": orgs})
 	})
 
 	// Catch-all.

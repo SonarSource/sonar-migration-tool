@@ -73,11 +73,20 @@ type Template struct {
 }
 
 // Portfolio represents a mapped portfolio.
+//
+// SelectionMode / RegularExpression / Tags reflect how the source portfolio
+// composed its project set on SonarQube Server; they are used during
+// migration to set up an equivalent selection on SonarQube Cloud (e.g. a
+// REGEXP portfolio on SQS becomes a regexp-selection portfolio on SQC with
+// the regex transformed to account for project-key renaming).
 type Portfolio struct {
 	SourcePortfolioKey string `csv:"source_portfolio_key" json:"source_portfolio_key"`
 	Name               string `csv:"name" json:"name"`
 	ServerURL          string `csv:"server_url" json:"server_url"`
 	Description        string `csv:"description" json:"description"`
+	SelectionMode      string `csv:"selection_mode" json:"selection_mode"`
+	RegularExpression  string `csv:"regexp" json:"regexp"`
+	Tags               string `csv:"tags" json:"tags"`
 }
 
 // Binding is an intermediate struct for unique DevOps bindings.

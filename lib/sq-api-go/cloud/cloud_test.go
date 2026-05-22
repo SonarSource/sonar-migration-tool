@@ -787,7 +787,7 @@ func TestEnterprisesCreatePortfolioError(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestEnterprisesUpdatePortfolio(t *testing.T) {
+func TestEnterprisesUpdatePortfolioProjects(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc(pathEntPortfolioP1, func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodPatch, r.Method)
@@ -796,12 +796,51 @@ func TestEnterprisesUpdatePortfolio(t *testing.T) {
 		require.NoError(t, err)
 		projects := body["projects"].([]any)
 		assert.Len(t, projects, 2)
+		first := projects[0].(map[string]any)
+		assert.Equal(t, "br-1", first["branchId"])
+		// Selection / RegularExpression / Tags / OrganizationIDs were not set,
+		// so they must NOT appear in the body.
+		_, hasSelection := body["selection"]
+		assert.False(t, hasSelection)
+		_, hasRegex := body["regularExpression"]
+		assert.False(t, hasRegex)
 		w.WriteHeader(http.StatusNoContent)
 	})
 	cc := newTestCloud(t, mux)
 
 	err := cc.Enterprises.UpdatePortfolio(context.Background(), cloud.UpdatePortfolioParams{
-		PortfolioID: "p1", Projects: []string{"proj1", "proj2"},
+		PortfolioID: "p1",
+		Projects: []cloud.PortfolioProjectRef{
+			{BranchID: "br-1"}, {BranchID: "br-2"},
+		},
+	})
+	require.NoError(t, err)
+}
+
+func TestEnterprisesUpdatePortfolioRegexp(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc(pathEntPortfolioP1, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		assert.Equal(t, "regexp", body["selection"])
+		assert.Equal(t, "^org1_backend-.*$", body["regularExpression"])
+		orgs := body["organizationIds"].([]any)
+		assert.Len(t, orgs, 1)
+		assert.Equal(t, "org-uuid", orgs[0])
+		// Empty Projects/Tags must be absent from the body.
+		_, hasProjects := body["projects"]
+		assert.False(t, hasProjects)
+		_, hasTags := body["tags"]
+		assert.False(t, hasTags)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	cc := newTestCloud(t, mux)
+
+	err := cc.Enterprises.UpdatePortfolio(context.Background(), cloud.UpdatePortfolioParams{
+		PortfolioID:       "p1",
+		Selection:         "regexp",
+		RegularExpression: "^org1_backend-.*$",
+		OrganizationIDs:   []string{"org-uuid"},
 	})
 	require.NoError(t, err)
 }
@@ -814,7 +853,7 @@ func TestEnterprisesUpdatePortfolioError(t *testing.T) {
 	cc := newTestCloud(t, mux)
 
 	err := cc.Enterprises.UpdatePortfolio(context.Background(), cloud.UpdatePortfolioParams{
-		PortfolioID: "p1", Projects: []string{},
+		PortfolioID: "p1",
 	})
 	require.Error(t, err)
 }
@@ -910,6 +949,34 @@ func TestEnterprisesListPortfoliosPaginates(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Len(t, all, 55)
+}
+
+func TestOrganizationsLookupID(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/organizations/search", func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "my-org", r.URL.Query().Get("organizations"))
+		writeJSON(w, types.OrganizationsSearchResponse{
+			Organizations: []types.Organization{
+				{ID: "uuid-1", Key: "my-org", Name: "My Org"},
+			},
+		})
+	})
+	cc := newTestCloud(t, mux)
+
+	id, err := cc.Organizations.LookupID(context.Background(), "my-org")
+	require.NoError(t, err)
+	assert.Equal(t, "uuid-1", id)
+}
+
+func TestOrganizationsLookupIDNotFound(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/organizations/search", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, types.OrganizationsSearchResponse{})
+	})
+	cc := newTestCloud(t, mux)
+
+	_, err := cc.Organizations.LookupID(context.Background(), "missing-org")
+	require.Error(t, err)
 }
 
 // --- DOP ---

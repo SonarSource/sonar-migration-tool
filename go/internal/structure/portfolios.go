@@ -10,7 +10,11 @@ import (
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
-// MapPortfolios maps portfolios, deduplicating by project composition.
+// MapPortfolios maps portfolios, deduplicating by project composition. It
+// also enriches each entry with selectionMode / regexp / tags from the
+// corresponding getPortfolioDetails record, so the migration can preserve
+// the source selection semantics rather than always producing a manual
+// project list on the target.
 func MapPortfolios(directory string, mapping ExtractMapping) []Portfolio {
 	items, _ := ReadExtractData(directory, mapping, "getPortfolioProjects")
 
@@ -38,6 +42,22 @@ func MapPortfolios(directory string, mapping ExtractMapping) []Portfolio {
 		}
 	}
 
+	// Overlay selection metadata read from getPortfolioDetails. Each detail
+	// item is the top-level portfolio object returned by api/views/show, so
+	// it carries selectionMode and (when applicable) regexp + tags.
+	detailItems, _ := ReadExtractData(directory, mapping, "getPortfolioDetails")
+	selection := buildSelectionIndex(detailItems)
+	for key, info := range selection {
+		d, ok := portfolioDetails[key]
+		if !ok {
+			continue
+		}
+		d.SelectionMode = info.mode
+		d.RegularExpression = info.regexp
+		d.Tags = info.tags
+		portfolioDetails[key] = d
+	}
+
 	// Deduplicate portfolios by project composition hash.
 	uniquePortfolios := make(map[string]portfolioDetail)
 	for key, projects := range portfolioProjects {
@@ -56,6 +76,9 @@ func MapPortfolios(directory string, mapping ExtractMapping) []Portfolio {
 			Name:               p.Name,
 			ServerURL:          p.ServerURL,
 			Description:        p.Description,
+			SelectionMode:      p.SelectionMode,
+			RegularExpression:  p.RegularExpression,
+			Tags:               p.Tags,
 		})
 	}
 	return result
@@ -66,6 +89,62 @@ type portfolioDetail struct {
 	Name               string
 	ServerURL          string
 	Description        string
+	SelectionMode      string
+	RegularExpression  string
+	Tags               string // comma-separated; SQS returns []string in the API
+}
+
+// portfolioSelection holds the selection fields read from a getPortfolioDetails record.
+type portfolioSelection struct {
+	mode   string
+	regexp string
+	tags   string
+}
+
+// buildSelectionIndex walks the getPortfolioDetails extract output and
+// returns a serverURL+portfolioKey → selection map for the TOP-LEVEL
+// portfolios only. Sub-portfolios with their own selection are flagged
+// elsewhere as Partial migrations (see issue #152).
+func buildSelectionIndex(items []ExtractItem) map[string]portfolioSelection {
+	out := make(map[string]portfolioSelection, len(items))
+	for _, item := range items {
+		var obj map[string]any
+		if err := json.Unmarshal(item.Data, &obj); err != nil {
+			continue
+		}
+		key := getString(obj, "key")
+		if key == "" {
+			continue
+		}
+		out[item.ServerURL+key] = portfolioSelection{
+			mode:   getString(obj, "selectionMode"),
+			regexp: getString(obj, "regexp"),
+			tags:   joinAnySlice(obj["tags"]),
+		}
+	}
+	return out
+}
+
+// joinAnySlice flattens a JSON array of strings to a comma-separated string,
+// tolerating nil and non-array shapes (returns "").
+func joinAnySlice(v any) string {
+	arr, ok := v.([]any)
+	if !ok {
+		return ""
+	}
+	out := ""
+	for _, e := range arr {
+		s, ok := e.(string)
+		if !ok || s == "" {
+			continue
+		}
+		if out == "" {
+			out = s
+		} else {
+			out += "," + s
+		}
+	}
+	return out
 }
 
 // generateHashID generates a consistent UUID-formatted string from a list of strings.

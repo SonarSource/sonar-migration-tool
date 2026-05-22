@@ -57,22 +57,91 @@ func (e *EnterprisesClient) CreatePortfolio(ctx context.Context, params CreatePo
 	return &result, nil
 }
 
-// UpdatePortfolioParams holds the parameters for updating a portfolio's project list.
-type UpdatePortfolioParams struct {
-	// PortfolioID is the portfolio's numeric ID.
-	PortfolioID string
-	// Projects is the list of project keys to include in the portfolio.
-	Projects []string
+// PortfolioProjectRef identifies a single project assignment in a portfolio.
+// The SonarQube Cloud portfolios PATCH endpoint represents project membership
+// as objects with a branchId (UUID of the project branch the portfolio
+// tracks), not as a list of project keys.
+type PortfolioProjectRef struct {
+	BranchID string `json:"branchId"`
 }
 
-// UpdatePortfolio updates the project list for a portfolio via
-// PATCH /enterprises/portfolios/{id}.
+// UpdatePortfolioParams holds parameters accepted by
+// PATCH /enterprises/portfolios/{id}. Only non-zero fields are sent; the
+// server treats missing fields as "no change".
+//
+// Mapping rules:
+//   - Selection "" (default) — server keeps the existing selection mode.
+//   - Selection "projects"   — Projects is the authoritative list.
+//   - Selection "regexp"     — RegularExpression + OrganizationIDs apply.
+//   - Selection "tags"       — Tags + OrganizationIDs apply.
+//
+// ProjectKeys is a legacy convenience: if set (and Projects is empty),
+// callers that still hold cloud project keys can pass them and we forward
+// them as branchId values. The SonarQube Cloud API rejects this shape, so
+// new code should populate Projects directly.
+type UpdatePortfolioParams struct {
+	PortfolioID       string
+	Selection         string
+	Name              string
+	Description       string
+	BranchKey         string
+	RegularExpression string
+	Tags              []string
+	OrganizationIDs   []string
+	Projects          []PortfolioProjectRef
+
+	// Deprecated: kept for backward compatibility with callers that still
+	// pass project keys. Use Projects + PortfolioProjectRef{BranchID} instead.
+	ProjectKeys []string
+}
+
+// UpdatePortfolio updates a portfolio via PATCH /enterprises/portfolios/{id}.
+// Only non-empty fields are included in the request body.
 func (e *EnterprisesClient) UpdatePortfolio(ctx context.Context, params UpdatePortfolioParams) error {
-	body := map[string]any{
-		"projects": params.Projects,
-	}
+	body := buildPortfolioPatchBody(params)
 	path := fmt.Sprintf("enterprises/portfolios/%s", params.PortfolioID)
 	return e.patchJSON(ctx, path, body, nil)
+}
+
+// buildPortfolioPatchBody assembles the JSON body honouring the
+// "only-send-set-fields" rule. Exposed only for testability.
+func buildPortfolioPatchBody(params UpdatePortfolioParams) map[string]any {
+	body := map[string]any{}
+	if params.Name != "" {
+		body["name"] = params.Name
+	}
+	if params.Description != "" {
+		body["description"] = params.Description
+	}
+	if params.Selection != "" {
+		body["selection"] = params.Selection
+	}
+	if params.BranchKey != "" {
+		body["branchKey"] = params.BranchKey
+	}
+	if params.RegularExpression != "" {
+		body["regularExpression"] = params.RegularExpression
+	}
+	if len(params.Tags) > 0 {
+		body["tags"] = params.Tags
+	}
+	if len(params.OrganizationIDs) > 0 {
+		body["organizationIds"] = params.OrganizationIDs
+	}
+	switch {
+	case len(params.Projects) > 0:
+		body["projects"] = params.Projects
+	case len(params.ProjectKeys) > 0:
+		// Legacy adapter — let callers that have not been migrated still
+		// send something. The SQC API will likely reject this if branchId
+		// is required to be a UUID.
+		refs := make([]PortfolioProjectRef, len(params.ProjectKeys))
+		for i, k := range params.ProjectKeys {
+			refs[i] = PortfolioProjectRef{BranchID: k}
+		}
+		body["projects"] = refs
+	}
+	return body
 }
 
 // DeletePortfolio deletes a portfolio via DELETE /enterprises/portfolios/{id}.
