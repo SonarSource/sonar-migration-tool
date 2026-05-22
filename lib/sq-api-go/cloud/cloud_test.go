@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -840,6 +841,75 @@ func TestEnterprisesDeletePortfolioError(t *testing.T) {
 	err := cc.Enterprises.DeletePortfolio(context.Background(), "p1")
 	require.Error(t, err)
 	assert.True(t, sqapi.IsNotFound(err))
+}
+
+func TestEnterprisesListPortfoliosPage(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc(pathEntPortfolios, func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		q := r.URL.Query()
+		assert.Equal(t, "ent-1", q.Get("enterpriseId"))
+		assert.Equal(t, "search-term", q.Get("q"))
+		assert.Equal(t, "2", q.Get("pageIndex"))
+		assert.Equal(t, "10", q.Get("pageSize"))
+		writeJSON(w, types.PortfoliosListResponse{
+			Portfolios: []types.Portfolio{
+				{ID: "p1", Name: "Portfolio One"},
+				{ID: "p2", Name: "Portfolio Two"},
+			},
+			Page: types.PortfoliosPage{PageIndex: 2, PageSize: 10, Total: 12},
+		})
+	})
+	cc := newTestCloud(t, mux)
+
+	resp, err := cc.Enterprises.ListPortfoliosPage(context.Background(), cloud.ListPortfoliosParams{
+		EnterpriseID: "ent-1",
+		Query:        "search-term",
+		PageIndex:    2,
+		PageSize:     10,
+	})
+	require.NoError(t, err)
+	assert.Len(t, resp.Portfolios, 2)
+	assert.Equal(t, "p1", resp.Portfolios[0].ID)
+	assert.Equal(t, 12, resp.Page.Total)
+}
+
+func TestEnterprisesListPortfoliosPaginates(t *testing.T) {
+	mux := http.NewServeMux()
+	// Build a mock that returns 50 portfolios on page 1 and 5 on page 2.
+	mux.HandleFunc(pathEntPortfolios, func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "ent-1", r.URL.Query().Get("enterpriseId"))
+		page := r.URL.Query().Get("pageIndex")
+		switch page {
+		case "1":
+			items := make([]types.Portfolio, 50)
+			for i := range items {
+				items[i] = types.Portfolio{ID: "p1-" + strconv.Itoa(i)}
+			}
+			writeJSON(w, types.PortfoliosListResponse{
+				Portfolios: items,
+				Page:       types.PortfoliosPage{PageIndex: 1, PageSize: 50, Total: 55},
+			})
+		case "2":
+			items := make([]types.Portfolio, 5)
+			for i := range items {
+				items[i] = types.Portfolio{ID: "p2-" + strconv.Itoa(i)}
+			}
+			writeJSON(w, types.PortfoliosListResponse{
+				Portfolios: items,
+				Page:       types.PortfoliosPage{PageIndex: 2, PageSize: 50, Total: 55},
+			})
+		default:
+			t.Errorf("unexpected pageIndex %q", page)
+		}
+	})
+	cc := newTestCloud(t, mux)
+
+	all, err := cc.Enterprises.ListPortfolios(context.Background(), cloud.ListPortfoliosParams{
+		EnterpriseID: "ent-1",
+	})
+	require.NoError(t, err)
+	assert.Len(t, all, 55)
 }
 
 // --- DOP ---

@@ -282,11 +282,31 @@ func runCreatePortfolios(ctx context.Context, e *Executor) error {
 		return err
 	}
 
+	// Pre-fetch every portfolio that already exists in the enterprise so we
+	// can resolve duplicates without depending on a specific error code from
+	// CreatePortfolio. This is what makes `reset` work on a re-run: the
+	// existing-portfolio IDs land in the createPortfolios JSONL and
+	// deletePortfolios can read them.
+	existingByName, err := loadExistingPortfolioIDs(ctx, e, entID)
+	if err != nil {
+		e.Logger.Warn("createPortfolios: could not list existing portfolios; duplicate-name re-runs will fail", "err", err)
+		existingByName = map[string]string{}
+	}
+
 	counter := NewTaskCounter("createPortfolios")
 	err = forEachMigrateItem(ctx, e, "createPortfolios", "generatePortfolioMappings",
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
 			name := extractField(item, "name")
 			desc := extractField(item, "description")
+
+			if existingID, ok := existingByName[name]; ok {
+				e.Logger.Info("createPortfolios: already exists, reusing", "name", name, "id", existingID)
+				counter.Success()
+				result := common.EnrichRaw(item, map[string]any{
+					"cloud_portfolio_id": existingID,
+				})
+				return w.WriteOne(result)
+			}
 
 			portfolio, err := e.CloudAPI.Enterprises.CreatePortfolio(ctx, cloud.CreatePortfolioParams{
 				EnterpriseID: entID,
@@ -295,8 +315,6 @@ func runCreatePortfolios(ctx context.Context, e *Executor) error {
 				Selection:    "projects",
 			})
 			if err != nil {
-				// Portfolio lookup on re-run is not supported — the enterprise API
-				// does not expose a list/search endpoint for portfolios.
 				counter.Fail()
 				logAPIWarn(e.Logger, "createPortfolios: create failed", err, "name", name)
 				return nil
@@ -310,6 +328,27 @@ func runCreatePortfolios(ctx context.Context, e *Executor) error {
 		})
 	counter.LogSummary(e.Logger)
 	return err
+}
+
+// loadExistingPortfolioIDs lists every portfolio in the given enterprise and
+// returns a name → ID map. The enterprise API has no "create-or-get"
+// semantics, so we need this snapshot to recover IDs of portfolios that
+// already exist (e.g. during `reset` or a resumed run).
+func loadExistingPortfolioIDs(ctx context.Context, e *Executor, entID string) (map[string]string, error) {
+	portfolios, err := e.CloudAPI.Enterprises.ListPortfolios(ctx, cloud.ListPortfoliosParams{
+		EnterpriseID: entID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(portfolios))
+	for _, p := range portfolios {
+		if p.Name == "" || p.ID == "" {
+			continue
+		}
+		out[p.Name] = p.ID
+	}
+	return out, nil
 }
 
 // resolveEnterpriseID reads the getEnterprises task output and returns the UUID
