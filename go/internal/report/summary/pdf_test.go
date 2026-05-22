@@ -3,6 +3,7 @@ package summary
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -102,7 +103,7 @@ func TestGeneratePDFReport(t *testing.T) {
 		{"name": "Proj1", "sonarcloud_org_key": "org1", "cloud_project_key": "org1_proj1"},
 	})
 
-	pdfPath, err := GeneratePDFReport(runDir, dir)
+	pdfPath, err := GeneratePDFReport(runDir, dir, dir)
 	if err != nil {
 		t.Fatalf("GeneratePDFReport: %v", err)
 	}
@@ -130,38 +131,62 @@ func TestTruncate(t *testing.T) {
 	}
 }
 
-func TestSubsectionColumnsWithScanHistory(t *testing.T) {
-	items := []EntityItem{
-		{Detail: "proj1|scan:success"},
+func TestBuildUnifiedRowsOrdering(t *testing.T) {
+	section := Section{
+		Name: "Quality Gates",
+		Succeeded: []EntityItem{
+			{Name: "GateA", Organization: "org1", Detail: "42"},
+		},
+		Partial: []EntityItem{
+			{Name: "GateB", Organization: "org1", Detail: "43", Issues: []string{"Add condition: foo"}},
+		},
+		Failed: []EntityItem{
+			{Name: "GateC", Organization: "org1", ErrorMessage: "boom"},
+		},
+		Skipped: []EntityItem{
+			{Name: "GateD", SkipReason: SkipReasonUnused, Detail: "Not used"},
+			{Name: "GateE", SkipReason: SkipReasonBuiltIn, Detail: "Built-in"},
+		},
 	}
-	headers, widths := subsectionColumns(false, items)
-	if len(headers) != 4 {
-		t.Errorf("expected 4 columns with scan history, got %d", len(headers))
+
+	rows := buildUnifiedRows(section)
+	if len(rows) != 5 {
+		t.Fatalf("expected 5 rows, got %d", len(rows))
 	}
-	if headers[3] != "Scan History" {
-		t.Errorf("expected 'Scan History' column, got %q", headers[3])
+	expectedOutcomes := []string{
+		outcomeSuccess, outcomePartial, outcomeFailed, outcomeSkipped, outcomeSkipped,
 	}
-	if len(widths) != 4 {
-		t.Errorf("expected 4 widths, got %d", len(widths))
+	for i, want := range expectedOutcomes {
+		if rows[i].outcome != want {
+			t.Errorf("row %d: expected outcome %q, got %q", i, want, rows[i].outcome)
+		}
+	}
+	// Skipped ordering: built-in comes before unused per skipReasonOrder.
+	if rows[3].name != "GateE" {
+		t.Errorf("expected built-in skipped first, got name %q", rows[3].name)
+	}
+	if rows[4].name != "GateD" {
+		t.Errorf("expected unused skipped second, got name %q", rows[4].name)
+	}
+	if rows[1].details != "43 — Add condition: foo" {
+		t.Errorf("expected partial details to combine cloud key + issues, got %q", rows[1].details)
 	}
 }
 
-func TestSubsectionColumnsWithoutScanHistory(t *testing.T) {
-	items := []EntityItem{
-		{Detail: "proj1"},
+func TestUnifiedRowDisplayNameWithLanguage(t *testing.T) {
+	row := unifiedRow{name: "Custom", language: "java"}
+	if got := row.displayName(); got != "java / Custom" {
+		t.Errorf("expected 'java / Custom', got %q", got)
 	}
-	headers, _ := subsectionColumns(false, items)
-	if len(headers) != 3 {
-		t.Errorf("expected 3 columns without scan history, got %d", len(headers))
+	row2 := unifiedRow{name: "Gate"}
+	if got := row2.displayName(); got != "Gate" {
+		t.Errorf("expected 'Gate', got %q", got)
 	}
 }
 
-func TestSubsectionColumnsFailure(t *testing.T) {
-	items := []EntityItem{
-		{ErrorMessage: "error"},
-	}
-	headers, _ := subsectionColumns(true, items)
-	if len(headers) != 3 || headers[2] != "Error" {
-		t.Errorf("expected failure columns, got %v", headers)
+func TestSuccessDetailsScanHistory(t *testing.T) {
+	got := successDetails(EntityItem{Detail: "proj1|scan:failed"})
+	if !strings.Contains(got, "proj1") || !strings.Contains(got, "Failed") {
+		t.Errorf("expected scan history in details, got %q", got)
 	}
 }

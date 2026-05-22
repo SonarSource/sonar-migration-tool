@@ -31,7 +31,7 @@ organization keys to organizations.csv.`,
 			return err
 		}
 		runDir := filepath.Join(cfg.ExportDirectory, runID)
-		if pdfPath, pdfErr := summary.GeneratePDFReport(runDir, cfg.ExportDirectory); pdfErr == nil {
+		if pdfPath, pdfErr := summary.GeneratePDFReport(runDir, cfg.ExportDirectory, cfg.ExportDirectory); pdfErr == nil {
 			fmt.Printf("PDF summary report: %s\n", pdfPath)
 		}
 		return nil

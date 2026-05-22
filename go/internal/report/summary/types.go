@@ -14,6 +14,7 @@ type MigrationSummary struct {
 type Section struct {
 	Name      string
 	Succeeded []EntityItem
+	Partial   []EntityItem // created on SQC but follow-up configuration was incomplete
 	Failed    []EntityItem
 	Skipped   []EntityItem
 }
@@ -21,10 +22,20 @@ type Section struct {
 // EntityItem represents a single entity in the report.
 type EntityItem struct {
 	Name         string
+	Language     string   // populated for Quality Profiles only; empty otherwise
 	Organization string
-	Detail       string // cloud key for successes, scan history status, skip reason
-	ErrorMessage string // failures only
+	Detail       string   // cloud key for successes, scan history status, skip reason
+	ErrorMessage string   // failures only
+	SkipReason   string   // for skipped items: SkipReason* constants below
+	Issues       []string // for partial migrations: human-readable list of issues
 }
+
+// Skip reason constants used when classifying skipped entities.
+const (
+	SkipReasonOrgSkipped = "org-skipped"
+	SkipReasonBuiltIn    = "built-in"
+	SkipReasonUnused     = "unused"
+)
 
 // sectionDef maps a report section to its corresponding task names and analysis entity type.
 type sectionDef struct {
@@ -34,17 +45,19 @@ type sectionDef struct {
 	AnalysisEntity string // entity type in analysis report (for failures)
 	NameField      string // JSONL field to extract entity name
 	DetailField    string // JSONL field for detail column (e.g., cloud key)
+	ExtractTask    string // extract task for source data (empty if not applicable)
 }
 
 // sectionDefs defines the sections in report order.
 var sectionDefs = []sectionDef{
 	{
-		Name:           "Projects",
-		InputTask:      "generateProjectMappings",
-		OutputTask:     "createProjects",
-		AnalysisEntity: "Project",
+		Name:           "Quality Gates",
+		InputTask:      "generateGateMappings",
+		OutputTask:     "createGates",
+		AnalysisEntity: "Quality Gate",
 		NameField:      "name",
-		DetailField:    "cloud_project_key",
+		DetailField:    "cloud_gate_id",
+		ExtractTask:    "getGates",
 	},
 	{
 		Name:           "Quality Profiles",
@@ -53,22 +66,7 @@ var sectionDefs = []sectionDef{
 		AnalysisEntity: "Quality Profile",
 		NameField:      "name",
 		DetailField:    "cloud_profile_key",
-	},
-	{
-		Name:           "Quality Gates",
-		InputTask:      "generateGateMappings",
-		OutputTask:     "createGates",
-		AnalysisEntity: "Quality Gate",
-		NameField:      "name",
-		DetailField:    "cloud_gate_id",
-	},
-	{
-		Name:           "Groups",
-		InputTask:      "generateGroupMappings",
-		OutputTask:     "createGroups",
-		AnalysisEntity: "Group",
-		NameField:      "name",
-		DetailField:    "cloud_group_id",
+		ExtractTask:    "getProfiles",
 	},
 	{
 		Name:           "Permission Templates",
@@ -79,12 +77,28 @@ var sectionDefs = []sectionDef{
 		DetailField:    "cloud_template_id",
 	},
 	{
+		Name:           "Groups",
+		InputTask:      "generateGroupMappings",
+		OutputTask:     "createGroups",
+		AnalysisEntity: "Group",
+		NameField:      "name",
+		DetailField:    "cloud_group_id",
+	},
+	{
 		Name:           "Portfolios",
 		InputTask:      "generatePortfolioMappings",
 		OutputTask:     "createPortfolios",
 		AnalysisEntity: "Portfolio",
 		NameField:      "name",
 		DetailField:    "cloud_portfolio_id",
+	},
+	{
+		Name:           "Projects",
+		InputTask:      "generateProjectMappings",
+		OutputTask:     "createProjects",
+		AnalysisEntity: "Project",
+		NameField:      "name",
+		DetailField:    "cloud_project_key",
 	},
 }
 

@@ -464,7 +464,7 @@ func generateAnalysisReport(p Prompter, exportDir, runID string) {
 		p.DisplayMessage(fmt.Sprintf("Analysis report: %d entries written to %s/final_analysis_report.csv", len(rows), runID))
 	}
 
-	pdfPath, pdfErr := summary.GeneratePDFReport(runDir, exportDir)
+	pdfPath, pdfErr := summary.GeneratePDFReport(runDir, exportDir, exportDir)
 	if pdfErr != nil {
 		p.DisplayWarning("Could not generate PDF summary: " + pdfErr.Error())
 		return

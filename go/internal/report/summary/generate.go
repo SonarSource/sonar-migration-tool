@@ -7,13 +7,18 @@ import (
 )
 
 // GeneratePDFReport collects migration data from runDir and writes a PDF
-// summary report to outputDir. Returns the path to the generated PDF.
-func GeneratePDFReport(runDir, outputDir string) (string, error) {
+// summary report to outputDir. exportDir is the root export directory used
+// to locate extract data; pass "" to default to filepath.Dir(runDir).
+// Returns the path to the generated PDF.
+func GeneratePDFReport(runDir, outputDir, exportDir string) (string, error) {
 	if outputDir == "" {
 		outputDir = filepath.Dir(runDir)
 	}
+	if exportDir == "" {
+		exportDir = filepath.Dir(runDir)
+	}
 
-	summary, err := CollectSummary(runDir)
+	summary, err := CollectSummary(runDir, exportDir)
 	if err != nil {
 		return "", fmt.Errorf("collecting summary: %w", err)
 	}

@@ -2,26 +2,40 @@ package summary
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/analysis"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 )
 
 // CollectSummary reads task JSONL outputs and the analysis report to build
-// a MigrationSummary for PDF rendering.
-func CollectSummary(runDir string) (*MigrationSummary, error) {
+// a MigrationSummary for PDF rendering. exportDir is the root export directory
+// containing extract runs and the run directory; if empty it defaults to the
+// parent of runDir.
+func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
+	if exportDir == "" {
+		exportDir = filepath.Dir(runDir)
+	}
+
 	store := common.NewDataStore(runDir)
 	failuresByType, err := collectFailures(runDir)
 	if err != nil {
 		return nil, err
 	}
 
+	configFailures, err := collectConfigFailures(runDir)
+	if err != nil {
+		return nil, err
+	}
+
 	scanHistoryMap := collectScanHistory(store)
+	extractMapping, _ := structure.GetUniqueExtracts(exportDir)
 
 	var sections []Section
 	for _, def := range sectionDefs {
-		section := collectSection(store, def, failuresByType)
+		section := collectSection(store, def, failuresByType, configFailures, exportDir, extractMapping)
 		if def.Name == "Projects" {
 			attachScanHistory(section.Succeeded, scanHistoryMap)
 		}
@@ -51,15 +65,26 @@ func collectFailures(runDir string) (map[string][]analysis.ReportRow, error) {
 	return result, nil
 }
 
-// collectSection builds a Section from task JSONL data and analysis failures.
-func collectSection(store *common.DataStore, def sectionDef, failuresByType map[string][]analysis.ReportRow) Section {
+// collectSection builds a Section from task JSONL data, analysis failures and extract data.
+func collectSection(store *common.DataStore, def sectionDef,
+	failuresByType map[string][]analysis.ReportRow,
+	configFailures []configFailure,
+	exportDir string, extractMapping structure.ExtractMapping) Section {
+
 	succeeded := collectSucceeded(store, def)
 	skipped := collectSkipped(store, def)
 	failed := collectFailed(failuresByType, def)
+	partial := collectPartial(def, configFailures, succeeded)
+
+	// Augment skipped with built-in / unused items derived from extract data.
+	if def.ExtractTask != "" && extractMapping != nil {
+		skipped = append(skipped, collectExtractSkipped(def, exportDir, extractMapping, store)...)
+	}
 
 	return Section{
 		Name:      def.Name,
 		Succeeded: succeeded,
+		Partial:   partial,
 		Failed:    failed,
 		Skipped:   skipped,
 	}
@@ -75,6 +100,7 @@ func collectSucceeded(store *common.DataStore, def sectionDef) []EntityItem {
 	for _, item := range items {
 		result = append(result, EntityItem{
 			Name:         jsonStr(item, def.NameField),
+			Language:     jsonStr(item, "language"),
 			Organization: jsonStr(item, "sonarcloud_org_key"),
 			Detail:       jsonStr(item, def.DetailField),
 		})
@@ -95,12 +121,99 @@ func collectSkipped(store *common.DataStore, def sectionDef) []EntityItem {
 		if orgKey == "" || orgKey == skippedOrgSentinel {
 			result = append(result, EntityItem{
 				Name:         jsonStr(item, def.NameField),
+				Language:     jsonStr(item, "language"),
 				Organization: jsonStr(item, "sonarqube_org_key"),
 				Detail:       "Organization skipped",
+				SkipReason:   SkipReasonOrgSkipped,
 			})
 		}
 	}
 	return result
+}
+
+// collectExtractSkipped derives skipped entries directly from extract data
+// for sections that have a source extract task (Quality Gates, Quality Profiles).
+// It marks isBuiltIn items as "built-in" and items that are not referenced in
+// the generated mappings as "unused".
+func collectExtractSkipped(def sectionDef, exportDir string,
+	mapping structure.ExtractMapping, store *common.DataStore) []EntityItem {
+
+	items, err := structure.ReadExtractData(exportDir, mapping, def.ExtractTask)
+	if err != nil || len(items) == 0 {
+		return nil
+	}
+
+	mappedKeys := buildMappedKeys(def, store)
+
+	var result []EntityItem
+	seen := make(map[string]bool)
+	for _, item := range items {
+		name := common.ExtractField(item.Data, "name")
+		if name == "" {
+			continue
+		}
+		language := common.ExtractField(item.Data, "language")
+		isBuiltIn := common.ExtractBool(item.Data, "isBuiltIn")
+		key := extractKeyFor(def, name, language, item.ServerURL)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		if isBuiltIn {
+			result = append(result, EntityItem{
+				Name:       name,
+				Language:   language,
+				Detail:     "Built-in, not migrated",
+				SkipReason: SkipReasonBuiltIn,
+			})
+			continue
+		}
+		mapKey := mappedKeyFor(def, name, language)
+		if mappedKeys[mapKey] {
+			continue
+		}
+		result = append(result, EntityItem{
+			Name:       name,
+			Language:   language,
+			Detail:     "Not used by any migrated project",
+			SkipReason: SkipReasonUnused,
+		})
+	}
+	return result
+}
+
+// buildMappedKeys returns the set of (name[+language]) keys present in the
+// generate*Mappings task output. Used to detect unused extract items.
+func buildMappedKeys(def sectionDef, store *common.DataStore) map[string]bool {
+	items, err := store.ReadAll(def.InputTask)
+	if err != nil {
+		return nil
+	}
+	set := make(map[string]bool, len(items))
+	for _, item := range items {
+		name := jsonStr(item, def.NameField)
+		if name == "" {
+			continue
+		}
+		language := jsonStr(item, "language")
+		set[mappedKeyFor(def, name, language)] = true
+	}
+	return set
+}
+
+func mappedKeyFor(def sectionDef, name, language string) string {
+	if def.Name == "Quality Profiles" {
+		return name + "|" + language
+	}
+	return name
+}
+
+func extractKeyFor(def sectionDef, name, language, serverURL string) string {
+	if def.Name == "Quality Profiles" {
+		return serverURL + "|" + name + "|" + language
+	}
+	return serverURL + "|" + name
 }
 
 // collectFailed maps analysis report failure rows to EntityItems.
