@@ -465,6 +465,64 @@ func TestCollectSummaryPortfolioHierarchyPartial(t *testing.T) {
 	}
 }
 
+func TestCollectSummaryPortfolioPATCHFailureMovesToFailed(t *testing.T) {
+	dir := t.TempDir()
+	runID := "run-01"
+	runDir := filepath.Join(dir, runID)
+	os.MkdirAll(runDir, 0o755)
+
+	// One portfolio created successfully.
+	writeTaskJSONL(t, runDir, "createPortfolios", []map[string]any{
+		{"name": "Backend", "server_url": "https://sq.example.com", "source_portfolio_key": "backendKey", "cloud_portfolio_id": "cloud-backend-1"},
+	})
+
+	// Its follow-up PATCH (configurePortfolios) failed with a 400.
+	logEntry := map[string]any{
+		"process_type": "request_completed",
+		"status":       "failure",
+		"payload": map[string]any{
+			"method":   "PATCH",
+			"url":      "https://api.sc.example.com/enterprises/portfolios/cloud-backend-1",
+			"status":   float64(400),
+			"response": `{"errorCode":"BadRequestBody","message":"selection regex requires regularExpression"}`,
+		},
+	}
+	logBytes, _ := json.Marshal(logEntry)
+	os.WriteFile(filepath.Join(runDir, "requests.log"), logBytes, 0o644)
+
+	summary, err := CollectSummary(runDir, dir)
+	if err != nil {
+		t.Fatalf("CollectSummary: %v", err)
+	}
+
+	portfolios := findSection(summary, "Portfolios")
+	if portfolios == nil {
+		t.Fatal("missing Portfolios section")
+	}
+	if len(portfolios.Succeeded) != 0 {
+		t.Errorf("expected 0 Succeeded portfolios after failure, got %d (names=%v)",
+			len(portfolios.Succeeded), portfolioNames(portfolios.Succeeded))
+	}
+	if len(portfolios.Failed) != 1 {
+		t.Fatalf("expected 1 Failed portfolio, got %d", len(portfolios.Failed))
+	}
+	item := portfolios.Failed[0]
+	if item.Name != "Backend" {
+		t.Errorf("expected failed name 'Backend', got %q", item.Name)
+	}
+	if !strings.Contains(item.ErrorMessage, "selection regex requires regularExpression") {
+		t.Errorf("expected SQC error in ErrorMessage, got %q", item.ErrorMessage)
+	}
+}
+
+func portfolioNames(items []EntityItem) []string {
+	out := make([]string, len(items))
+	for i, it := range items {
+		out[i] = it.Name
+	}
+	return out
+}
+
 // --- helpers ---
 
 func findSection(s *MigrationSummary, name string) *Section {

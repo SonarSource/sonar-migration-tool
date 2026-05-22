@@ -89,6 +89,16 @@ func collectSection(store *common.DataStore, def sectionDef,
 		succeeded, partial = markPartialPortfolios(store, succeeded, partial, parents)
 	}
 
+	// Portfolio PATCH/DELETE failures encode the id in the URL — re-parse
+	// the request log to attribute them back to a portfolio and move that
+	// entity from Succeeded into Failed.
+	if def.Name == "Portfolios" {
+		runDir := store.BaseDir()
+		if portfolioFails := collectPortfolioFailures(runDir); len(portfolioFails) > 0 {
+			succeeded, failed, partial = applyPortfolioFailures(store, succeeded, failed, partial, portfolioFails)
+		}
+	}
+
 	return Section{
 		Name:      def.Name,
 		Succeeded: succeeded,
