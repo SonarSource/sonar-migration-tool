@@ -55,6 +55,8 @@ func RenderPDF(summary *MigrationSummary) ([]byte, error) {
 	pdf := fpdf.New("P", "mm", "Letter", "")
 	pdf.SetAutoPageBreak(true, 20)
 
+	registerUnicodeFont(pdf)
+
 	pdf.SetHeaderFuncMode(func() {
 		addPageHeader(pdf, summary.RunID)
 	}, true)
@@ -76,17 +78,25 @@ func RenderPDF(summary *MigrationSummary) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// registerUnicodeFont registers the embedded Noto Sans regular + bold variants
+// so SetFont(pdfFontFamily, ...) renders strings as UTF-8 with broad coverage
+// instead of the single-byte Helvetica fallback that mangles non-ASCII text.
+func registerUnicodeFont(pdf *fpdf.Fpdf) {
+	pdf.AddUTF8FontFromBytes(pdfFontFamily, "", notoSansRegular)
+	pdf.AddUTF8FontFromBytes(pdfFontFamily, "B", notoSansBold)
+}
+
 func addPageHeader(pdf *fpdf.Fpdf, runID string) {
 	pdf.SetY(5)
 	setColor(pdf, colorDarkBlue)
-	pdf.SetFont("Helvetica", "B", 8)
+	pdf.SetFont(pdfFontFamily, "B", 8)
 	pdf.CellFormat(0, 6, "SonarQube Migration Summary - "+runID, "", 0, "R", false, 0, "")
 	pdf.Ln(8)
 }
 
 func addPageFooter(pdf *fpdf.Fpdf) {
 	pdf.SetY(-15)
-	pdf.SetFont("Helvetica", "", 8)
+	pdf.SetFont(pdfFontFamily, "", 8)
 	setColor(pdf, colorBlack)
 	pdf.CellFormat(0, 10, fmt.Sprintf("Page %d", pdf.PageNo()), "", 0, "C", false, 0, "")
 }
@@ -95,12 +105,12 @@ func renderTitlePage(pdf *fpdf.Fpdf, summary *MigrationSummary) {
 	pdf.SetY(30)
 
 	setColor(pdf, colorDarkBlue)
-	pdf.SetFont("Helvetica", "B", 22)
+	pdf.SetFont(pdfFontFamily, "B", 22)
 	pdf.CellFormat(0, 12, "SonarQube Migration Summary", "", 1, "C", false, 0, "")
 	pdf.Ln(4)
 
 	setColor(pdf, colorBlack)
-	pdf.SetFont("Helvetica", "", 11)
+	pdf.SetFont(pdfFontFamily, "", 11)
 	pdf.CellFormat(0, 7, "Run ID: "+summary.RunID, "", 1, "C", false, 0, "")
 	pdf.CellFormat(0, 7, "Generated: "+summary.GeneratedAt.Format("2006-01-02 15:04:05"), "", 1, "C", false, 0, "")
 	pdf.Ln(10)
@@ -114,7 +124,7 @@ func renderExecutiveSummary(pdf *fpdf.Fpdf, sections []Section) {
 
 	setFillColor(pdf, colorDarkBlue)
 	pdf.SetTextColor(255, 255, 255)
-	pdf.SetFont("Helvetica", "B", 10)
+	pdf.SetFont(pdfFontFamily, "B", 10)
 	for i, h := range headers {
 		align := "C"
 		if i == 0 {
@@ -124,7 +134,7 @@ func renderExecutiveSummary(pdf *fpdf.Fpdf, sections []Section) {
 	}
 	pdf.Ln(-1)
 
-	pdf.SetFont("Helvetica", "", 10)
+	pdf.SetFont(pdfFontFamily, "", 10)
 	var totalS, totalP, totalF, totalSk int
 	for i, sec := range sections {
 		s, p, f, sk := len(sec.Succeeded), len(sec.Partial), len(sec.Failed), len(sec.Skipped)
@@ -152,7 +162,7 @@ func renderExecutiveSummary(pdf *fpdf.Fpdf, sections []Section) {
 	// Totals row
 	setFillColor(pdf, colorDarkBlue)
 	pdf.SetTextColor(255, 255, 255)
-	pdf.SetFont("Helvetica", "B", 10)
+	pdf.SetFont(pdfFontFamily, "B", 10)
 	pdf.CellFormat(widths[0], 8, "Total", "1", 0, "L", true, 0, "")
 	pdf.CellFormat(widths[1], 8, itoa(totalS), "1", 0, "C", true, 0, "")
 	pdf.CellFormat(widths[2], 8, itoa(totalP), "1", 0, "C", true, 0, "")
@@ -181,11 +191,11 @@ func renderSection(pdf *fpdf.Fpdf, section Section) {
 	checkPageBreak(pdf, 30)
 
 	setColor(pdf, colorMedBlue)
-	pdf.SetFont("Helvetica", "B", 14)
+	pdf.SetFont(pdfFontFamily, "B", 14)
 	pdf.CellFormat(0, 10, section.Name, "", 1, "L", false, 0, "")
 
 	setColor(pdf, colorBlack)
-	pdf.SetFont("Helvetica", "", 9)
+	pdf.SetFont(pdfFontFamily, "", 9)
 	pdf.CellFormat(0, 6, sectionCountSummary(section), "", 1, "L", false, 0, "")
 	pdf.Ln(2)
 
@@ -234,7 +244,7 @@ func renderUnifiedTable(pdf *fpdf.Fpdf, section Section) {
 		})
 	}
 
-	pdf.SetFont("Helvetica", "", 8)
+	pdf.SetFont(pdfFontFamily, "", 8)
 	for i, row := range rows {
 		checkPageBreak(pdf, 7)
 		if i%2 == 0 {
@@ -248,11 +258,11 @@ func renderUnifiedTable(pdf *fpdf.Fpdf, section Section) {
 		pdf.CellFormat(widths[1], 6, truncate(row.org, 24), "1", 0, "L", true, 0, "")
 		// Outcome cell in its color, bold.
 		setColor(pdf, row.color)
-		pdf.SetFont("Helvetica", "B", 8)
+		pdf.SetFont(pdfFontFamily, "B", 8)
 		pdf.CellFormat(widths[2], 6, row.outcome, "1", 0, "C", true, 0, "")
 		// Details in black, regular.
 		setColor(pdf, colorBlack)
-		pdf.SetFont("Helvetica", "", 8)
+		pdf.SetFont(pdfFontFamily, "", 8)
 		pdf.CellFormat(widths[3], 6, truncate(row.details, 56), "1", 0, "L", true, 0, "")
 		pdf.Ln(-1)
 	}
@@ -396,7 +406,7 @@ func skipBreakdown(skipped []EntityItem) []string {
 func renderTableHeader(pdf *fpdf.Fpdf, headers []string, widths []float64) {
 	setFillColor(pdf, colorMedBlue)
 	pdf.SetTextColor(255, 255, 255)
-	pdf.SetFont("Helvetica", "B", 8)
+	pdf.SetFont(pdfFontFamily, "B", 8)
 	for i, h := range headers {
 		pdf.CellFormat(widths[i], 6, h, "1", 0, "L", true, 0, "")
 	}
@@ -441,10 +451,40 @@ func setFillColor(pdf *fpdf.Fpdf, c [3]int) {
 }
 
 func truncate(s string, maxLen int) string {
+	s = sanitizeForPDF(s)
 	if len(s) <= maxLen {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+// sanitizeForPDF replaces runes outside the Unicode Basic Multilingual Plane
+// (codepoints ≥ U+10000, i.e. astral-plane characters such as most emoji)
+// with "?". fpdf v0.9.0's CID font map is sized for the BMP only and panics
+// with an index-out-of-range error on any astral-plane rune. The embedded
+// Noto Sans LGC font would not have glyphs for those characters anyway —
+// replacing them keeps the rest of the string (accented Latin, Greek,
+// Cyrillic, BMP symbols) rendering correctly.
+func sanitizeForPDF(s string) string {
+	hasAstral := false
+	for _, r := range s {
+		if r >= 0x10000 {
+			hasAstral = true
+			break
+		}
+	}
+	if !hasAstral {
+		return s
+	}
+	out := make([]rune, 0, len(s))
+	for _, r := range s {
+		if r >= 0x10000 {
+			out = append(out, '?')
+		} else {
+			out = append(out, r)
+		}
+	}
+	return string(out)
 }
 
 func itoa(n int) string {

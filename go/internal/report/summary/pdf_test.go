@@ -8,6 +8,39 @@ import (
 	"time"
 )
 
+func TestRenderPDFUnicodeNames(t *testing.T) {
+	summary := &MigrationSummary{
+		RunID:       "unicode-run",
+		GeneratedAt: time.Now(),
+		Sections: []Section{
+			{
+				Name: "Quality Gates",
+				Succeeded: []EntityItem{
+					{Name: "🥇 1 - Corp Gold", Organization: "org1", Detail: "42"},
+					{Name: "🥉 3 - Corp base", Organization: "org1", Detail: "44"},
+					{Name: "Café — Production", Organization: "org1", Detail: "45"},
+					{Name: "Ürümqi 北京 αβγ", Organization: "org1", Detail: "46"},
+				},
+			},
+		},
+	}
+
+	pdfBytes, err := RenderPDF(summary)
+	if err != nil {
+		t.Fatalf("RenderPDF with unicode names: %v", err)
+	}
+	if string(pdfBytes[:5]) != "%PDF-" {
+		t.Errorf("expected PDF header, got %q", string(pdfBytes[:5]))
+	}
+	// fpdf compresses and subsets the embedded TTF, so the family name does
+	// not appear in the byte stream. We instead verify that rendering with
+	// astral-plane / accented / non-Latin characters does not panic and
+	// produces a PDF larger than the Helvetica-only fallback (≈3KB).
+	if len(pdfBytes) < 10_000 {
+		t.Errorf("expected embedded subsetted font (>=10KB PDF), got %d bytes", len(pdfBytes))
+	}
+}
+
 func TestRenderPDFMinimal(t *testing.T) {
 	summary := &MigrationSummary{
 		RunID:       "test-run-01",
@@ -170,6 +203,25 @@ func TestBuildUnifiedRowsOrdering(t *testing.T) {
 	}
 	if rows[1].details != "43 — Add condition: foo" {
 		t.Errorf("expected partial details to combine cloud key + issues, got %q", rows[1].details)
+	}
+}
+
+func TestSanitizeForPDF(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"Plain ASCII", "Plain ASCII"},
+		{"Café — déjà vu", "Café — déjà vu"},        // BMP non-ASCII preserved
+		{"Ürümqi 北京 αβγ", "Ürümqi 北京 αβγ"},        // BMP non-ASCII preserved
+		{"🥇 1 - Corp Gold", "? 1 - Corp Gold"},     // astral emoji replaced
+		{"🥇🥈🥉", "???"},                            // multi-astral
+		{"a🥇b", "a?b"},
+	}
+	for _, c := range cases {
+		got := sanitizeForPDF(c.in)
+		if got != c.want {
+			t.Errorf("sanitizeForPDF(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }
 
