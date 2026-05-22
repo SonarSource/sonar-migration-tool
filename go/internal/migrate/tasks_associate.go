@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sonar-solutions/sq-api-go/cloud"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 )
@@ -37,6 +38,11 @@ func associateTasks() []TaskDef {
 			Name:         "setProjectTags",
 			Dependencies: []string{"createProjects"},
 			Run:          runSetProjectTags,
+		},
+		{
+			Name:         "setNewCodePeriods",
+			Dependencies: []string{"createProjects"},
+			Run:          runSetNewCodePeriods,
 		},
 	}
 }
@@ -209,6 +215,82 @@ func runSetProjectSettings(ctx context.Context, e *Executor) error {
 		})
 	counter.LogSummary(e.Logger)
 	return err
+}
+
+// runSetNewCodePeriods migrates per-branch new-code policy. It iterates the
+// extract getNewCodePeriods records (one per source project+branch), maps
+// each to its target SonarQube Cloud project, translates the SQS
+// type/value to SQC equivalents, and calls
+// POST /api/new_code_periods/set on SQC. This handles both newly-created
+// projects and pre-existing ones (createProjects only sets the main-branch
+// NCD at creation time and skips that work entirely when the project
+// already exists).
+func runSetNewCodePeriods(ctx context.Context, e *Executor) error {
+	projects, _ := e.Store.ReadAll("createProjects")
+	projectKeyMap := make(map[string]projectMapping)
+	for _, p := range projects {
+		serverURL := extractField(p, "server_url")
+		key := extractField(p, "key")
+		projectKeyMap[serverURL+key] = projectMapping{
+			CloudKey: extractField(p, "cloud_project_key"),
+			OrgKey:   extractField(p, "sonarcloud_org_key"),
+		}
+	}
+
+	counter := NewTaskCounter("setNewCodePeriods")
+	err := forEachExtractItem(ctx, e, "setNewCodePeriods", "getNewCodePeriods",
+		func(ctx context.Context, item structure.ExtractItem, w *common.ChunkWriter) error {
+			projectKey := extractField(item.Data, "projectKey")
+			pm, ok := projectKeyMap[item.ServerURL+projectKey]
+			if !ok || pm.CloudKey == "" {
+				return nil
+			}
+			sqsType := extractField(item.Data, "type")
+			sqcType, mapped := sqcNewCodeType[sqsType]
+			if !mapped {
+				e.Logger.Warn("setNewCodePeriods: unmapped source NCD type, skipping",
+					"project", pm.CloudKey, "source_type", sqsType)
+				return nil
+			}
+			branch := extractField(item.Data, "branchKey")
+			value := extractAnyStr(item.Data, "value")
+			// previous_version must travel with an empty value; SQC rejects
+			// the call otherwise.
+			if sqcType == "previous_version" {
+				value = ""
+			}
+
+			e.Logger.Debug("project api call: POST /api/new_code_periods/set",
+				"project", pm.CloudKey, "branch", branch, "type", sqcType,
+				"value", value, "org", pm.OrgKey, "source_type", sqsType)
+			err := e.Cloud.NewCodePeriods.Set(ctx, cloud.SetNewCodePeriodParams{
+				Project:      pm.CloudKey,
+				Branch:       branch,
+				Type:         sqcType,
+				Value:        value,
+				Organization: pm.OrgKey,
+			})
+			if err != nil {
+				counter.Fail()
+				logAPIWarn(e.Logger, "setNewCodePeriods failed", err,
+					"project", pm.CloudKey, "branch", branch, "type", sqcType)
+			} else {
+				counter.Success()
+			}
+			_ = w.WriteOne(item.Data)
+			return nil
+		})
+	counter.LogSummary(e.Logger)
+	return err
+}
+
+// sqcNewCodeType maps the SonarQube Server NCD type enum to the equivalent
+// SonarQube Cloud "type" value accepted by /api/new_code_periods/set.
+var sqcNewCodeType = map[string]string{
+	"NUMBER_OF_DAYS":    "days",
+	"PREVIOUS_VERSION":  "previous_version",
+	"REFERENCE_BRANCH":  "reference_branch",
+	"SPECIFIC_ANALYSIS": "specific_analysis",
 }
 
 func runSetProjectTags(ctx context.Context, e *Executor) error {

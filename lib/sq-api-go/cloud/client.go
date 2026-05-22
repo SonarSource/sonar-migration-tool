@@ -46,6 +46,7 @@ type Client struct {
 	Settings        *SettingsClient
 	Enterprises     *EnterprisesClient
 	Organizations   *OrganizationsClient
+	NewCodePeriods  *NewCodePeriodsClient
 	DOP             *DOPClient
 }
 
@@ -63,6 +64,7 @@ func New(c *sqapi.Client) *Client {
 		Settings:        &SettingsClient{b},
 		Enterprises:     &EnterprisesClient{b},
 		Organizations:   &OrganizationsClient{b},
+		NewCodePeriods:  &NewCodePeriodsClient{b},
 		DOP:             &DOPClient{b},
 	}
 }

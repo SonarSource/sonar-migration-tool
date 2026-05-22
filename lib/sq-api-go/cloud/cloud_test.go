@@ -685,6 +685,40 @@ func TestBranchesMainBranchIDMissing(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestNewCodePeriodsSetDays(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/new_code_periods/set", func(w http.ResponseWriter, r *http.Request) {
+		assertFormValue(t, r, "project", "p1")
+		assertFormValue(t, r, "branch", "main")
+		assertFormValue(t, r, "type", "days")
+		assertFormValue(t, r, "value", "30")
+		assertFormValue(t, r, "organization", "org1")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	cc := newTestCloud(t, mux)
+
+	err := cc.NewCodePeriods.Set(context.Background(), cloud.SetNewCodePeriodParams{
+		Project: "p1", Branch: "main", Type: "days", Value: "30", Organization: "org1",
+	})
+	require.NoError(t, err)
+}
+
+func TestNewCodePeriodsSetPreviousVersionOmitsValue(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/new_code_periods/set", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		assert.Equal(t, "previous_version", r.FormValue("type"))
+		assert.Equal(t, "", r.FormValue("value"), "value must be omitted for previous_version mode")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	cc := newTestCloud(t, mux)
+
+	err := cc.NewCodePeriods.Set(context.Background(), cloud.SetNewCodePeriodParams{
+		Project: "p1", Type: "previous_version", Organization: "org1",
+	})
+	require.NoError(t, err)
+}
+
 // --- Rules ---
 
 func TestRulesUpdate(t *testing.T) {

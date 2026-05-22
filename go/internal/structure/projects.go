@@ -14,6 +14,7 @@ var cloudEndpoints = []string{"dev.azure.com", "gitlab.com", "api.github.com", "
 var newCodeMappings = map[string]string{
 	"NUMBER_OF_DAYS":   "days",
 	"PREVIOUS_VERSION": "previous_version",
+	"REFERENCE_BRANCH": "reference_branch",
 }
 
 // IsCloudBinding checks whether a binding URL matches a known cloud endpoint.
@@ -90,9 +91,15 @@ func MapNewCodeDefinitions(directory string, mapping ExtractMapping) map[string]
 		projectKey := common.ExtractField(item.Data, "projectKey")
 		branchKey := common.ExtractField(item.Data, "branchKey")
 
+		// SonarQube Cloud expects no value for the "previous_version" mode —
+		// the type alone fully describes the policy. Previous releases of
+		// this tool serialised the literal string "previous_version" as the
+		// value, which leaked into projects.csv and then into the SQC
+		// create payload as newCodeDefinitionValue=previous_version. Leave
+		// the value empty here so the migrate-side check skips that param.
 		value := ncdValue
 		if ncdType == "PREVIOUS_VERSION" {
-			value = "previous_version"
+			value = nil
 		}
 
 		if result[item.ServerURL] == nil {
