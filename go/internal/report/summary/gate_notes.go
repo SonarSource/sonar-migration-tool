@@ -36,10 +36,14 @@ func collectGateMappingNotes(runDir string) map[string][]string {
 	}
 
 	// Aggregate per cloud_gate_id so each gate gets a tidy summary line
-	// rather than one row per affected condition.
+	// rather than one row per affected condition. The *Seen maps deduplicate
+	// repeated notes (one source SQS gate mapped to a single SQC gate from
+	// multiple source orgs writes the same note multiple times).
 	type aggregate struct {
-		remapped []string // human-friendly "source → target,target"
-		dropped  []string // source metrics
+		remapped     []string        // human-friendly "source --> target,target"
+		dropped      []string        // source metrics
+		remappedSeen map[string]bool // key: source + "→" + joined targets
+		droppedSeen  map[string]bool // key: source metric
 	}
 	byGate := make(map[string]*aggregate)
 
@@ -66,14 +70,33 @@ func collectGateMappingNotes(runDir string) map[string][]string {
 				continue
 			}
 			if byGate[note.CloudGateID] == nil {
-				byGate[note.CloudGateID] = &aggregate{}
+				byGate[note.CloudGateID] = &aggregate{
+					remappedSeen: map[string]bool{},
+					droppedSeen:  map[string]bool{},
+				}
 			}
 			ag := byGate[note.CloudGateID]
+			// addGateConditions can record the same per-condition decision
+			// more than once when the same SQS source gate is mapped to a
+			// single SQC org from multiple source orgs (gates.csv carries
+			// one row per source-org pairing, all sharing the same cloud
+			// gate id). Deduplicate by (action, source, targets) so the
+			// Details column shows each mapping exactly once.
 			switch note.Action {
 			case "remapped":
+				targets := strings.Join(note.TargetMetrics, ", ")
+				key := note.SourceMetric + "→" + targets
+				if ag.remappedSeen[key] {
+					continue
+				}
+				ag.remappedSeen[key] = true
 				ag.remapped = append(ag.remapped,
-					fmt.Sprintf("%s --> %s", note.SourceMetric, strings.Join(note.TargetMetrics, ", ")))
+					fmt.Sprintf("%s --> %s", note.SourceMetric, targets))
 			case "dropped":
+				if ag.droppedSeen[note.SourceMetric] {
+					continue
+				}
+				ag.droppedSeen[note.SourceMetric] = true
 				ag.dropped = append(ag.dropped, note.SourceMetric)
 			}
 		}

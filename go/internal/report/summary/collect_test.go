@@ -523,6 +523,69 @@ func portfolioNames(items []EntityItem) []string {
 	return out
 }
 
+// TestCollectSummaryQualityGateMappingDedupesAcrossSourceOrgs verifies
+// that when the same SQS source gate is migrated into a single SQC gate
+// from several source orgs (gates.csv carries one row per source-org
+// pairing, all sharing the same cloud_gate_id), the Details column shows
+// each mapping decision exactly once — not repeated per source org.
+func TestCollectSummaryQualityGateMappingDedupesAcrossSourceOrgs(t *testing.T) {
+	dir := t.TempDir()
+	runID := "run-01"
+	runDir := filepath.Join(dir, runID)
+	os.MkdirAll(runDir, 0o755)
+
+	writeTaskJSONL(t, runDir, "createGates", []map[string]any{
+		{"name": "Shared QG", "sonarcloud_org_key": "org1", "cloud_gate_id": "42"},
+	})
+
+	// Three identical sidecar entries for the same (cloud_gate_id,
+	// source_metric, target_metric) tuple — emulates addGateConditions
+	// recording the same remap from three different source SQS orgs that
+	// all migrated into a single target SQC org.
+	notesDir := filepath.Join(runDir, "addGateConditions.notes")
+	os.MkdirAll(notesDir, 0o755)
+	dup := map[string]any{
+		"cloud_gate_id":  "42",
+		"gate_name":      "Shared QG",
+		"action":         "remapped",
+		"source_metric":  "new_security_rating_with_aica",
+		"target_metrics": []string{"new_security_rating"},
+	}
+	dupDropped := map[string]any{
+		"cloud_gate_id": "42",
+		"gate_name":     "Shared QG",
+		"action":        "dropped",
+		"source_metric": "contains_ai_code",
+	}
+	f, _ := os.Create(filepath.Join(notesDir, "results.1.jsonl"))
+	for i := 0; i < 3; i++ {
+		b, _ := json.Marshal(dup)
+		f.Write(b)
+		f.Write([]byte("\n"))
+		b, _ = json.Marshal(dupDropped)
+		f.Write(b)
+		f.Write([]byte("\n"))
+	}
+	f.Close()
+
+	summary, err := CollectSummary(runDir, dir)
+	if err != nil {
+		t.Fatalf("CollectSummary: %v", err)
+	}
+	gates := findSection(summary, "Quality Gates")
+	if len(gates.Partial) != 1 {
+		t.Fatalf("expected 1 Partial gate, got %d", len(gates.Partial))
+	}
+	joined := strings.Join(gates.Partial[0].Issues, "\n")
+	// Each remap/dropped metric should appear exactly once.
+	if got := strings.Count(joined, "new_security_rating_with_aica --> new_security_rating"); got != 1 {
+		t.Errorf("expected remap line exactly once, got %d occurrences in:\n%s", got, joined)
+	}
+	if got := strings.Count(joined, "contains_ai_code"); got != 1 {
+		t.Errorf("expected dropped metric exactly once, got %d occurrences in:\n%s", got, joined)
+	}
+}
+
 func TestCollectSummaryQualityGateMetricMappingMovesToPartial(t *testing.T) {
 	dir := t.TempDir()
 	runID := "run-01"
