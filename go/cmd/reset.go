@@ -17,6 +17,7 @@ var resetCmd = &cobra.Command{
 		url, _ := cmd.Flags().GetString("url")
 		concurrency, _ := cmd.Flags().GetInt("concurrency")
 		exportDir, _ := cmd.Flags().GetString("export_directory")
+		debug, _ := cmd.Flags().GetBool("debug")
 
 		cfg := migrate.ResetConfig{
 			Token:           args[0],
@@ -25,6 +26,7 @@ var resetCmd = &cobra.Command{
 			URL:             url,
 			Concurrency:     concurrency,
 			ExportDirectory: exportDir,
+			Debug:           debug,
 		}
 
 		fmt.Println("WARNING: This will delete everything in every organization within the enterprise.")
@@ -38,4 +40,5 @@ func init() {
 	f.String("url", "https://sonarcloud.io/", "URL of SonarQube Cloud")
 	f.Int("concurrency", 25, "Maximum number of concurrent requests")
 	f.String("export_directory", "/app/files/", "Directory to place all interim files")
+	f.Bool("debug", false, "Enable debug-level logging (verbose request payloads, more detail per task)")
 }

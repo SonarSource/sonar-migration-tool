@@ -129,10 +129,14 @@ func buildTransport(cfg *clientConfig, token string, version float64) http.Round
 		logFn:   cfg.retryLogFn,
 	}
 
-	return &authTransport{
+	var rt http.RoundTripper = &authTransport{
 		inner:  retry,
 		header: buildAuthHeader(token, version),
 	}
+	if cfg.debugLogFn != nil {
+		rt = &debugTransport{inner: rt, fn: cfg.debugLogFn}
+	}
+	return rt
 }
 
 // normalizeBaseURL ensures the base URL ends with exactly one slash.

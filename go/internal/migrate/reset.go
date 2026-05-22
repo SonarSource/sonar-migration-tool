@@ -23,6 +23,7 @@ type ResetConfig struct {
 	URL             string
 	Concurrency     int
 	ExportDirectory string
+	Debug           bool
 }
 
 // RunReset deletes all migrated entities from SonarQube Cloud.
@@ -32,8 +33,20 @@ func RunReset(ctx context.Context, cfg ResetConfig) error {
 	cloudURL := cfg.URL
 	apiURL := strings.Replace(cloudURL, "https://", "https://api.", 1)
 
-	cloudClient := sqapi.NewCloudClient(cloudURL, cfg.Token)
-	apiClient := sqapi.NewCloudClient(apiURL, cfg.Token)
+	// Eager-construct the logger so we can install an HTTP debug logger when
+	// --debug is set.
+	level := slog.LevelInfo
+	if cfg.Debug {
+		level = slog.LevelDebug
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+
+	var clientOpts []sqapi.Option
+	if cfg.Debug {
+		clientOpts = append(clientOpts, sqapi.WithDebugLogger(httpDebugLogger(logger)))
+	}
+	cloudClient := sqapi.NewCloudClient(cloudURL, cfg.Token, clientOpts...)
+	apiClient := sqapi.NewCloudClient(apiURL, cfg.Token, clientOpts...)
 	cc := cloud.New(cloudClient)
 	apiCC := cloud.New(apiClient)
 	raw := common.NewRawClient(cloudClient.HTTPClient(), cloudClient.BaseURL())
@@ -81,7 +94,6 @@ func RunReset(ctx context.Context, cfg ResetConfig) error {
 	_ = os.WriteFile(filepath.Join(runDir, "clear.json"), data, 0o644)
 
 	store := common.NewDataStore(runDir)
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	executor := &Executor{
 		Cloud:     cc,

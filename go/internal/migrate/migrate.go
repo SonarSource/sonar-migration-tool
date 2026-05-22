@@ -29,6 +29,7 @@ type MigrateConfig struct {
 	TargetTask      string
 	SkipProfiles       bool
 	IncludeScanHistory bool
+	Debug              bool // Enable slog.LevelDebug + verbose request payload logs
 }
 
 // Executor is the runtime context passed to every migrate task function.
@@ -54,19 +55,28 @@ type Executor struct {
 func RunMigrate(ctx context.Context, cfg MigrateConfig) (string, error) {
 	cfg.applyDefaults()
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	level := slog.LevelInfo
+	if cfg.Debug {
+		level = slog.LevelDebug
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
 	cloudURL := cfg.URL
 	apiURL := strings.Replace(cloudURL, "https://", "https://api.", 1)
 
-	// Create Cloud clients with retry logging.
+	// Create Cloud clients with retry logging — and, when --debug is set,
+	// full HTTP request/response logging.
 	retryLog := func(method, url string, status, attempt, total int) {
 		logger.Warn("retrying request",
 			"method", method, "endpoint", url,
 			"status", status, "attempt", attempt, "maxAttempts", total)
 	}
-	cloudClient := sqapi.NewCloudClient(cloudURL, cfg.Token, sqapi.WithRetryLogger(retryLog))
-	apiClient := sqapi.NewCloudClient(apiURL, cfg.Token, sqapi.WithRetryLogger(retryLog))
+	clientOpts := []sqapi.Option{sqapi.WithRetryLogger(retryLog)}
+	if cfg.Debug {
+		clientOpts = append(clientOpts, sqapi.WithDebugLogger(httpDebugLogger(logger)))
+	}
+	cloudClient := sqapi.NewCloudClient(cloudURL, cfg.Token, clientOpts...)
+	apiClient := sqapi.NewCloudClient(apiURL, cfg.Token, clientOpts...)
 	cc := cloud.New(cloudClient)
 	apiCC := cloud.New(apiClient)
 

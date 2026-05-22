@@ -16,7 +16,14 @@ type clientConfig struct {
 	maxConns    int
 	timeoutSecs int
 	retryLogFn  RetryLogFunc
+	debugLogFn  DebugLogFunc
 }
+
+// DebugLogFunc is invoked once per request/response pair with the verbatim
+// HTTP method, URL, sanitized header set, request body, response status, and
+// response body. The Authorization header is replaced with "<redacted>"
+// before the callback fires.
+type DebugLogFunc func(method, url string, headers map[string][]string, reqBody []byte, respStatus int, respBody []byte, err error)
 
 func defaultClientConfig() *clientConfig {
 	return &clientConfig{
@@ -78,5 +85,15 @@ func WithTimeout(seconds int) Option {
 func WithRetryLogger(fn RetryLogFunc) Option {
 	return func(cfg *clientConfig) {
 		cfg.retryLogFn = fn
+	}
+}
+
+// WithDebugLogger installs an HTTP request/response debug logger. When set,
+// the client wraps its transport with a RoundTripper that calls fn once per
+// request/response pair, exposing the full payloads. Useful for diagnosing
+// migration issues against SonarQube Cloud without recompiling the SDK.
+func WithDebugLogger(fn DebugLogFunc) Option {
+	return func(cfg *clientConfig) {
+		cfg.debugLogFn = fn
 	}
 }
