@@ -156,24 +156,32 @@ func runAddGateConditions(ctx context.Context, e *Executor) error {
 					continue
 				}
 				if !mapped {
-					targets = []string{metric}
+					targets = []replacementCondition{{Metric: metric}}
 				} else {
 					e.Logger.Info("addGateConditions: source metric remapped to SonarQube Cloud equivalent(s) (#143)",
 						"gate", gateName, "source_metric", metric, "target_metrics", targets)
 				}
 
-				for _, targetMetric := range targets {
+				for _, repl := range targets {
+					effOp := repl.Op
+					if effOp == "" {
+						effOp = op
+					}
+					effErr := repl.Error
+					if effErr == "" {
+						effErr = errorVal
+					}
 					e.Logger.Debug("gate api call: POST /api/qualitygates/create_condition",
-						"gate_id", gateID, "metric", targetMetric, "op", op, "error", errorVal, "org", orgKey,
+						"gate_id", gateID, "metric", repl.Metric, "op", effOp, "error", effErr, "org", orgKey,
 						"source_metric", metric)
 					_, err := e.Cloud.QualityGates.CreateCondition(ctx, cloud.CreateConditionParams{
 						GateID: gateID, Organization: orgKey,
-						Metric: targetMetric, Op: op, Error: errorVal,
+						Metric: repl.Metric, Op: effOp, Error: effErr,
 					})
 					if err != nil {
 						counter.Fail()
 						logAPIWarn(e.Logger, "addGateConditions failed", err,
-							"metric", targetMetric, "source_metric", metric)
+							"metric", repl.Metric, "source_metric", metric)
 					} else {
 						counter.Success()
 					}
