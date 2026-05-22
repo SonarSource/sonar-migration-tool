@@ -13,7 +13,7 @@ import (
 // project list (snapshot of the resolved projects at extract time). New
 // projects that match a regex/tags subportfolio after migration will not
 // appear in the SQC portfolio until it is updated manually.
-const partialPortfolioIssue = "Source portfolio has subportfolios; SonarQube Cloud has no hierarchy — migrated as a flat project list and the perimeter may differ from the source"
+const partialPortfolioIssue = "The source portfolio has subportfolios. The target portfolio is migrated as a flat list of projects. The portfolio project perimeter may be slightly different on SonarQube Cloud"
 
 // portfoliosWithSubportfolios walks getPortfolioDetails across all extracts
 // and returns the set of portfolio keys that have at least one direct

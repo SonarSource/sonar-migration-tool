@@ -259,7 +259,14 @@ func renderUnifiedTable(pdf *fpdf.Fpdf, section Section) {
 		})
 	}
 
-	const lineH = 6.0
+	// Single-line rows render at the original 6mm height; when the Details
+	// text wraps, each extra line is set to a tighter 3.6mm so the row does
+	// not balloon vertically. This still leaves enough breathing room above
+	// and below 8pt text for legibility.
+	const (
+		singleLineH  = 6.0
+		wrappedLineH = 3.6
+	)
 	pdf.SetFont(pdfFontFamily, "", 8)
 	for i, row := range rows {
 		// Compute wrapped line count for the Details column so the whole row
@@ -271,7 +278,14 @@ func renderUnifiedTable(pdf *fpdf.Fpdf, section Section) {
 		if lineCount < 1 {
 			lineCount = 1
 		}
-		rowHeight := float64(lineCount) * lineH
+		var lineH, rowHeight float64
+		if lineCount == 1 {
+			lineH = singleLineH
+			rowHeight = singleLineH
+		} else {
+			lineH = wrappedLineH
+			rowHeight = float64(lineCount) * wrappedLineH
+		}
 
 		checkPageBreak(pdf, rowHeight)
 		if i%2 == 0 {
