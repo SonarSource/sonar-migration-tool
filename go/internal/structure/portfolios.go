@@ -102,9 +102,10 @@ type portfolioSelection struct {
 }
 
 // buildSelectionIndex walks the getPortfolioDetails extract output and
-// returns a serverURL+portfolioKey → selection map for the TOP-LEVEL
-// portfolios only. Sub-portfolios with their own selection are flagged
-// elsewhere as Partial migrations (see issue #152).
+// returns a serverURL+portfolioKey → selection map. Each item from
+// api/views/show carries the full nested tree under subViews, so we recurse
+// into every node and capture its own selectionMode/regexp/tags — otherwise
+// leaf portfolios inside a hierarchy lose their regex during migration.
 func buildSelectionIndex(items []ExtractItem) map[string]portfolioSelection {
 	out := make(map[string]portfolioSelection, len(items))
 	for _, item := range items {
@@ -112,17 +113,34 @@ func buildSelectionIndex(items []ExtractItem) map[string]portfolioSelection {
 		if err := json.Unmarshal(item.Data, &obj); err != nil {
 			continue
 		}
-		key := getString(obj, "key")
-		if key == "" {
-			continue
-		}
-		out[item.ServerURL+key] = portfolioSelection{
-			mode:   getString(obj, "selectionMode"),
-			regexp: getString(obj, "regexp"),
-			tags:   joinAnySlice(obj["tags"]),
-		}
+		collectPortfolioSelections(item.ServerURL, obj, out)
 	}
 	return out
+}
+
+// collectPortfolioSelections walks a portfolio node and its subViews
+// recursively, recording each node's selection metadata indexed by
+// serverURL+key.
+func collectPortfolioSelections(serverURL string, node map[string]any, out map[string]portfolioSelection) {
+	if node == nil {
+		return
+	}
+	if key := getString(node, "key"); key != "" {
+		out[serverURL+key] = portfolioSelection{
+			mode:   getString(node, "selectionMode"),
+			regexp: getString(node, "regexp"),
+			tags:   joinAnySlice(node["tags"]),
+		}
+	}
+	subs, ok := node["subViews"].([]any)
+	if !ok {
+		return
+	}
+	for _, sv := range subs {
+		if subMap, ok := sv.(map[string]any); ok {
+			collectPortfolioSelections(serverURL, subMap, out)
+		}
+	}
 }
 
 // joinAnySlice flattens a JSON array of strings to a comma-separated string,

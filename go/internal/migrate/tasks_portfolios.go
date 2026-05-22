@@ -119,12 +119,22 @@ func runConfigurePortfolios(ctx context.Context, e *Executor) error {
 				}
 			}
 
+			e.Logger.Info("configurePortfolios: sending PATCH",
+				"portfolio", portfolioID,
+				"name", extractField(item, "name"),
+				"selection", params.Selection,
+				"regex", params.RegularExpression,
+				"tags", params.Tags,
+				"organizationIds", orgIDs,
+			)
 			if err := e.CloudAPI.Enterprises.UpdatePortfolio(ctx, params); err != nil {
 				counter.Fail()
 				logAPIWarn(e.Logger, "configurePortfolios failed", err,
 					"portfolio", portfolioID, "selection", selectionMode)
 			} else {
 				counter.Success()
+				e.Logger.Info("configurePortfolios: PATCH succeeded",
+					"portfolio", portfolioID, "selection", params.Selection)
 			}
 			return nil
 		})
