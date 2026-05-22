@@ -8,6 +8,36 @@ import (
 	"time"
 )
 
+func TestRenderPDFLongDetailsWrap(t *testing.T) {
+	// The portfolio Partial issue text is intentionally long. Verify it does
+	// not cause a render failure and that the resulting PDF is well-formed.
+	longIssue := "Source portfolio has subportfolios; SonarQube Cloud has no hierarchy — migrated as a flat project list and the perimeter may differ from the source"
+	summary := &MigrationSummary{
+		RunID:       "wrap-run",
+		GeneratedAt: time.Now(),
+		Sections: []Section{
+			{
+				Name: "Portfolios",
+				Partial: []EntityItem{
+					{Name: "Top", Detail: "42", Issues: []string{longIssue}},
+				},
+			},
+		},
+	}
+
+	pdfBytes, err := RenderPDF(summary)
+	if err != nil {
+		t.Fatalf("RenderPDF with long details: %v", err)
+	}
+	if string(pdfBytes[:5]) != "%PDF-" {
+		t.Errorf("expected PDF header, got %q", string(pdfBytes[:5]))
+	}
+	// A valid embedded-font PDF for one section + one row is >>10KB.
+	if len(pdfBytes) < 10_000 {
+		t.Errorf("expected non-trivial PDF size, got %d bytes", len(pdfBytes))
+	}
+}
+
 func TestRenderPDFUnicodeNames(t *testing.T) {
 	summary := &MigrationSummary{
 		RunID:       "unicode-run",

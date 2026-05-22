@@ -259,9 +259,35 @@ func renderUnifiedTable(pdf *fpdf.Fpdf, section Section) {
 		})
 	}
 
+	// Single-line rows render at the original 6mm height; when the Details
+	// text wraps, each extra line is set to a tighter 3.6mm so the row does
+	// not balloon vertically. This still leaves enough breathing room above
+	// and below 8pt text for legibility.
+	const (
+		singleLineH  = 6.0
+		wrappedLineH = 3.6
+	)
 	pdf.SetFont(pdfFontFamily, "", 8)
 	for i, row := range rows {
-		checkPageBreak(pdf, 7)
+		// Compute wrapped line count for the Details column so the whole row
+		// (Name, Organization, Outcome) can match that height. SplitLines
+		// already accounts for the cell's internal margin.
+		detailsText := sanitizeForPDF(row.details)
+		detailsCol := len(widths) - 1
+		lineCount := len(pdf.SplitLines([]byte(detailsText), widths[detailsCol]))
+		if lineCount < 1 {
+			lineCount = 1
+		}
+		var lineH, rowHeight float64
+		if lineCount == 1 {
+			lineH = singleLineH
+			rowHeight = singleLineH
+		} else {
+			lineH = wrappedLineH
+			rowHeight = float64(lineCount) * wrappedLineH
+		}
+
+		checkPageBreak(pdf, rowHeight)
 		if i%2 == 0 {
 			setFillColor(pdf, colorLightGray)
 		} else {
@@ -274,22 +300,23 @@ func renderUnifiedTable(pdf *fpdf.Fpdf, section Section) {
 		if hideOrg {
 			nameLimit = 60
 		}
-		pdf.CellFormat(widths[col], 6, truncate(row.displayName(), nameLimit), "1", 0, "L", true, 0, "")
+		pdf.CellFormat(widths[col], rowHeight, truncate(row.displayName(), nameLimit), "1", 0, "L", true, 0, "")
 		col++
 		if !hideOrg {
-			pdf.CellFormat(widths[col], 6, truncate(row.org, 24), "1", 0, "L", true, 0, "")
+			pdf.CellFormat(widths[col], rowHeight, truncate(row.org, 24), "1", 0, "L", true, 0, "")
 			col++
 		}
 		// Outcome cell in its color, bold.
 		setColor(pdf, row.color)
 		pdf.SetFont(pdfFontFamily, "B", 8)
-		pdf.CellFormat(widths[col], 6, row.outcome, "1", 0, "C", true, 0, "")
+		pdf.CellFormat(widths[col], rowHeight, row.outcome, "1", 0, "C", true, 0, "")
 		col++
-		// Details in black, regular.
+		// Details in black, regular — MultiCell wraps long text across lines
+		// rather than truncating. lineH is per-line so the cell ends up at
+		// rowHeight, matching the row.
 		setColor(pdf, colorBlack)
 		pdf.SetFont(pdfFontFamily, "", 8)
-		pdf.CellFormat(widths[col], 6, truncate(row.details, 56), "1", 0, "L", true, 0, "")
-		pdf.Ln(-1)
+		pdf.MultiCell(widths[col], lineH, detailsText, "1", "L", true)
 	}
 }
 

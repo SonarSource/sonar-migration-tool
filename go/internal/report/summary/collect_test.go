@@ -383,6 +383,88 @@ func TestCollectSummaryPartialProfileChangeParent(t *testing.T) {
 	}
 }
 
+func TestCollectSummaryPortfolioHierarchyPartial(t *testing.T) {
+	dir := t.TempDir()
+	runID := "run-01"
+	runDir := filepath.Join(dir, runID)
+	os.MkdirAll(runDir, 0o755)
+
+	// Extract describes a top-level portfolio "Top" with one subportfolio
+	// "Mid" which itself has one subportfolio "Leaf"; plus a stand-alone
+	// portfolio "Solo" with no children.
+	extractDir := filepath.Join(dir, "extract-01")
+	writeExtractMeta(t, extractDir, "https://sq.example.com")
+	writeTaskJSONL(t, extractDir, "getPortfolioDetails", []map[string]any{
+		{
+			"key":  "topKey",
+			"name": "Top",
+			"subViews": []map[string]any{
+				{
+					"key":  "midKey",
+					"name": "Mid",
+					"subViews": []map[string]any{
+						{"key": "leafKey", "name": "Leaf"},
+					},
+				},
+			},
+		},
+		{"key": "soloKey", "name": "Solo"},
+	})
+
+	// createPortfolios JSONL — all four portfolios were created successfully.
+	writeTaskJSONL(t, runDir, "createPortfolios", []map[string]any{
+		{"name": "Top", "server_url": "https://sq.example.com", "source_portfolio_key": "topKey", "cloud_portfolio_id": "1"},
+		{"name": "Mid", "server_url": "https://sq.example.com", "source_portfolio_key": "midKey", "cloud_portfolio_id": "2"},
+		{"name": "Leaf", "server_url": "https://sq.example.com", "source_portfolio_key": "leafKey", "cloud_portfolio_id": "3"},
+		{"name": "Solo", "server_url": "https://sq.example.com", "source_portfolio_key": "soloKey", "cloud_portfolio_id": "4"},
+	})
+
+	summary, err := CollectSummary(runDir, dir)
+	if err != nil {
+		t.Fatalf("CollectSummary: %v", err)
+	}
+
+	portfolios := findSection(summary, "Portfolios")
+	if portfolios == nil {
+		t.Fatal("missing Portfolios section")
+	}
+
+	succeededNames := map[string]bool{}
+	for _, item := range portfolios.Succeeded {
+		succeededNames[item.Name] = true
+	}
+	partialNames := map[string]bool{}
+	for _, item := range portfolios.Partial {
+		partialNames[item.Name] = true
+	}
+
+	// Top and Mid have subportfolios → Partial.
+	if !partialNames["Top"] || !partialNames["Mid"] {
+		t.Errorf("expected Top and Mid in Partial, got %v", partialNames)
+	}
+	// Leaf (subportfolio with no children) and Solo (standalone) → Success.
+	if !succeededNames["Leaf"] {
+		t.Errorf("expected Leaf in Succeeded, got %v", succeededNames)
+	}
+	if !succeededNames["Solo"] {
+		t.Errorf("expected Solo in Succeeded, got %v", succeededNames)
+	}
+	if succeededNames["Top"] || succeededNames["Mid"] {
+		t.Errorf("Top/Mid should not remain in Succeeded, got %v", succeededNames)
+	}
+
+	// Issue text should explain the hierarchy.
+	for _, item := range portfolios.Partial {
+		if len(item.Issues) == 0 {
+			t.Errorf("portfolio %q has no issues attached", item.Name)
+			continue
+		}
+		if !strings.Contains(item.Issues[0], "subportfolios") {
+			t.Errorf("portfolio %q: issue does not mention subportfolios: %q", item.Name, item.Issues[0])
+		}
+	}
+}
+
 // --- helpers ---
 
 func findSection(s *MigrationSummary, name string) *Section {

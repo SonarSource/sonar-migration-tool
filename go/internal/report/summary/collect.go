@@ -81,6 +81,14 @@ func collectSection(store *common.DataStore, def sectionDef,
 		skipped = append(skipped, collectExtractSkipped(def, exportDir, extractMapping, store)...)
 	}
 
+	// SonarQube Cloud has no portfolio hierarchy: any source portfolio that
+	// has subportfolios is migrated as a flat project list, so its perimeter
+	// may differ from the source. Mark those as Partial.
+	if def.Name == "Portfolios" && extractMapping != nil {
+		parents := portfoliosWithSubportfolios(exportDir, extractMapping)
+		succeeded, partial = markPartialPortfolios(store, succeeded, partial, parents)
+	}
+
 	return Section{
 		Name:      def.Name,
 		Succeeded: succeeded,
