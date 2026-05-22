@@ -6,6 +6,8 @@ package cloud
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strconv"
 
 	"github.com/sonar-solutions/sq-api-go/types"
 )
@@ -77,4 +79,76 @@ func (e *EnterprisesClient) UpdatePortfolio(ctx context.Context, params UpdatePo
 func (e *EnterprisesClient) DeletePortfolio(ctx context.Context, portfolioID string) error {
 	path := fmt.Sprintf("enterprises/portfolios/%s", portfolioID)
 	return e.deleteReq(ctx, path)
+}
+
+// ListPortfoliosParams holds optional parameters for ListPortfolios. Only
+// EnterpriseID is required in normal usage; the API also accepts a search
+// query and pagination knobs.
+type ListPortfoliosParams struct {
+	EnterpriseID string
+	Query        string
+	PageIndex    int
+	PageSize     int
+}
+
+// listPortfoliosDefaultPageSize is the API's default and maximum page size.
+const listPortfoliosDefaultPageSize = 50
+
+// ListPortfoliosPage fetches a single page of enterprise portfolios via
+// GET /enterprises/portfolios. PageIndex is 1-based; PageSize defaults to 50.
+func (e *EnterprisesClient) ListPortfoliosPage(ctx context.Context, params ListPortfoliosParams) (*types.PortfoliosListResponse, error) {
+	q := url.Values{}
+	if params.EnterpriseID != "" {
+		q.Set("enterpriseId", params.EnterpriseID)
+	}
+	if params.Query != "" {
+		q.Set("q", params.Query)
+	}
+	pageIndex := params.PageIndex
+	if pageIndex <= 0 {
+		pageIndex = 1
+	}
+	q.Set("pageIndex", strconv.Itoa(pageIndex))
+	pageSize := params.PageSize
+	if pageSize <= 0 {
+		pageSize = listPortfoliosDefaultPageSize
+	}
+	q.Set("pageSize", strconv.Itoa(pageSize))
+
+	var result types.PortfoliosListResponse
+	path := "enterprises/portfolios?" + q.Encode()
+	if err := e.getJSON(ctx, path, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// ListPortfolios fetches every page of portfolios for the given enterprise
+// (and optional search query) and returns the concatenated list. The caller
+// should typically supply an EnterpriseID; the API also allows omitting it
+// when Favorite=true on the underlying endpoint, but that mode is not
+// exposed here as it is not useful for migration tooling.
+func (e *EnterprisesClient) ListPortfolios(ctx context.Context, params ListPortfoliosParams) ([]types.Portfolio, error) {
+	if params.PageSize <= 0 {
+		params.PageSize = listPortfoliosDefaultPageSize
+	}
+	if params.PageIndex <= 0 {
+		params.PageIndex = 1
+	}
+	var all []types.Portfolio
+	for {
+		page, err := e.ListPortfoliosPage(ctx, params)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page.Portfolios...)
+		if len(page.Portfolios) < params.PageSize {
+			break
+		}
+		if page.Page.Total > 0 && len(all) >= page.Page.Total {
+			break
+		}
+		params.PageIndex++
+	}
+	return all, nil
 }

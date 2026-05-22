@@ -5,6 +5,8 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
@@ -172,6 +174,79 @@ func TestCreatePortfolios(t *testing.T) {
 		t.Fatalf("createPortfolios: %v", err)
 	}
 	// portfolios CSV is empty, so no output expected.
+}
+
+// TestCreatePortfoliosReusesExisting verifies that when a portfolio with the
+// same name already exists in the enterprise (the situation on `reset` or a
+// resumed run), runCreatePortfolios reuses its cloud ID via ListPortfolios
+// instead of trying to POST and failing. This is the linchpin of issue #175:
+// without this, deletePortfolios sees an empty input JSONL and is a no-op.
+func TestCreatePortfoliosReusesExisting(t *testing.T) {
+	cloudSrv := newMockCloudServer()
+	defer cloudSrv.Close()
+
+	// Stand up a custom API server that:
+	// - has one pre-existing portfolio "PreExistingPortfolio" with id "p-existing"
+	// - fails any POST attempt (proves we did NOT call CreatePortfolio)
+	apiMux := http.NewServeMux()
+	apiMux.HandleFunc("GET /enterprises/enterprises", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"enterprises": []map[string]any{{"id": "ent-1", "key": "test-enterprise"}},
+		})
+	})
+	apiMux.HandleFunc("GET /enterprises/portfolios", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"portfolios": []map[string]any{
+				{"id": "p-existing", "name": "PreExistingPortfolio"},
+			},
+			"page": map[string]any{"pageIndex": 1, "pageSize": 50, "total": 1},
+		})
+	})
+	postCalled := false
+	apiMux.HandleFunc("POST /enterprises/portfolios", func(w http.ResponseWriter, _ *http.Request) {
+		postCalled = true
+		http.Error(w, `{"message":"already exists"}`, http.StatusBadRequest)
+	})
+	apiSrv := httptest.NewServer(apiMux)
+	defer apiSrv.Close()
+
+	dir := t.TempDir()
+	setupExtractData(dir)
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+
+	// Write a portfolios.csv with the same name as the pre-existing portfolio.
+	csvPath := filepath.Join(dir, "portfolios.csv")
+	csv := "source_portfolio_key,name,server_url,description\n" +
+		"src-1,PreExistingPortfolio,https://sq.example.com,Reused\n"
+	if err := os.WriteFile(csvPath, []byte(csv), 0o644); err != nil {
+		t.Fatalf("write portfolios.csv: %v", err)
+	}
+	// Write a stub organizations.csv (required by loadCSVToJSONL's join).
+	orgCSV := "sonarqube_org_key,sonarcloud_org_key,binding_key,server_url,alm,url,is_cloud,project_count\n"
+	if err := os.WriteFile(filepath.Join(dir, "organizations.csv"), []byte(orgCSV), 0o644); err != nil {
+		t.Fatalf("write organizations.csv: %v", err)
+	}
+
+	runTask(t, e, "generatePortfolioMappings")
+	w, _ := e.Store.Writer("getEnterprises")
+	w.WriteOne(json.RawMessage(`[{"id":"ent-1","key":"test-enterprise"}]`))
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["createPortfolios"].Run(context.Background(), e); err != nil {
+		t.Fatalf("createPortfolios: %v", err)
+	}
+
+	if postCalled {
+		t.Error("POST /enterprises/portfolios should NOT have been called when portfolio already exists")
+	}
+
+	items, _ := e.Store.ReadAll("createPortfolios")
+	if len(items) != 1 {
+		t.Fatalf("expected 1 createPortfolios item, got %d", len(items))
+	}
+	if id := extractField(items[0], "cloud_portfolio_id"); id != "p-existing" {
+		t.Errorf("expected cloud_portfolio_id 'p-existing', got %q", id)
+	}
 }
 
 func TestGetMigrationUser(t *testing.T) {

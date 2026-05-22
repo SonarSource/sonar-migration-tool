@@ -292,6 +292,15 @@ func newMockAPIServer() *httptest.Server {
 		})
 	})
 
+	mux.HandleFunc("GET /enterprises/portfolios", func(w http.ResponseWriter, r *http.Request) {
+		// Default: no existing portfolios. Tests that need pre-existing
+		// portfolios should swap in their own server.
+		json.NewEncoder(w).Encode(map[string]any{
+			"portfolios": []any{},
+			"page":       map[string]any{"pageIndex": 1, "pageSize": 50, "total": 0},
+		})
+	})
+
 	mux.HandleFunc("POST /enterprises/portfolios", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"id": "portfolio-1", "key": "pf-1", "name": "Test Portfolio",
