@@ -221,11 +221,26 @@ func (r unifiedRow) displayName() string {
 	return r.name
 }
 
-// renderUnifiedTable renders the 4-column per-section table:
+// sectionsWithoutOrganization lists sections rendered without an Organization
+// column. Portfolios are created at the enterprise level, so an organization
+// dimension is not meaningful.
+var sectionsWithoutOrganization = map[string]bool{
+	"Portfolios": true,
+}
+
+// renderUnifiedTable renders the per-section table:
 //   Name | Organization | Outcome (colored) | Details
+// For sections in sectionsWithoutOrganization, the Organization column is
+// dropped, producing a 3-column table: Name | Outcome | Details.
 func renderUnifiedTable(pdf *fpdf.Fpdf, section Section) {
+	hideOrg := sectionsWithoutOrganization[section.Name]
+
 	headers := []string{"Name", "Organization", "Outcome", "Details"}
 	widths := []float64{55, 35, 25, 81}
+	if hideOrg {
+		headers = []string{"Name", "Outcome", "Details"}
+		widths = []float64{90, 25, 81}
+	}
 
 	renderTableHeader(pdf, headers, widths)
 
@@ -252,18 +267,28 @@ func renderUnifiedTable(pdf *fpdf.Fpdf, section Section) {
 		} else {
 			setFillColor(pdf, colorWhite)
 		}
-		// Name + Organization in black on alternating background.
+		// Name (+ Organization, when present) in black on alternating background.
 		setColor(pdf, colorBlack)
-		pdf.CellFormat(widths[0], 6, truncate(row.displayName(), 36), "1", 0, "L", true, 0, "")
-		pdf.CellFormat(widths[1], 6, truncate(row.org, 24), "1", 0, "L", true, 0, "")
+		col := 0
+		nameLimit := 36
+		if hideOrg {
+			nameLimit = 60
+		}
+		pdf.CellFormat(widths[col], 6, truncate(row.displayName(), nameLimit), "1", 0, "L", true, 0, "")
+		col++
+		if !hideOrg {
+			pdf.CellFormat(widths[col], 6, truncate(row.org, 24), "1", 0, "L", true, 0, "")
+			col++
+		}
 		// Outcome cell in its color, bold.
 		setColor(pdf, row.color)
 		pdf.SetFont(pdfFontFamily, "B", 8)
-		pdf.CellFormat(widths[2], 6, row.outcome, "1", 0, "C", true, 0, "")
+		pdf.CellFormat(widths[col], 6, row.outcome, "1", 0, "C", true, 0, "")
+		col++
 		// Details in black, regular.
 		setColor(pdf, colorBlack)
 		pdf.SetFont(pdfFontFamily, "", 8)
-		pdf.CellFormat(widths[3], 6, truncate(row.details, 56), "1", 0, "L", true, 0, "")
+		pdf.CellFormat(widths[col], 6, truncate(row.details, 56), "1", 0, "L", true, 0, "")
 		pdf.Ln(-1)
 	}
 }
@@ -364,6 +389,13 @@ func skippedDetails(item EntityItem) string {
 	return ""
 }
 
+// sectionsWithoutSkipped lists sections for which the per-section counts
+// summary suppresses any "skipped" reference. Portfolios are created at the
+// enterprise level, so a per-organization skip is not a meaningful concept.
+var sectionsWithoutSkipped = map[string]bool{
+	"Portfolios": true,
+}
+
 // sectionCountSummary returns a one-line counts summary for a section,
 // breaking down skipped items by reason.
 func sectionCountSummary(section Section) string {
@@ -374,6 +406,10 @@ func sectionCountSummary(section Section) string {
 		parts = append(parts, fmt.Sprintf("%d partial", len(section.Partial)))
 	}
 	parts = append(parts, fmt.Sprintf("%d failed", len(section.Failed)))
+
+	if sectionsWithoutSkipped[section.Name] {
+		return strings.Join(parts, ", ")
+	}
 
 	skipTotal := len(section.Skipped)
 	if skipTotal == 0 {

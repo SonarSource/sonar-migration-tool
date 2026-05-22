@@ -110,7 +110,14 @@ func collectSucceeded(store *common.DataStore, def sectionDef) []EntityItem {
 
 // collectSkipped reads the input (generate*Mappings) task and finds items
 // where sonarcloud_org_key is empty or "SKIPPED".
+//
+// Portfolios are created at the enterprise level rather than per organization,
+// so an organization-level skip is not meaningful for them; no skipped rows
+// are emitted for that section.
 func collectSkipped(store *common.DataStore, def sectionDef) []EntityItem {
+	if def.Name == "Portfolios" {
+		return nil
+	}
 	items, err := store.ReadAll(def.InputTask)
 	if err != nil {
 		return nil
