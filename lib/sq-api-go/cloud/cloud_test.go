@@ -892,6 +892,44 @@ func TestSettingsSetFieldValues(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestSettingsListDefinitions exercises the SDK's read of
+// /api/settings/list_definitions, which the migrate task uses to decide
+// whether each setting key on the target SQC org expects a single value,
+// repeated values, or a property-set fieldValues payload. The migration
+// regression that motivated this endpoint was sonar.java.file.suffixes:
+// SQS returns it as values=[...] but SQC defines it as a single STRING
+// (multiValues=false), so the migrate tool needs SQC's view of the schema
+// — not SQS's — to pick the right shape.
+func TestSettingsListDefinitions(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/settings/list_definitions", func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "myorg", r.URL.Query().Get("organization"))
+		writeJSON(w, types.SettingsListDefinitionsResponse{
+			Definitions: []types.SettingDefinition{
+				{Key: "sonar.exclusions", Type: "STRING", MultiValues: true},
+				{Key: "sonar.java.file.suffixes", Type: "STRING", MultiValues: false},
+				{Key: "sonar.issue.ignore.allfile", Type: "PROPERTY_SET", MultiValues: false},
+			},
+		})
+	})
+	cc := newTestCloud(t, mux)
+
+	defs, err := cc.Settings.ListDefinitions(context.Background(), "myorg")
+	require.NoError(t, err)
+	require.Len(t, defs, 3)
+
+	byKey := make(map[string]types.SettingDefinition, len(defs))
+	for _, d := range defs {
+		byKey[d.Key] = d
+	}
+	assert.True(t, byKey["sonar.exclusions"].MultiValues,
+		"sonar.exclusions must round-trip multiValues=true")
+	assert.False(t, byKey["sonar.java.file.suffixes"].MultiValues,
+		"sonar.java.file.suffixes must round-trip multiValues=false — this is the bit that determines whether migrate sends value= or values=")
+	assert.Equal(t, "PROPERTY_SET", byKey["sonar.issue.ignore.allfile"].Type)
+}
+
 // --- Enterprises ---
 
 func TestEnterprisesList(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sonar-solutions/sq-api-go/cloud"
+	"github.com/sonar-solutions/sq-api-go/types"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 )
@@ -197,14 +198,27 @@ func runSetProjectSettings(ctx context.Context, e *Executor) error {
 	// Build project lookup.
 	projects, _ := e.Store.ReadAll("createProjects")
 	projectKeyMap := make(map[string]projectMapping)
+	orgs := make(map[string]struct{})
 	for _, p := range projects {
 		serverURL := extractField(p, "server_url")
 		key := extractField(p, "key")
-		projectKeyMap[serverURL+key] = projectMapping{
+		pm := projectMapping{
 			CloudKey: extractField(p, "cloud_project_key"),
 			OrgKey:   extractField(p, "sonarcloud_org_key"),
 		}
+		projectKeyMap[serverURL+key] = pm
+		if pm.OrgKey != "" {
+			orgs[pm.OrgKey] = struct{}{}
+		}
 	}
+
+	// Pre-fetch SQC's setting definitions per org we will write to. SQS and
+	// SQC don't always agree on whether a setting is multi-value or stored
+	// as a single CSV string (sonar.java.file.suffixes is the canonical
+	// example: SQS exposes it as values=[.java,.jav] but SQC defines it as
+	// STRING + multiValues=false, so POSTing values= just no-ops with 204).
+	// Reading list_definitions lets us pick the right form per setting key.
+	defsByOrg := loadSettingDefinitions(ctx, e, orgs)
 
 	counter := NewTaskCounter("setProjectSettings")
 	err := forEachExtractItem(ctx, e, "setProjectSettings", "getProjectSettings",
@@ -231,7 +245,8 @@ func runSetProjectSettings(ctx context.Context, e *Executor) error {
 				return nil
 			}
 
-			err := applyProjectSetting(ctx, e, pm, item.Data, settingKey)
+			def, hasDef := defsByOrg[pm.OrgKey][settingKey]
+			err := applyProjectSetting(ctx, e, pm, item.Data, settingKey, def, hasDef)
 			switch {
 			case errors.Is(err, errSettingEmpty):
 				// Empty payload — skip silently, do not count as success
@@ -251,22 +266,100 @@ func runSetProjectSettings(ctx context.Context, e *Executor) error {
 	return err
 }
 
+// loadSettingDefinitions fetches /api/settings/list_definitions for each
+// SonarQube Cloud organization that will receive project settings, and
+// returns a per-org lookup keyed by setting key. A failed fetch for one org
+// is logged at Warn level and yields an empty (not nil) inner map — callers
+// then transparently fall back to extract-shape dispatch for that org.
+func loadSettingDefinitions(ctx context.Context, e *Executor, orgs map[string]struct{}) map[string]map[string]types.SettingDefinition {
+	out := make(map[string]map[string]types.SettingDefinition, len(orgs))
+	for org := range orgs {
+		defs, err := e.Cloud.Settings.ListDefinitions(ctx, org)
+		if err != nil {
+			logAPIWarn(e.Logger, "setProjectSettings: list_definitions failed, falling back to extract-shape dispatch", err, "org", org)
+			out[org] = map[string]types.SettingDefinition{}
+			continue
+		}
+		byKey := make(map[string]types.SettingDefinition, len(defs))
+		for _, d := range defs {
+			byKey[d.Key] = d
+		}
+		out[org] = byKey
+		e.Logger.Debug("setProjectSettings: loaded definitions", "org", org, "count", len(defs))
+	}
+	return out
+}
+
 // errSettingEmpty is the sentinel returned by applyProjectSetting when the
 // extract record had no value / values / fieldValues to send. It is not a
 // real error — the caller silently skips the record.
 var errSettingEmpty = errors.New("setting has no value")
 
 // applyProjectSetting dispatches a single getProjectSettings record to the
-// appropriate SDK call based on which of value / values / fieldValues is
-// populated.
-func applyProjectSetting(ctx context.Context, e *Executor, pm projectMapping, raw json.RawMessage, settingKey string) error {
+// appropriate SDK call. When a SQC definition is available for the setting
+// key, the post shape is chosen from the target's definition (PROPERTY_SET
+// → fieldValues, multiValues=true → values, otherwise → single CSV-joined
+// value). Without a definition we fall back to the extract record's shape.
+//
+// The definition path matters because SQS and SQC disagree on a handful of
+// settings — notably sonar.java.file.suffixes — where SQS returns
+// values=[...] but SQC's definition is a single STRING with
+// multiValues=false. POSTing values= to such a setting on SQC returns 204
+// but silently fails to persist; joining with comma and POSTing as value=
+// is what actually lands.
+func applyProjectSetting(ctx context.Context, e *Executor, pm projectMapping, raw json.RawMessage, settingKey string, def types.SettingDefinition, hasDef bool) error {
+	if hasDef {
+		switch {
+		case def.Type == "PROPERTY_SET":
+			fvs := extractObjectArray(raw, "fieldValues")
+			if len(fvs) == 0 {
+				return errSettingEmpty
+			}
+			e.Logger.Debug("project api call: POST /api/settings/set (property-set)",
+				"project", pm.CloudKey, "key", settingKey, "field_values_count", len(fvs), "org", pm.OrgKey)
+			return e.Cloud.Settings.SetFieldValues(ctx, pm.CloudKey, settingKey, fvs, pm.OrgKey)
+		case def.MultiValues:
+			vals := extractStringArray(raw, "values")
+			if len(vals) == 0 {
+				if v := extractField(raw, "value"); v != "" {
+					vals = strings.Split(v, ",")
+				}
+			}
+			if len(vals) == 0 {
+				return errSettingEmpty
+			}
+			e.Logger.Debug("project api call: POST /api/settings/set (multi-value)",
+				"project", pm.CloudKey, "key", settingKey, "values", vals, "org", pm.OrgKey)
+			return e.Cloud.Settings.SetValues(ctx, pm.CloudKey, settingKey, vals, pm.OrgKey)
+		default:
+			// Single-value (STRING/BOOLEAN/INTEGER/FLOAT/SINGLE_SELECT_LIST,
+			// etc.). If SQS returned a list (values=), CSV-join it so SQC
+			// stores it as one string.
+			value := extractField(raw, "value")
+			if value == "" {
+				if vals := extractStringArray(raw, "values"); len(vals) > 0 {
+					value = strings.Join(vals, ",")
+				}
+			}
+			if value == "" {
+				return errSettingEmpty
+			}
+			e.Logger.Debug("project api call: POST /api/settings/set",
+				"project", pm.CloudKey, "key", settingKey, "value", value, "org", pm.OrgKey)
+			return e.Cloud.Settings.Set(ctx, pm.CloudKey, settingKey, value, pm.OrgKey)
+		}
+	}
+
+	// No SQC definition for this key — fall back to dispatching by the
+	// shape of the extract record. This preserves behaviour for custom or
+	// plugin-defined settings that aren't in list_definitions.
 	if vals := extractStringArray(raw, "values"); len(vals) > 0 {
-		e.Logger.Debug("project api call: POST /api/settings/set (multi-value)",
+		e.Logger.Debug("project api call: POST /api/settings/set (multi-value, no SQC def)",
 			"project", pm.CloudKey, "key", settingKey, "values", vals, "org", pm.OrgKey)
 		return e.Cloud.Settings.SetValues(ctx, pm.CloudKey, settingKey, vals, pm.OrgKey)
 	}
 	if fvs := extractObjectArray(raw, "fieldValues"); len(fvs) > 0 {
-		e.Logger.Debug("project api call: POST /api/settings/set (property-set)",
+		e.Logger.Debug("project api call: POST /api/settings/set (property-set, no SQC def)",
 			"project", pm.CloudKey, "key", settingKey, "field_values_count", len(fvs), "org", pm.OrgKey)
 		return e.Cloud.Settings.SetFieldValues(ctx, pm.CloudKey, settingKey, fvs, pm.OrgKey)
 	}
@@ -274,7 +367,7 @@ func applyProjectSetting(ctx context.Context, e *Executor, pm projectMapping, ra
 	if value == "" {
 		return errSettingEmpty
 	}
-	e.Logger.Debug("project api call: POST /api/settings/set",
+	e.Logger.Debug("project api call: POST /api/settings/set (no SQC def)",
 		"project", pm.CloudKey, "key", settingKey, "value", value, "org", pm.OrgKey)
 	return e.Cloud.Settings.Set(ctx, pm.CloudKey, settingKey, value, pm.OrgKey)
 }

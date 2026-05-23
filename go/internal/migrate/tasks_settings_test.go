@@ -9,37 +9,35 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
 )
 
-// TestRunSetProjectSettingsDispatchesByShape verifies that the migrate task
-// dispatches each /api/settings/values record to the right SQC PUT shape:
-//
-//   - single "value"   → "value" form field
-//   - multi  "values"  → repeated "values" form fields
-//   - "fieldValues"    → repeated "fieldValues" JSON-encoded form fields
-//
-// Records missing every payload (only a key) must be skipped silently —
-// not counted as a failure.
-func TestRunSetProjectSettingsDispatchesByShape(t *testing.T) {
-	type recorded struct {
-		key    string
-		value  string
-		values []string
-		fields []string
-	}
+// settingsHit captures the request shape a /api/settings/set handler saw,
+// so each test can assert exactly one of value=, values=, or fieldValues=
+// was sent (rather than allowing both shapes to coexist).
+type settingsHit struct {
+	key    string
+	value  string
+	values []string
+	fields []string
+}
+
+// mountSettingsSetCapture wires a POST /api/settings/set handler that
+// records every request into the returned slice (guarded by the returned
+// mutex). Each test gets a fresh mux/server pair via this helper.
+func mountSettingsSetCapture(mux *http.ServeMux) (*sync.Mutex, *[]settingsHit) {
 	var (
 		mu   sync.Mutex
-		hits []recorded
+		hits []settingsHit
 	)
-	cloudMux := http.NewServeMux()
-	cloudMux.HandleFunc("POST /api/settings/set", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/settings/set", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		mu.Lock()
-		hits = append(hits, recorded{
+		hits = append(hits, settingsHit{
 			key:    r.FormValue("key"),
 			value:  r.FormValue("value"),
 			values: append([]string(nil), r.Form["values"]...),
@@ -48,6 +46,31 @@ func TestRunSetProjectSettingsDispatchesByShape(t *testing.T) {
 		mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	})
+	return &mu, &hits
+}
+
+// mountSettingsDefinitions installs a list_definitions handler that
+// returns the supplied keys. Each entry is "<key>:<type>:<multi>" e.g.
+// "sonar.exclusions:STRING:true". Use this to drive the new
+// definition-aware dispatcher in setProjectSettings.
+func mountSettingsDefinitions(mux *http.ServeMux, defs ...map[string]any) {
+	mux.HandleFunc("GET /api/settings/list_definitions", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"definitions": defs})
+	})
+}
+
+// TestRunSetProjectSettingsDispatchesByShape covers the FALLBACK path:
+// when SQC's list_definitions has no entry for a setting key (custom or
+// plugin-defined settings), the task dispatches based on the extract
+// record's shape — values=[...] → SetValues, fieldValues=[...] →
+// SetFieldValues, plain value → Set. Records with no payload at all are
+// skipped silently.
+func TestRunSetProjectSettingsDispatchesByShape(t *testing.T) {
+	cloudMux := http.NewServeMux()
+	mu, hitsPtr := mountSettingsSetCapture(cloudMux)
+	// Empty definitions registry so EVERY setting falls back to extract
+	// shape — that's exactly what this test exercises.
+	mountSettingsDefinitions(cloudMux)
 	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{})
 	})
@@ -98,6 +121,7 @@ func TestRunSetProjectSettingsDispatchesByShape(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
+	hits := *hitsPtr
 	if len(hits) != 3 {
 		t.Fatalf("expected 3 settings calls (empty record skipped), got %d", len(hits))
 	}
@@ -146,6 +170,114 @@ func TestRunSetProjectSettingsDispatchesByShape(t *testing.T) {
 	}
 }
 
+// TestRunSetProjectSettingsRespectsSQCDefinitions is the regression test
+// for sonar.java.file.suffixes (and any other "looks-multi-on-SQS, stored-
+// as-CSV-string-on-SQC" setting). SQC returns 204 for a malformed shape
+// but doesn't persist — the only way to know which shape is right is to
+// ask SQC's list_definitions and dispatch on its multiValues / type flags.
+func TestRunSetProjectSettingsRespectsSQCDefinitions(t *testing.T) {
+	cloudMux := http.NewServeMux()
+	mu, hitsPtr := mountSettingsSetCapture(cloudMux)
+	// SQC says: file.suffixes is single STRING (CSV), exclusions is
+	// multi-value, issue.ignore.allfile is a PROPERTY_SET. Exactly what
+	// list_definitions returns against sonarcloud.io.
+	mountSettingsDefinitions(cloudMux,
+		map[string]any{"key": "sonar.java.file.suffixes", "type": "STRING", "multiValues": false},
+		map[string]any{"key": "sonar.exclusions", "type": "STRING", "multiValues": true},
+		map[string]any{"key": "sonar.issue.ignore.allfile", "type": "PROPERTY_SET", "multiValues": false},
+	)
+	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	})
+	cloudSrv := httptest.NewServer(cloudMux)
+	defer cloudSrv.Close()
+
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+
+	dir := t.TempDir()
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+
+	extractDir := filepath.Join(dir, "extract-01", "getProjectSettings")
+	if err := os.MkdirAll(extractDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Every extract record comes in with values=[...] (which is what SQS
+	// returns regardless of how SQC has defined the setting). The dispatcher
+	// must look at SQC's definition to decide the post shape.
+	f, _ := os.Create(filepath.Join(extractDir, "results.1.jsonl"))
+	for _, rec := range []map[string]any{
+		{"project": "proj1", "key": "sonar.java.file.suffixes",
+			"values": []string{".jav", ".java", ".javax"}},
+		{"project": "proj1", "key": "sonar.exclusions",
+			"values": []string{"src/gen/**", "**/*.spec.ts"}},
+		{"project": "proj1", "key": "sonar.issue.ignore.allfile",
+			"fieldValues": []map[string]any{{"fileRegexp": "Generated test"}}},
+	} {
+		b, _ := json.Marshal(rec)
+		f.Write(b)
+		f.Write([]byte("\n"))
+	}
+	f.Close()
+
+	pw, _ := e.Store.Writer("createProjects")
+	b, _ := json.Marshal(map[string]any{
+		"key": "proj1", "server_url": testServerURL,
+		"sonarcloud_org_key": "org1", "cloud_project_key": "org1_proj1",
+	})
+	pw.WriteOne(b)
+
+	if err := runSetProjectSettings(context.Background(), e); err != nil {
+		t.Fatalf("runSetProjectSettings: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	hits := *hitsPtr
+	if len(hits) != 3 {
+		t.Fatalf("expected 3 settings calls, got %d", len(hits))
+	}
+	sort.Slice(hits, func(i, j int) bool { return hits[i].key < hits[j].key })
+
+	// sonar.exclusions: SQC defines multiValues=true → values= shape.
+	excl := hits[0]
+	if excl.key != "sonar.exclusions" {
+		t.Fatalf("excl: wrong key %q", excl.key)
+	}
+	sort.Strings(excl.values)
+	if !reflect.DeepEqual(excl.values, []string{"**/*.spec.ts", "src/gen/**"}) {
+		t.Errorf("excl: got values=%v, want [**/*.spec.ts src/gen/**]", excl.values)
+	}
+	if excl.value != "" {
+		t.Errorf("excl: must NOT collapse to a single CSV value (multiValues=true), got %q", excl.value)
+	}
+
+	// sonar.issue.ignore.allfile: PROPERTY_SET → fieldValues=.
+	ifa := hits[1]
+	if ifa.key != "sonar.issue.ignore.allfile" {
+		t.Fatalf("ifa: wrong key %q", ifa.key)
+	}
+	if len(ifa.fields) != 1 {
+		t.Errorf("ifa: expected 1 fieldValues entry, got %d", len(ifa.fields))
+	}
+
+	// sonar.java.file.suffixes: SQC defines multiValues=false → must be
+	// CSV-joined and sent as value=, NOT as values=. This is the central
+	// regression — sending values= here returns 204 but silently no-ops.
+	jfs := hits[2]
+	if jfs.key != "sonar.java.file.suffixes" {
+		t.Fatalf("jfs: wrong key %q", jfs.key)
+	}
+	if len(jfs.values) != 0 {
+		t.Errorf("jfs: must NOT send values=[%s] for a single-value SQC setting (would 204 but not persist)",
+			strings.Join(jfs.values, ","))
+	}
+	// Order of CSV elements mirrors the extract record's array order.
+	if jfs.value != ".jav,.java,.javax" {
+		t.Errorf("jfs: expected value=\".jav,.java,.javax\", got %q", jfs.value)
+	}
+}
+
 // When a source project failed createProjects (or wasn't in the migrate
 // scope), its settings extract records have no corresponding entry in
 // projectKeyMap. Historically those records were silently dropped, which
@@ -155,6 +287,7 @@ func TestRunSetProjectSettingsDispatchesByShape(t *testing.T) {
 // record, naming both the project key and the setting key.
 func TestRunSetProjectSettingsWarnsOnUnmappedProject(t *testing.T) {
 	cloudMux := http.NewServeMux()
+	mountSettingsDefinitions(cloudMux)
 	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{})
 	})
