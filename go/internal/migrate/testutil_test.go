@@ -264,6 +264,19 @@ func newAlreadyExistsCloudServer() *httptest.Server {
 	})
 
 	// GET search endpoints — return existing resources for lookup.
+	mux.HandleFunc("GET /api/projects/search", func(w http.ResponseWriter, r *http.Request) {
+		// Mimic the happy path: the project key SQC reports as
+		// "already exists" actually belongs to OUR target org, so
+		// createProjects' verify-already-exists step finds it
+		// (issue #193). A test that wants to simulate the
+		// other-org case wires a different handler.
+		projectKey := r.URL.Query().Get("projects")
+		json.NewEncoder(w).Encode(map[string]any{
+			"components": []map[string]any{
+				{"key": projectKey, "name": projectKey},
+			},
+		})
+	})
 	mux.HandleFunc("GET /api/qualityprofiles/search", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"profiles": []map[string]any{

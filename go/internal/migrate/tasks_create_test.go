@@ -383,6 +383,54 @@ func TestCreateProjects_AlreadyExists(t *testing.T) {
 	}
 }
 
+// SonarQube Cloud project keys are GLOBALLY unique, so an
+// "already exists" 400 from /api/projects/create doesn't guarantee
+// the existing project is in our target org — it might be claimed
+// by a different org. If we naively recorded a createProjects entry
+// for it, downstream tasks (setProjectSettings, setGlobalSettings'
+// fan-out) would PATCH a phantom project and get 404s. This test
+// asserts createProjects now verifies the project's actual org via
+// /api/projects/search and refuses to record an entry when the key
+// belongs elsewhere. Issue #193.
+func TestCreateProjects_AlreadyExistsInDifferentOrg(t *testing.T) {
+	// Build a custom Cloud mock that returns "already exists" for
+	// create AND returns an EMPTY project search result, mimicking
+	// SQC saying "the key exists, but not in this org".
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/projects/create", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(400)
+		fmt.Fprint(w, `{"errors":[{"msg":"Could not create Project, key already exists: x"}]}`)
+	})
+	mux.HandleFunc("GET /api/projects/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"components": []map[string]any{}})
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	})
+	cloudSrv := httptest.NewServer(mux)
+	defer cloudSrv.Close()
+
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+	dir := t.TempDir()
+	setupExtractData(dir)
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+
+	setupCSVs(t, dir)
+	runTask(t, e, "generateProjectMappings")
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["createProjects"].Run(context.Background(), e); err != nil {
+		t.Fatalf("createProjects: %v", err)
+	}
+
+	items, _ := e.Store.ReadAll("createProjects")
+	if len(items) != 0 {
+		t.Fatalf("expected NO createProjects records when key exists in another org, got %d: %s",
+			len(items), items)
+	}
+}
+
 func TestCreateProfiles_AlreadyExists(t *testing.T) {
 	cloudSrv := newAlreadyExistsCloudServer()
 	defer cloudSrv.Close()

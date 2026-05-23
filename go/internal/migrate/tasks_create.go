@@ -79,6 +79,27 @@ func runCreateProjects(ctx context.Context, e *Executor) error {
 					logAPIWarn(e.Logger, "createProjects: create failed", err, "key", key)
 					return nil
 				}
+				// SonarQube Cloud project keys are GLOBALLY unique, not
+				// org-scoped, so "key already exists" doesn't guarantee
+				// the existing project is in OUR target org. If it
+				// isn't, downstream tasks (setProjectSettings,
+				// setGlobalSettings fan-out, etc.) will issue PATCHes
+				// against a phantom project and get 404s. Verify the
+				// project is actually accessible in orgKey before
+				// recording it (issue #193).
+				exists, verifyErr := e.Cloud.Projects.ExistsInOrg(ctx, cloudKey, orgKey)
+				if verifyErr != nil {
+					counter.Fail()
+					logAPIWarn(e.Logger, "createProjects: could not verify already-existing project belongs to target org",
+						verifyErr, "source_key", key, "cloud_key", cloudKey, "org", orgKey)
+					return nil
+				}
+				if !exists {
+					counter.Fail()
+					e.Logger.Warn("createProjects: key already exists but project is not in target org, skipping",
+						"source_key", key, "cloud_key", cloudKey, "org", orgKey)
+					return nil
+				}
 				counter.Success()
 				e.Logger.Info("createProjects: already exists", "source_key", key, "cloud_key", cloudKey, "org", orgKey)
 			} else {

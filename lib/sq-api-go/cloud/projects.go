@@ -66,3 +66,31 @@ func (p *ProjectsClient) SetTags(ctx context.Context, projectKey, tags string) e
 	form.Set("tags", tags)
 	return p.postForm(ctx, "api/project_tags/set", form, nil)
 }
+
+// ExistsInOrg reports whether a project with the given key is
+// accessible in the given SonarQube Cloud organization. Used to
+// disambiguate /api/projects/create's "key already exists" response
+// (issue #193): SQC project keys are globally unique, so a 400
+// rejection doesn't tell us whether the existing project is in our
+// target org or some other org that happens to claim the same key.
+// A positive result confirms our migration can adopt the existing
+// project; a negative result means createProjects should treat the
+// case as a failure and skip the project from downstream tasks.
+//
+// Implementation: GET /api/projects/search filtered to (org, projects).
+// SQC returns the project in the response only when both match.
+func (p *ProjectsClient) ExistsInOrg(ctx context.Context, projectKey, organization string) (bool, error) {
+	q := url.Values{}
+	q.Set("organization", organization)
+	q.Set("projects", projectKey)
+	var resp types.ProjectsSearchResponse
+	if err := p.getJSON(ctx, "api/projects/search?"+q.Encode(), &resp); err != nil {
+		return false, err
+	}
+	for _, proj := range resp.Components {
+		if proj.Key == projectKey {
+			return true, nil
+		}
+	}
+	return false, nil
+}

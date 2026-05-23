@@ -185,6 +185,45 @@ func TestProjectsSetTags(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestProjectsExistsInOrg covers the disambiguator the migration tool
+// uses to resolve /api/projects/create's "key already exists" 400
+// (issue #193). SQC project keys are globally unique, so an
+// "already-exists" response doesn't tell us whether the existing
+// project is in our target org or in a different one that claimed
+// the same key — we have to verify via /api/projects/search filtered
+// to (org, projects).
+func TestProjectsExistsInOrg(t *testing.T) {
+	t.Run("present", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/projects/search", func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, "myorg", r.URL.Query().Get("organization"))
+			assert.Equal(t, "myorg_proj1", r.URL.Query().Get("projects"))
+			writeJSON(w, types.ProjectsSearchResponse{
+				Components: []types.Project{{Key: "myorg_proj1", Name: "Proj 1"}},
+			})
+		})
+		cc := newTestCloud(t, mux)
+		ok, err := cc.Projects.ExistsInOrg(context.Background(), "myorg_proj1", "myorg")
+		require.NoError(t, err)
+		assert.True(t, ok)
+	})
+
+	t.Run("absent in org but key claimed elsewhere", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/projects/search", func(w http.ResponseWriter, r *http.Request) {
+			// SQC returns an empty list when the project is NOT in
+			// the queried org, even if the key exists in some
+			// other org. This is the case createProjects must
+			// catch — the "already exists" 400 is misleading.
+			writeJSON(w, types.ProjectsSearchResponse{Components: nil})
+		})
+		cc := newTestCloud(t, mux)
+		ok, err := cc.Projects.ExistsInOrg(context.Background(), "myorg_proj1", "myorg")
+		require.NoError(t, err)
+		assert.False(t, ok)
+	})
+}
+
 // --- Groups ---
 
 func TestGroupsCreate(t *testing.T) {
