@@ -18,7 +18,14 @@ type CreateProjectParams struct {
 	Name         string
 	Organization string
 	Visibility   string
-	// NewCodeDefinitionType and NewCodeDefinitionValue are optional new-code period settings.
+	// NewCodeDefinitionType and NewCodeDefinitionValue are optional new-code
+	// period settings. SonarQube Cloud /api/projects/create rejects requests
+	// that include type without value (HTTP 400: "Both newCodeDefinitionType
+	// and newCodeDefinitionValue must be provided"), so we only forward the
+	// pair when BOTH are non-empty. "previous_version" — which has no value —
+	// is therefore omitted entirely and the project inherits the SQC default
+	// (which is previous_version); project-level NCD can be set later via
+	// /api/new_code_periods/set.
 	NewCodeDefinitionType  string
 	NewCodeDefinitionValue string
 }
@@ -32,10 +39,8 @@ func (p *ProjectsClient) Create(ctx context.Context, params CreateProjectParams)
 	if params.Visibility != "" {
 		form.Set("visibility", params.Visibility)
 	}
-	if params.NewCodeDefinitionType != "" {
+	if params.NewCodeDefinitionType != "" && params.NewCodeDefinitionValue != "" {
 		form.Set("newCodeDefinitionType", params.NewCodeDefinitionType)
-	}
-	if params.NewCodeDefinitionValue != "" {
 		form.Set("newCodeDefinitionValue", params.NewCodeDefinitionValue)
 	}
 

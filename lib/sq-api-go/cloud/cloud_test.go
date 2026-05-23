@@ -107,6 +107,33 @@ func TestProjectsCreateWithNewCode(t *testing.T) {
 	assert.Equal(t, "p1", proj.Key)
 }
 
+// SQC rejects /api/projects/create requests that include
+// newCodeDefinitionType without newCodeDefinitionValue (HTTP 400 "Both
+// newCodeDefinitionType and newCodeDefinitionValue must be provided"). For
+// "previous_version" — the SQC default, which has no value — every project
+// in the migration plan would otherwise cascade-fail and break downstream
+// tasks (setProjectSettings, setProjectGates, etc.). The SDK now omits both
+// fields whenever either side is empty.
+func TestProjectsCreateOmitsNewCodeWhenValueMissing(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc(pathProjectsCreate, func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		assert.Empty(t, r.Form["newCodeDefinitionType"],
+			"type must be omitted when value is empty (SQC rejects the half-set pair)")
+		assert.Empty(t, r.Form["newCodeDefinitionValue"])
+		writeJSON(w, types.ProjectCreateResponse{Project: types.Project{Key: "p1"}})
+	})
+	cc := newTestCloud(t, mux)
+
+	_, err := cc.Projects.Create(context.Background(), cloud.CreateProjectParams{
+		ProjectKey:            "p1",
+		Name:                  "P",
+		Organization:          "o",
+		NewCodeDefinitionType: "previous_version",
+	})
+	require.NoError(t, err)
+}
+
 func TestProjectsCreateError(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc(pathProjectsCreate, func(w http.ResponseWriter, r *http.Request) {
@@ -800,15 +827,107 @@ func TestSettingsSetError(t *testing.T) {
 func TestSettingsSetValues(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc(pathSettingsSet, func(w http.ResponseWriter, r *http.Request) {
-		assertFormValue(t, r, "component", "proj1")
-		assertFormValue(t, r, "key", "sonar.exclusions")
-		assertFormValue(t, r, "value", "a.java,b.java,c.java")
+		_ = r.ParseForm()
+		assert.Equal(t, "proj1", r.FormValue("component"))
+		assert.Equal(t, "sonar.exclusions", r.FormValue("key"))
+		// Multi-value settings must be sent as repeated "values" form
+		// parameters (not as a single comma-joined "value") so SonarQube
+		// Cloud parses the list correctly.
+		assert.Equal(t, []string{"a.java", "b.java", "c.java"}, r.Form["values"])
+		assert.Empty(t, r.Form["value"], "single value param must not be present for multi-value settings")
+		// SonarQube Cloud rejects requests that send both component AND
+		// organization with HTTP 400 "Only component or organization can be
+		// set, not both". Project-level scope is conveyed by component only.
+		assert.Empty(t, r.Form["organization"], "organization must be omitted when component is set")
 		w.WriteHeader(http.StatusNoContent)
 	})
 	cc := newTestCloud(t, mux)
 
 	err := cc.Settings.SetValues(context.Background(), "proj1", "sonar.exclusions", []string{"a.java", "b.java", "c.java"}, "myorg")
 	require.NoError(t, err)
+}
+
+func TestSettingsSetUsesOrgWhenComponentEmpty(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc(pathSettingsSet, func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		assert.Empty(t, r.Form["component"], "component must be absent for org-level settings")
+		assert.Equal(t, "myorg", r.FormValue("organization"))
+		assert.Equal(t, "sonar.example", r.FormValue("key"))
+		w.WriteHeader(http.StatusNoContent)
+	})
+	cc := newTestCloud(t, mux)
+
+	err := cc.Settings.Set(context.Background(), "", "sonar.example", "v", "myorg")
+	require.NoError(t, err)
+}
+
+func TestSettingsSetFieldValues(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc(pathSettingsSet, func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		assert.Equal(t, "proj1", r.FormValue("component"))
+		assert.Equal(t, "sonar.issue.ignore.allfile", r.FormValue("key"))
+		// Each property-set entry is JSON-encoded and sent as a separate
+		// "fieldValues" form parameter.
+		fv := r.Form["fieldValues"]
+		require.Len(t, fv, 2)
+		var entries []map[string]any
+		for _, raw := range fv {
+			var m map[string]any
+			require.NoError(t, json.Unmarshal([]byte(raw), &m))
+			entries = append(entries, m)
+		}
+		assert.Equal(t, "Generated test", entries[0]["fileRegexp"])
+		assert.Equal(t, "Mock data", entries[1]["fileRegexp"])
+		w.WriteHeader(http.StatusNoContent)
+	})
+	cc := newTestCloud(t, mux)
+
+	err := cc.Settings.SetFieldValues(context.Background(), "proj1", "sonar.issue.ignore.allfile",
+		[]map[string]any{
+			{"fileRegexp": "Generated test"},
+			{"fileRegexp": "Mock data"},
+		}, "myorg")
+	require.NoError(t, err)
+}
+
+// TestSettingsListDefinitions exercises the SDK's read of
+// /api/settings/list_definitions, which the migrate task uses to decide
+// whether each setting key on the target SQC org expects a single value,
+// repeated values, or a property-set fieldValues payload. The migration
+// regression that motivated this endpoint was sonar.java.file.suffixes:
+// SQS returns it as values=[...] but SQC defines it as a single STRING
+// (multiValues=false), so the migrate tool needs SQC's view of the schema
+// — not SQS's — to pick the right shape.
+func TestSettingsListDefinitions(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/settings/list_definitions", func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "myorg", r.URL.Query().Get("organization"))
+		writeJSON(w, types.SettingsListDefinitionsResponse{
+			Definitions: []types.SettingDefinition{
+				{Key: "sonar.exclusions", Type: "STRING", MultiValues: true},
+				{Key: "sonar.java.file.suffixes", Type: "STRING", MultiValues: false},
+				{Key: "sonar.issue.ignore.allfile", Type: "PROPERTY_SET", MultiValues: false},
+			},
+		})
+	})
+	cc := newTestCloud(t, mux)
+
+	defs, err := cc.Settings.ListDefinitions(context.Background(), "myorg")
+	require.NoError(t, err)
+	require.Len(t, defs, 3)
+
+	byKey := make(map[string]types.SettingDefinition, len(defs))
+	for _, d := range defs {
+		byKey[d.Key] = d
+	}
+	assert.True(t, byKey["sonar.exclusions"].MultiValues,
+		"sonar.exclusions must round-trip multiValues=true")
+	assert.False(t, byKey["sonar.java.file.suffixes"].MultiValues,
+		"sonar.java.file.suffixes must round-trip multiValues=false — this is the bit that determines whether migrate sends value= or values=")
+	assert.Equal(t, "PROPERTY_SET", byKey["sonar.issue.ignore.allfile"].Type)
 }
 
 // --- Enterprises ---
