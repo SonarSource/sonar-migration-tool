@@ -28,3 +28,20 @@ func (s *SettingsClient) Values(ctx context.Context, component string, keys stri
 	}
 	return result.Settings, nil
 }
+
+// ListDefinitions returns the setting definitions registered on the
+// SonarQube Server, used by global-settings migration (issue #186) to
+// detect which keys have been customized (value != defaultValue) and
+// therefore deserve forwarding to SQC. component is optional — leave it
+// empty to fetch global definitions.
+func (s *SettingsClient) ListDefinitions(ctx context.Context, component string) ([]types.SettingDefinition, error) {
+	params := url.Values{}
+	if component != "" {
+		params.Set("component", component)
+	}
+	var result types.SettingsListDefinitionsResponse
+	if err := s.get(ctx, "api/settings/list_definitions", params, &result); err != nil {
+		return nil, err
+	}
+	return result.Definitions, nil
+}

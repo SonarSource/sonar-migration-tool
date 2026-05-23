@@ -100,6 +100,19 @@ var sectionDefs = []sectionDef{
 		NameField:      "name",
 		DetailField:    "cloud_project_key",
 	},
+	{
+		// Global settings (issue #186) — one row per non-default SQS
+		// setting, fanned out across orgs by collectGlobalSettings.
+		// InputTask is left empty: the "skip when value=default"
+		// filter is applied inside the migrate task, so the report
+		// just reflects what was written. NameField is the setting
+		// key; DetailField is the pre-rendered value + per-org
+		// summary string set by renderGlobalSettingDetail.
+		Name:        "Global Settings",
+		OutputTask:  "setGlobalSettings",
+		NameField:   "key",
+		DetailField: "detail",
+	},
 }
 
 // skippedOrgSentinel matches the value used by the wizard when an org is skipped.

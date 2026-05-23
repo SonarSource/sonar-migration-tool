@@ -22,6 +22,17 @@ func systemTasks() []TaskDef {
 			},
 		},
 		{
+			// Companion to getServerSettings: extracts the SQS-side
+			// setting definitions (key, type, multiValues, defaultValue)
+			// so the migrate phase can decide which global settings have
+			// been customized (value != defaultValue — issue #186).
+			Name:     "getServerSettingsDefinitions",
+			Editions: AllEditions,
+			Run: func(ctx context.Context, e *Executor) error {
+				return fetchAndWriteArray(ctx, e, "getServerSettingsDefinitions", "api/settings/list_definitions", "definitions", nil, map[string]any{"serverUrl": e.ServerURL})
+			},
+		},
+		{
 			Name:     "getPlugins",
 			Editions: AllEditions,
 			Run: func(ctx context.Context, e *Executor) error {

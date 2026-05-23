@@ -673,6 +673,54 @@ func succeededNames(items []EntityItem) []string {
 	return out
 }
 
+// TestCollectGlobalSettingsFansOutByBucket ensures one setGlobalSettings
+// JSONL record produces one EntityItem per (org, outcome) — applied →
+// Succeeded, skipped_orgs[i] → Skipped, failed_orgs[i] → Failed — and
+// that the Detail string from the migrate task is forwarded verbatim.
+// Issue #186.
+func TestCollectGlobalSettingsFansOutByBucket(t *testing.T) {
+	dir := t.TempDir()
+	writeTaskJSONL(t, dir, "setGlobalSettings", []map[string]any{
+		{
+			"key":          "sonar.cleanasyoucode.enabled",
+			"value":        "true",
+			"applied_orgs": []string{"orgA", "orgB"},
+			"skipped_orgs": []map[string]any{{"org": "orgC", "reason": "not-on-sqc"}},
+			"failed_orgs":  []map[string]any{{"org": "orgD", "reason": "boom"}},
+			"detail":       "value=true — applied to: orgA, orgB — skipped: orgC (not-on-sqc) — failed: orgD",
+		},
+	})
+
+	summary, err := CollectSummary(dir, "")
+	if err != nil {
+		t.Fatalf("CollectSummary: %v", err)
+	}
+	sec := findSection(summary, "Global Settings")
+	if sec == nil {
+		t.Fatal("missing Global Settings section")
+	}
+	if len(sec.Succeeded) != 2 {
+		t.Errorf("Succeeded: want 2 (orgA + orgB), got %d", len(sec.Succeeded))
+	}
+	if len(sec.Skipped) != 1 || sec.Skipped[0].Organization != "orgC" {
+		t.Errorf("Skipped: want one entry for orgC, got %+v", sec.Skipped)
+	}
+	if sec.Skipped[0].SkipReason != "not-on-sqc" {
+		t.Errorf("Skipped[0].SkipReason: want 'not-on-sqc', got %q", sec.Skipped[0].SkipReason)
+	}
+	if len(sec.Failed) != 1 || sec.Failed[0].Organization != "orgD" {
+		t.Errorf("Failed: want one entry for orgD, got %+v", sec.Failed)
+	}
+	if sec.Failed[0].ErrorMessage != "boom" {
+		t.Errorf("Failed[0].ErrorMessage: want 'boom', got %q", sec.Failed[0].ErrorMessage)
+	}
+	// Detail string from migrate task is forwarded verbatim — that's how
+	// the report renders value + per-org info without re-deriving it.
+	if !strings.Contains(sec.Succeeded[0].Detail, "applied to: orgA, orgB") {
+		t.Errorf("Detail not forwarded: %q", sec.Succeeded[0].Detail)
+	}
+}
+
 // --- helpers ---
 
 func findSection(s *MigrationSummary, name string) *Section {

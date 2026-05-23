@@ -174,6 +174,15 @@ func newMockServer() *httptest.Server {
 		})
 	})
 
+	mux.HandleFunc("GET /api/settings/list_definitions", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"definitions": []map[string]any{
+				{"key": "sonar.custom", "type": "STRING", "multiValues": false, "defaultValue": ""},
+				{"key": "sonar.core.id", "type": "STRING", "multiValues": false, "defaultValue": "xxx"},
+			},
+		})
+	})
+
 	mux.HandleFunc("GET /api/plugins/installed", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"plugins": []map[string]any{{"key": "findbugs", "name": "FindBugs"}},
@@ -378,7 +387,7 @@ func TestRunExtractFull(t *testing.T) {
 	expectedTasks := []string{
 		"getProjects", "getUsers", "getGroups", "getProfiles", "getGates",
 		"getTemplates", "getDefaultTemplates", "getRules", "getRepos",
-		"getPlugins", "getServerInfo", "getServerSettings", "getUsage",
+		"getPlugins", "getServerInfo", "getServerSettings", "getServerSettingsDefinitions", "getUsage",
 		"getBindings", "getWebhooks", "getServerWebhooks", "getUserPermissions",
 		"getProfileRules", "getTasks",
 		// Per-project tasks

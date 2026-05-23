@@ -363,6 +363,38 @@ func TestSettingsValuesError(t *testing.T) {
 	assert.True(t, sqapi.IsForbidden(err))
 }
 
+// Global-settings migration (issue #186) needs each definition's
+// defaultValue to decide whether the SQS-side value is customized. This
+// test pins the JSON unmarshalling: the SDK must decode defaultValue,
+// multiValues, and type into the typed struct.
+func TestSettingsListDefinitions(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/settings/list_definitions", func(w http.ResponseWriter, r *http.Request) {
+		assert.Empty(t, r.URL.Query().Get("component"), "global call must not send a component")
+		writeJSON(w, types.SettingsListDefinitionsResponse{
+			Definitions: []types.SettingDefinition{
+				{Key: "sonar.exclusions", Type: "STRING", MultiValues: true, DefaultValue: ""},
+				{Key: "sonar.java.file.suffixes", Type: "STRING", MultiValues: false, DefaultValue: ".java,.jav"},
+				{Key: "sonar.cleanasyoucode.enabled", Type: "BOOLEAN", MultiValues: false, DefaultValue: "true"},
+			},
+		})
+	})
+	sc := newTestServer(t, mux)
+
+	defs, err := sc.Settings.ListDefinitions(context.Background(), "")
+	require.NoError(t, err)
+	require.Len(t, defs, 3)
+
+	byKey := make(map[string]types.SettingDefinition, len(defs))
+	for _, d := range defs {
+		byKey[d.Key] = d
+	}
+	assert.Equal(t, ".java,.jav", byKey["sonar.java.file.suffixes"].DefaultValue,
+		"defaultValue must round-trip — this is how migrate detects customization")
+	assert.True(t, byKey["sonar.exclusions"].MultiValues)
+	assert.Equal(t, "BOOLEAN", byKey["sonar.cleanasyoucode.enabled"].Type)
+}
+
 // --- Plugins ---
 
 func TestPluginsInstalled(t *testing.T) {

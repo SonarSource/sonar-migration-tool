@@ -15,15 +15,17 @@ type SettingsValuesResponse struct {
 	Settings []Setting `json:"settings"`
 }
 
-// SettingDefinition describes a setting's property type and whether it
-// accepts multiple values, as returned by /api/settings/list_definitions.
-// Only the fields actually consumed during migration are decoded — the
-// API also returns name, description, category, defaultValue, options, and
-// fields, all of which we don't need.
+// SettingDefinition describes a setting's property type, whether it accepts
+// multiple values, and its default value, as returned by
+// /api/settings/list_definitions. The defaultValue is the source-of-truth
+// for "is this setting customized?" — global-settings migration (issue
+// #186) compares it against the value returned by /api/settings/values to
+// decide whether to forward the setting to SQC.
 type SettingDefinition struct {
-	Key         string `json:"key"`
-	Type        string `json:"type"`
-	MultiValues bool   `json:"multiValues"`
+	Key          string `json:"key"`
+	Type         string `json:"type"`
+	MultiValues  bool   `json:"multiValues"`
+	DefaultValue string `json:"defaultValue"`
 }
 
 // SettingsListDefinitionsResponse is the response envelope for
