@@ -517,18 +517,20 @@ var sqcNewCodeType = map[string]string{
 // new-code-period default to every SonarQube Cloud organization
 // (issue #136).
 //
-// SonarQube Cloud's /api/new_code_periods/set works for per-project
-// writes but the org-level default is set through the legacy settings
-// keys instead — same approach as the reference sonar-tools/Python
-// implementation (sonar/settings.py::set_new_code_period). The task
-// issues two POST /api/settings/set calls per org:
+// The migration POSTs once per org to /api/new_code_periods/set with
+// organization=<key>&type=<sqcType>&value=<value> (no project). SQC
+// accepts the call at org scope and records the result as the org-wide
+// default that new projects inherit from.
 //
-//	sonar.leak.period.type = NUMBER_OF_DAYS | REFERENCE_BRANCH | SPECIFIC_ANALYSIS
-//	sonar.leak.period      = <value>   (omitted when type has no value)
+// Note: the obvious-looking alternative — POSTing sonar.leak.period.type
+// and sonar.leak.period through /api/settings/set, as
+// sonar-tools/Python does — does NOT work on current SonarCloud: the
+// API rejects those keys at organization scope with HTTP 400
+// "Provided property can't be set at organization level". The
+// new_code_periods endpoint is the right one for SQC org-level writes.
 //
 // PREVIOUS_VERSION is SQC's own default, so the task no-ops in that
-// case — issue #196's "don't migrate settings equal to the default"
-// principle applies here too.
+// case to avoid useless API calls (issue #196 principle).
 func runSetGlobalNewCodePeriod(ctx context.Context, e *Executor) error {
 	ncdItems, err := readExtractItems(e, "getGlobalNewCodePeriod")
 	if err != nil {
@@ -545,24 +547,28 @@ func runSetGlobalNewCodePeriod(ctx context.Context, e *Executor) error {
 		e.Logger.Info("setGlobalNewCodePeriod: SQS global NCD has no type, skipping")
 		return nil
 	}
-	// Normalize the legacy alias seen in older SQS exports — the SQC
-	// settings endpoint expects NUMBER_OF_DAYS. Matches sonar-tools.
+	// Older SQS exports sometimes use the legacy DAYS alias.
 	if sqsType == "DAYS" {
 		sqsType = "NUMBER_OF_DAYS"
 	}
-	if _, mapped := sqcNewCodeType[sqsType]; !mapped {
+	sqcType, mapped := sqcNewCodeType[sqsType]
+	if !mapped {
 		e.Logger.Warn("setGlobalNewCodePeriod: unmapped SQS NCD type, skipping",
 			"source_type", sqsType)
 		return nil
 	}
-	if sqsType == "PREVIOUS_VERSION" {
+	if sqcType == "previous_version" {
 		e.Logger.Info("setGlobalNewCodePeriod: SQS global NCD is PREVIOUS_VERSION (== SQC default), skipping",
 			"source_type", sqsType)
 		return nil
 	}
 	value := extractAnyStr(src, "value")
+	// previous_version is the only SQC type that must travel WITHOUT
+	// a value. We already returned for it above; for the rest we
+	// forward whatever SQS sent (empty allowed for reference_branch
+	// when SQS didn't carry a branch name — SQC will reject, and the
+	// per-org Warn surfaces the misconfiguration).
 
-	// Org fan-out.
 	orgItems, _ := e.Store.ReadAll("generateOrganizationMappings")
 	seen := make(map[string]struct{})
 	counter := NewTaskCounter("setGlobalNewCodePeriod")
@@ -576,26 +582,17 @@ func runSetGlobalNewCodePeriod(ctx context.Context, e *Executor) error {
 		}
 		seen[orgKey] = struct{}{}
 
-		// 1/2 — type. Required.
-		e.Logger.Debug("setGlobalNewCodePeriod: POST /api/settings/set (sonar.leak.period.type)",
-			"org", orgKey, "type", sqsType)
-		if err := e.Cloud.Settings.Set(ctx, "", "sonar.leak.period.type", sqsType, orgKey); err != nil {
+		e.Logger.Debug("setGlobalNewCodePeriod: POST /api/new_code_periods/set (org default)",
+			"org", orgKey, "type", sqcType, "value", value, "source_type", sqsType)
+		if err := e.Cloud.NewCodePeriods.Set(ctx, cloud.SetNewCodePeriodParams{
+			Organization: orgKey,
+			Type:         sqcType,
+			Value:        value,
+		}); err != nil {
 			counter.Fail()
-			logAPIWarn(e.Logger, "setGlobalNewCodePeriod failed setting type", err,
-				"org", orgKey, "type", sqsType)
+			logAPIWarn(e.Logger, "setGlobalNewCodePeriod failed", err,
+				"org", orgKey, "type", sqcType)
 			continue
-		}
-		// 2/2 — value. Skipped when SQS has no value (e.g. for
-		// REFERENCE_BRANCH from a global setting that didn't carry one).
-		if value != "" {
-			e.Logger.Debug("setGlobalNewCodePeriod: POST /api/settings/set (sonar.leak.period)",
-				"org", orgKey, "value", value)
-			if err := e.Cloud.Settings.Set(ctx, "", "sonar.leak.period", value, orgKey); err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "setGlobalNewCodePeriod failed setting value", err,
-					"org", orgKey, "value", value)
-				continue
-			}
 		}
 		counter.Success()
 	}
