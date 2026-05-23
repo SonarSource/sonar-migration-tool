@@ -63,15 +63,18 @@ func TestRunSetProjectSettingsDispatchesByShape(t *testing.T) {
 	}
 	f, _ := os.Create(filepath.Join(extractDir, "results.1.jsonl"))
 	for _, rec := range []map[string]any{
-		// Single scalar value — should hit the "value" path.
-		{"projectKey": "proj1", "key": "sonar.cfamily.ignoreHeaderComments", "value": "false"},
+		// Single scalar value — should hit the "value" path. Note the real
+		// extract enriches the record with "project" (see
+		// projectSettingsTask), not "projectKey" — mirror that shape so
+		// any future regression on the field name is caught immediately.
+		{"project": "proj1", "key": "sonar.cfamily.ignoreHeaderComments", "value": "false"},
 		// Multi-value list — should hit the SetValues path.
-		{"projectKey": "proj1", "key": "sonar.exclusions", "values": []string{"src/gen/**", "**/*.spec.ts"}},
+		{"project": "proj1", "key": "sonar.exclusions", "values": []string{"src/gen/**", "**/*.spec.ts"}},
 		// Property-set — should hit the SetFieldValues path.
-		{"projectKey": "proj1", "key": "sonar.issue.ignore.allfile",
+		{"project": "proj1", "key": "sonar.issue.ignore.allfile",
 			"fieldValues": []map[string]any{{"fileRegexp": "Generated test"}}},
 		// Empty payload — must be skipped silently.
-		{"projectKey": "proj1", "key": "sonar.cleanup.something"},
+		{"project": "proj1", "key": "sonar.cleanup.something"},
 	} {
 		b, _ := json.Marshal(rec)
 		f.Write(b)

@@ -209,7 +209,13 @@ func runSetProjectSettings(ctx context.Context, e *Executor) error {
 	counter := NewTaskCounter("setProjectSettings")
 	err := forEachExtractItem(ctx, e, "setProjectSettings", "getProjectSettings",
 		func(ctx context.Context, item structure.ExtractItem, w *common.ChunkWriter) error {
-			projectKey := extractField(item.Data, "projectKey")
+			// projectSettingsTask enriches each setting with "project": <key>
+			// (see internal/extract/tasks_projects.go); legacy fixtures used
+			// "projectKey", so accept either to stay robust.
+			projectKey := extractField(item.Data, "project")
+			if projectKey == "" {
+				projectKey = extractField(item.Data, "projectKey")
+			}
 			pm, ok := projectKeyMap[item.ServerURL+projectKey]
 			if !ok {
 				return nil
