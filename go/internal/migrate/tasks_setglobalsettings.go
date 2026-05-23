@@ -47,20 +47,33 @@ const (
 //     skipped org lists plus a pre-built "detail" string that the
 //     summary report renders verbatim.
 func runSetGlobalSettings(ctx context.Context, e *Executor) error {
-	// SQS-side definitions — keyed by setting key. Drives the
-	// "customized?" check below.
-	sqsDefRecords, _ := e.Store.ReadAll("getServerSettingsDefinitions")
-	sqsDefaultByKey := make(map[string]string, len(sqsDefRecords))
-	for _, d := range sqsDefRecords {
-		k := extractField(d, "key")
+	// getServerSettings and getServerSettingsDefinitions are EXTRACT
+	// tasks — their output lives in the per-server extract directories
+	// (one level above the migrate run dir) and is reached via
+	// readExtractItems / e.Mapping. Using e.Store.ReadAll here would
+	// silently return zero records and the task would no-op.
+	sqsDefItems, err := readExtractItems(e, "getServerSettingsDefinitions")
+	if err != nil {
+		return fmt.Errorf("setGlobalSettings: reading getServerSettingsDefinitions: %w", err)
+	}
+	sqsDefaultByKey := make(map[string]string, len(sqsDefItems))
+	for _, d := range sqsDefItems {
+		k := extractField(d.Data, "key")
 		if k == "" {
 			continue
 		}
-		sqsDefaultByKey[k] = extractField(d, "defaultValue")
+		sqsDefaultByKey[k] = extractField(d.Data, "defaultValue")
 	}
 
 	// Raw SQS global settings — kept only when customized.
-	sqsValues, _ := e.Store.ReadAll("getServerSettings")
+	sqsItems, err := readExtractItems(e, "getServerSettings")
+	if err != nil {
+		return fmt.Errorf("setGlobalSettings: reading getServerSettings: %w", err)
+	}
+	sqsValues := make([]json.RawMessage, 0, len(sqsItems))
+	for _, it := range sqsItems {
+		sqsValues = append(sqsValues, it.Data)
+	}
 	customized := make([]json.RawMessage, 0, len(sqsValues))
 	for _, raw := range sqsValues {
 		key := extractField(raw, "key")

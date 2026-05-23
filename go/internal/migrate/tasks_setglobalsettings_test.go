@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -50,8 +52,20 @@ func runGlobalSettingsTest(t *testing.T,
 	var logBuf bytes.Buffer
 	e.Logger = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
-	writeTaskJSONL(t, e, "getServerSettings", sqsSettings)
-	writeTaskJSONL(t, e, "getServerSettingsDefinitions", sqsDefs)
+	// getServerSettings / getServerSettingsDefinitions are EXTRACT tasks
+	// — runSetGlobalSettings reaches them via readExtractItems and
+	// e.Mapping, NOT via the migrate store. Writing to the migrate store
+	// would silently leave the production read path empty and the test
+	// would be exercising a different code path than reality. Drop the
+	// records into the configured extract directory instead.
+	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettings", sqsSettings)
+	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettingsDefinitions", sqsDefs)
+	// extract.json is what GetUniqueExtracts inspects to assemble the
+	// ExtractMapping; without it readExtractItems can't resolve the
+	// extract dir for a server URL.
+	writeExtractMetaJSON(t, dir, "extract-01", testServerURL)
+	// generateOrganizationMappings IS produced by the migrate phase, so
+	// it correctly lives in the migrate store.
 	writeTaskJSONL(t, e, "generateOrganizationMappings", orgs)
 
 	if err := runSetGlobalSettings(context.Background(), e); err != nil {
@@ -62,6 +76,40 @@ func runGlobalSettingsTest(t *testing.T,
 	defer muHits.Unlock()
 	hits = append(hits, *hitsPtr...)
 	return hits, logBuf.String()
+}
+
+// writeExtractTaskJSONL writes records as JSONL into an extract run
+// directory (NOT the migrate store). setGlobalSettings reads from here
+// via readExtractItems / e.Mapping.
+func writeExtractTaskJSONL(t *testing.T, exportDir, extractRun, task string, records []map[string]any) {
+	t.Helper()
+	taskDir := filepath.Join(exportDir, extractRun, task)
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", taskDir, err)
+	}
+	f, err := os.Create(filepath.Join(taskDir, "results.1.jsonl"))
+	if err != nil {
+		t.Fatalf("create extract jsonl: %v", err)
+	}
+	defer f.Close()
+	for _, r := range records {
+		b, _ := json.Marshal(r)
+		f.Write(b)
+		f.Write([]byte("\n"))
+	}
+}
+
+// writeExtractMetaJSON writes the extract.json file the structure
+// package reads to learn which server URL produced this extract.
+func writeExtractMetaJSON(t *testing.T, exportDir, extractRun, serverURL string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(exportDir, extractRun), 0o755); err != nil {
+		t.Fatalf("mkdir extract: %v", err)
+	}
+	b, _ := json.Marshal(map[string]any{"url": serverURL})
+	if err := os.WriteFile(filepath.Join(exportDir, extractRun, "extract.json"), b, 0o644); err != nil {
+		t.Fatalf("write extract.json: %v", err)
+	}
 }
 
 // writeTaskJSONL writes a slice of maps as JSONL into the named task's output
