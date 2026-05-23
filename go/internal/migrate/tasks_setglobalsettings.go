@@ -14,14 +14,31 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// SQS-only key with no direct SQC equivalent: its patterns are
-// platform-enforced "always-exclude" globs. On SQC the closest match is
-// sonar.exclusions, so the migrate task folds sonar.global.exclusions's
-// patterns into sonar.exclusions before posting (issue #186 follow-up).
-const (
-	sqsGlobalExclusionsKey = "sonar.global.exclusions"
-	sqsExclusionsKey       = "sonar.exclusions"
-)
+// exclusionPair captures a "global vs local" SQS pair that has no
+// direct SQC equivalent for the global half — the migrate task folds the
+// global patterns into the local key before posting.
+//
+// Today this covers:
+//
+//   - sonar.global.exclusions      → sonar.exclusions
+//   - sonar.global.test.exclusions → sonar.test.exclusions
+//
+// More pairs can be added without touching the merge or detail-render
+// logic; just append to globalExclusionPairs.
+type exclusionPair struct {
+	// SQSGlobalKey is the SQS-side key with no SQC counterpart. Its
+	// patterns are moved onto SQSLocalKey before migration.
+	SQSGlobalKey string
+	// SQSLocalKey is the SQS key that DOES have a SQC counterpart
+	// (same name on both sides). After the merge it carries the
+	// union of patterns from both sources.
+	SQSLocalKey string
+}
+
+var globalExclusionPairs = []exclusionPair{
+	{SQSGlobalKey: "sonar.global.exclusions", SQSLocalKey: "sonar.exclusions"},
+	{SQSGlobalKey: "sonar.global.test.exclusions", SQSLocalKey: "sonar.test.exclusions"},
+}
 
 // runSetGlobalSettings migrates customized SQS-side global settings to
 // every SonarQube Cloud organization in scope (issue #186).
@@ -86,12 +103,17 @@ func runSetGlobalSettings(ctx context.Context, e *Executor) error {
 		customized = append(customized, raw)
 	}
 
-	// SQS exposes platform-enforced exclusion patterns via
-	// sonar.global.exclusions; SQC has no equivalent key. Fold its
-	// patterns into sonar.exclusions so the platform-level enforcement
-	// is preserved on SQC; drop sonar.global.exclusions from the
-	// migration list so it doesn't trigger a "not-on-sqc" Warn.
-	customized = mergeGlobalExclusionsIntoExclusions(sqsValues, customized, e.Logger)
+	// SQS exposes platform-enforced exclusion patterns via the
+	// sonar.global.* keys (today: sonar.global.exclusions and
+	// sonar.global.test.exclusions). SQC has no global counterparts,
+	// so the migrate task folds each global key's patterns into its
+	// non-global sibling (sonar.exclusions / sonar.test.exclusions)
+	// and drops the global side from the migration list — otherwise
+	// a "not-on-sqc" Warn would fire and the platform-enforced
+	// patterns would be silently lost.
+	for _, pair := range globalExclusionPairs {
+		customized = mergeGlobalIntoLocal(pair, sqsValues, customized, e.Logger)
+	}
 
 	// Target SQC orgs.
 	orgItems, _ := e.Store.ReadAll("generateOrganizationMappings")
@@ -153,10 +175,11 @@ func applyOneGlobalSetting(ctx context.Context, e *Executor, raw json.RawMessage
 	key := extractField(raw, "key")
 	rec := globalSettingResult{Key: key}
 	rec.Value, rec.Values, rec.FieldValues = readSettingPayload(raw)
-	// Carry the merge marker through to the output record so the report
-	// can call out that sonar.exclusions was sourced from SQS's
-	// sonar.global.exclusions in addition to sonar.exclusions.
-	rec.MergedFromGlobal = extractBool(raw, "_merged_from_global")
+	// Carry the merge provenance through to the output record so the
+	// report can call out which SQS-global key contributed patterns to
+	// this SQC-side key (e.g. sonar.global.test.exclusions for the
+	// sonar.test.exclusions record).
+	rec.MergedFromGlobal = extractField(raw, "_merged_from")
 
 	for _, org := range orgs {
 		def, hasDef := defsByOrg[org][key]
@@ -183,48 +206,50 @@ func applyOneGlobalSetting(ctx context.Context, e *Executor, raw json.RawMessage
 	return rec
 }
 
-// mergeGlobalExclusionsIntoExclusions folds SQS's
-// sonar.global.exclusions patterns into the sonar.exclusions record so
-// the merged set lands on SQC's sonar.exclusions setting (SQC has no
-// global-exclusions counterpart). The synthesized record carries a
-// _merged_from_global marker that renderGlobalSettingDetail picks up so
-// the report calls out the merge.
+// mergeGlobalIntoLocal folds the SQS-side patterns from a global-only
+// key (pair.SQSGlobalKey) into the related key that exists on SQC
+// (pair.SQSLocalKey), so platform-enforced patterns aren't lost during
+// migration. The synthesized record carries a _merged_from marker
+// holding the global key name; renderGlobalSettingDetail uses it to
+// produce a "merged from <global> + <local>" note in the report.
 //
-// Behaviour rules:
-//   - If sonar.global.exclusions has no values (or value=) on SQS, this
-//     is a no-op — the original customized list passes through.
-//   - If sonar.global.exclusions IS set, the synthesized sonar.exclusions
-//     record carries the union (order-preserving, deduped) of the global
-//     patterns and the project-default patterns.
-//   - sonar.global.exclusions is removed from the customized list — its
-//     patterns have moved to sonar.exclusions, so there's nothing to
+// Behaviour rules (same shape for every pair):
+//   - If pair.SQSGlobalKey has no values (or value=) on SQS, this is a
+//     no-op — the original customized list passes through.
+//   - If pair.SQSGlobalKey IS set, the synthesized pair.SQSLocalKey
+//     record carries the union (order-preserving, deduped) of the
+//     global patterns and the local patterns.
+//   - pair.SQSGlobalKey is removed from the customized list — its
+//     patterns have moved to pair.SQSLocalKey, so there's nothing to
 //     migrate under the original key.
-//   - If sonar.exclusions wasn't customized on its own (only the global
-//     side was) we still emit the synthesized record so the global
-//     patterns make it to SQC.
-func mergeGlobalExclusionsIntoExclusions(sqsValues []json.RawMessage, customized []json.RawMessage, logger *slog.Logger) []json.RawMessage {
+//   - If pair.SQSLocalKey wasn't customized on its own (only the
+//     global side was) we still emit the synthesized record so the
+//     global patterns make it to SQC.
+func mergeGlobalIntoLocal(pair exclusionPair, sqsValues []json.RawMessage,
+	customized []json.RawMessage, logger *slog.Logger) []json.RawMessage {
+
 	// Look up both sides in the full extract — we need the global patterns
-	// even if sonar.exclusions itself wasn't filtered into `customized`.
-	var globalRec, exclusionsRec json.RawMessage
+	// even if the local key wasn't filtered into `customized`.
+	var globalRec, localRec json.RawMessage
 	for _, raw := range sqsValues {
 		switch extractField(raw, "key") {
-		case sqsGlobalExclusionsKey:
+		case pair.SQSGlobalKey:
 			globalRec = raw
-		case sqsExclusionsKey:
-			exclusionsRec = raw
+		case pair.SQSLocalKey:
+			localRec = raw
 		}
 	}
 	globalVals := readPatterns(globalRec)
 	if len(globalVals) == 0 {
 		return customized
 	}
-	exclusionsVals := readPatterns(exclusionsRec)
-	merged := unionPreservingOrder(globalVals, exclusionsVals)
+	localVals := readPatterns(localRec)
+	merged := unionPreservingOrder(globalVals, localVals)
 
 	synth := map[string]any{
-		"key":                 sqsExclusionsKey,
-		"values":              merged,
-		"_merged_from_global": true,
+		"key":          pair.SQSLocalKey,
+		"values":       merged,
+		"_merged_from": pair.SQSGlobalKey,
 	}
 	synthRaw, _ := json.Marshal(synth)
 
@@ -232,10 +257,10 @@ func mergeGlobalExclusionsIntoExclusions(sqsValues []json.RawMessage, customized
 	replaced := false
 	for _, raw := range customized {
 		switch extractField(raw, "key") {
-		case sqsGlobalExclusionsKey:
-			// Drop — its patterns have moved into sonar.exclusions.
+		case pair.SQSGlobalKey:
+			// Drop — its patterns have moved into the local key.
 			continue
-		case sqsExclusionsKey:
+		case pair.SQSLocalKey:
 			out = append(out, synthRaw)
 			replaced = true
 		default:
@@ -243,14 +268,16 @@ func mergeGlobalExclusionsIntoExclusions(sqsValues []json.RawMessage, customized
 		}
 	}
 	if !replaced {
-		// sonar.exclusions wasn't in the customized list (it was at
-		// SQS default), but the global side was set — synthesize a
+		// Local key wasn't in the customized list (it was at SQS
+		// default), but the global side was set — synthesize a
 		// record so the global patterns make it across.
 		out = append(out, synthRaw)
 	}
-	logger.Info("setGlobalSettings: merged sonar.global.exclusions into sonar.exclusions",
+	logger.Info("setGlobalSettings: merged global key into local key",
+		"global_key", pair.SQSGlobalKey,
+		"local_key", pair.SQSLocalKey,
 		"global_patterns", len(globalVals),
-		"exclusions_patterns", len(exclusionsVals),
+		"local_patterns", len(localVals),
 		"merged_patterns", len(merged))
 	return out
 }
@@ -342,14 +369,13 @@ func renderGlobalSettingDetail(r globalSettingResult) string {
 	default:
 		parts = append(parts, fmt.Sprintf("value=%s", r.Value))
 	}
-	if r.MergedFromGlobal {
+	if r.MergedFromGlobal != "" {
 		// Surface the cross-key merge so an operator inspecting the
 		// report can see where the patterns actually came from. This
-		// satisfies the issue requirement that the report "detail that
-		// SQC org sonar.exclusions is set from the combination of the
-		// SQS global sonar.global.exclusions and sonar.exclusions
-		// setting".
-		parts = append(parts, "merged from sonar.global.exclusions + sonar.exclusions")
+		// satisfies the issue requirement that the report "detail
+		// that SQC org <key> is set from the combination of the SQS
+		// global <global-key> and <key> setting".
+		parts = append(parts, fmt.Sprintf("merged from %s + %s", r.MergedFromGlobal, r.Key))
 	}
 	if len(r.AppliedOrgs) > 0 {
 		parts = append(parts, "applied to: "+strings.Join(r.AppliedOrgs, ", "))
@@ -384,7 +410,7 @@ type globalSettingResult struct {
 	SkippedOrgs      []skippedOrg     `json:"skipped_orgs,omitempty"`
 	FailedOrgs       []failedOrg      `json:"failed_orgs,omitempty"`
 	Detail           string           `json:"detail"`
-	MergedFromGlobal bool             `json:"merged_from_global,omitempty"`
+	MergedFromGlobal string           `json:"merged_from_global,omitempty"`
 }
 
 type skippedOrg struct {

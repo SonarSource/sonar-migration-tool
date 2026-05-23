@@ -359,18 +359,114 @@ func TestRunSetGlobalSettingsAppliesGlobalExclusionsWhenExclusionsAtDefault(t *t
 	}
 }
 
+// Same shape as the sonar.global.exclusions test, but exercises the
+// second entry in globalExclusionPairs: SQS's
+// sonar.global.test.exclusions must be folded into
+// sonar.test.exclusions on SQC. Verifies the pair-table refactor covers
+// the new pair without any extra code in the merge function.
+func TestRunSetGlobalSettingsMergesGlobalTestExclusionsIntoTestExclusions(t *testing.T) {
+	hits, logs := runGlobalSettingsTest(t,
+		// SQS extract values — both keys customized.
+		[]map[string]any{
+			{"key": "sonar.global.test.exclusions", "values": []string{"src/test/gen/**", "vendor/test/**"}},
+			{"key": "sonar.test.exclusions", "values": []string{"src/test/legacy/**", "src/test/gen/**"}}, // dedupe
+		},
+		[]map[string]any{
+			{"key": "sonar.global.test.exclusions", "type": "STRING", "multiValues": true, "defaultValue": ""},
+			{"key": "sonar.test.exclusions", "type": "STRING", "multiValues": true, "defaultValue": ""},
+		},
+		[]map[string]any{
+			{"sonarcloud_org_key": "org1"},
+		},
+		[]map[string]any{
+			// SQC only has sonar.test.exclusions.
+			{"key": "sonar.test.exclusions", "type": "STRING", "multiValues": true},
+		},
+	)
+	if len(hits) != 1 {
+		t.Fatalf("expected exactly 1 settings.set call (merged test exclusions), got %d (%+v)", len(hits), hits)
+	}
+	if hits[0].key != "sonar.test.exclusions" {
+		t.Fatalf("expected the call to land on sonar.test.exclusions, got %q", hits[0].key)
+	}
+	want := []string{"src/test/gen/**", "vendor/test/**", "src/test/legacy/**"}
+	if !reflect.DeepEqual(hits[0].values, want) {
+		t.Errorf("merged patterns: want %v (global-first, local-second, deduped), got %v",
+			want, hits[0].values)
+	}
+	if strings.Contains(logs, "sonar.global.test.exclusions") && strings.Contains(logs, "not available on SQC") {
+		t.Errorf("must NOT Warn about sonar.global.test.exclusions being SQC-missing — its patterns were migrated:\n%s", logs)
+	}
+}
+
+// When only sonar.global.test.exclusions is customized
+// (sonar.test.exclusions at default), the global patterns must still
+// reach SQC's sonar.test.exclusions — same behaviour as the exclusions
+// pair, just one row over in globalExclusionPairs.
+func TestRunSetGlobalSettingsAppliesGlobalTestExclusionsWhenTestExclusionsAtDefault(t *testing.T) {
+	hits, _ := runGlobalSettingsTest(t,
+		[]map[string]any{
+			{"key": "sonar.global.test.exclusions", "values": []string{"vendor/test/**"}},
+		},
+		[]map[string]any{
+			{"key": "sonar.global.test.exclusions", "type": "STRING", "multiValues": true, "defaultValue": ""},
+			{"key": "sonar.test.exclusions", "type": "STRING", "multiValues": true, "defaultValue": ""},
+		},
+		[]map[string]any{
+			{"sonarcloud_org_key": "org1"},
+		},
+		[]map[string]any{
+			{"key": "sonar.test.exclusions", "type": "STRING", "multiValues": true},
+		},
+	)
+	if len(hits) != 1 {
+		t.Fatalf("expected 1 call (global test patterns onto sonar.test.exclusions), got %d", len(hits))
+	}
+	if hits[0].key != "sonar.test.exclusions" {
+		t.Fatalf("expected sonar.test.exclusions to be the target, got %q", hits[0].key)
+	}
+	if !reflect.DeepEqual(hits[0].values, []string{"vendor/test/**"}) {
+		t.Errorf("want values=[vendor/test/**] from global-only side, got %v", hits[0].values)
+	}
+}
+
 // renderGlobalSettingDetail must annotate the merged record so the
 // summary report displays the cross-key provenance — this is the report
-// requirement called out in the issue.
+// requirement called out in the issue. The detail string is formed from
+// the carried global-key name so the same code path covers every pair
+// in globalExclusionPairs.
 func TestRenderGlobalSettingDetailMentionsMerge(t *testing.T) {
-	got := renderGlobalSettingDetail(globalSettingResult{
-		Key:              "sonar.exclusions",
-		Values:           []string{"a", "b"},
-		AppliedOrgs:      []string{"org1"},
-		MergedFromGlobal: true,
-	})
-	if !strings.Contains(got, "merged from sonar.global.exclusions + sonar.exclusions") {
-		t.Errorf("expected detail to call out the merge, got: %s", got)
+	cases := []struct {
+		name   string
+		rec    globalSettingResult
+		expect string
+	}{
+		{
+			name: "exclusions",
+			rec: globalSettingResult{
+				Key:              "sonar.exclusions",
+				Values:           []string{"a", "b"},
+				AppliedOrgs:      []string{"org1"},
+				MergedFromGlobal: "sonar.global.exclusions",
+			},
+			expect: "merged from sonar.global.exclusions + sonar.exclusions",
+		},
+		{
+			name: "test exclusions",
+			rec: globalSettingResult{
+				Key:              "sonar.test.exclusions",
+				Values:           []string{"a"},
+				AppliedOrgs:      []string{"org1"},
+				MergedFromGlobal: "sonar.global.test.exclusions",
+			},
+			expect: "merged from sonar.global.test.exclusions + sonar.test.exclusions",
+		},
+	}
+	for _, c := range cases {
+		got := renderGlobalSettingDetail(c.rec)
+		if !strings.Contains(got, c.expect) {
+			t.Errorf("%s: expected detail to contain %q, got: %s", c.name, c.expect, got)
+		}
 	}
 }
 
