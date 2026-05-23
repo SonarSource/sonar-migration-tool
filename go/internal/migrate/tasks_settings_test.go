@@ -1,13 +1,16 @@
 package migrate
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -140,5 +143,75 @@ func TestRunSetProjectSettingsDispatchesByShape(t *testing.T) {
 	}
 	if fv["fileRegexp"] != "Generated test" {
 		t.Errorf("ifa: wrong fieldValues content: %+v", fv)
+	}
+}
+
+// When a source project failed createProjects (or wasn't in the migrate
+// scope), its settings extract records have no corresponding entry in
+// projectKeyMap. Historically those records were silently dropped, which
+// made setting-migration cascade failures invisible — users would see "task
+// summary succeeded=N" without any hint that N was smaller than expected.
+// This test enforces that the migrate task now logs a Warn line per dropped
+// record, naming both the project key and the setting key.
+func TestRunSetProjectSettingsWarnsOnUnmappedProject(t *testing.T) {
+	cloudMux := http.NewServeMux()
+	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	})
+	cloudSrv := httptest.NewServer(cloudMux)
+	defer cloudSrv.Close()
+
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+
+	dir := t.TempDir()
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	// Capture Warn output so the test can assert on it.
+	var buf bytes.Buffer
+	e.Logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	extractDir := filepath.Join(dir, "extract-01", "getProjectSettings")
+	if err := os.MkdirAll(extractDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	f, _ := os.Create(filepath.Join(extractDir, "results.1.jsonl"))
+	// One record for a project that IS in createProjects, and one for a
+	// project that ISN'T (the realistic cascade case: createProjects failed
+	// for okorach-oss_sonar-tools, so its setting must surface a Warn).
+	for _, rec := range []map[string]any{
+		{"project": "proj1", "key": "sonar.exclusions", "values": []string{"**/*.gen"}},
+		{"project": "okorach-oss_sonar-tools", "key": "sonar.java.file.suffixes",
+			"values": []string{".java", ".jav"}},
+	} {
+		b, _ := json.Marshal(rec)
+		f.Write(b)
+		f.Write([]byte("\n"))
+	}
+	f.Close()
+
+	pw, _ := e.Store.Writer("createProjects")
+	b, _ := json.Marshal(map[string]any{
+		"key": "proj1", "server_url": testServerURL,
+		"sonarcloud_org_key": "org1", "cloud_project_key": "org1_proj1",
+	})
+	pw.WriteOne(b)
+
+	if err := runSetProjectSettings(context.Background(), e); err != nil {
+		t.Fatalf("runSetProjectSettings: %v", err)
+	}
+
+	logs := buf.String()
+	if !strings.Contains(logs, "project not found in migration scope") {
+		t.Errorf("expected Warn for unmapped project, got:\n%s", logs)
+	}
+	if !strings.Contains(logs, "okorach-oss_sonar-tools") {
+		t.Errorf("expected dropped project key in Warn, got:\n%s", logs)
+	}
+	if !strings.Contains(logs, "sonar.java.file.suffixes") {
+		t.Errorf("expected dropped setting key in Warn, got:\n%s", logs)
+	}
+	// The mapped record (proj1/sonar.exclusions) should NOT produce a Warn.
+	if strings.Contains(logs, "proj1") && strings.Contains(logs, "not found") {
+		t.Errorf("mapped project must not Warn, got:\n%s", logs)
 	}
 }

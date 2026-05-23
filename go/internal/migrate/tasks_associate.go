@@ -216,11 +216,17 @@ func runSetProjectSettings(ctx context.Context, e *Executor) error {
 			if projectKey == "" {
 				projectKey = extractField(item.Data, "projectKey")
 			}
+			settingKey := extractField(item.Data, "key")
 			pm, ok := projectKeyMap[item.ServerURL+projectKey]
 			if !ok {
+				// Most common cause: the source project failed createProjects
+				// (or wasn't in this run's scope). Surface it as a Warn so
+				// users see *why* their settings aren't landing on SQC instead
+				// of silently losing them.
+				e.Logger.Warn("setProjectSettings: skipping setting, project not found in migration scope",
+					"project", projectKey, "setting", settingKey, "server", item.ServerURL)
 				return nil
 			}
-			settingKey := extractField(item.Data, "key")
 			if settingKey == "" {
 				return nil
 			}
