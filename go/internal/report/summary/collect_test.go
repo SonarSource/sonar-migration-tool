@@ -673,21 +673,27 @@ func succeededNames(items []EntityItem) []string {
 	return out
 }
 
-// TestCollectGlobalSettingsFansOutByBucket ensures one setGlobalSettings
-// JSONL record produces one EntityItem per (org, outcome) — applied →
-// Succeeded, skipped_orgs[i] → Skipped, failed_orgs[i] → Failed — and
-// that the Detail string from the migrate task is forwarded verbatim.
-// Issue #186.
-func TestCollectGlobalSettingsFansOutByBucket(t *testing.T) {
+// TestCollectGlobalSettingsRoutesOutcomesByStatus ensures the report
+// reads the new outcomes[] schema (one entry per setting × org) and
+// routes each outcome to the right Section bucket by Status, with
+// Detail forwarded verbatim. The migrate task is responsible for the
+// per-row wording — the report no longer composes a single string for
+// the whole record.
+func TestCollectGlobalSettingsRoutesOutcomesByStatus(t *testing.T) {
 	dir := t.TempDir()
 	writeTaskJSONL(t, dir, "setGlobalSettings", []map[string]any{
 		{
-			"key":          "sonar.cleanasyoucode.enabled",
-			"value":        "true",
-			"applied_orgs": []string{"orgA", "orgB"},
-			"skipped_orgs": []map[string]any{{"org": "orgC", "reason": "not-on-sqc"}},
-			"failed_orgs":  []map[string]any{{"org": "orgD", "reason": "boom"}},
-			"detail":       "value=true — applied to: orgA, orgB — skipped: orgC (not-on-sqc) — failed: orgD",
+			"key":   "sonar.cleanasyoucode.enabled",
+			"value": "true",
+			"outcomes": []map[string]any{
+				{"org": "orgA", "status": "applied", "detail": "Applied (value=true)"},
+				{"org": "orgB", "status": "applied-to-projects",
+					"detail": "Applied to all projects (value=true) (failed: orgB_projX)"},
+				{"org": "orgC", "status": "skipped", "reason": "not-on-sqc",
+					"detail": "Skipped (not on SQC)"},
+				{"org": "orgD", "status": "failed", "reason": "boom",
+					"detail": "Failed: boom"},
+			},
 		},
 	})
 
@@ -699,25 +705,76 @@ func TestCollectGlobalSettingsFansOutByBucket(t *testing.T) {
 	if sec == nil {
 		t.Fatal("missing Global Settings section")
 	}
+
 	if len(sec.Succeeded) != 2 {
-		t.Errorf("Succeeded: want 2 (orgA + orgB), got %d", len(sec.Succeeded))
+		t.Errorf("Succeeded: want 2 (applied + applied-to-projects), got %d", len(sec.Succeeded))
 	}
+	// Per-row Detail must differ between the direct-apply row and
+	// the fan-out row — the whole point of the schema change.
+	if sec.Succeeded[0].Detail == sec.Succeeded[1].Detail {
+		t.Errorf("Detail must be per-row, both Succeeded rows had %q", sec.Succeeded[0].Detail)
+	}
+	hasFanOutWording := false
+	for _, it := range sec.Succeeded {
+		if strings.Contains(it.Detail, "Applied to all projects") {
+			hasFanOutWording = true
+		}
+	}
+	if !hasFanOutWording {
+		t.Errorf("fan-out row's Detail must say \"Applied to all projects\", got %+v", sec.Succeeded)
+	}
+
 	if len(sec.Skipped) != 1 || sec.Skipped[0].Organization != "orgC" {
-		t.Errorf("Skipped: want one entry for orgC, got %+v", sec.Skipped)
+		t.Fatalf("Skipped: want one entry for orgC, got %+v", sec.Skipped)
 	}
 	if sec.Skipped[0].SkipReason != "not-on-sqc" {
 		t.Errorf("Skipped[0].SkipReason: want 'not-on-sqc', got %q", sec.Skipped[0].SkipReason)
 	}
+	if sec.Skipped[0].Detail != "Skipped (not on SQC)" {
+		t.Errorf("Skipped[0].Detail: want verbatim per-row text, got %q", sec.Skipped[0].Detail)
+	}
+
 	if len(sec.Failed) != 1 || sec.Failed[0].Organization != "orgD" {
-		t.Errorf("Failed: want one entry for orgD, got %+v", sec.Failed)
+		t.Fatalf("Failed: want one entry for orgD, got %+v", sec.Failed)
 	}
 	if sec.Failed[0].ErrorMessage != "boom" {
 		t.Errorf("Failed[0].ErrorMessage: want 'boom', got %q", sec.Failed[0].ErrorMessage)
 	}
-	// Detail string from migrate task is forwarded verbatim — that's how
-	// the report renders value + per-org info without re-deriving it.
-	if !strings.Contains(sec.Succeeded[0].Detail, "applied to: orgA, orgB") {
-		t.Errorf("Detail not forwarded: %q", sec.Succeeded[0].Detail)
+}
+
+// Mixed fan-out outcomes (some projects succeeded, others failed)
+// must land in the Section's Partial bucket — not Succeeded — so the
+// report distinguishes them from clean applies. Per-row Detail still
+// drives the wording.
+func TestCollectGlobalSettingsPartialOutcomeLandsInPartialBucket(t *testing.T) {
+	dir := t.TempDir()
+	writeTaskJSONL(t, dir, "setGlobalSettings", []map[string]any{
+		{
+			"key":   "sonar.html.file.suffixes",
+			"value": "html",
+			"outcomes": []map[string]any{
+				{"org": "orgA", "status": "partial",
+					"detail": "Applied to 1 of 2 projects (values=[.html]) (failed: orgA_projX)"},
+			},
+		},
+	})
+
+	summary, err := CollectSummary(dir, "")
+	if err != nil {
+		t.Fatalf("CollectSummary: %v", err)
+	}
+	sec := findSection(summary, "Global Settings")
+	if sec == nil {
+		t.Fatal("missing Global Settings section")
+	}
+	if len(sec.Succeeded) != 0 {
+		t.Errorf("Succeeded must NOT contain partial outcomes, got %+v", sec.Succeeded)
+	}
+	if len(sec.Partial) != 1 || sec.Partial[0].Organization != "orgA" {
+		t.Fatalf("Partial: want one entry for orgA, got %+v", sec.Partial)
+	}
+	if !strings.Contains(sec.Partial[0].Detail, "Applied to 1 of 2 projects") {
+		t.Errorf("Partial[0].Detail: want N/M count text, got %q", sec.Partial[0].Detail)
 	}
 }
 

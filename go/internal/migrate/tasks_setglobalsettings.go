@@ -218,6 +218,12 @@ func applyOneGlobalSetting(ctx context.Context, e *Executor, raw json.RawMessage
 	// setting key, not of the org.
 	orgRejected := false
 
+	valueSummary := renderValueSummary(rec)
+	mergeSuffix := ""
+	if rec.MergedFromGlobal != "" {
+		mergeSuffix = fmt.Sprintf(" (merged from %s + %s)", rec.MergedFromGlobal, key)
+	}
+
 	for _, org := range orgs {
 		def, hasDef := defsByOrg[org][key]
 		if !hasDef {
@@ -231,12 +237,22 @@ func applyOneGlobalSetting(ctx context.Context, e *Executor, raw json.RawMessage
 			if _, atProject := projectDefsByOrg[org][key]; atProject {
 				e.Logger.Info("setGlobalSettings: key exists only at SQC project scope, will be propagated by setProjectSettings",
 					"key", key, "org", org)
-				rec.SkippedOrgs = append(rec.SkippedOrgs, skippedOrg{Org: org, Reason: "project-scope-only"})
+				rec.Outcomes = append(rec.Outcomes, orgOutcome{
+					Org:    org,
+					Status: outcomeSkipped,
+					Reason: "project-scope-only",
+					Detail: "Skipped (handled by setProjectSettings)" + mergeSuffix,
+				})
 				continue
 			}
 			e.Logger.Warn("setGlobalSettings: setting key not available on SQC, skipping",
 				"key", key, "org", org)
-			rec.SkippedOrgs = append(rec.SkippedOrgs, skippedOrg{Org: org, Reason: "not-on-sqc"})
+			rec.Outcomes = append(rec.Outcomes, orgOutcome{
+				Org:    org,
+				Status: outcomeSkipped,
+				Reason: "not-on-sqc",
+				Detail: "Skipped (not on SQC)" + mergeSuffix,
+			})
 			continue
 		}
 		// If a previous org for THIS key already rejected the
@@ -244,14 +260,18 @@ func applyOneGlobalSetting(ctx context.Context, e *Executor, raw json.RawMessage
 		// straight to the project fan-out. Saves one wasted 400 per
 		// extra org.
 		if orgRejected {
-			fanOutForOrgRejection(ctx, e, raw, key, org, projectDefsByOrg, projectKeyMap, overrideCovered, counter, &rec, /*alreadyKnown=*/ true)
+			rec.Outcomes = append(rec.Outcomes,
+				fanOutOutcome(ctx, e, raw, key, org, valueSummary, mergeSuffix, projectDefsByOrg, projectKeyMap, overrideCovered, counter, /*alreadyKnown=*/ true))
 			continue
 		}
 
 		err := applySettingByDef(ctx, e, "", org, raw, key, def, true)
 		switch {
 		case errors.Is(err, errSettingEmpty):
-			rec.SkippedOrgs = append(rec.SkippedOrgs, skippedOrg{Org: org, Reason: "empty"})
+			rec.Outcomes = append(rec.Outcomes, orgOutcome{
+				Org: org, Status: outcomeSkipped, Reason: "empty",
+				Detail: "Skipped (empty payload)" + mergeSuffix,
+			})
 		case sqapi.IsOrgLevelRejection(err):
 			// SQC's list_definitions falsely reported this key as
 			// settable at org scope (e.g. sonar.coverage.jacoco.xmlReportPaths,
@@ -260,40 +280,77 @@ func applyOneGlobalSetting(ctx context.Context, e *Executor, raw json.RawMessage
 			// the remaining orgs in the loop skip the failing org-
 			// scope POST altogether.
 			orgRejected = true
-			fanOutForOrgRejection(ctx, e, raw, key, org, projectDefsByOrg, projectKeyMap, overrideCovered, counter, &rec, /*alreadyKnown=*/ false)
+			rec.Outcomes = append(rec.Outcomes,
+				fanOutOutcome(ctx, e, raw, key, org, valueSummary, mergeSuffix, projectDefsByOrg, projectKeyMap, overrideCovered, counter, /*alreadyKnown=*/ false))
 		case err != nil:
 			counter.Fail()
 			logAPIWarn(e.Logger, "setGlobalSettings failed", err, "key", key, "org", org)
-			rec.FailedOrgs = append(rec.FailedOrgs, failedOrg{Org: org, Reason: err.Error()})
+			rec.Outcomes = append(rec.Outcomes, orgOutcome{
+				Org: org, Status: outcomeFailed, Reason: err.Error(),
+				Detail: "Failed: " + apiErrMessage(err) + mergeSuffix,
+			})
 		default:
 			counter.Success()
-			rec.AppliedOrgs = append(rec.AppliedOrgs, org)
+			rec.Outcomes = append(rec.Outcomes, orgOutcome{
+				Org: org, Status: outcomeApplied,
+				Detail: "Applied (" + valueSummary + ")" + mergeSuffix,
+			})
 		}
 	}
-	rec.Detail = renderGlobalSettingDetail(rec)
 	return rec
 }
 
-// fanOutForOrgRejection handles the per-org fan-out when SQC rejected
-// the org-scope POST for a key (or when we've already seen that
-// rejection on a previous org during this run). Per-project SQS
-// overrides are skipped so we don't race against the parallel
-// setProjectSettings per-record loop.
-func fanOutForOrgRejection(ctx context.Context, e *Executor, raw json.RawMessage,
-	key, org string,
+// renderValueSummary picks the compact form of the value (value=X /
+// values=[a,b] / fieldValues=[...]) for inclusion in per-row Detail
+// strings. The shape mirrors what /api/settings/set would receive.
+func renderValueSummary(r globalSettingResult) string {
+	switch {
+	case len(r.FieldValues) > 0:
+		b, _ := json.Marshal(r.FieldValues)
+		return "fieldValues=" + string(b)
+	case len(r.Values) > 0:
+		return "values=[" + strings.Join(r.Values, ",") + "]"
+	default:
+		return "value=" + r.Value
+	}
+}
+
+// apiErrMessage extracts the API error message when err is an
+// sqapi.APIError, falling back to err.Error() otherwise. Keeps the
+// report's Detail text compact (no Method/URL noise).
+func apiErrMessage(err error) string {
+	var apiErr *sqapi.APIError
+	if errors.As(err, &apiErr) {
+		if msg := apiErr.Message(); msg != "" {
+			return msg
+		}
+	}
+	return err.Error()
+}
+
+// fanOutOutcome handles the per-org fan-out when SQC rejected the
+// org-scope POST for a key (or when we've already seen that rejection
+// on a previous org during this run). Per-project SQS overrides are
+// skipped so we don't race against the parallel setProjectSettings
+// per-record loop. Returns a single orgOutcome with a Detail string
+// that summarises the apply ("Applied to all projects (value=…)") and
+// enumerates any project-level exceptions.
+func fanOutOutcome(ctx context.Context, e *Executor, raw json.RawMessage,
+	key, org, valueSummary, mergeSuffix string,
 	projectDefsByOrg map[string]map[string]types.SettingDefinition,
 	projectKeyMap map[string]projectMapping,
 	overrideCovered map[string]map[string]bool,
-	counter *TaskCounter, rec *globalSettingResult,
-	alreadyKnown bool) {
+	counter *TaskCounter, alreadyKnown bool) orgOutcome {
 
 	projectDef, hasProjDef := projectDefsByOrg[org][key]
 	if !hasProjDef {
 		// Pathological — org said yes, project says no.
-		rec.FailedOrgs = append(rec.FailedOrgs,
-			failedOrg{Org: org, Reason: "rejected at org scope, key absent from project scope"})
 		counter.Fail()
-		return
+		return orgOutcome{
+			Org: org, Status: outcomeFailed,
+			Reason: "rejected at org scope, key absent from project scope",
+			Detail: "Failed: rejected at org scope, key absent from project scope" + mergeSuffix,
+		}
 	}
 	if alreadyKnown {
 		e.Logger.Info("setGlobalSettings: org-level write already rejected for this key, propagating to projects without retrying",
@@ -303,18 +360,70 @@ func fanOutForOrgRejection(ctx context.Context, e *Executor, raw json.RawMessage
 			"key", key, "org", org)
 	}
 	applied, failed, skipped := fanOutGlobalToProjects(ctx, e, raw, key, org, projectDef, projectKeyMap, overrideCovered)
-	rec.AppliedOrgs = append(rec.AppliedOrgs, org)
 	for range applied {
 		counter.Success()
 	}
-	for _, p := range failed {
+	for range failed {
 		counter.Fail()
-		rec.FailedOrgs = append(rec.FailedOrgs, failedOrg{Org: org + "/" + p.project, Reason: p.reason})
 	}
-	for _, p := range skipped {
-		rec.SkippedOrgs = append(rec.SkippedOrgs,
-			skippedOrg{Org: org + "/" + p, Reason: "per-project-override"})
+
+	// Branch the Detail wording on actual per-project counts so the
+	// row doesn't say "Applied to all projects" while also listing
+	// failures — that's the contradictory text the report showed
+	// before. Three cases:
+	//
+	//   - applied=N, failed=0 → "Applied to all projects (value=…)"
+	//   - applied=N, failed=M → "Applied to N of (N+M) projects
+	//                            (value=…) (failed: …; skipped: …)"
+	//   - applied=0, failed=M → "Failed: N projects (e.g. <error>)"
+	//
+	// Override-skipped projects (per-project SQS override wins) are
+	// listed alongside failures but are not failures themselves.
+	a, f, s := len(applied), len(failed), len(skipped)
+	total := a + f
+	var detail string
+	var status string
+	switch {
+	case a > 0 && f == 0:
+		detail = "Applied to all projects (" + valueSummary + ")"
+		status = outcomeAppliedToProjects
+	case a > 0 && f > 0:
+		detail = fmt.Sprintf("Applied to %d of %d projects (%s)", a, total, valueSummary)
+		status = outcomePartial
+	default: // a == 0 — every fan-out project failed (or no targets).
+		if f > 0 {
+			detail = fmt.Sprintf("Failed: %d project(s), e.g. %s", f, failed[0].reason)
+		} else {
+			detail = "Failed: no eligible projects in org"
+		}
+		status = outcomeFailed
 	}
+	var notes []string
+	if f > 0 {
+		names := make([]string, 0, f)
+		for _, p := range failed {
+			names = append(names, p.project)
+		}
+		notes = append(notes, "failed: "+strings.Join(names, ", "))
+	}
+	if s > 0 {
+		names := make([]string, 0, s)
+		for _, p := range skipped {
+			names = append(names, p+" (override)")
+		}
+		notes = append(notes, "skipped: "+strings.Join(names, ", "))
+	}
+	if len(notes) > 0 {
+		detail += " (" + strings.Join(notes, "; ") + ")"
+	}
+	detail += mergeSuffix
+	out := orgOutcome{Org: org, Status: status, Detail: detail}
+	if status == outcomeFailed && f > 0 {
+		// Surface a concrete API error message in the Reason so the
+		// report's Failed bucket can populate EntityItem.ErrorMessage.
+		out.Reason = failed[0].reason
+	}
+	return out
 }
 
 // projectFanOutFailure is returned from fanOutGlobalToProjects for each
@@ -551,70 +660,40 @@ func readSettingPayload(raw json.RawMessage) (value string, values []string, fie
 		extractObjectArray(raw, "fieldValues")
 }
 
-// renderGlobalSettingDetail produces the string the summary report shows
-// in the Detail column for one global-setting row. Matches the format
-// requested in issue #186: "value=… — applied to: org1, org2".
-func renderGlobalSettingDetail(r globalSettingResult) string {
-	var parts []string
-	switch {
-	case len(r.FieldValues) > 0:
-		b, _ := json.Marshal(r.FieldValues)
-		parts = append(parts, fmt.Sprintf("fieldValues=%s", string(b)))
-	case len(r.Values) > 0:
-		parts = append(parts, fmt.Sprintf("values=[%s]", strings.Join(r.Values, ",")))
-	default:
-		parts = append(parts, fmt.Sprintf("value=%s", r.Value))
-	}
-	if r.MergedFromGlobal != "" {
-		// Surface the cross-key merge so an operator inspecting the
-		// report can see where the patterns actually came from. This
-		// satisfies the issue requirement that the report "detail
-		// that SQC org <key> is set from the combination of the SQS
-		// global <global-key> and <key> setting".
-		parts = append(parts, fmt.Sprintf("merged from %s + %s", r.MergedFromGlobal, r.Key))
-	}
-	if len(r.AppliedOrgs) > 0 {
-		parts = append(parts, "applied to: "+strings.Join(r.AppliedOrgs, ", "))
-	}
-	if len(r.SkippedOrgs) > 0 {
-		skipped := make([]string, 0, len(r.SkippedOrgs))
-		for _, s := range r.SkippedOrgs {
-			skipped = append(skipped, fmt.Sprintf("%s (%s)", s.Org, s.Reason))
-		}
-		parts = append(parts, "skipped: "+strings.Join(skipped, ", "))
-	}
-	if len(r.FailedOrgs) > 0 {
-		failed := make([]string, 0, len(r.FailedOrgs))
-		for _, f := range r.FailedOrgs {
-			failed = append(failed, f.Org)
-		}
-		parts = append(parts, "failed: "+strings.Join(failed, ", "))
-	}
-	return strings.Join(parts, " — ")
-}
-
 // globalSettingResult is the per-setting record written to the
 // setGlobalSettings task output (one JSONL line per setting key) and
 // read back by the summary report to populate the Global Settings
-// section.
+// section. Outcomes carry the per-org result, so the report can
+// render a row per (setting × org) with a Detail string specific to
+// what happened on THAT org.
 type globalSettingResult struct {
 	Key              string           `json:"key"`
 	Value            string           `json:"value,omitempty"`
 	Values           []string         `json:"values,omitempty"`
 	FieldValues      []map[string]any `json:"fieldValues,omitempty"`
-	AppliedOrgs      []string         `json:"applied_orgs,omitempty"`
-	SkippedOrgs      []skippedOrg     `json:"skipped_orgs,omitempty"`
-	FailedOrgs       []failedOrg      `json:"failed_orgs,omitempty"`
-	Detail           string           `json:"detail"`
+	Outcomes         []orgOutcome     `json:"outcomes"`
 	MergedFromGlobal string           `json:"merged_from_global,omitempty"`
 }
 
-type skippedOrg struct {
+// orgOutcome is the per-(setting, org) result. Status drives the
+// report bucket (applied / applied-to-projects → Succeeded, failed →
+// Failed, skipped → Skipped); Detail is the pre-rendered row text the
+// report displays verbatim; Reason is forwarded to EntityItem's
+// ErrorMessage (failed) or SkipReason (skipped) fields.
+type orgOutcome struct {
 	Org    string `json:"org"`
-	Reason string `json:"reason"`
+	Status string `json:"status"`
+	Detail string `json:"detail"`
+	Reason string `json:"reason,omitempty"`
 }
 
-type failedOrg struct {
-	Org    string `json:"org"`
-	Reason string `json:"reason"`
-}
+// outcomeStatus* constants name the values orgOutcome.Status can take.
+// Kept here (rather than as an exported enum on the report side) so
+// migrate and report agree on the contract.
+const (
+	outcomeApplied           = "applied"
+	outcomeAppliedToProjects = "applied-to-projects"
+	outcomePartial           = "partial"
+	outcomeFailed            = "failed"
+	outcomeSkipped           = "skipped"
+)

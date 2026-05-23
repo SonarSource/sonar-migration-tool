@@ -319,98 +319,76 @@ func jsonStr(raw json.RawMessage, key string) string {
 	return common.ExtractField(raw, key)
 }
 
-// collectGlobalSettings renders the Global Settings section (issue #186).
-// Each setGlobalSettings JSONL record represents one SQS setting whose
-// value differs from its declared default; it carries three per-org
-// outcome lists (applied / skipped / failed). The section emits one
-// EntityItem per (setting key × org) pair so the report can show exactly
-// which orgs the setting reached, was missing from, or failed on.
-//
-// The Detail column reuses the pre-built "detail" string from the migrate
-// task so the rendered row is identical across buckets — only the
-// Organization and SkipReason / ErrorMessage differ.
+// collectGlobalSettings renders the Global Settings section (issue
+// #186). Each setGlobalSettings JSONL record carries an outcomes[]
+// list — one entry per (setting × org) — with a pre-rendered Detail
+// string specific to that org. The collector emits one EntityItem per
+// outcome and routes it to the right bucket by status. Detail is
+// forwarded verbatim so the migrate task fully controls the wording
+// (e.g. "Applied (value=X)" for direct org applies,
+// "Applied to all projects (values=[...]) (failed: projX)" for the
+// runtime fan-out path).
 func collectGlobalSettings(store *common.DataStore, def sectionDef) Section {
 	items, err := store.ReadAll(def.OutputTask)
 	if err != nil {
 		return Section{Name: def.Name}
 	}
-	var succeeded, skipped, failed []EntityItem
+	var succeeded, partial, skipped, failed []EntityItem
 	for _, raw := range items {
 		key := jsonStr(raw, def.NameField)
-		detail := jsonStr(raw, def.DetailField)
-
-		for _, org := range parseStringArray(raw, "applied_orgs") {
-			succeeded = append(succeeded, EntityItem{
+		for _, oc := range parseOutcomes(raw) {
+			item := EntityItem{
 				Name:         key,
-				Organization: org,
-				Detail:       detail,
-			})
-		}
-		for _, e := range parseOrgReasonArray(raw, "skipped_orgs") {
-			reason := SkipReasonUnused // default bucket label
-			if e.Reason == "not-on-sqc" {
-				reason = "not-on-sqc"
+				Organization: oc.Org,
+				Detail:       oc.Detail,
 			}
-			skipped = append(skipped, EntityItem{
-				Name:         key,
-				Organization: e.Org,
-				Detail:       detail,
-				SkipReason:   reason,
-			})
-		}
-		for _, e := range parseOrgReasonArray(raw, "failed_orgs") {
-			failed = append(failed, EntityItem{
-				Name:         key,
-				Organization: e.Org,
-				Detail:       detail,
-				ErrorMessage: e.Reason,
-			})
+			switch oc.Status {
+			case "applied", "applied-to-projects":
+				succeeded = append(succeeded, item)
+			case "partial":
+				// Per-row Detail already enumerates the
+				// exception projects — keep Issues unset.
+				partial = append(partial, item)
+			case "skipped":
+				item.SkipReason = oc.Reason
+				skipped = append(skipped, item)
+			case "failed":
+				item.ErrorMessage = oc.Reason
+				failed = append(failed, item)
+			}
 		}
 	}
 	return Section{
 		Name:      def.Name,
 		Succeeded: succeeded,
+		Partial:   partial,
 		Skipped:   skipped,
 		Failed:    failed,
 	}
 }
 
-// orgReason is the {org, reason} shape used inside setGlobalSettings's
-// skipped_orgs / failed_orgs JSON arrays.
-type orgReason struct {
+// outcomeRecord mirrors the orgOutcome shape that
+// setGlobalSettings writes for each (setting × org). Kept private to
+// the report package because the migrate package owns the schema.
+type outcomeRecord struct {
 	Org    string `json:"org"`
+	Status string `json:"status"`
+	Detail string `json:"detail"`
 	Reason string `json:"reason"`
 }
 
-// parseStringArray decodes a JSON array of strings from a top-level
-// field of the record. Returns nil when the field is missing or the
-// shape doesn't match — collectGlobalSettings just skips that bucket.
-func parseStringArray(raw json.RawMessage, field string) []string {
+// parseOutcomes decodes the outcomes[] field from a setGlobalSettings
+// JSONL record. Returns nil when the field is missing or malformed.
+func parseOutcomes(raw json.RawMessage) []outcomeRecord {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return nil
 	}
-	arr, ok := obj[field]
+	arr, ok := obj["outcomes"]
 	if !ok {
 		return nil
 	}
-	var out []string
-	_ = json.Unmarshal(arr, &out)
-	return out
-}
-
-// parseOrgReasonArray decodes a JSON array of {org, reason} objects
-// from a top-level field of the record.
-func parseOrgReasonArray(raw json.RawMessage, field string) []orgReason {
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return nil
-	}
-	arr, ok := obj[field]
-	if !ok {
-		return nil
-	}
-	var out []orgReason
+	var out []outcomeRecord
 	_ = json.Unmarshal(arr, &out)
 	return out
 }
