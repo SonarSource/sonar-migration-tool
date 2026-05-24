@@ -38,7 +38,7 @@ func readTasks() []TaskDef {
 		},
 		{
 			Name:         "getCreatedProjects",
-			Dependencies: []string{"createProjects"},
+			Dependencies: []string{"generateOrganizationMappings"},
 			Run:          runGetCreatedProjects,
 		},
 		{
@@ -183,8 +183,15 @@ func runGetMigrationUser(ctx context.Context, e *Executor) error {
 	return w.WriteOne(raw)
 }
 
+// runGetCreatedProjects lists every project in every mapped SonarCloud
+// organization. It iterates generateOrganizationMappings (one record per
+// org) rather than createProjects (one record per project) so that the
+// /api/projects/search call fires exactly once per org. Reset feeds the
+// output to deleteProjects; iterating per-project caused N×N duplicates
+// where reset would try to delete the same key once per createProjects
+// record in that org.
 func runGetCreatedProjects(ctx context.Context, e *Executor) error {
-	return forEachMigrateItem(ctx, e, "getCreatedProjects", "createProjects",
+	return forEachMigrateItem(ctx, e, "getCreatedProjects", "generateOrganizationMappings",
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
 			orgKey := extractField(item, "sonarcloud_org_key")
 			if shouldSkipOrg(orgKey) {
