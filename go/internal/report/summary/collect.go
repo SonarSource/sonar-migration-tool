@@ -105,15 +105,27 @@ func collectNCDLimitations(runDir, exportDir string, mapping structure.ExtractMa
 		mainBranchByKey[server+key] = main
 	}
 
+	// SQS's /api/new_code_periods/list returns one record per (project,
+	// branch). The `inherited` flag is BRANCH-level — it tells you the
+	// branch inherits the project setting, NOT that the project itself
+	// is inheriting from somewhere upstream. Implications for the
+	// limitation counts:
+	//
+	//   - branchKey == mainBranch (with or without inherited): this
+	//     IS the project-level NCD. Counts toward unsupported-type if
+	//     the type is not migratable; otherwise it's a normal apply.
+	//   - branchKey != mainBranch && inherited == false: explicit
+	//     per-branch override → counts toward #134.
+	//   - branchKey != mainBranch && inherited == true: branch just
+	//     reflects the project setting → ignore (the main-branch
+	//     record already covers it).
 	perBranch := 0
 	unsupportedTypeProjects := make(map[string]bool)
 	for _, item := range items {
-		// Inherited records are not explicit overrides — ignore.
 		var obj map[string]any
 		_ = json.Unmarshal(item.Data, &obj)
-		if inherited, _ := obj["inherited"].(bool); inherited {
-			continue
-		}
+		inherited, _ := obj["inherited"].(bool)
+
 		projectKey := common.ExtractField(item.Data, "projectKey")
 		branch := common.ExtractField(item.Data, "branchKey")
 		ncdType := common.ExtractField(item.Data, "type")
@@ -124,7 +136,9 @@ func collectNCDLimitations(runDir, exportDir string, mapping structure.ExtractMa
 		}
 
 		if branch != "" && branch != mainBranch {
-			perBranch++
+			if !inherited {
+				perBranch++
+			}
 			continue
 		}
 		if _, supported := sqcNewCodeTypes[ncdType]; !supported {

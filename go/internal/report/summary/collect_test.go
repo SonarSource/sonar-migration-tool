@@ -997,16 +997,21 @@ func TestCollectSummaryNCDLimitations(t *testing.T) {
 	extractDir := filepath.Join(dir, "extract-01")
 	writeExtractMeta(t, extractDir, "https://sq.example.com")
 	writeTaskJSONL(t, extractDir, "getNewCodePeriods", []map[string]any{
-		// Inherited default — must be ignored.
-		{"projectKey": "projA", "branchKey": "main", "type": "PREVIOUS_VERSION", "inherited": true},
-		// Per-branch override → #134.
+		// main-branch records carry the project-level NCD. inherited=true
+		// here means the branch inherits from the project — NOT that
+		// the project is inheriting from somewhere upstream. Both of
+		// these are supported (NUMBER_OF_DAYS) so neither counts.
+		{"projectKey": "projA", "branchKey": "main", "type": "NUMBER_OF_DAYS", "value": "44", "inherited": true},
+		{"projectKey": "projD", "branchKey": "main", "type": "NUMBER_OF_DAYS", "value": "30"},
+		// Per-branch override (inherited:false on a non-main branch) → #134.
 		{"projectKey": "projA", "branchKey": "feature-x", "type": "NUMBER_OF_DAYS", "value": "7"},
+		// Reflected non-main record (branch inherits project setting) —
+		// must NOT count toward #134 because it isn't an explicit
+		// override.
+		{"projectKey": "projD", "branchKey": "feature-y", "type": "NUMBER_OF_DAYS", "value": "30", "inherited": true},
 		// Project main-branch unsupported types → #135 (two distinct projects).
-		{"projectKey": "projA", "branchKey": "main", "type": "REFERENCE_BRANCH", "value": "develop"},
 		{"projectKey": "projB", "branchKey": "main", "type": "REFERENCE_BRANCH", "value": "main"},
 		{"projectKey": "projC", "branchKey": "main", "type": "SPECIFIC_ANALYSIS", "value": "abc123"},
-		// Supported case — must NOT count.
-		{"projectKey": "projD", "branchKey": "main", "type": "NUMBER_OF_DAYS", "value": "30"},
 	})
 
 	// createProjects in the run directory carries the main_branch per
@@ -1042,8 +1047,8 @@ func TestCollectSummaryNCDLimitations(t *testing.T) {
 	if unsupportedType == "" {
 		t.Fatalf("expected unsupported-type NCD limitation bullet, got %v", summary.Limitations)
 	}
-	if !strings.Contains(unsupportedType, "3 project(s)") {
-		t.Errorf("unsupported-type bullet should mention 3 project(s) (projA, projB, projC), got %q", unsupportedType)
+	if !strings.Contains(unsupportedType, "2 project(s)") {
+		t.Errorf("unsupported-type bullet should mention 2 project(s) (projB, projC), got %q", unsupportedType)
 	}
 }
 

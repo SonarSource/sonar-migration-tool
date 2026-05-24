@@ -345,11 +345,21 @@ func TestRunSetNewCodePeriodsTranslatesAndSets(t *testing.T) {
 	}
 	f, _ := os.Create(filepath.Join(extractDir, "results.1.jsonl"))
 	for _, rec := range []map[string]any{
-		{"projectKey": "proj-days", "branchKey": "main", "type": "NUMBER_OF_DAYS", "value": "14"},
+		// Project-level NUMBER_OF_DAYS on main branch with inherited=true
+		// — SQS represents the project-level NCD as a main-branch
+		// record where the branch inherits from the project. Must be
+		// applied (this is the regression file-issue 44-days case).
+		{"projectKey": "proj-days", "branchKey": "main", "type": "NUMBER_OF_DAYS", "value": "14", "inherited": true},
 		{"projectKey": "proj-prev", "branchKey": "main", "type": "PREVIOUS_VERSION", "value": nil},
 		{"projectKey": "proj-ref", "branchKey": "main", "type": "REFERENCE_BRANCH", "value": "develop"},
 		{"projectKey": "proj-unknown", "branchKey": "main", "type": "UNKNOWN_MODE"},
+		// Explicit per-branch override → skipped (#134).
 		{"projectKey": "proj-days", "branchKey": "feature-x", "type": "NUMBER_OF_DAYS", "value": "7"},
+		// Reflected non-main branch (branch inherits project setting)
+		// — must NOT be applied (the main-branch record already covers
+		// the project-level NCD) and must NOT trigger a per-branch
+		// limitation (no explicit override).
+		{"projectKey": "proj-days", "branchKey": "feature-y", "type": "NUMBER_OF_DAYS", "value": "14", "inherited": true},
 	} {
 		b, _ := json.Marshal(rec)
 		f.Write(b)

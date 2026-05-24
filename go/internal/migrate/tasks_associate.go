@@ -453,25 +453,27 @@ func applyProjectSetting(ctx context.Context, e *Executor, pm projectMapping, ra
 // NCD at creation time and skips that work entirely when the project
 // already exists).
 // runSetNewCodePeriods applies project new-code-definition overrides
-// extracted from SonarQube Server to SonarQube Cloud. Three classes
-// of extract records are intentionally skipped — collectLimitations
-// re-derives them from the same extract data and surfaces them as
-// bullets in the "Migration limitations" section of the PDF report:
+// extracted from SonarQube Server to SonarQube Cloud.
 //
-//   1. inherited:true records reflect the inherited org/project
-//      default rather than an explicit override, so re-applying them
-//      would be redundant.
-//   2. Records whose branchKey is NOT the project's main branch
-//      describe a per-branch NCD override. SonarQube Cloud has no
-//      per-branch NCD concept (issue #134) — applying via
-//      /api/new_code_periods/set with branch=X would either error or
-//      set the WRONG scope, so we skip and let the limitation
-//      surface in the report.
-//   3. Records whose type is not in sqcNewCodeType (REFERENCE_BRANCH,
-//      SPECIFIC_ANALYSIS as of May 2026) describe a NCD type that
-//      SonarQube Cloud does not support at all (issue #135). The
-//      project is left with the org default; the limitation surfaces
-//      in the report.
+// SonarQube Server's /api/new_code_periods/list returns ONE record
+// per (project, branch). The `inherited` flag describes BRANCH-level
+// inheritance from the project — NOT project-level inheritance from
+// the org or instance. So:
+//
+//   - branchKey == mainBranch (with or without inherited:true)
+//     carries the PROJECT-level NCD — this is the value we must
+//     migrate.
+//   - branchKey != mainBranch && inherited == false is an explicit
+//     per-branch override. SonarQube Cloud has no per-branch NCD
+//     concept (issue #134); skipped and surfaced as a limitation.
+//   - branchKey != mainBranch && inherited == true means the branch
+//     is simply reflecting the project-level NCD (already covered by
+//     the main-branch record); silently skipped, no limitation.
+//   - Records whose type is not in sqcProjectNewCodeType
+//     (REFERENCE_BRANCH, SPECIFIC_ANALYSIS as of May 2026) cannot be
+//     applied at project scope on SQC (issue #135); skipped and
+//     surfaced as a limitation. The project is left with the org
+//     default.
 func runSetNewCodePeriods(ctx context.Context, e *Executor) error {
 	type projectInfo struct {
 		mapping    projectMapping
@@ -504,16 +506,17 @@ func runSetNewCodePeriods(ctx context.Context, e *Executor) error {
 				return nil
 			}
 			pm := info.mapping
-			// (1) Skip inherited defaults — nothing explicit to apply.
-			if extractBool(item.Data, "inherited") {
-				return nil
-			}
 			branch := extractField(item.Data, "branchKey")
-			// (2) Skip per-branch NCD overrides — SQC has no per-branch
-			// NCD concept (issue #134). Reported as a limitation.
+			// Skip records that don't describe the project-level NCD.
+			// Non-main-branch records are either explicit per-branch
+			// overrides (which SQC can't represent — issue #134) or
+			// inherited reflections of the project setting (covered
+			// by the main-branch record). Either way, nothing to apply.
 			if branch != "" && branch != info.mainBranch {
-				e.Logger.Info("setNewCodePeriods: per-branch NCD override not migratable to SonarQube Cloud, skipping",
-					"project", pm.CloudKey, "branch", branch, "type", extractField(item.Data, "type"))
+				if !extractBool(item.Data, "inherited") {
+					e.Logger.Info("setNewCodePeriods: per-branch NCD override not migratable to SonarQube Cloud, skipping",
+						"project", pm.CloudKey, "branch", branch, "type", extractField(item.Data, "type"))
+				}
 				return nil
 			}
 			sqsType := extractField(item.Data, "type")
