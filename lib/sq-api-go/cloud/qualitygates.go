@@ -49,6 +49,19 @@ func (q *QualityGatesClient) CreateCondition(ctx context.Context, params CreateC
 	return &result, nil
 }
 
+// List returns every quality gate in the organization via
+// /api/qualitygates/list. Used by reset to find the built-in
+// "Sonar way" gate before clearing custom defaults.
+func (q *QualityGatesClient) List(ctx context.Context, organization string) ([]types.QualityGate, error) {
+	v := url.Values{}
+	v.Set("organization", organization)
+	var resp types.QualityGatesListResponse
+	if err := q.getJSON(ctx, "api/qualitygates/list?"+v.Encode(), &resp); err != nil {
+		return nil, err
+	}
+	return resp.QualityGates, nil
+}
+
 // Show returns the quality gate with its current conditions via
 // /api/qualitygates/show.
 func (q *QualityGatesClient) Show(ctx context.Context, name, organization string) (*types.QualityGate, error) {

@@ -24,8 +24,12 @@ func deleteTasks() []TaskDef {
 			Run:          runDeleteProfiles,
 		},
 		{
-			Name:         "deleteGates",
-			Dependencies: []string{"createGates"},
+			Name: "deleteGates",
+			// resetDefaultGates restores the built-in Sonar way as the
+			// org's default gate; without that, the custom default
+			// can't be destroyed (SonarCloud rejects destroy on the
+			// current default). Issue #213.
+			Dependencies: []string{"createGates", "resetDefaultGates"},
 			Run:          runDeleteGates,
 		},
 		{
@@ -50,8 +54,14 @@ func deleteTasks() []TaskDef {
 			Run:          runResetDefaultProfiles,
 		},
 		{
+			// Restores the built-in "Sonar way" as the org's default
+			// gate before deleteGates runs. SonarCloud rejects /api/
+			// qualitygates/destroy on whichever gate is currently the
+			// default, so without this step the gate that was set as
+			// default during migration (and any gate the user later
+			// promoted to default) survives reset. Issue #213.
 			Name:         "resetDefaultGates",
-			Dependencies: []string{"setDefaultGates"},
+			Dependencies: []string{"generateOrganizationMappings"},
 			Run:          runResetDefaultGates,
 		},
 		{
@@ -265,10 +275,56 @@ func runResetDefaultProfiles(_ context.Context, e *Executor) error {
 	return w.WriteChunk(nil)
 }
 
-func runResetDefaultGates(_ context.Context, e *Executor) error {
-	// No-op: Cloud resets defaults when gates are deleted.
-	w, _ := e.Store.Writer("resetDefaultGates")
-	return w.WriteChunk(nil)
+// runResetDefaultGates restores the built-in "Sonar way" as each
+// mapped org's default quality gate, so deleteGates can subsequently
+// destroy whichever custom gate the migration (or the user) had
+// promoted to default. SonarCloud's /api/qualitygates/destroy rejects
+// the current default; without this step the custom default gate
+// survives reset. Issue #213.
+func runResetDefaultGates(ctx context.Context, e *Executor) error {
+	counter := NewTaskCounter("resetDefaultGates")
+	err := forEachMigrateItem(ctx, e, "resetDefaultGates", "generateOrganizationMappings",
+		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
+			orgKey := extractField(item, "sonarcloud_org_key")
+			if shouldSkipOrg(orgKey) {
+				return nil
+			}
+			gates, err := e.Cloud.QualityGates.List(ctx, orgKey)
+			if err != nil {
+				counter.Fail()
+				logAPIWarn(e.Logger, "resetDefaultGates: listing gates failed", err, "org", orgKey)
+				return nil
+			}
+			var builtIn *int
+			for i := range gates {
+				if gates[i].IsBuiltIn {
+					builtIn = &gates[i].ID
+					if gates[i].IsDefault {
+						// Already default — nothing to do.
+						counter.Success()
+						return nil
+					}
+					break
+				}
+			}
+			if builtIn == nil {
+				e.Logger.Warn("resetDefaultGates: no built-in gate found, custom default may block deleteGates",
+					"org", orgKey)
+				counter.Fail()
+				return nil
+			}
+			e.Logger.Debug("gate api call: POST /api/qualitygates/set_as_default",
+				"org", orgKey, "gate_id", *builtIn)
+			if err := e.Cloud.QualityGates.SetDefault(ctx, *builtIn, orgKey); err != nil {
+				counter.Fail()
+				logAPIWarn(e.Logger, "resetDefaultGates: set_as_default failed", err, "org", orgKey)
+				return nil
+			}
+			counter.Success()
+			return nil
+		})
+	counter.LogSummary(e.Logger)
+	return err
 }
 
 func runResetPermissionTemplates(_ context.Context, e *Executor) error {

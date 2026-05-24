@@ -83,6 +83,107 @@ func TestRunResetGlobalSettings(t *testing.T) {
 	}
 }
 
+// TestRunResetDefaultGates verifies that the task finds the built-in
+// "Sonar way" gate and posts /api/qualitygates/set_as_default with
+// its id, so a subsequent deleteGates call can destroy the previously
+// custom default. Regression for issue #213 — the task was a no-op
+// before, which left the custom default gate undeletable.
+func TestRunResetDefaultGates(t *testing.T) {
+	var (
+		mu             sync.Mutex
+		setDefaultID   string
+		setDefaultOrg  string
+		setDefaultHits int
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/qualitygates/list", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"default": "Custom Gate",
+			"qualitygates": []map[string]any{
+				{"id": 1, "name": "Sonar way", "isBuiltIn": true, "isDefault": false},
+				{"id": 42, "name": "Custom Gate", "isBuiltIn": false, "isDefault": true},
+			},
+		})
+	})
+	mux.HandleFunc("POST /api/qualitygates/set_as_default", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		mu.Lock()
+		setDefaultID = r.FormValue("id")
+		setDefaultOrg = r.FormValue("organization")
+		setDefaultHits++
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	cloudSrv := httptest.NewServer(mux)
+	defer cloudSrv.Close()
+
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+
+	dir := t.TempDir()
+	setupExtractData(dir)
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+
+	w, _ := e.Store.Writer("generateOrganizationMappings")
+	b, _ := json.Marshal(map[string]any{"sonarcloud_org_key": testCloudOrg})
+	w.WriteOne(b)
+
+	if err := runResetDefaultGates(context.Background(), e); err != nil {
+		t.Fatalf("runResetDefaultGates: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if setDefaultHits != 1 {
+		t.Fatalf("expected one set_as_default call, got %d", setDefaultHits)
+	}
+	if setDefaultID != "1" {
+		t.Errorf("set_as_default id: got %q want 1 (built-in Sonar way)", setDefaultID)
+	}
+	if setDefaultOrg != testCloudOrg {
+		t.Errorf("set_as_default organization: got %q want %q", setDefaultOrg, testCloudOrg)
+	}
+}
+
+// TestRunResetDefaultGatesSkipsWhenAlreadyDefault confirms the task
+// does NOT call set_as_default when the built-in gate is already the
+// org's default — saves a redundant API call.
+func TestRunResetDefaultGatesSkipsWhenAlreadyDefault(t *testing.T) {
+	setDefaultHits := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/qualitygates/list", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"qualitygates": []map[string]any{
+				{"id": 1, "name": "Sonar way", "isBuiltIn": true, "isDefault": true},
+			},
+		})
+	})
+	mux.HandleFunc("POST /api/qualitygates/set_as_default", func(w http.ResponseWriter, r *http.Request) {
+		setDefaultHits++
+		w.WriteHeader(http.StatusNoContent)
+	})
+	cloudSrv := httptest.NewServer(mux)
+	defer cloudSrv.Close()
+
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+
+	dir := t.TempDir()
+	setupExtractData(dir)
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+
+	w, _ := e.Store.Writer("generateOrganizationMappings")
+	b, _ := json.Marshal(map[string]any{"sonarcloud_org_key": testCloudOrg})
+	w.WriteOne(b)
+
+	if err := runResetDefaultGates(context.Background(), e); err != nil {
+		t.Fatalf("runResetDefaultGates: %v", err)
+	}
+	if setDefaultHits != 0 {
+		t.Errorf("set_as_default must not be called when built-in already default; got %d", setDefaultHits)
+	}
+}
+
 // TestRunResetGlobalSettingsAllInherited verifies that when an org has
 // no customized settings (everything inherited), the task still
 // succeeds and does NOT call POST /api/settings/reset (which would 400
