@@ -1100,6 +1100,178 @@ func TestIsSettingCustomized(t *testing.T) {
 	}
 }
 
+// SQS-only settings (issue #200) must be intercepted before the API
+// loop. Some are dropped silently — no report row at all — and some
+// emit a single section-level note (Organization="") describing why
+// the value isn't portable. This table test pins each of the four
+// keys plus a control key that should pass through unchanged.
+func TestPartitionSQSOnlySettings(t *testing.T) {
+	mk := func(m map[string]any) json.RawMessage {
+		b, _ := json.Marshal(m)
+		return b
+	}
+	cases := []struct {
+		name       string
+		raw        map[string]any
+		wantSilent bool
+		wantNote   string // empty == not emitted; substring match
+	}{
+		{
+			name:       "serverBaseURL is always silent",
+			raw:        map[string]any{"key": "sonar.core.serverBaseURL", "value": "https://my-sonar.example.com"},
+			wantSilent: true,
+		},
+		{
+			name:       "disableNotificationOnUpdate is always silent",
+			raw:        map[string]any{"key": "sonar.builtInQualityProfiles.disableNotificationOnUpdate", "value": "true"},
+			wantSilent: true,
+		},
+		{
+			name:       "allowDisableInheritedRules=false is silent",
+			raw:        map[string]any{"key": "sonar.qualityProfiles.allowDisableInheritedRules", "value": "false"},
+			wantSilent: true,
+		},
+		{
+			name:     "allowDisableInheritedRules=true emits a note",
+			raw:      map[string]any{"key": "sonar.qualityProfiles.allowDisableInheritedRules", "value": "true"},
+			wantNote: "does not exist on SonarQube Cloud",
+		},
+		{
+			name:       "ratingGrid at default is silent",
+			raw:        map[string]any{"key": "sonar.technicalDebt.ratingGrid", "value": "0.05,0.1,0.2,0.5"},
+			wantSilent: true,
+		},
+		{
+			name:     "ratingGrid customized emits a note",
+			raw:      map[string]any{"key": "sonar.technicalDebt.ratingGrid", "value": "0.03,0.07,0.2,0.5"},
+			wantNote: "revert to the platform default 0.05,0.1,0.2,0.5",
+		},
+		{
+			name: "unknown setting passes through",
+			raw:  map[string]any{"key": "sonar.exclusions", "values": []string{"a"}},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rem, notes := partitionSQSOnlySettings([]json.RawMessage{mk(c.raw)})
+			isSQSOnly := c.wantSilent || c.wantNote != ""
+			if isSQSOnly {
+				if len(rem) != 0 {
+					t.Errorf("SQS-only key must be removed from customized, got %d", len(rem))
+				}
+			} else {
+				if len(rem) != 1 {
+					t.Errorf("non-SQS-only key must pass through, got %d", len(rem))
+				}
+			}
+			if c.wantSilent {
+				if len(notes) != 0 {
+					t.Errorf("silent skip must emit no note, got %+v", notes)
+				}
+				return
+			}
+			if c.wantNote != "" {
+				if len(notes) != 1 {
+					t.Fatalf("expected one note, got %d", len(notes))
+				}
+				if !strings.Contains(notes[0].Outcomes[0].Detail, c.wantNote) {
+					t.Errorf("note Detail must contain %q, got %q", c.wantNote, notes[0].Outcomes[0].Detail)
+				}
+				if notes[0].Outcomes[0].Org != "" {
+					t.Errorf("note must NOT carry an Org (section-level), got %q", notes[0].Outcomes[0].Org)
+				}
+				if notes[0].Outcomes[0].Reason != "sqs-only" {
+					t.Errorf("note Reason must be \"sqs-only\" for report grouping, got %q", notes[0].Outcomes[0].Reason)
+				}
+			}
+		})
+	}
+}
+
+// End-to-end: when an SQS-only setting is customized, the API must
+// NOT be called for it; the only sign in the JSONL output is the
+// section-level note row.
+func TestRunSetGlobalSettingsInterceptsSQSOnlyKeys(t *testing.T) {
+	cloudMux := http.NewServeMux()
+	mu, hitsPtr := mountSettingsSetCapture(cloudMux)
+	mountSettingsDefinitions(cloudMux,
+		// Pretend SQC knows about sonar.exclusions but NOT the
+		// SQS-only keys; the migrate code shouldn't reach this
+		// handler for them anyway.
+		map[string]any{"key": "sonar.exclusions", "type": "STRING", "multiValues": true},
+	)
+	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	})
+	cloudSrv := httptest.NewServer(cloudMux)
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+
+	dir := t.TempDir()
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettings", []map[string]any{
+		// Two SQS-only keys: one silent, one with a note.
+		{"key": "sonar.core.serverBaseURL", "value": "https://my-sonar.example.com"},
+		{"key": "sonar.technicalDebt.ratingGrid", "value": "0.03,0.07,0.2,0.5"},
+		// One legit customization that SHOULD be migrated.
+		{"key": "sonar.exclusions", "values": []string{"**/*.gen"}},
+	})
+	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
+		{"key": "sonar.core.serverBaseURL", "type": "STRING", "defaultValue": ""},
+		{"key": "sonar.technicalDebt.ratingGrid", "type": "STRING", "defaultValue": "0.05,0.1,0.2,0.5"},
+		{"key": "sonar.exclusions", "type": "STRING", "multiValues": true, "defaultValue": ""},
+	})
+	writeExtractMetaJSON(t, dir, "extract-01", testServerURL)
+	writeTaskJSONL(t, e, "generateOrganizationMappings", []map[string]any{
+		{"sonarcloud_org_key": "orgA"},
+		{"sonarcloud_org_key": "orgB"},
+	})
+
+	if err := runSetGlobalSettings(context.Background(), e); err != nil {
+		t.Fatalf("runSetGlobalSettings: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	// Exactly the customized sonar.exclusions PATCHes — one per
+	// org. The SQS-only keys MUST not produce any settings.set call.
+	if len(*hitsPtr) != 2 {
+		t.Fatalf("expected only sonar.exclusions PATCHes (2 orgs × 1 key), got %d: %+v", len(*hitsPtr), *hitsPtr)
+	}
+	for _, h := range *hitsPtr {
+		if h.key != "sonar.exclusions" {
+			t.Errorf("unexpected SQS-only key reached SQC: %s", h.key)
+		}
+	}
+
+	// JSONL output must contain a single section-level note for
+	// the customized ratingGrid; serverBaseURL was silent so
+	// nothing should appear for it.
+	records, _ := e.Store.ReadAll("setGlobalSettings")
+	noteCount := 0
+	for _, raw := range records {
+		key, _ := jsonpathString(raw, "key")
+		if key == "sonar.technicalDebt.ratingGrid" || key == "sonar.core.serverBaseURL" {
+			noteCount++
+		}
+	}
+	if noteCount != 1 {
+		t.Errorf("expected exactly one SQS-only note row (ratingGrid), got %d", noteCount)
+	}
+}
+
+// jsonpathString is a tiny helper for the test above — pull a top
+// level string field from a raw JSON line.
+func jsonpathString(raw []byte, key string) (string, bool) {
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return "", false
+	}
+	s, ok := m[key].(string)
+	return s, ok
+}
+
 // Compile-time guard: catch accidental removal of the helper that drives
 // most tests above.
 var _ = sync.Mutex{}

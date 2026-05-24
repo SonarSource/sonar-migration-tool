@@ -40,6 +40,10 @@ var skipReasonOrder = []struct {
 	{SkipReasonBuiltIn, "Built-in"},
 	{SkipReasonUnused, "Unused"},
 	{"", "Other"},
+	// SQS-only settings appear last so the section ends with the
+	// "not applicable on SQC" notes — one row per such setting,
+	// no Organization (issue #200).
+	{SkipReasonSQSOnly, "Not applicable on SonarQube Cloud"},
 }
 
 // Outcome labels used in the unified per-section table.

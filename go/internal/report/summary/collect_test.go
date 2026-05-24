@@ -835,6 +835,56 @@ func TestCollectGlobalSettingsIncludesNewCodePeriod(t *testing.T) {
 	}
 }
 
+// Section-level note rows (Organization="", SkipReason="sqs-only")
+// must route to the Skipped bucket so the PDF places them at the
+// bottom of the Global Settings section with the "Not applicable on
+// SonarQube Cloud" label. Issue #200.
+func TestCollectGlobalSettingsRoutesSQSOnlyNotesToSkipped(t *testing.T) {
+	dir := t.TempDir()
+	writeTaskJSONL(t, dir, "setGlobalSettings", []map[string]any{
+		// Normal customized setting → succeeded per-org.
+		{
+			"key": "sonar.exclusions", "values": []string{"a"},
+			"outcomes": []map[string]any{
+				{"org": "orgA", "status": "applied", "detail": "Applied (values=[a])"},
+			},
+		},
+		// SQS-only note row (one entry, no Organization).
+		{
+			"key": "sonar.technicalDebt.ratingGrid", "value": "0.03,0.07,0.2,0.5",
+			"outcomes": []map[string]any{
+				{"org": "", "status": "skipped", "reason": SkipReasonSQSOnly,
+					"detail": "Not customizable on SonarQube Cloud — SQS value 0.03,0.07,0.2,0.5 will revert to the platform default 0.05,0.1,0.2,0.5."},
+			},
+		},
+	})
+
+	summary, err := CollectSummary(dir, "")
+	if err != nil {
+		t.Fatalf("CollectSummary: %v", err)
+	}
+	sec := findSection(summary, "Global Settings")
+	if sec == nil {
+		t.Fatal("missing Global Settings section")
+	}
+	if len(sec.Succeeded) != 1 {
+		t.Errorf("Succeeded: want 1 (sonar.exclusions/orgA), got %d", len(sec.Succeeded))
+	}
+	if len(sec.Skipped) != 1 {
+		t.Fatalf("Skipped: want one entry for the SQS-only note, got %d: %+v", len(sec.Skipped), sec.Skipped)
+	}
+	row := sec.Skipped[0]
+	if row.SkipReason != SkipReasonSQSOnly {
+		t.Errorf("Skipped[0].SkipReason: want SkipReasonSQSOnly, got %q", row.SkipReason)
+	}
+	if row.Organization != "" {
+		t.Errorf("Section-level note must have empty Organization, got %q", row.Organization)
+	}
+	if !strings.Contains(row.Detail, "revert to the platform default") {
+		t.Errorf("Detail must carry the user-facing note text, got %q", row.Detail)
+	}
+}
+
 // --- helpers ---
 
 func findSection(s *MigrationSummary, name string) *Section {
