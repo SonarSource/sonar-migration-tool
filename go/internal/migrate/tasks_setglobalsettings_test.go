@@ -1188,6 +1188,81 @@ func TestPartitionSQSOnlySettings(t *testing.T) {
 	}
 }
 
+// Regression for issue #200: when an SQS-only setting's value equals
+// SQS's parentValue (i.e. it's at SQS's "default") but the per-key
+// rule still wants a note — e.g.
+// sonar.qualityProfiles.allowDisableInheritedRules=true on a SQS
+// where parentValue=true — the note must still reach the report.
+// The previous order ran isSettingCustomized BEFORE
+// partitionSQSOnlySettings, so this key was dropped as
+// "not-customized" and the section-level note never fired.
+func TestRunSetGlobalSettingsSQSOnlyNoteFiresEvenAtSQSDefault(t *testing.T) {
+	cloudMux := http.NewServeMux()
+	_, _ = mountSettingsSetCapture(cloudMux)
+	mountSettingsDefinitions(cloudMux)
+	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	})
+	cloudSrv := httptest.NewServer(cloudMux)
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+
+	dir := t.TempDir()
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettings", []map[string]any{
+		// value matches parentValue — isSettingCustomized's #196
+		// fix would discard this if it ran first. The SQS-only
+		// interceptor must catch it before that.
+		{"key": "sonar.qualityProfiles.allowDisableInheritedRules",
+			"value": "true", "parentValue": "true"},
+	})
+	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
+		{"key": "sonar.qualityProfiles.allowDisableInheritedRules",
+			"type": "BOOLEAN", "defaultValue": "true"},
+	})
+	writeExtractMetaJSON(t, dir, "extract-01", testServerURL)
+	writeTaskJSONL(t, e, "generateOrganizationMappings", []map[string]any{
+		{"sonarcloud_org_key": "orgA"},
+	})
+
+	if err := runSetGlobalSettings(context.Background(), e); err != nil {
+		t.Fatalf("runSetGlobalSettings: %v", err)
+	}
+
+	records, _ := e.Store.ReadAll("setGlobalSettings")
+	foundNote := false
+	for _, raw := range records {
+		key, _ := jsonpathString(raw, "key")
+		if key != "sonar.qualityProfiles.allowDisableInheritedRules" {
+			continue
+		}
+		var rec struct {
+			Outcomes []struct {
+				Org    string `json:"org"`
+				Status string `json:"status"`
+				Reason string `json:"reason"`
+				Detail string `json:"detail"`
+			} `json:"outcomes"`
+		}
+		_ = json.Unmarshal(raw, &rec)
+		if len(rec.Outcomes) != 1 {
+			t.Fatalf("expected one section-level outcome, got %d", len(rec.Outcomes))
+		}
+		oc := rec.Outcomes[0]
+		if oc.Org != "" || oc.Reason != "sqs-only" {
+			t.Errorf("note must be section-level (Org=\"\") with Reason=sqs-only, got %+v", oc)
+		}
+		if !strings.Contains(oc.Detail, "does not exist on SonarQube Cloud") {
+			t.Errorf("Detail must explain the SQS-only nature, got %q", oc.Detail)
+		}
+		foundNote = true
+	}
+	if !foundNote {
+		t.Errorf("section-level note for SQS-only key did NOT reach the report (even though value=true)")
+	}
+}
+
 // End-to-end: when an SQS-only setting is customized, the API must
 // NOT be called for it; the only sign in the JSONL output is the
 // section-level note row.

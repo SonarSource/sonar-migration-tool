@@ -90,13 +90,20 @@ var sqsOnlySettings = map[string]func(raw json.RawMessage) sqsOnlyDecision{
 	},
 }
 
-// partitionSQSOnlySettings splits the customized list, removing any
-// key that's known to have no SQC counterpart (issue #200). Keys
-// returned in `notes` carry one synthetic outcome with Org="" so the
-// report renders them once at the bottom of the section, NOT per-org.
-func partitionSQSOnlySettings(customized []json.RawMessage) (remaining []json.RawMessage, notes []globalSettingResult) {
-	remaining = customized[:0]
-	for _, raw := range customized {
+// partitionSQSOnlySettings splits the raw SQS getServerSettings list,
+// removing any key that's known to have no SQC counterpart (issue
+// #200). The function is called BEFORE the "customized vs default"
+// filter so the per-key handlers can decide based on the raw value
+// even when that value happens to match SQS's default (e.g.
+// sonar.qualityProfiles.allowDisableInheritedRules=true, which is
+// SQS's default but still wants a report note).
+//
+// Keys returned in `notes` carry one synthetic outcome with Org=""
+// so the report renders them once at the bottom of the section, NOT
+// per-org.
+func partitionSQSOnlySettings(values []json.RawMessage) (remaining []json.RawMessage, notes []globalSettingResult) {
+	remaining = values[:0]
+	for _, raw := range values {
 		key := extractField(raw, "key")
 		handler, isSQSOnly := sqsOnlySettings[key]
 		if !isSQSOnly {
@@ -183,6 +190,18 @@ func runSetGlobalSettings(ctx context.Context, e *Executor) error {
 	for _, it := range sqsItems {
 		sqsValues = append(sqsValues, it.Data)
 	}
+
+	// Issue #200 — partition off the SQS-only settings BEFORE the
+	// customized filter. For these keys the per-handler logic decides
+	// what to do based on the raw value, not on whether the value
+	// differs from SQS's default. The previous order (customized
+	// filter first, then partition) hid keys whose value happened to
+	// equal SQS's default — e.g. sonar.qualityProfiles.allowDisable
+	// InheritedRules=true where SQS's parentValue is also true: the
+	// customized filter dropped it, and the section-level note for
+	// "exists only on SQS" never reached the report.
+	sqsValues, sqsOnlyNotes := partitionSQSOnlySettings(sqsValues)
+
 	customized := make([]json.RawMessage, 0, len(sqsValues))
 	for _, raw := range sqsValues {
 		key := extractField(raw, "key")
@@ -206,13 +225,6 @@ func runSetGlobalSettings(ctx context.Context, e *Executor) error {
 	for _, pair := range globalExclusionPairs {
 		customized = mergeGlobalIntoLocal(pair, sqsValues, customized, e.Logger)
 	}
-
-	// Issue #200 — partition off the SQS settings that have no SQC
-	// counterpart. Each handled key is either:
-	//   - dropped silently (no API call, no report row); or
-	//   - kept out of the API loop but emitted as a single
-	//     section-level note row at the bottom of the report.
-	customized, sqsOnlyNotes := partitionSQSOnlySettings(customized)
 
 	// Target SQC orgs.
 	orgItems, _ := e.Store.ReadAll("generateOrganizationMappings")
