@@ -40,6 +40,10 @@ var skipReasonOrder = []struct {
 	{SkipReasonBuiltIn, "Built-in"},
 	{SkipReasonUnused, "Unused"},
 	{"", "Other"},
+	// SQS-only settings appear last so the section ends with the
+	// "not applicable on SQC" notes — one row per such setting,
+	// no Organization (issue #200).
+	{SkipReasonSQSOnly, "Not applicable on SonarQube Cloud"},
 }
 
 // Outcome labels used in the unified per-section table.
@@ -270,6 +274,12 @@ func renderUnifiedTable(pdf *fpdf.Fpdf, section Section) {
 		multiLineFontSize = 6.0
 	)
 	pdf.SetFont(pdfFontFamily, "", bodyFontSize)
+	// Sections where the Name column may carry long setting keys
+	// (e.g. sonar.qualityProfiles.allowDisableInheritedRules) and
+	// must word-wrap instead of truncating. Other sections keep the
+	// truncate behaviour to avoid disturbing layouts that depend on
+	// single-line names.
+	wrapName := section.Name == "Global Settings"
 	for i, row := range rows {
 		// Compute wrapped line count for the Details column so the whole row
 		// (Name, Organization, Outcome) can match that height. SplitLines
@@ -286,6 +296,19 @@ func renderUnifiedTable(pdf *fpdf.Fpdf, section Section) {
 		pdf.SetFont(pdfFontFamily, "", bodyFontSize)
 		if lineCount < 1 {
 			lineCount = 1
+		}
+		// If the Name column word-wraps, compute its line count too
+		// and take the max so the row is tall enough for either side.
+		nameText := row.displayName()
+		nameLineCount := 1
+		if wrapName {
+			nameLineCount = len(pdf.SplitLines([]byte(nameText), widths[0]))
+			if nameLineCount < 1 {
+				nameLineCount = 1
+			}
+			if nameLineCount > lineCount {
+				lineCount = nameLineCount
+			}
 		}
 		var lineH, rowHeight float64
 		if lineCount == 1 {
@@ -309,7 +332,16 @@ func renderUnifiedTable(pdf *fpdf.Fpdf, section Section) {
 		if hideOrg {
 			nameLimit = 60
 		}
-		pdf.CellFormat(widths[col], rowHeight, truncate(row.displayName(), nameLimit), "1", 0, "L", true, 0, "")
+		if wrapName {
+			// Use MultiCell so long setting keys wrap. MultiCell
+			// advances the cursor down, so capture (x, y) first and
+			// restore them after for the remaining cells on this row.
+			x, y := pdf.GetXY()
+			pdf.MultiCell(widths[col], lineH, nameText, "1", "L", true)
+			pdf.SetXY(x+widths[col], y)
+		} else {
+			pdf.CellFormat(widths[col], rowHeight, truncate(nameText, nameLimit), "1", 0, "L", true, 0, "")
+		}
 		col++
 		if !hideOrg {
 			pdf.CellFormat(widths[col], rowHeight, truncate(row.org, 24), "1", 0, "L", true, 0, "")

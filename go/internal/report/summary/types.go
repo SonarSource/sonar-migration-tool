@@ -31,10 +31,17 @@ type EntityItem struct {
 }
 
 // Skip reason constants used when classifying skipped entities.
+//
+// SkipReasonSQSOnly marks rows that describe a SonarQube-Server-only
+// setting which has no SonarQube Cloud counterpart (issue #200). The
+// row carries a single section-level note (Organization is left
+// blank) and is rendered last in the Skipped bucket so it appears at
+// the bottom of the section.
 const (
 	SkipReasonOrgSkipped = "org-skipped"
 	SkipReasonBuiltIn    = "built-in"
 	SkipReasonUnused     = "unused"
+	SkipReasonSQSOnly    = "sqs-only"
 )
 
 // sectionDef maps a report section to its corresponding task names and analysis entity type.

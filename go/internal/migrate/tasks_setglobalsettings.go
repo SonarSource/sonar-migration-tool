@@ -36,6 +36,104 @@ type exclusionPair struct {
 	SQSLocalKey string
 }
 
+// sqsOnlyDecision tells partitionSQSOnlySettings what to do with one
+// SQS setting that has no SonarQube Cloud equivalent.
+//
+//   - SkipSilently=true: drop the record entirely, no API call, no
+//     report row.
+//   - SkipSilently=false: drop from the API loop AND emit one
+//     section-level note row at the bottom of the Global Settings
+//     report section. Note carries the wording the report displays.
+type sqsOnlyDecision struct {
+	SkipSilently bool
+	Note         string
+}
+
+// sqsOnlySettings names the SQS settings that have no SQC counterpart
+// (issue #200) and the per-key rule for what to do with them. The
+// migration loop short-circuits them before any API call so they
+// never produce "not-on-sqc" Warns or settings.set failures.
+//
+// Decision functions receive the raw getServerSettings record so they
+// can inspect value / values / parentValue to decide between
+// silent-skip and emit-a-note.
+var sqsOnlySettings = map[string]func(raw json.RawMessage) sqsOnlyDecision{
+	"sonar.core.serverBaseURL": func(_ json.RawMessage) sqsOnlyDecision {
+		return sqsOnlyDecision{SkipSilently: true}
+	},
+	"sonar.builtInQualityProfiles.disableNotificationOnUpdate": func(_ json.RawMessage) sqsOnlyDecision {
+		return sqsOnlyDecision{SkipSilently: true}
+	},
+	"sonar.qualityProfiles.allowDisableInheritedRules": func(raw json.RawMessage) sqsOnlyDecision {
+		// Only worth mentioning when the SQS-side operator
+		// explicitly enabled the feature; the default ("false") is
+		// the same as "doesn't exist", so no note then.
+		if extractField(raw, "value") == "true" {
+			return sqsOnlyDecision{
+				Note: "Setting does not exist on SonarQube Cloud; the SQS feature flag is not portable.",
+			}
+		}
+		return sqsOnlyDecision{SkipSilently: true}
+	},
+	"sonar.technicalDebt.ratingGrid": func(raw json.RawMessage) sqsOnlyDecision {
+		// SQC always uses the platform default. Mention this only
+		// when SQS was customized away from that default value.
+		const ratingGridDefault = "0.05,0.1,0.2,0.5"
+		v := extractField(raw, "value")
+		if v == "" || v == ratingGridDefault {
+			return sqsOnlyDecision{SkipSilently: true}
+		}
+		return sqsOnlyDecision{
+			Note: "Not customizable on SonarQube Cloud — SQS value " + v +
+				" will revert to the platform default " + ratingGridDefault + ".",
+		}
+	},
+}
+
+// partitionSQSOnlySettings splits the raw SQS getServerSettings list,
+// removing any key that's known to have no SQC counterpart (issue
+// #200). The function is called BEFORE the "customized vs default"
+// filter so the per-key handlers can decide based on the raw value
+// even when that value happens to match SQS's default (e.g.
+// sonar.qualityProfiles.allowDisableInheritedRules=true, which is
+// SQS's default but still wants a report note).
+//
+// Keys returned in `notes` carry one synthetic outcome with Org=""
+// so the report renders them once at the bottom of the section, NOT
+// per-org.
+func partitionSQSOnlySettings(values []json.RawMessage) (remaining []json.RawMessage, notes []globalSettingResult) {
+	remaining = values[:0]
+	for _, raw := range values {
+		key := extractField(raw, "key")
+		handler, isSQSOnly := sqsOnlySettings[key]
+		if !isSQSOnly {
+			remaining = append(remaining, raw)
+			continue
+		}
+		decision := handler(raw)
+		if decision.SkipSilently {
+			continue
+		}
+		rec := globalSettingResult{Key: key}
+		rec.Value, rec.Values, rec.FieldValues = readSettingPayload(raw)
+		rec.Outcomes = []orgOutcome{{
+			Org:    "",
+			Status: outcomeSkipped,
+			Reason: skipReasonSQSOnlyValue,
+			Detail: decision.Note,
+		}}
+		notes = append(notes, rec)
+	}
+	return remaining, notes
+}
+
+// skipReasonSQSOnlyValue is the reason marker placed on per-section
+// note rows so the report can both group them under the right label
+// and order them last in the Skipped bucket. Mirrors the constant
+// exported from the report package — kept here too to avoid a
+// migrate -> report dependency direction reversal.
+const skipReasonSQSOnlyValue = "sqs-only"
+
 var globalExclusionPairs = []exclusionPair{
 	{SQSGlobalKey: "sonar.global.exclusions", SQSLocalKey: "sonar.exclusions"},
 	{SQSGlobalKey: "sonar.global.test.exclusions", SQSLocalKey: "sonar.test.exclusions"},
@@ -92,6 +190,18 @@ func runSetGlobalSettings(ctx context.Context, e *Executor) error {
 	for _, it := range sqsItems {
 		sqsValues = append(sqsValues, it.Data)
 	}
+
+	// Issue #200 — partition off the SQS-only settings BEFORE the
+	// customized filter. For these keys the per-handler logic decides
+	// what to do based on the raw value, not on whether the value
+	// differs from SQS's default. The previous order (customized
+	// filter first, then partition) hid keys whose value happened to
+	// equal SQS's default — e.g. sonar.qualityProfiles.allowDisable
+	// InheritedRules=true where SQS's parentValue is also true: the
+	// customized filter dropped it, and the section-level note for
+	// "exists only on SQS" never reached the report.
+	sqsValues, sqsOnlyNotes := partitionSQSOnlySettings(sqsValues)
+
 	customized := make([]json.RawMessage, 0, len(sqsValues))
 	for _, raw := range sqsValues {
 		key := extractField(raw, "key")
@@ -187,6 +297,18 @@ func runSetGlobalSettings(ctx context.Context, e *Executor) error {
 	if err := g.Wait(); err != nil {
 		return err
 	}
+
+	// Section-level notes for SQS-only settings (issue #200).
+	// Written AFTER the parallel loop so they always trail the
+	// regular per-org rows in the report's Skipped bucket — and
+	// because the writer is shared, the mutex still applies.
+	for _, rec := range sqsOnlyNotes {
+		b, _ := json.Marshal(rec)
+		mu.Lock()
+		_ = w.WriteOne(b)
+		mu.Unlock()
+	}
+
 	counter.LogSummary(e.Logger)
 	return nil
 }
