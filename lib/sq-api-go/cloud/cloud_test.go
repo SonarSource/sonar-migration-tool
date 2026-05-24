@@ -1247,7 +1247,7 @@ func TestOrganizationsUpdateLeakPeriod(t *testing.T) {
 		gotBody   map[string]any
 	)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/organizations/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/organizations/organizations/", func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotPath = r.URL.Path
 		body, _ := io.ReadAll(r.Body)
@@ -1266,7 +1266,7 @@ func TestOrganizationsUpdateLeakPeriod(t *testing.T) {
 		})
 	require.NoError(t, err)
 	assert.Equal(t, http.MethodPatch, gotMethod)
-	assert.Equal(t, "/organizations/uuid-1", gotPath)
+	assert.Equal(t, "/organizations/organizations/uuid-1", gotPath)
 	assert.Equal(t, "30", gotBody["defaultLeakPeriod"])
 	assert.Equal(t, "days", gotBody["defaultLeakPeriodType"])
 	// Untouched fields must be absent — the PATCH is supposed to be

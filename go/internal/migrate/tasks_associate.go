@@ -578,16 +578,36 @@ func runSetGlobalNewCodePeriod(ctx context.Context, e *Executor) error {
 		}
 		seen[orgKey] = struct{}{}
 
-		// SonarCloud's PATCH /organizations/{organizationId} accepts
-		// the human-readable organization key as the path parameter
-		// (not just the internal UUID — /api/organizations/search
-		// doesn't return the UUID anyway). The Enterprise API base
-		// resolves the key to its underlying org record server-side.
-		e.Logger.Debug("setGlobalNewCodePeriod: PATCH /organizations/{key}",
-			"org", orgKey,
+		// Resolve the org's current name. SonarCloud's PATCH
+		// endpoint requires the name field in the body even when
+		// it's not changing — sending only defaultLeakPeriod fields
+		// without name has been observed to be rejected. The regular
+		// sonarcloud.io /api/organizations/search returns name (it
+		// does NOT return the UUID, which is why we don't bother
+		// with LookupID).
+		orgName := orgKey // fallback if the lookup misses
+		if orgs, err := e.Cloud.Organizations.Search(ctx, orgKey); err != nil {
+			e.Logger.Warn("setGlobalNewCodePeriod: org name lookup failed, using key as name",
+				"org", orgKey, "err", err)
+		} else {
+			for _, o := range orgs {
+				if o.Key == orgKey && o.Name != "" {
+					orgName = o.Name
+					break
+				}
+			}
+		}
+
+		// PATCH /organizations/organizations/{key} on api.sonarcloud.io.
+		// Pointer-based params: only the three fields we set end up
+		// in the body, so SonarCloud keeps everything else (url,
+		// avatar, description, ...) unchanged.
+		e.Logger.Debug("setGlobalNewCodePeriod: PATCH /organizations/organizations/{key}",
+			"org", orgKey, "name", orgName,
 			"defaultLeakPeriodType", sqcType, "defaultLeakPeriod", value,
 			"source_type", sqsType)
 		params := cloud.UpdateOrganizationParams{
+			Name:                  &orgName,
 			DefaultLeakPeriodType: &sqcType,
 		}
 		if value != "" {

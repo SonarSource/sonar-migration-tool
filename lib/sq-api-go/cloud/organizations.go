@@ -93,7 +93,10 @@ func (o *OrganizationsClient) UpdateOrganization(ctx context.Context, orgRef str
 		// missing fields.
 		return fmt.Errorf("UpdateOrganization called with no fields to update")
 	}
-	return o.patchJSON(ctx, "organizations/"+orgRef, body, nil)
+	// SonarCloud's Enterprise API path is /organizations/organizations/{ref}
+	// — the doubled segment is real, mirroring /enterprises/enterprises
+	// and /enterprises/portfolios for the same Enterprise API base.
+	return o.patchJSON(ctx, "organizations/organizations/"+orgRef, body, nil)
 }
 
 // buildUpdateOrgBody assembles the JSON body following SonarCloud's

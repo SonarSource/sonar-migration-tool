@@ -16,21 +16,24 @@ import (
 	"testing"
 )
 
-// ncdGlobalCall captures one PATCH /organizations/{ref} from
-// runSetGlobalNewCodePeriod, including the JSON body so the tests can
-// verify the leak-period fields end up on the wire.
+// ncdGlobalCall captures one PATCH
+// /organizations/organizations/{ref} from runSetGlobalNewCodePeriod,
+// including the JSON body so the tests can verify the leak-period
+// fields AND name end up on the wire.
 type ncdGlobalCall struct {
 	orgRef                string
+	name                  string
 	defaultLeakPeriodType string
 	defaultLeakPeriod     string
 }
 
-// runSetGlobalNCDTest wires only the api.sonarcloud.io base (the
-// runtime path: PATCH /organizations/{key}). The previous two-step
-// flow that looked up a UUID via /api/organizations/search was
-// dropped — SonarCloud's search endpoint doesn't return the UUID,
-// and the PATCH endpoint accepts the org key directly as the path
-// identifier.
+// runSetGlobalNCDTest wires both bases: sonarcloud.io (for the
+// /api/organizations/search lookup that gets the org's current name)
+// and api.sonarcloud.io (for the PATCH
+// /organizations/organizations/{key} that actually writes the NCD).
+// Including name in the PATCH body matches what the SonarCloud UI
+// sends — the endpoint has been observed to reject the PATCH
+// otherwise.
 func runSetGlobalNCDTest(t *testing.T, ncd map[string]any, orgs []map[string]any) (hits []ncdGlobalCall, logs string) {
 	t.Helper()
 	var (
@@ -38,29 +41,38 @@ func runSetGlobalNCDTest(t *testing.T, ncd map[string]any, orgs []map[string]any
 		recorded []ncdGlobalCall
 	)
 
-	// Cloud mux (sonarcloud.io) — catch-all so any incidental call
-	// doesn't crash the test; the new code path makes no calls here.
+	// Cloud mux (sonarcloud.io): /api/organizations/search so the
+	// name lookup succeeds. Echo back the requested key as the name.
 	cloudMux := http.NewServeMux()
+	cloudMux.HandleFunc("/api/organizations/search", func(w http.ResponseWriter, r *http.Request) {
+		keys := strings.Split(r.URL.Query().Get("organizations"), ",")
+		var out []map[string]any
+		for _, k := range keys {
+			out = append(out, map[string]any{"key": k, "name": k + " (display)"})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"organizations": out})
+	})
 	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{})
 	})
 	cloudSrv := httptest.NewServer(cloudMux)
 	t.Cleanup(cloudSrv.Close)
 
-	// API mux (api.sonarcloud.io): PATCH /organizations/{ref}.
+	// API mux (api.sonarcloud.io): PATCH /organizations/organizations/{ref}.
 	apiMux := http.NewServeMux()
-	apiMux.HandleFunc("/organizations/", func(w http.ResponseWriter, r *http.Request) {
+	apiMux.HandleFunc("/organizations/organizations/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPatch {
 			http.Error(w, `{"errors":[{"msg":"method not allowed"}]}`, http.StatusMethodNotAllowed)
 			return
 		}
-		ref := strings.TrimPrefix(r.URL.Path, "/organizations/")
+		ref := strings.TrimPrefix(r.URL.Path, "/organizations/organizations/")
 		body, _ := io.ReadAll(r.Body)
 		var decoded map[string]any
 		_ = json.Unmarshal(body, &decoded)
 		mu.Lock()
 		recorded = append(recorded, ncdGlobalCall{
 			orgRef:                ref,
+			name:                  asStr(decoded["name"]),
 			defaultLeakPeriodType: asStr(decoded["defaultLeakPeriodType"]),
 			defaultLeakPeriod:     asStr(decoded["defaultLeakPeriod"]),
 		})
@@ -131,8 +143,8 @@ func TestRunSetGlobalNewCodePeriodFansOutDaysToEveryOrg(t *testing.T) {
 	}
 	sort.Slice(hits, func(i, j int) bool { return hits[i].orgRef < hits[j].orgRef })
 	want := []ncdGlobalCall{
-		{orgRef: "orgA", defaultLeakPeriodType: "days", defaultLeakPeriod: "30"},
-		{orgRef: "orgB", defaultLeakPeriodType: "days", defaultLeakPeriod: "30"},
+		{orgRef: "orgA", name: "orgA (display)", defaultLeakPeriodType: "days", defaultLeakPeriod: "30"},
+		{orgRef: "orgB", name: "orgB (display)", defaultLeakPeriodType: "days", defaultLeakPeriod: "30"},
 	}
 	for i, w := range want {
 		if hits[i] != w {
