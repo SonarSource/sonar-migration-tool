@@ -73,6 +73,54 @@ func TestCollectSummaryWithData(t *testing.T) {
 	}
 }
 
+// TestCollectSummaryDedupesDuplicateCreates is a regression for #165.
+// When a single source-side entity exists under multiple SonarQube
+// Server orgs that map to the same SonarCloud org, the create* task
+// writes one JSONL record per source-org pairing — all referring to
+// the same cloud entity. The report previously listed each duplicate
+// as its own row and inflated the migrated-count by N-1.
+func TestCollectSummaryDedupesDuplicateCreates(t *testing.T) {
+	dir := t.TempDir()
+
+	// Same cloud gate, same org, written three times (one per source org).
+	writeTaskJSONL(t, dir, "createGates", []map[string]any{
+		{"name": "3 - Corp base", "sonarcloud_org_key": "fubar", "cloud_gate_id": "42"},
+		{"name": "3 - Corp base", "sonarcloud_org_key": "fubar", "cloud_gate_id": "42"},
+		{"name": "3 - Corp base", "sonarcloud_org_key": "fubar", "cloud_gate_id": "42"},
+		// A different gate in the same org — must remain.
+		{"name": "Custom Gate", "sonarcloud_org_key": "fubar", "cloud_gate_id": "43"},
+		// Same gate name in a different org — must remain (distinct cloud entity).
+		{"name": "3 - Corp base", "sonarcloud_org_key": "other", "cloud_gate_id": "99"},
+	})
+
+	summary, err := CollectSummary(dir, "")
+	if err != nil {
+		t.Fatalf("CollectSummary: %v", err)
+	}
+
+	gates := findSection(summary, "Quality Gates")
+	if gates == nil {
+		t.Fatal("missing Quality Gates section")
+	}
+	if len(gates.Succeeded) != 3 {
+		var got []string
+		for _, g := range gates.Succeeded {
+			got = append(got, g.Organization+"/"+g.Name+"#"+g.Detail)
+		}
+		t.Fatalf("expected 3 unique rows after dedup, got %d: %v", len(gates.Succeeded), got)
+	}
+	// Find the fubar/3 - Corp base row — must appear exactly once.
+	found := 0
+	for _, g := range gates.Succeeded {
+		if g.Organization == "fubar" && g.Name == "3 - Corp base" {
+			found++
+		}
+	}
+	if found != 1 {
+		t.Errorf("expected exactly one row for fubar/3 - Corp base, got %d", found)
+	}
+}
+
 func TestCollectSummaryWithScanHistory(t *testing.T) {
 	dir := t.TempDir()
 

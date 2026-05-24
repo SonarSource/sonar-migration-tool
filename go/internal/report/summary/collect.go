@@ -162,19 +162,40 @@ func collectSection(store *common.DataStore, def sectionDef,
 }
 
 // collectSucceeded reads items from the output (create*) task JSONL.
+//
+// Issue #165 — the create* tasks (createGates, createProfiles, ...)
+// iterate generate*Mappings, which contains one record per
+// (source_org, entity_name) pair. When a single source-side entity
+// exists under N different SonarQube Server orgs that all map to the
+// same SonarCloud org, the create task emits N JSONL records for the
+// SAME cloud entity. Without dedup the report renders the same row
+// N times and the migrated-count is inflated by N-1.
+//
+// We dedupe by the composite (Organization, Detail, Name, Language).
+// Detail carries the cloud-side unique id for every section
+// (cloud_gate_id, cloud_profile_key, etc.) so identical cloud
+// entities collapse to one row; the rest of the composite keeps
+// distinct entities with the same name in different orgs separate.
 func collectSucceeded(store *common.DataStore, def sectionDef) []EntityItem {
 	items, err := store.ReadAll(def.OutputTask)
 	if err != nil {
 		return nil
 	}
 	var result []EntityItem
+	seen := make(map[string]bool, len(items))
 	for _, item := range items {
-		result = append(result, EntityItem{
+		entry := EntityItem{
 			Name:         jsonStr(item, def.NameField),
 			Language:     jsonStr(item, "language"),
 			Organization: jsonStr(item, "sonarcloud_org_key"),
 			Detail:       jsonStr(item, def.DetailField),
-		})
+		}
+		key := entry.Organization + "\x00" + entry.Detail + "\x00" + entry.Name + "\x00" + entry.Language
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		result = append(result, entry)
 	}
 	return result
 }
