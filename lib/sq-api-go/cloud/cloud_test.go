@@ -634,6 +634,39 @@ func TestPermissionsAddGroupOrgLevel(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// AddUser is used by the migration tool (issue #190) to grant the
+// migration user user/admin/issueadmin/securityhotspotadmin on every
+// newly-created project so the subsequent per-project mutations
+// don't fail with "Insufficient privileges". The endpoint shape
+// mirrors AddGroup but takes login instead of groupName.
+func TestPermissionsAddUser(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/permissions/add_user", func(w http.ResponseWriter, r *http.Request) {
+		assertFormValue(t, r, "login", "migration-bot")
+		assertFormValue(t, r, "permission", "admin")
+		assertFormValue(t, r, "organization", "myorg")
+		assertFormValue(t, r, "projectKey", "myorg_proj1")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	cc := newTestCloud(t, mux)
+
+	err := cc.Permissions.AddUser(context.Background(), "migration-bot", "admin", "myorg", "myorg_proj1")
+	require.NoError(t, err)
+}
+
+func TestPermissionsAddUserOrgLevel(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/permissions/add_user", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		assert.Empty(t, r.FormValue("projectKey"))
+		w.WriteHeader(http.StatusNoContent)
+	})
+	cc := newTestCloud(t, mux)
+
+	err := cc.Permissions.AddUser(context.Background(), "migration-bot", "admin", "myorg", "")
+	require.NoError(t, err)
+}
+
 func TestPermissionsAddGroupToTemplate(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/permissions/add_group_to_template", func(w http.ResponseWriter, r *http.Request) {

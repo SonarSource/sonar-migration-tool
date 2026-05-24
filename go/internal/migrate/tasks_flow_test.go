@@ -3,6 +3,9 @@ package migrate
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
 )
 
@@ -288,6 +291,141 @@ func TestCreateMigrationGroups(t *testing.T) {
 	err := reg["createMigrationGroups"].Run(context.Background(), e)
 	if err != nil {
 		t.Fatalf("createMigrationGroups: %v", err)
+	}
+}
+
+// TestGrantMigrationUserProjectPermissions asserts each newly-created
+// project receives the four expected permission grants for the
+// migration user (issue #190): user, admin, issueadmin,
+// securityhotspotadmin. The grant fires BEFORE the per-project
+// mutations downstream — verified here by the dependency-graph
+// assertion at the bottom.
+func TestGrantMigrationUserProjectPermissions(t *testing.T) {
+	type call struct {
+		login      string
+		permission string
+		project    string
+		org        string
+	}
+	var (
+		mu       sync.Mutex
+		recorded []call
+	)
+	// Custom cloud mock that captures add_user calls. Everything else
+	// is taken from newMockCloudServer's behaviour (it would otherwise
+	// answer 200 to whatever else is hit during ReadAll fixture).
+	cloudMux := http.NewServeMux()
+	cloudMux.HandleFunc("POST /api/permissions/add_user", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		mu.Lock()
+		recorded = append(recorded, call{
+			login:      r.FormValue("login"),
+			permission: r.FormValue("permission"),
+			project:    r.FormValue("projectKey"),
+			org:        r.FormValue("organization"),
+		})
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	})
+	cloudSrv := httptest.NewServer(cloudMux)
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+
+	dir := t.TempDir()
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	// getMigrationUser → login.
+	uw, _ := e.Store.Writer("getMigrationUser")
+	uw.WriteOne([]byte(`{"login":"migration-bot","name":"Migration Bot"}`))
+	// createProjects → two projects across two orgs.
+	pw, _ := e.Store.Writer("createProjects")
+	for _, p := range []map[string]any{
+		{"key": "src-a", "server_url": testServerURL,
+			"sonarcloud_org_key": "orgA", "cloud_project_key": "orgA_src-a"},
+		{"key": "src-b", "server_url": testServerURL,
+			"sonarcloud_org_key": "orgB", "cloud_project_key": "orgB_src-b"},
+	} {
+		b, _ := json.Marshal(p)
+		pw.WriteOne(b)
+	}
+
+	if err := runGrantMigrationUserProjectPermissions(context.Background(), e); err != nil {
+		t.Fatalf("runGrantMigrationUserProjectPermissions: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	// 2 projects × 4 permissions = 8 calls.
+	if len(recorded) != 8 {
+		t.Fatalf("expected 8 calls (2 projects × 4 perms), got %d: %+v", len(recorded), recorded)
+	}
+	// Assert: every call carries the migration-user login, each
+	// project receives EXACTLY the 4 permissions in the list, and
+	// the project + org pair on the call match createProjects.
+	wantPerms := map[string]bool{
+		"user":                 true,
+		"admin":                true,
+		"issueadmin":           true,
+		"securityhotspotadmin": true,
+	}
+	gotPermsPerProject := make(map[string]map[string]int)
+	for _, c := range recorded {
+		if c.login != "migration-bot" {
+			t.Errorf("login: want migration-bot, got %q", c.login)
+		}
+		if !wantPerms[c.permission] {
+			t.Errorf("unexpected permission %q on project %q", c.permission, c.project)
+		}
+		if gotPermsPerProject[c.project] == nil {
+			gotPermsPerProject[c.project] = make(map[string]int)
+		}
+		gotPermsPerProject[c.project][c.permission]++
+	}
+	for _, project := range []string{"orgA_src-a", "orgB_src-b"} {
+		got := gotPermsPerProject[project]
+		for perm := range wantPerms {
+			if got[perm] != 1 {
+				t.Errorf("project %q permission %q: want exactly 1 grant, got %d",
+					project, perm, got[perm])
+			}
+		}
+	}
+}
+
+// Per-project mutations must depend on
+// grantMigrationUserProjectPermissions so the DAG runs the grant
+// BEFORE any project-scoped write. Pin the dependency at the
+// registry level so a refactor that drops the dep is caught here.
+func TestGrantMigrationUserIsAPrerequisiteForPerProjectTasks(t *testing.T) {
+	reg := BuildMigrateRegistry(RegisterAll())
+	for _, name := range []string{
+		"setProjectProfiles",
+		"setProjectGates",
+		"setProjectGroupPermissions",
+		"setProjectSettings",
+		"setProjectTags",
+		"setNewCodePeriods",
+		"setProjectBinding",
+	} {
+		task := reg[name]
+		if task == nil {
+			t.Errorf("task %q not registered", name)
+			continue
+		}
+		found := false
+		for _, dep := range task.Dependencies {
+			if dep == "grantMigrationUserProjectPermissions" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("task %q must list grantMigrationUserProjectPermissions in Dependencies, got %v",
+				name, task.Dependencies)
+		}
 	}
 }
 

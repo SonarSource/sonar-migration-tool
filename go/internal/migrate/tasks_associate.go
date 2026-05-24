@@ -19,34 +19,41 @@ import (
 // associateTasks returns tasks that associate projects with profiles, gates, etc.
 func associateTasks() []TaskDef {
 	return []TaskDef{
+		// Every per-project mutation below also depends on
+		// grantMigrationUserProjectPermissions so the migration
+		// user has Browse/Administer/Administer-Issues/Administer-
+		// Hotspots before any settings/profile/gate/tag/NCD/group
+		// write reaches a project (issue #190). The dep is in
+		// addition to createProjects — the DAG resolver picks the
+		// right order regardless.
 		{
 			Name:         "setProjectProfiles",
-			Dependencies: []string{"createProfiles", "createProjects"},
+			Dependencies: []string{"createProfiles", "createProjects", "grantMigrationUserProjectPermissions"},
 			Run:          runSetProjectProfiles,
 		},
 		{
 			Name:         "setProjectGates",
-			Dependencies: []string{"createGates", "createProjects"},
+			Dependencies: []string{"createGates", "createProjects", "grantMigrationUserProjectPermissions"},
 			Run:          runSetProjectGates,
 		},
 		{
 			Name:         "setProjectGroupPermissions",
-			Dependencies: []string{"createGroups", "createProjects"},
+			Dependencies: []string{"createGroups", "createProjects", "grantMigrationUserProjectPermissions"},
 			Run:          runSetProjectGroupPermissions,
 		},
 		{
 			Name:         "setProjectSettings",
-			Dependencies: []string{"createProjects"},
+			Dependencies: []string{"createProjects", "grantMigrationUserProjectPermissions"},
 			Run:          runSetProjectSettings,
 		},
 		{
 			Name:         "setProjectTags",
-			Dependencies: []string{"createProjects"},
+			Dependencies: []string{"createProjects", "grantMigrationUserProjectPermissions"},
 			Run:          runSetProjectTags,
 		},
 		{
 			Name:         "setNewCodePeriods",
-			Dependencies: []string{"createProjects"},
+			Dependencies: []string{"createProjects", "grantMigrationUserProjectPermissions"},
 			Run:          runSetNewCodePeriods,
 		},
 		{

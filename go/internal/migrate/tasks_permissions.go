@@ -44,7 +44,77 @@ func permissionTasks() []TaskDef {
 			Dependencies: []string{"createProfiles", "createGroups"},
 			Run:          runSetProfileGroupPermissions,
 		},
+		{
+			// Issue #190: depending on the SQS permission template
+			// the user provisioned the SQC org with, the migration
+			// user can end up without Browse/Administer on the
+			// projects it just created — which then makes every
+			// downstream per-project mutation (settings, profiles,
+			// gates, tags, NCD, group perms, binding) 403. Grant the
+			// migration user user/admin/issueadmin/securityhotspotadmin
+			// on every newly-created project as the FIRST step after
+			// createProjects; the other per-project tasks list this
+			// task as an additional dependency so the DAG enforces
+			// the order.
+			Name:         "grantMigrationUserProjectPermissions",
+			Dependencies: []string{"createProjects", "getMigrationUser"},
+			Run:          runGrantMigrationUserProjectPermissions,
+		},
 	}
+}
+
+// migrationUserProjectPermissions are the four permissions the
+// migration user grants itself on every project it just created.
+// user=Browse, admin=Administer, issueadmin=Administer Issues,
+// securityhotspotadmin=Administer Security Hotspots. The latter two
+// anticipate the project-data migration feature (issues + hotspots
+// status changes).
+var migrationUserProjectPermissions = []string{
+	"user",
+	"admin",
+	"issueadmin",
+	"securityhotspotadmin",
+}
+
+func runGrantMigrationUserProjectPermissions(ctx context.Context, e *Executor) error {
+	userItems, _ := e.Store.ReadAll("getMigrationUser")
+	if len(userItems) == 0 {
+		e.Logger.Info("grantMigrationUserProjectPermissions: no migration user record, nothing to grant")
+		return nil
+	}
+	login := extractField(userItems[0], "login")
+	if login == "" {
+		e.Logger.Info("grantMigrationUserProjectPermissions: migration user has no login, nothing to grant")
+		return nil
+	}
+
+	counter := NewTaskCounter("grantMigrationUserProjectPermissions")
+	err := forEachMigrateItem(ctx, e, "grantMigrationUserProjectPermissions", "createProjects",
+		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
+			orgKey := extractField(item, "sonarcloud_org_key")
+			if shouldSkipOrg(orgKey) {
+				return nil
+			}
+			cloudKey := extractField(item, "cloud_project_key")
+			if cloudKey == "" {
+				return nil
+			}
+			for _, perm := range migrationUserProjectPermissions {
+				e.Logger.Debug("grantMigrationUserProjectPermissions: POST /api/permissions/add_user",
+					"login", login, "perm", perm, "project", cloudKey, "org", orgKey)
+				err := e.Cloud.Permissions.AddUser(ctx, login, perm, orgKey, cloudKey)
+				if err != nil {
+					counter.Fail()
+					logAPIWarn(e.Logger, "grantMigrationUserProjectPermissions failed", err,
+						"login", login, "project", cloudKey, "perm", perm)
+					continue
+				}
+				counter.Success()
+			}
+			return nil
+		})
+	counter.LogSummary(e.Logger)
+	return err
 }
 
 func runCreateMigrationGroups(ctx context.Context, e *Executor) error {

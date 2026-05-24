@@ -18,8 +18,10 @@ func almTasks() []TaskDef {
 			Run:          runMatchProjectRepos,
 		},
 		{
+			// Project DevOps binding writes need the migration user
+			// to be a project admin (issue #190).
 			Name:         "setProjectBinding",
-			Dependencies: []string{"matchProjectRepos"},
+			Dependencies: []string{"matchProjectRepos", "grantMigrationUserProjectPermissions"},
 			Run:          runSetProjectBinding,
 		},
 	}
