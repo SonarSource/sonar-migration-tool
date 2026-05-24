@@ -578,22 +578,13 @@ func runSetGlobalNewCodePeriod(ctx context.Context, e *Executor) error {
 		}
 		seen[orgKey] = struct{}{}
 
-		// Step 1 — resolve the org UUID via the regular sonarcloud.io
-		// base. The Enterprise API endpoint we hit next needs the
-		// UUID, not the human-readable key.
-		orgID, err := e.Cloud.Organizations.LookupID(ctx, orgKey)
-		if err != nil {
-			counter.Fail()
-			logAPIWarn(e.Logger, "setGlobalNewCodePeriod: org lookup failed", err,
-				"org", orgKey)
-			continue
-		}
-
-		// Step 2 — PATCH /organizations/{uuid} on api.sonarcloud.io.
-		// Only the leak-period fields are set; SonarCloud keeps the
-		// rest unchanged.
-		e.Logger.Debug("setGlobalNewCodePeriod: PATCH /organizations/{id}",
-			"org", orgKey, "org_id", orgID,
+		// SonarCloud's PATCH /organizations/{organizationId} accepts
+		// the human-readable organization key as the path parameter
+		// (not just the internal UUID — /api/organizations/search
+		// doesn't return the UUID anyway). The Enterprise API base
+		// resolves the key to its underlying org record server-side.
+		e.Logger.Debug("setGlobalNewCodePeriod: PATCH /organizations/{key}",
+			"org", orgKey,
 			"defaultLeakPeriodType", sqcType, "defaultLeakPeriod", value,
 			"source_type", sqsType)
 		params := cloud.UpdateOrganizationParams{
@@ -602,10 +593,10 @@ func runSetGlobalNewCodePeriod(ctx context.Context, e *Executor) error {
 		if value != "" {
 			params.DefaultLeakPeriod = &value
 		}
-		if err := e.CloudAPI.Organizations.UpdateOrganization(ctx, orgID, params); err != nil {
+		if err := e.CloudAPI.Organizations.UpdateOrganization(ctx, orgKey, params); err != nil {
 			counter.Fail()
 			logAPIWarn(e.Logger, "setGlobalNewCodePeriod failed", err,
-				"org", orgKey, "org_id", orgID, "type", sqcType)
+				"org", orgKey, "type", sqcType)
 			continue
 		}
 		counter.Success()

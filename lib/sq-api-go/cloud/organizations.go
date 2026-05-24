@@ -72,17 +72,19 @@ type UpdateOrganizationParams struct {
 	DefaultLeakPeriodType *string // "days" | "previous_version" | "reference_branch" | "specific_analysis"
 }
 
-// UpdateOrganization patches an organization by ID. Used by the
-// migration tool (issue #136) to set defaultLeakPeriodType and
-// defaultLeakPeriod from the SonarQube Server platform-wide
-// new-code-period default.
+// UpdateOrganization patches an organization. Used by the migration
+// tool (issue #136) to set defaultLeakPeriodType and defaultLeakPeriod
+// from the SonarQube Server platform-wide new-code-period default.
 //
-// orgID is the UUID returned by LookupID, NOT the human-readable key.
-// Must be called on a client constructed against api.sonarcloud.io;
-// the regular sonarcloud.io base does not expose /organizations/{id}.
-func (o *OrganizationsClient) UpdateOrganization(ctx context.Context, orgID string, params UpdateOrganizationParams) error {
-	if orgID == "" {
-		return fmt.Errorf("organization id is required")
+// orgRef is the {organizationId} path parameter — SonarCloud accepts
+// both the UUID and the human-readable org key. The migration tool
+// passes the key because /api/organizations/search doesn't return the
+// UUID. Must be called on a client constructed against
+// api.sonarcloud.io; the regular sonarcloud.io base does not expose
+// /organizations/{id}.
+func (o *OrganizationsClient) UpdateOrganization(ctx context.Context, orgRef string, params UpdateOrganizationParams) error {
+	if orgRef == "" {
+		return fmt.Errorf("organization reference is required")
 	}
 	body := buildUpdateOrgBody(params)
 	if len(body) == 0 {
@@ -91,7 +93,7 @@ func (o *OrganizationsClient) UpdateOrganization(ctx context.Context, orgID stri
 		// missing fields.
 		return fmt.Errorf("UpdateOrganization called with no fields to update")
 	}
-	return o.patchJSON(ctx, "organizations/"+orgID, body, nil)
+	return o.patchJSON(ctx, "organizations/"+orgRef, body, nil)
 }
 
 // buildUpdateOrgBody assembles the JSON body following SonarCloud's

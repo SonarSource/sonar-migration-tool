@@ -16,59 +16,51 @@ import (
 	"testing"
 )
 
-// ncdGlobalCall captures one PATCH /organizations/{id} from
+// ncdGlobalCall captures one PATCH /organizations/{ref} from
 // runSetGlobalNewCodePeriod, including the JSON body so the tests can
 // verify the leak-period fields end up on the wire.
 type ncdGlobalCall struct {
-	orgID                 string
+	orgRef                string
 	defaultLeakPeriodType string
 	defaultLeakPeriod     string
 }
 
-// runSetGlobalNCDTest wires both Cloud bases — sonarcloud.io (for the
-// org-ID lookup via /api/organizations/search) and api.sonarcloud.io
-// (for the PATCH /organizations/{id} that actually sets the org NCD).
-// orgKeyToID is the canonical org-key → UUID mapping that backs the
-// search handler so the test reflects the real two-step flow.
-func runSetGlobalNCDTest(t *testing.T, ncd map[string]any, orgs []map[string]any, orgKeyToID map[string]string) (hits []ncdGlobalCall, logs string) {
+// runSetGlobalNCDTest wires only the api.sonarcloud.io base (the
+// runtime path: PATCH /organizations/{key}). The previous two-step
+// flow that looked up a UUID via /api/organizations/search was
+// dropped — SonarCloud's search endpoint doesn't return the UUID,
+// and the PATCH endpoint accepts the org key directly as the path
+// identifier.
+func runSetGlobalNCDTest(t *testing.T, ncd map[string]any, orgs []map[string]any) (hits []ncdGlobalCall, logs string) {
 	t.Helper()
 	var (
 		mu       sync.Mutex
 		recorded []ncdGlobalCall
 	)
 
-	// Cloud mux (sonarcloud.io): only /api/organizations/search.
+	// Cloud mux (sonarcloud.io) — catch-all so any incidental call
+	// doesn't crash the test; the new code path makes no calls here.
 	cloudMux := http.NewServeMux()
-	cloudMux.HandleFunc("/api/organizations/search", func(w http.ResponseWriter, r *http.Request) {
-		keys := strings.Split(r.URL.Query().Get("organizations"), ",")
-		var orgs []map[string]any
-		for _, k := range keys {
-			if id, ok := orgKeyToID[k]; ok {
-				orgs = append(orgs, map[string]any{"id": id, "key": k, "name": k})
-			}
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"organizations": orgs})
-	})
 	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{})
 	})
 	cloudSrv := httptest.NewServer(cloudMux)
 	t.Cleanup(cloudSrv.Close)
 
-	// API mux (api.sonarcloud.io): PATCH /organizations/{id}.
+	// API mux (api.sonarcloud.io): PATCH /organizations/{ref}.
 	apiMux := http.NewServeMux()
 	apiMux.HandleFunc("/organizations/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPatch {
 			http.Error(w, `{"errors":[{"msg":"method not allowed"}]}`, http.StatusMethodNotAllowed)
 			return
 		}
-		id := strings.TrimPrefix(r.URL.Path, "/organizations/")
+		ref := strings.TrimPrefix(r.URL.Path, "/organizations/")
 		body, _ := io.ReadAll(r.Body)
 		var decoded map[string]any
 		_ = json.Unmarshal(body, &decoded)
 		mu.Lock()
 		recorded = append(recorded, ncdGlobalCall{
-			orgID:                 id,
+			orgRef:                ref,
 			defaultLeakPeriodType: asStr(decoded["defaultLeakPeriodType"]),
 			defaultLeakPeriod:     asStr(decoded["defaultLeakPeriod"]),
 		})
@@ -124,7 +116,7 @@ func asStr(v any) string {
 }
 
 // SQS NUMBER_OF_DAYS=30 → each SQC org receives one PATCH
-// /organizations/{id} on api.sonarcloud.io with body
+// /organizations/{key} with body
 // {"defaultLeakPeriodType":"days","defaultLeakPeriod":"30"}.
 func TestRunSetGlobalNewCodePeriodFansOutDaysToEveryOrg(t *testing.T) {
 	hits, _ := runSetGlobalNCDTest(t,
@@ -133,15 +125,14 @@ func TestRunSetGlobalNewCodePeriodFansOutDaysToEveryOrg(t *testing.T) {
 			{"sonarcloud_org_key": "orgA"},
 			{"sonarcloud_org_key": "orgB"},
 		},
-		map[string]string{"orgA": "uuid-a", "orgB": "uuid-b"},
 	)
 	if len(hits) != 2 {
 		t.Fatalf("expected 2 PATCHes (one per org), got %d: %+v", len(hits), hits)
 	}
-	sort.Slice(hits, func(i, j int) bool { return hits[i].orgID < hits[j].orgID })
+	sort.Slice(hits, func(i, j int) bool { return hits[i].orgRef < hits[j].orgRef })
 	want := []ncdGlobalCall{
-		{orgID: "uuid-a", defaultLeakPeriodType: "days", defaultLeakPeriod: "30"},
-		{orgID: "uuid-b", defaultLeakPeriodType: "days", defaultLeakPeriod: "30"},
+		{orgRef: "orgA", defaultLeakPeriodType: "days", defaultLeakPeriod: "30"},
+		{orgRef: "orgB", defaultLeakPeriodType: "days", defaultLeakPeriod: "30"},
 	}
 	for i, w := range want {
 		if hits[i] != w {
@@ -155,7 +146,6 @@ func TestRunSetGlobalNewCodePeriodSkipsPreviousVersion(t *testing.T) {
 	hits, logs := runSetGlobalNCDTest(t,
 		map[string]any{"type": "PREVIOUS_VERSION", "serverUrl": testServerURL},
 		[]map[string]any{{"sonarcloud_org_key": "orgA"}},
-		map[string]string{"orgA": "uuid-a"},
 	)
 	if len(hits) != 0 {
 		t.Errorf("PREVIOUS_VERSION must NOT trigger any PATCH, got %d", len(hits))
@@ -171,7 +161,6 @@ func TestRunSetGlobalNewCodePeriodReferenceBranch(t *testing.T) {
 	hits, _ := runSetGlobalNCDTest(t,
 		map[string]any{"type": "REFERENCE_BRANCH", "value": "main", "serverUrl": testServerURL},
 		[]map[string]any{{"sonarcloud_org_key": "orgA"}},
-		map[string]string{"orgA": "uuid-a"},
 	)
 	if len(hits) != 1 {
 		t.Fatalf("expected 1 PATCH, got %d", len(hits))
@@ -186,7 +175,6 @@ func TestRunSetGlobalNewCodePeriodNormalizesLegacyDaysAlias(t *testing.T) {
 	hits, _ := runSetGlobalNCDTest(t,
 		map[string]any{"type": "DAYS", "value": "7", "serverUrl": testServerURL},
 		[]map[string]any{{"sonarcloud_org_key": "orgA"}},
-		map[string]string{"orgA": "uuid-a"},
 	)
 	if len(hits) != 1 {
 		t.Fatalf("expected 1 PATCH, got %d", len(hits))
