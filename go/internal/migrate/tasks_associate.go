@@ -561,9 +561,16 @@ func runSetGlobalNewCodePeriod(ctx context.Context, e *Executor) error {
 	// Note: we do NOT short-circuit PREVIOUS_VERSION. The target SQC
 	// org might already be at a non-default value (e.g. an operator
 	// manually set "32 days" earlier); skipping would leave that
-	// stale value in place. PATCHing previous_version with an empty
-	// defaultLeakPeriod explicitly clears any prior days/branch.
+	// stale value in place. We always PATCH.
 	value := extractAnyStr(src, "value")
+	// SonarCloud's PATCH /organizations/organizations/{key} validates
+	// the (defaultLeakPeriodType, defaultLeakPeriod) pair and rejects
+	// previous_version with an empty defaultLeakPeriod
+	// ("Invalid default leak period for type PREVIOUS_VERSION"). The
+	// UI sends "previous_version" as the value too — mirror that.
+	if sqcType == "previous_version" {
+		value = "previous_version"
+	}
 
 	orgItems, _ := e.Store.ReadAll("generateOrganizationMappings")
 	seen := make(map[string]struct{})

@@ -244,8 +244,10 @@ func TestRunSetGlobalNewCodePeriodEmitsReportRecord(t *testing.T) {
 
 // PREVIOUS_VERSION must STILL PATCH each org — the SQC org may have
 // been previously set to "32 days" or another non-default value and
-// we need to actively reset it back to previous_version. The PATCH
-// body sends defaultLeakPeriod="" to clear the stale value.
+// we need to actively reset it back to previous_version. SonarCloud
+// validates the (type, value) pair and rejects type=previous_version
+// with an empty value ("Invalid default leak period for type
+// PREVIOUS_VERSION") — the value must mirror the type.
 func TestRunSetGlobalNewCodePeriodAppliesPreviousVersion(t *testing.T) {
 	hits, _ := runSetGlobalNCDTest(t,
 		map[string]any{"type": "PREVIOUS_VERSION", "serverUrl": testServerURL},
@@ -257,10 +259,9 @@ func TestRunSetGlobalNewCodePeriodAppliesPreviousVersion(t *testing.T) {
 	if hits[0].defaultLeakPeriodType != "previous_version" {
 		t.Errorf("expected type=previous_version, got %q", hits[0].defaultLeakPeriodType)
 	}
-	// Empty defaultLeakPeriod must travel in the body — that's what
-	// clears any "32 days" left over from a prior manual setting.
-	if hits[0].defaultLeakPeriod != "" {
-		t.Errorf("PREVIOUS_VERSION must travel with empty defaultLeakPeriod, got %q", hits[0].defaultLeakPeriod)
+	if hits[0].defaultLeakPeriod != "previous_version" {
+		t.Errorf("PREVIOUS_VERSION must travel with defaultLeakPeriod=\"previous_version\" (SQC rejects empty), got %q",
+			hits[0].defaultLeakPeriod)
 	}
 }
 
