@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/analysis"
@@ -32,6 +33,7 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 	}
 
 	scanHistoryMap := collectScanHistory(store)
+	ncdFallbackMap := collectNCDFallback(store)
 	extractMapping, _ := structure.GetUniqueExtracts(exportDir)
 
 	var sections []Section
@@ -39,6 +41,7 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 		section := collectSection(store, def, failuresByType, configFailures, exportDir, extractMapping)
 		if def.Name == "Projects" {
 			attachScanHistory(section.Succeeded, scanHistoryMap)
+			attachNCDFallback(section.Succeeded, ncdFallbackMap)
 		}
 		sections = append(sections, section)
 	}
@@ -462,6 +465,76 @@ func attachScanHistory(projects []EntityItem, scanMap map[string]string) {
 			projects[i].Detail = cloudKey + "|scan:" + status
 		}
 	}
+}
+
+// collectNCDFallback reads the setNewCodePeriods JSONL and returns a
+// map of cloud_project_key -> the SQS-side NCD type that triggered
+// the org-default fallback. Only records with ncd_fallback=true are
+// captured (those whose source type wasn't supported at SonarCloud
+// project scope — REFERENCE_BRANCH and SPECIFIC_ANALYSIS as of May
+// 2026). Issue #135.
+func collectNCDFallback(store *common.DataStore) map[string]string {
+	items, err := store.ReadAll("setNewCodePeriods")
+	if err != nil || len(items) == 0 {
+		return nil
+	}
+	result := make(map[string]string)
+	for _, item := range items {
+		if !jsonBool(item, "ncd_fallback") {
+			continue
+		}
+		cloudKey := jsonStr(item, "cloud_project_key")
+		sqsType := jsonStr(item, "source_ncd_type")
+		if cloudKey != "" {
+			result[cloudKey] = sqsType
+		}
+	}
+	return result
+}
+
+// attachNCDFallback appends a per-project NCD-fallback marker to the
+// Detail field for projects whose SQS NCD type couldn't be migrated
+// at project scope on SonarCloud — issue #135. The marker is
+// "|ncdFallback:<sqs_type>"; the PDF renderer (successDetails)
+// splits it back out and prints a human-readable note alongside the
+// cloud key. Robust to attachScanHistory running first: its marker
+// (|scan:...) is preserved by inserting our marker AFTER the cloud
+// key but BEFORE any |scan: marker.
+func attachNCDFallback(projects []EntityItem, ncdMap map[string]string) {
+	if ncdMap == nil {
+		return
+	}
+	for i := range projects {
+		detail := projects[i].Detail
+		// Detail is either "cloudKey" or "cloudKey|scan:status".
+		cloudKey := detail
+		scanSuffix := ""
+		if idx := strings.Index(detail, "|scan:"); idx >= 0 {
+			cloudKey = detail[:idx]
+			scanSuffix = detail[idx:]
+		}
+		sqsType, ok := ncdMap[cloudKey]
+		if !ok {
+			continue
+		}
+		projects[i].Detail = cloudKey + "|ncdFallback:" + sqsType + scanSuffix
+	}
+}
+
+// jsonBool extracts a bool value for a key from a JSONL record.
+// Falls back to false on missing key, non-bool value, or parse error.
+func jsonBool(raw json.RawMessage, key string) bool {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return false
+	}
+	v, ok := obj[key]
+	if !ok {
+		return false
+	}
+	var b bool
+	_ = json.Unmarshal(v, &b)
+	return b
 }
 
 // extractRunID extracts the run ID from a directory path (last path component).

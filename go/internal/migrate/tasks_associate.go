@@ -497,6 +497,14 @@ func runSetNewCodePeriods(ctx context.Context, e *Executor) error {
 		}
 	}
 
+	// Org-default NCD that projects with unsupported types fall back
+	// to. Derived from the SQS global NCD extract via the project-
+	// scope type map so the value is guaranteed to be settable on
+	// SQC at project scope. If SQS had no global NCD set, or its
+	// global type isn't project-scope-supported on SQC, we use the
+	// SonarCloud built-in default (previous_version).
+	orgDefaultType, orgDefaultValue := projectScopeOrgDefaultNCD(e)
+
 	counter := NewTaskCounter("setNewCodePeriods")
 	err := forEachExtractItem(ctx, e, "setNewCodePeriods", "getNewCodePeriods",
 		func(ctx context.Context, item structure.ExtractItem, w *common.ChunkWriter) error {
@@ -523,21 +531,38 @@ func runSetNewCodePeriods(ctx context.Context, e *Executor) error {
 			sqcType, mapped := sqcProjectNewCodeType[sqsType]
 			if !mapped {
 				// Type not supported at project scope on SQC (issue
-				// #135). Actively RESET the project-level NCD on SQC
-				// so it falls back to the org default — a bare skip
-				// would leave any stale project-level setting from a
-				// prior migrate run in place.
-				e.Logger.Info("setNewCodePeriods: NCD type not supported on SonarQube Cloud, resetting project to org default",
-					"project", pm.CloudKey, "source_type", sqsType)
-				if err := e.Cloud.Settings.Reset(ctx, pm.CloudKey,
-					[]string{"sonar.leak.period", "sonar.leak.period.type"}, ""); err != nil {
+				// #135). Explicitly set the project's NCD to the org
+				// default (derived from the SQS global NCD) — a
+				// settings/reset alone leaves the project unset
+				// because SonarCloud's org-level NCD lives in the
+				// organization metadata, not in inherited settings.
+				e.Logger.Info("setNewCodePeriods: NCD type not supported on SonarQube Cloud, setting project to org default",
+					"project", pm.CloudKey, "source_type", sqsType,
+					"org_default_type", orgDefaultType, "org_default_value", orgDefaultValue)
+				if err := e.Cloud.Settings.Set(ctx, pm.CloudKey, "sonar.leak.period", orgDefaultValue, ""); err != nil {
 					counter.Fail()
-					logAPIWarn(e.Logger, "setNewCodePeriods reset failed", err,
+					logAPIWarn(e.Logger, "setNewCodePeriods org-default value failed", err,
 						"project", pm.CloudKey, "source_type", sqsType)
-				} else {
-					counter.Success()
+					return nil
 				}
-				_ = w.WriteOne(item.Data)
+				if err := e.Cloud.Settings.Set(ctx, pm.CloudKey, "sonar.leak.period.type", orgDefaultType, ""); err != nil {
+					counter.Fail()
+					logAPIWarn(e.Logger, "setNewCodePeriods org-default type failed", err,
+						"project", pm.CloudKey, "source_type", sqsType)
+					return nil
+				}
+				counter.Success()
+				// Sidecar JSONL marker so the PDF report's Projects
+				// table can flag this project as having had an
+				// unsupported NCD type that fell back to the org
+				// default. The cloud_project_key + source_ncd_type +
+				// ncd_fallback flag are what collectNCDFallback
+				// reads in internal/report/summary.
+				_ = w.WriteOne(common.EnrichRaw(item.Data, map[string]any{
+					"cloud_project_key": pm.CloudKey,
+					"source_ncd_type":   sqsType,
+					"ncd_fallback":      true,
+				}))
 				return nil
 			}
 			// SonarCloud sets the project-level new code definition via
@@ -589,6 +614,40 @@ var sqcNewCodeType = map[string]string{
 	"PREVIOUS_VERSION":  "previous_version",
 	"REFERENCE_BRANCH":  "reference_branch",
 	"SPECIFIC_ANALYSIS": "specific_analysis",
+}
+
+// projectScopeOrgDefaultNCD computes the (sonar.leak.period.type,
+// sonar.leak.period) value pair that runSetNewCodePeriods uses as
+// the fallback for projects whose SQS NCD type is not supported at
+// SonarCloud project scope (issue #135). The pair is derived from
+// the SQS global NCD extract so it matches the org-level default
+// that runSetGlobalNewCodePeriod migrates. If SQS had no global NCD,
+// or its global type isn't supported at SQC project scope, we fall
+// back to SonarCloud's built-in default (previous_version), which
+// is what a fresh SQC org uses.
+func projectScopeOrgDefaultNCD(e *Executor) (typeValue string, value string) {
+	const sqcBuiltinType, sqcBuiltinValue = "previous_version", "previous_version"
+	items, err := readExtractItems(e, "getGlobalNewCodePeriod")
+	if err != nil || len(items) == 0 {
+		return sqcBuiltinType, sqcBuiltinValue
+	}
+	src := items[0].Data
+	sqsType := extractField(src, "type")
+	if sqsType == "DAYS" {
+		sqsType = "NUMBER_OF_DAYS"
+	}
+	sqcType, mapped := sqcProjectNewCodeType[sqsType]
+	if !mapped {
+		return sqcBuiltinType, sqcBuiltinValue
+	}
+	v := extractAnyStr(src, "value")
+	if sqcType == "previous_version" {
+		v = "previous_version"
+	}
+	if v == "" {
+		return sqcBuiltinType, sqcBuiltinValue
+	}
+	return sqcType, v
 }
 
 // sqcProjectNewCodeType maps the NCD types accepted by SonarCloud's

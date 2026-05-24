@@ -1052,6 +1052,60 @@ func TestCollectSummaryNCDLimitations(t *testing.T) {
 	}
 }
 
+// TestCollectSummaryAttachesNCDFallbackToProject is a regression for
+// issue #135 — when a project's SQS NCD type isn't supported at SQC
+// project scope, the migrate task sets the project to the org
+// default AND writes a sidecar marker (ncd_fallback=true) so the
+// PDF report can flag the project. This test confirms the marker is
+// picked up and surfaced in the project's Detail field via the
+// |ncdFallback:<type> suffix that the PDF renderer interprets.
+func TestCollectSummaryAttachesNCDFallbackToProject(t *testing.T) {
+	dir := t.TempDir()
+	runID := "run-ncd-fallback"
+	runDir := filepath.Join(dir, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeExtractMeta(t, filepath.Join(dir, "extract-01"), "https://sq.example.com")
+
+	writeTaskJSONL(t, runDir, "createProjects", []map[string]any{
+		{"name": "Project A", "sonarcloud_org_key": "org1", "cloud_project_key": "org1_projA"},
+		{"name": "Project B", "sonarcloud_org_key": "org1", "cloud_project_key": "org1_projB"},
+	})
+	writeTaskJSONL(t, runDir, "setNewCodePeriods", []map[string]any{
+		// projA had REFERENCE_BRANCH on SQS — fell back to org default
+		// at runtime, marker written for the report.
+		{"projectKey": "projA", "cloud_project_key": "org1_projA", "type": "REFERENCE_BRANCH", "source_ncd_type": "REFERENCE_BRANCH", "ncd_fallback": true},
+		// projB had NUMBER_OF_DAYS — applied normally, no marker.
+		{"projectKey": "projB", "cloud_project_key": "org1_projB", "type": "NUMBER_OF_DAYS", "value": "30"},
+	})
+
+	summary, err := CollectSummary(runDir, dir)
+	if err != nil {
+		t.Fatalf("CollectSummary: %v", err)
+	}
+	projSection := findSection(summary, "Projects")
+	if projSection == nil {
+		t.Fatal("missing Projects section")
+	}
+
+	var aDetail, bDetail string
+	for _, p := range projSection.Succeeded {
+		switch p.Name {
+		case "Project A":
+			aDetail = p.Detail
+		case "Project B":
+			bDetail = p.Detail
+		}
+	}
+	if !strings.Contains(aDetail, "|ncdFallback:REFERENCE_BRANCH") {
+		t.Errorf("Project A Detail must carry the ncdFallback marker, got %q", aDetail)
+	}
+	if strings.Contains(bDetail, "ncdFallback") {
+		t.Errorf("Project B (supported NCD type) must NOT carry the ncdFallback marker, got %q", bDetail)
+	}
+}
+
 // When the SQS instance had no applications, the limitations list
 // must NOT include the applications entry — otherwise every report
 // would carry an irrelevant note.

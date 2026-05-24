@@ -401,15 +401,15 @@ func TestRunSetNewCodePeriodsTranslatesAndSets(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	// Four calls total — REFERENCE_BRANCH (unsupported), UNKNOWN_MODE
-	// (unmapped), and the per-branch NUMBER_OF_DAYS on feature-x are
-	// all skipped; the remaining migrated records each dispatch TWO
-	// /api/settings/set calls:
-	//   - proj-days: sonar.leak.period.type=days + sonar.leak.period=14
-	//   - proj-prev: sonar.leak.period.type=previous_version +
-	//                sonar.leak.period=previous_version
-	if len(recorded) != 4 {
-		t.Fatalf("expected 4 calls (2 per project), got %d: %+v", len(recorded), recorded)
+	// Eight calls total — every migrated record dispatches TWO
+	// /api/settings/set calls (value then type). The per-branch
+	// override on feature-x is skipped. Supported types use their
+	// own values; unsupported types (REFERENCE_BRANCH, UNKNOWN_MODE)
+	// fall back to the SQC org default (previous_version /
+	// previous_version since this test doesn't seed a SQS global
+	// NCD extract).
+	if len(recorded) != 8 {
+		t.Fatalf("expected 8 calls (2 per project × 4 projects), got %d: %+v", len(recorded), recorded)
 	}
 
 	byProject := map[string][]call{}
@@ -435,6 +435,13 @@ func TestRunSetNewCodePeriodsTranslatesAndSets(t *testing.T) {
 	}
 	check(t, "org1_proj-days", "14", "days")
 	check(t, "org1_proj-prev", "previous_version", "previous_version")
+	// proj-ref and proj-unknown both fall back to the SQC org
+	// default (previous_version since no SQS global NCD is seeded
+	// in this test). Pinning the fallback values ensures the
+	// behaviour is the explicit org-default Set — not a reset — and
+	// not a stale value carryover.
+	check(t, "org1_proj-ref", "previous_version", "previous_version")
+	check(t, "org1_proj-unknown", "previous_version", "previous_version")
 
 	for _, c := range recorded {
 		if c.branch != "" {
@@ -442,33 +449,11 @@ func TestRunSetNewCodePeriodsTranslatesAndSets(t *testing.T) {
 		}
 	}
 
-	// Every record whose type isn't in sqcProjectNewCodeType — both
-	// the well-known unsupported types (REFERENCE_BRANCH,
-	// SPECIFIC_ANALYSIS) and any other future / unknown type — must
-	// trigger a /api/settings/reset on the matching project so that
-	// SQC falls back to the org default. Any stale project-level
-	// NCD from a prior migrate run is cleared. /api/settings/set
-	// must NOT be called for these projects.
-	if len(resetCalls) != 2 {
-		t.Fatalf("expected 2 reset calls (proj-ref + proj-unknown), got %d: %+v", len(resetCalls), resetCalls)
-	}
-	resetProjects := map[string]string{}
-	for _, c := range resetCalls {
-		resetProjects[c.project] = c.keys
-	}
-	for _, project := range []string{"org1_proj-ref", "org1_proj-unknown"} {
-		keys, ok := resetProjects[project]
-		if !ok {
-			t.Errorf("expected reset call for %s", project)
-			continue
-		}
-		if !strings.Contains(keys, "sonar.leak.period") || !strings.Contains(keys, "sonar.leak.period.type") {
-			t.Errorf("%s reset keys must include sonar.leak.period and sonar.leak.period.type, got %q", project, keys)
-		}
-	}
-	for _, c := range recorded {
-		if c.project == "org1_proj-ref" || c.project == "org1_proj-unknown" {
-			t.Errorf("unsupported-type project %s must not receive a settings/set call; we reset instead. got %+v", c.project, c)
-		}
+	// Unsupported NCD types are EXPLICITLY set to the org default,
+	// not reset — a bare reset would leave the project unset on
+	// SonarCloud because the org-level NCD lives in organization
+	// metadata, not in inheritable settings.
+	if len(resetCalls) != 0 {
+		t.Errorf("/api/settings/reset must not be called; unsupported types are explicitly set to org default, got %+v", resetCalls)
 	}
 }
