@@ -295,27 +295,44 @@ func TestRunSetGlobalNewCodePeriodNormalizesLegacyDaysAlias(t *testing.T) {
 }
 
 // TestRunSetNewCodePeriodsTranslatesAndSets verifies that runSetNewCodePeriods
-// translates SQS NCD types to their SQC equivalents, omits the value for
-// previous_version, and resolves projectKey + branch to the right cloud
-// project + organization.
+// posts the project-level new code definition to SonarCloud as two
+// /api/settings/set calls (sonar.leak.period then sonar.leak.period.type)
+// for supported types, and ACTIVELY RESETS the same two settings via
+// /api/settings/reset for unsupported types (issue #135 — projects
+// fall back to the org default rather than retaining stale state
+// from a prior migrate). Per-branch overrides are skipped silently.
 func TestRunSetNewCodePeriodsTranslatesAndSets(t *testing.T) {
 	type call struct {
-		project, branch, ncdType, value, org string
+		project, branch, settingKey, value string
+	}
+	type resetCall struct {
+		project string
+		keys    string
 	}
 	var (
-		mu       sync.Mutex
-		recorded []call
+		mu          sync.Mutex
+		recorded    []call
+		resetCalls  []resetCall
 	)
 	cloudMux := http.NewServeMux()
-	cloudMux.HandleFunc("POST /api/new_code_periods/set", func(w http.ResponseWriter, r *http.Request) {
+	cloudMux.HandleFunc("POST /api/settings/set", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		mu.Lock()
 		recorded = append(recorded, call{
-			project: r.FormValue("project"),
-			branch:  r.FormValue("branch"),
-			ncdType: r.FormValue("type"),
-			value:   r.FormValue("value"),
-			org:     r.FormValue("organization"),
+			project:    r.FormValue("component"),
+			branch:     r.FormValue("branch"),
+			settingKey: r.FormValue("key"),
+			value:      r.FormValue("value"),
+		})
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	cloudMux.HandleFunc("POST /api/settings/reset", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		mu.Lock()
+		resetCalls = append(resetCalls, resetCall{
+			project: r.FormValue("component"),
+			keys:    r.FormValue("keys"),
 		})
 		mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
@@ -332,18 +349,34 @@ func TestRunSetNewCodePeriodsTranslatesAndSets(t *testing.T) {
 	dir := t.TempDir()
 	e := newTestExecutor(cloudSrv, apiSrv, dir)
 
-	// Three extract records covering each translated NCD type plus an
-	// unmapped one (UNKNOWN) which the task should skip with a warning.
+	// Five extract records exercising the four classes:
+	//   - NUMBER_OF_DAYS / PREVIOUS_VERSION on the main branch → applied.
+	//   - REFERENCE_BRANCH on the main branch → skipped (issue #135 —
+	//     unsupported at SQC project scope).
+	//   - UNKNOWN_MODE → skipped (unmapped).
+	//   - PREVIOUS_VERSION on a non-main branch → skipped (issue #134
+	//     — SQC has no per-branch NCD concept).
 	extractDir := filepath.Join(dir, "extract-01", "getNewCodePeriods")
 	if err := os.MkdirAll(extractDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	f, _ := os.Create(filepath.Join(extractDir, "results.1.jsonl"))
 	for _, rec := range []map[string]any{
-		{"projectKey": "proj-days", "branchKey": "main", "type": "NUMBER_OF_DAYS", "value": "14"},
+		// Project-level NUMBER_OF_DAYS on main branch with inherited=true
+		// — SQS represents the project-level NCD as a main-branch
+		// record where the branch inherits from the project. Must be
+		// applied (this is the regression file-issue 44-days case).
+		{"projectKey": "proj-days", "branchKey": "main", "type": "NUMBER_OF_DAYS", "value": "14", "inherited": true},
 		{"projectKey": "proj-prev", "branchKey": "main", "type": "PREVIOUS_VERSION", "value": nil},
 		{"projectKey": "proj-ref", "branchKey": "main", "type": "REFERENCE_BRANCH", "value": "develop"},
 		{"projectKey": "proj-unknown", "branchKey": "main", "type": "UNKNOWN_MODE"},
+		// Explicit per-branch override → skipped (#134).
+		{"projectKey": "proj-days", "branchKey": "feature-x", "type": "NUMBER_OF_DAYS", "value": "7"},
+		// Reflected non-main branch (branch inherits project setting)
+		// — must NOT be applied (the main-branch record already covers
+		// the project-level NCD) and must NOT trigger a per-branch
+		// limitation (no explicit override).
+		{"projectKey": "proj-days", "branchKey": "feature-y", "type": "NUMBER_OF_DAYS", "value": "14", "inherited": true},
 	} {
 		b, _ := json.Marshal(rec)
 		f.Write(b)
@@ -353,10 +386,10 @@ func TestRunSetNewCodePeriodsTranslatesAndSets(t *testing.T) {
 
 	pw, _ := e.Store.Writer("createProjects")
 	for _, src := range []map[string]any{
-		{"key": "proj-days", "server_url": testServerURL, "sonarcloud_org_key": "org1", "cloud_project_key": "org1_proj-days"},
-		{"key": "proj-prev", "server_url": testServerURL, "sonarcloud_org_key": "org1", "cloud_project_key": "org1_proj-prev"},
-		{"key": "proj-ref", "server_url": testServerURL, "sonarcloud_org_key": "org1", "cloud_project_key": "org1_proj-ref"},
-		{"key": "proj-unknown", "server_url": testServerURL, "sonarcloud_org_key": "org1", "cloud_project_key": "org1_proj-unknown"},
+		{"key": "proj-days", "server_url": testServerURL, "sonarcloud_org_key": "org1", "cloud_project_key": "org1_proj-days", "main_branch": "main"},
+		{"key": "proj-prev", "server_url": testServerURL, "sonarcloud_org_key": "org1", "cloud_project_key": "org1_proj-prev", "main_branch": "main"},
+		{"key": "proj-ref", "server_url": testServerURL, "sonarcloud_org_key": "org1", "cloud_project_key": "org1_proj-ref", "main_branch": "main"},
+		{"key": "proj-unknown", "server_url": testServerURL, "sonarcloud_org_key": "org1", "cloud_project_key": "org1_proj-unknown", "main_branch": "main"},
 	} {
 		b, _ := json.Marshal(src)
 		pw.WriteOne(b)
@@ -368,20 +401,59 @@ func TestRunSetNewCodePeriodsTranslatesAndSets(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	// Expect 3 calls — the UNKNOWN_MODE record should be skipped.
-	if len(recorded) != 3 {
-		t.Fatalf("expected 3 calls, got %d: %+v", len(recorded), recorded)
+	// Eight calls total — every migrated record dispatches TWO
+	// /api/settings/set calls (value then type). The per-branch
+	// override on feature-x is skipped. Supported types use their
+	// own values; unsupported types (REFERENCE_BRANCH, UNKNOWN_MODE)
+	// fall back to the SQC org default (previous_version /
+	// previous_version since this test doesn't seed a SQS global
+	// NCD extract).
+	if len(recorded) != 8 {
+		t.Fatalf("expected 8 calls (2 per project × 4 projects), got %d: %+v", len(recorded), recorded)
 	}
-	sort.Slice(recorded, func(i, j int) bool { return recorded[i].project < recorded[j].project })
 
-	want := []call{
-		{project: "org1_proj-days", branch: "main", ncdType: "days", value: "14", org: "org1"},
-		{project: "org1_proj-prev", branch: "main", ncdType: "previous_version", value: "", org: "org1"},
-		{project: "org1_proj-ref", branch: "main", ncdType: "reference_branch", value: "develop", org: "org1"},
+	byProject := map[string][]call{}
+	for _, c := range recorded {
+		byProject[c.project] = append(byProject[c.project], c)
 	}
-	for i, w := range want {
-		if recorded[i] != w {
-			t.Errorf("call %d: got %+v, want %+v", i, recorded[i], w)
+
+	// Order matters: SonarCloud rejects sonar.leak.period.type when
+	// the existing sonar.leak.period value is inconsistent with the
+	// new type, so value goes first then type.
+	check := func(t *testing.T, project, wantValue, wantType string) {
+		t.Helper()
+		calls := byProject[project]
+		if len(calls) != 2 {
+			t.Fatalf("%s: expected 2 calls (value then type), got %d: %+v", project, len(calls), calls)
 		}
+		if calls[0].settingKey != "sonar.leak.period" || calls[0].value != wantValue {
+			t.Errorf("%s: first call must be sonar.leak.period=%q, got %+v", project, wantValue, calls[0])
+		}
+		if calls[1].settingKey != "sonar.leak.period.type" || calls[1].value != wantType {
+			t.Errorf("%s: second call must be sonar.leak.period.type=%q, got %+v", project, wantType, calls[1])
+		}
+	}
+	check(t, "org1_proj-days", "14", "days")
+	check(t, "org1_proj-prev", "previous_version", "previous_version")
+	// proj-ref and proj-unknown both fall back to the SQC org
+	// default (previous_version since no SQS global NCD is seeded
+	// in this test). Pinning the fallback values ensures the
+	// behaviour is the explicit org-default Set — not a reset — and
+	// not a stale value carryover.
+	check(t, "org1_proj-ref", "previous_version", "previous_version")
+	check(t, "org1_proj-unknown", "previous_version", "previous_version")
+
+	for _, c := range recorded {
+		if c.branch != "" {
+			t.Errorf("branch param must be omitted, got %+v", c)
+		}
+	}
+
+	// Unsupported NCD types are EXPLICITLY set to the org default,
+	// not reset — a bare reset would leave the project unset on
+	// SonarCloud because the org-level NCD lives in organization
+	// metadata, not in inheritable settings.
+	if len(resetCalls) != 0 {
+		t.Errorf("/api/settings/reset must not be called; unsupported types are explicitly set to org default, got %+v", resetCalls)
 	}
 }

@@ -972,6 +972,140 @@ func TestCollectSummaryMentionsUnmigratedApplications(t *testing.T) {
 	}
 }
 
+// TestCollectSummaryNCDLimitations is a regression for #134 + #135.
+// Seeds a getNewCodePeriods extract with:
+//
+//   - one inherited:true record → must be ignored (defaults aren't
+//     overrides).
+//   - one per-branch override (branchKey="feature-x" while the
+//     project's main branch is "main") → must count as a per-branch
+//     limitation (#134).
+//   - two project-main-branch records of type REFERENCE_BRANCH (one
+//     for projA, one for projB) → both projects must count as
+//     having an unsupported NCD type (#135).
+//   - one SPECIFIC_ANALYSIS record on a third project's main branch
+//     → counts as an unsupported NCD type project (#135).
+//   - one NUMBER_OF_DAYS record on a project's main branch → must
+//     NOT count (it's the supported case).
+func TestCollectSummaryNCDLimitations(t *testing.T) {
+	dir := t.TempDir()
+	runID := "run-ncd"
+	runDir := filepath.Join(dir, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	extractDir := filepath.Join(dir, "extract-01")
+	writeExtractMeta(t, extractDir, "https://sq.example.com")
+	writeTaskJSONL(t, extractDir, "getNewCodePeriods", []map[string]any{
+		// main-branch records carry the project-level NCD. inherited=true
+		// here means the branch inherits from the project — NOT that
+		// the project is inheriting from somewhere upstream. Both of
+		// these are supported (NUMBER_OF_DAYS) so neither counts.
+		{"projectKey": "projA", "branchKey": "main", "type": "NUMBER_OF_DAYS", "value": "44", "inherited": true},
+		{"projectKey": "projD", "branchKey": "main", "type": "NUMBER_OF_DAYS", "value": "30"},
+		// Per-branch override (inherited:false on a non-main branch) → #134.
+		{"projectKey": "projA", "branchKey": "feature-x", "type": "NUMBER_OF_DAYS", "value": "7"},
+		// Reflected non-main record (branch inherits project setting) —
+		// must NOT count toward #134 because it isn't an explicit
+		// override.
+		{"projectKey": "projD", "branchKey": "feature-y", "type": "NUMBER_OF_DAYS", "value": "30", "inherited": true},
+		// Project main-branch unsupported types → #135 (two distinct projects).
+		{"projectKey": "projB", "branchKey": "main", "type": "REFERENCE_BRANCH", "value": "main"},
+		{"projectKey": "projC", "branchKey": "main", "type": "SPECIFIC_ANALYSIS", "value": "abc123"},
+	})
+
+	// createProjects in the run directory carries the main_branch per
+	// project — collectLimitations consults it to decide which records
+	// are per-branch vs. project-main-branch.
+	writeTaskJSONL(t, runDir, "createProjects", []map[string]any{
+		{"key": "projA", "server_url": "https://sq.example.com", "main_branch": "main"},
+		{"key": "projB", "server_url": "https://sq.example.com", "main_branch": "main"},
+		{"key": "projC", "server_url": "https://sq.example.com", "main_branch": "main"},
+		{"key": "projD", "server_url": "https://sq.example.com", "main_branch": "main"},
+	})
+
+	summary, err := CollectSummary(runDir, dir)
+	if err != nil {
+		t.Fatalf("CollectSummary: %v", err)
+	}
+
+	var perBranch, unsupportedType string
+	for _, msg := range summary.Limitations {
+		if strings.Contains(msg, "per-branch new-code-definition") {
+			perBranch = msg
+		}
+		if strings.Contains(msg, "reference_branch or specific_analysis") {
+			unsupportedType = msg
+		}
+	}
+	if perBranch == "" {
+		t.Fatalf("expected per-branch NCD limitation bullet, got %v", summary.Limitations)
+	}
+	if !strings.Contains(perBranch, "1 branch-level") {
+		t.Errorf("per-branch bullet should mention 1 branch-level entry, got %q", perBranch)
+	}
+	if unsupportedType == "" {
+		t.Fatalf("expected unsupported-type NCD limitation bullet, got %v", summary.Limitations)
+	}
+	if !strings.Contains(unsupportedType, "2 project(s)") {
+		t.Errorf("unsupported-type bullet should mention 2 project(s) (projB, projC), got %q", unsupportedType)
+	}
+}
+
+// TestCollectSummaryAttachesNCDFallbackToProject is a regression for
+// issue #135 — when a project's SQS NCD type isn't supported at SQC
+// project scope, the migrate task sets the project to the org
+// default AND writes a sidecar marker (ncd_fallback=true) so the
+// PDF report can flag the project. This test confirms the marker is
+// picked up and surfaced in the project's Detail field via the
+// |ncdFallback:<type> suffix that the PDF renderer interprets.
+func TestCollectSummaryAttachesNCDFallbackToProject(t *testing.T) {
+	dir := t.TempDir()
+	runID := "run-ncd-fallback"
+	runDir := filepath.Join(dir, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeExtractMeta(t, filepath.Join(dir, "extract-01"), "https://sq.example.com")
+
+	writeTaskJSONL(t, runDir, "createProjects", []map[string]any{
+		{"name": "Project A", "sonarcloud_org_key": "org1", "cloud_project_key": "org1_projA"},
+		{"name": "Project B", "sonarcloud_org_key": "org1", "cloud_project_key": "org1_projB"},
+	})
+	writeTaskJSONL(t, runDir, "setNewCodePeriods", []map[string]any{
+		// projA had REFERENCE_BRANCH on SQS — fell back to org default
+		// at runtime, marker written for the report.
+		{"projectKey": "projA", "cloud_project_key": "org1_projA", "type": "REFERENCE_BRANCH", "source_ncd_type": "REFERENCE_BRANCH", "ncd_fallback": true},
+		// projB had NUMBER_OF_DAYS — applied normally, no marker.
+		{"projectKey": "projB", "cloud_project_key": "org1_projB", "type": "NUMBER_OF_DAYS", "value": "30"},
+	})
+
+	summary, err := CollectSummary(runDir, dir)
+	if err != nil {
+		t.Fatalf("CollectSummary: %v", err)
+	}
+	projSection := findSection(summary, "Projects")
+	if projSection == nil {
+		t.Fatal("missing Projects section")
+	}
+
+	var aDetail, bDetail string
+	for _, p := range projSection.Succeeded {
+		switch p.Name {
+		case "Project A":
+			aDetail = p.Detail
+		case "Project B":
+			bDetail = p.Detail
+		}
+	}
+	if !strings.Contains(aDetail, "|ncdFallback:REFERENCE_BRANCH") {
+		t.Errorf("Project A Detail must carry the ncdFallback marker, got %q", aDetail)
+	}
+	if strings.Contains(bDetail, "ncdFallback") {
+		t.Errorf("Project B (supported NCD type) must NOT carry the ncdFallback marker, got %q", bDetail)
+	}
+}
+
 // When the SQS instance had no applications, the limitations list
 // must NOT include the applications entry — otherwise every report
 // would carry an irrelevant note.

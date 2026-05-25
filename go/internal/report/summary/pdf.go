@@ -523,14 +523,31 @@ func buildUnifiedRows(section Section) []unifiedRow {
 	return rows
 }
 
-// successDetails formats the Details column for a Succeeded item, including
-// scan-history status (projects only) when present.
+// successDetails formats the Details column for a Succeeded item.
+// Projects may carry up to two trailing markers added by the
+// collectors:
+//   - |ncdFallback:<sqs_type> — issue #135, the SQS NCD type wasn't
+//     supported at SonarCloud project scope; the project fell back
+//     to the org default.
+//   - |scan:<status> — issue #208 era, scan-history import outcome.
+//
+// Both markers are split off and rendered on separate lines after
+// the cloud key.
 func successDetails(item EntityItem) string {
-	cloudKey, scan := parseScanHistory(item.Detail)
-	if scan == "" {
+	cloudKey, scan, ncdFallback := parseProjectDetailMarkers(item.Detail)
+	parts := []string{cloudKey}
+	if ncdFallback != "" {
+		parts = append(parts, fmt.Sprintf(
+			"new code definition: %s on SonarQube Server is not supported at project scope on SonarQube Cloud — falling back to the org default",
+			ncdFallback))
+	}
+	if scan != "" {
+		parts = append(parts, fmt.Sprintf("scan history: %s", scanStatusLabel(scan)))
+	}
+	if len(parts) == 1 {
 		return cloudKey
 	}
-	return fmt.Sprintf("%s — scan history: %s", cloudKey, scanStatusLabel(scan))
+	return strings.Join(parts, "\n")
 }
 
 // partialDetails formats the Details column for a Partial item — each issue
@@ -626,6 +643,25 @@ func parseScanHistory(detail string) (string, string) {
 		return detail, ""
 	}
 	return detail[:idx], detail[idx+6:]
+}
+
+// parseProjectDetailMarkers splits a project's Detail string into its
+// three parts: the cloud key, the scan-history status (or empty),
+// and the NCD fallback source type (or empty). Marker ordering set
+// by attachNCDFallback puts the NCD marker BEFORE the scan marker.
+func parseProjectDetailMarkers(detail string) (cloudKey, scan, ncdFallback string) {
+	cloudKey = detail
+	// scan marker (always last when present).
+	if idx := strings.Index(cloudKey, "|scan:"); idx >= 0 {
+		scan = cloudKey[idx+len("|scan:"):]
+		cloudKey = cloudKey[:idx]
+	}
+	// NCD fallback marker.
+	if idx := strings.Index(cloudKey, "|ncdFallback:"); idx >= 0 {
+		ncdFallback = cloudKey[idx+len("|ncdFallback:"):]
+		cloudKey = cloudKey[:idx]
+	}
+	return cloudKey, scan, ncdFallback
 }
 
 func scanStatusLabel(status string) string {

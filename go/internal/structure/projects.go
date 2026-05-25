@@ -10,11 +10,17 @@ import (
 // Cloud endpoint patterns for ALM binding detection.
 var cloudEndpoints = []string{"dev.azure.com", "gitlab.com", "api.github.com", "bitbucket.org"}
 
-// NewCodeMappings maps SonarQube NCD types to Cloud types.
+// newCodeMappings maps SonarQube Server NCD types to the equivalent
+// SonarQube Cloud "type" values accepted by /api/projects/create and
+// /api/new_code_periods/set. Only the types that SonarQube Cloud
+// actually accepts are listed; REFERENCE_BRANCH and SPECIFIC_ANALYSIS
+// do NOT exist on SQC (issue #135), so projects whose main-branch NCD
+// uses one of those types fall back to the SQC org default by
+// returning a zero newCodeDefinition from getNewCodeDef. The
+// limitation is surfaced in the PDF report via collectLimitations.
 var newCodeMappings = map[string]string{
 	"NUMBER_OF_DAYS":   "days",
 	"PREVIOUS_VERSION": "previous_version",
-	"REFERENCE_BRANCH": "reference_branch",
 }
 
 // IsCloudBinding checks whether a binding URL matches a known cloud endpoint.
