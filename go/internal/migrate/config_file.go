@@ -38,10 +38,27 @@ type configFileShape struct {
 }
 
 type sonarCloudBlock struct {
+	// Legacy flat fields (Shape 3 v1).
 	URL           string `json:"url"`
 	Token         string `json:"token"`
 	EnterpriseKey string `json:"enterprise_key"`
 	Edition       string `json:"edition"`
+
+	// New nested format.
+	Enterprise    *enterpriseBlock `json:"enterprise"`
+	Organizations []OrgConfigEntry `json:"organizations"`
+}
+
+type enterpriseBlock struct {
+	Key string `json:"key"`
+}
+
+// OrgConfigEntry holds per-organization SonarCloud credentials used both for
+// migration and to pre-populate organizations.csv during structure.
+type OrgConfigEntry struct {
+	Key   string `json:"key"`
+	Token string `json:"token"`
+	URL   string `json:"url"`
 }
 
 type settingsBlock struct {
@@ -65,31 +82,52 @@ func parseConfigFile(path string) (configFileShape, error) {
 }
 
 func (s configFileShape) toMigrateConfig() MigrateConfig {
-	var cfg MigrateConfig
 	switch {
 	case s.SonarCloud != nil:
-		cfg.Token = s.SonarCloud.Token
-		cfg.URL = s.SonarCloud.URL
-		cfg.EnterpriseKey = s.SonarCloud.EnterpriseKey
-		cfg.Edition = s.SonarCloud.Edition
-		if s.Settings != nil {
-			cfg.ExportDirectory = s.Settings.ExportDirectory
-			cfg.Concurrency = s.Settings.Concurrency
-		}
+		return s.SonarCloud.toMigrateConfig(s.Settings)
 	case s.Migrate != nil:
 		return s.Migrate.toMigrateConfig()
 	default:
-		cfg.Token = s.Token
-		cfg.EnterpriseKey = s.EnterpriseKey
-		cfg.URL = s.URL
-		cfg.Edition = s.Edition
-		cfg.ExportDirectory = s.ExportDirectory
-		cfg.Concurrency = s.Concurrency
-		cfg.RunID = s.RunID
-		cfg.TargetTask = s.TargetTask
-		cfg.SkipProfiles = s.SkipProfiles
-		cfg.IncludeScanHistory = s.IncludeScanHistory
-		cfg.Debug = s.Debug
+		return MigrateConfig{
+			Token:              s.Token,
+			EnterpriseKey:      s.EnterpriseKey,
+			URL:                s.URL,
+			Edition:            s.Edition,
+			ExportDirectory:    s.ExportDirectory,
+			Concurrency:        s.Concurrency,
+			RunID:              s.RunID,
+			TargetTask:         s.TargetTask,
+			SkipProfiles:       s.SkipProfiles,
+			IncludeScanHistory: s.IncludeScanHistory,
+			Debug:              s.Debug,
+		}
+	}
+}
+
+func (sc sonarCloudBlock) toMigrateConfig(settings *settingsBlock) MigrateConfig {
+	cfg := MigrateConfig{Edition: sc.Edition}
+
+	if sc.Enterprise != nil && sc.Enterprise.Key != "" {
+		cfg.EnterpriseKey = sc.Enterprise.Key
+	} else {
+		cfg.EnterpriseKey = sc.EnterpriseKey
+	}
+
+	if len(sc.Organizations) > 0 {
+		first := sc.Organizations[0]
+		cfg.Token = first.Token
+		cfg.URL = first.URL
+	}
+	if cfg.Token == "" {
+		cfg.Token = sc.Token
+	}
+	if cfg.URL == "" {
+		cfg.URL = sc.URL
+	}
+
+	if settings != nil {
+		cfg.ExportDirectory = settings.ExportDirectory
+		cfg.Concurrency = settings.Concurrency
 	}
 	return cfg
 }
@@ -105,6 +143,20 @@ func (s configFileShape) toResetConfig() ResetConfig {
 		ExportDirectory: m.ExportDirectory,
 		Debug:           m.Debug,
 	}
+}
+
+// LoadSonarCloudOrgsFromConfigFile returns the organizations list from a
+// side-sectioned config file. Returns nil when the file uses a different shape
+// or no organizations are defined.
+func LoadSonarCloudOrgsFromConfigFile(path string) ([]OrgConfigEntry, error) {
+	shape, err := parseConfigFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if shape.SonarCloud == nil {
+		return nil, nil
+	}
+	return shape.SonarCloud.Organizations, nil
 }
 
 // LoadMigrateConfigFile parses a JSON config file in any of the three

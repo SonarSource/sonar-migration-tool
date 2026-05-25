@@ -4,7 +4,9 @@ import "fmt"
 
 // RunStructure groups projects into organizations based on DevOps Bindings
 // and Server URLs. Outputs organizations.csv and projects.csv.
-func RunStructure(exportDirectory string) error {
+// When defaultOrgKey is non-empty and only one SonarCloud org is configured,
+// it pre-populates the sonarcloud_org_key column in organizations.csv.
+func RunStructure(exportDirectory string, defaultOrgKey ...string) error {
 	mapping, err := GetUniqueExtracts(exportDirectory)
 	if err != nil {
 		return fmt.Errorf("scanning extracts: %w", err)
@@ -14,7 +16,7 @@ func RunStructure(exportDirectory string) error {
 	}
 
 	bindings, projects := MapProjectStructure(exportDirectory, mapping)
-	organizations := MapOrganizationStructure(bindings)
+	organizations := MapOrganizationStructure(bindings, defaultOrgKey...)
 
 	if err := ExportCSV(exportDirectory, "organizations", organizations); err != nil {
 		return fmt.Errorf("exporting organizations.csv: %w", err)
