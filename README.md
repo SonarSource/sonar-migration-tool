@@ -139,6 +139,7 @@ sonar-migration-tool extract <URL> <TOKEN> --export_directory ./files/ [--concur
 | `--extract_type` | Type of extract to run |
 | `--export_directory` | Output directory (default: `/app/files/` — override when running natively) |
 | `--include_scan_history` | Extract full issue data, source code, and SCM blame for scan history import |
+| `--project_key` | Comma-separated list of SonarQube project keys to scope the extract to. Empty extracts every project. See [Single-project / selective re-migration](#single-project--selective-re-migration). |
 | `--pem_file_path` | Client certificate PEM file (mTLS) |
 | `--key_file_path` | Client certificate key file (mTLS) |
 | `--cert_password` | Client certificate password (mTLS) |
@@ -185,10 +186,44 @@ sonar-migration-tool migrate <TOKEN> <ENTERPRISE_KEY> --export_directory ./files
 | `--run_id` | Resume a failed migration from the last completed task |
 | `--target_task` | Run a specific migration task (with its dependencies) |
 | `--skip_profiles` | Skip quality profile migration/provisioning |
+| `--project_key` | Comma-separated list of SonarQube project keys to scope the migration to. Empty migrates every project in `projects.csv`. See [Single-project / selective re-migration](#single-project--selective-re-migration). |
 | `--edition` | SonarQube Cloud license edition |
 | `--url` | SonarQube Cloud URL (default: `https://sonarcloud.io/`) |
 | `--concurrency` | Max concurrent requests |
 | `--export_directory` | Directory containing SonarQube exports (default: `/app/files/` — override when running natively) |
+
+---
+
+## Single-project / selective re-migration
+
+The `--project_key` flag on `extract` and `migrate` accepts a **comma-separated list of SonarQube project keys** and scopes the run to just those projects. Empty (the default) processes every project. Two common use cases:
+
+### Test the tool against a single representative project
+
+Before running a full migration against your whole instance, validate the toolchain end-to-end against one project:
+
+```bash
+sonar-migration-tool extract  <URL> <TOKEN>            --project_key okorach-oss_sonar-tools  --export_directory ./files/
+sonar-migration-tool structure                          --export_directory ./files/
+# edit organizations.csv → set sonarcloud_org_key
+sonar-migration-tool mappings                           --export_directory ./files/
+sonar-migration-tool migrate  <CLOUD_TOKEN> <ENT_KEY>  --project_key okorach-oss_sonar-tools  --export_directory ./files/
+```
+
+Only that project is extracted from SQS and pushed to SQC, so the round trip is fast and the SQC org stays clean for repeat tests.
+
+### Re-migrate a few failed projects after a full run
+
+When a full migration succeeded for most projects but failed for a handful, you don't need to re-run the whole pipeline. Re-extract just the failed projects, then re-migrate them:
+
+```bash
+sonar-migration-tool extract  <URL> <TOKEN>            --project_key projA,projB,projC  --export_directory ./files/
+sonar-migration-tool migrate  <CLOUD_TOKEN> <ENT_KEY>  --project_key projA,projB,projC  --export_directory ./files/
+```
+
+`createProjects` is idempotent — projects that already exist on SQC return `already exists` and downstream tasks proceed normally on each one.
+
+Whitespace around each key is trimmed; duplicates collapse; empty tokens are dropped. The flag is also accepted via JSON config as `"project_key": "projA,projB,projC"`.
 
 ---
 

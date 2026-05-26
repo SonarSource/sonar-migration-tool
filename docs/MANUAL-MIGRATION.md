@@ -85,6 +85,7 @@ sonar-migration-tool extract http://localhost:9000 YOUR_TOKEN --export_directory
 | `--pem_file_path`   | Path to a PEM client certificate file (mTLS)             | --      |
 | `--key_file_path`   | Path to a private key file (mTLS)                        | --      |
 | `--cert_password`   | Password for the client certificate (mTLS)               | --      |
+| `--project_key`     | Comma-separated list of project keys to scope the extract to. See [Single-Project / Selective Re-Migration](#single-project--selective-re-migration). | --      |
 
 ---
 
@@ -163,6 +164,7 @@ sonar-migration-tool migrate YOUR_CLOUD_TOKEN YOUR_ENTERPRISE_KEY --export_direc
 | `--run_id`          | Resume a previously started migration by its run ID       | --                        |
 | `--target_task`     | Run a specific migration task only                        | --                        |
 | `--skip_profiles`   | Skip migrating quality profiles                           | --                        |
+| `--project_key`     | Comma-separated list of project keys to scope the migration to. See [Single-Project / Selective Re-Migration](#single-project--selective-re-migration). | --                        |
 
 ---
 
@@ -195,6 +197,65 @@ Once the migration is complete:
    # Built binary
    sonar-migration-tool analysis_report <RUN_ID> --export_directory ./files/
    ```
+
+---
+
+## Single-Project / Selective Re-Migration
+
+`extract` and `migrate` both accept a `--project_key` flag whose value is a **comma-separated list of SonarQube project keys**. When set, the run is scoped to just those projects. When omitted, every project is processed (today's default). Two common workflows:
+
+### Test the tool against one project before a full migration
+
+Before running a full migration against every project on your instance, validate the tool end-to-end against a single representative project. Smaller blast radius, faster iteration:
+
+```bash
+# 1. Extract just one project from SonarQube Server.
+sonar-migration-tool extract http://localhost:9000 YOUR_SQS_TOKEN \
+  --project_key okorach-oss_sonar-tools \
+  --export_directory ./files/
+
+# 2. Generate the org-structure CSV and fill in sonarcloud_org_key as usual.
+sonar-migration-tool structure --export_directory ./files/
+#   edit organizations.csv → set sonarcloud_org_key
+
+# 3. Generate entity mappings.
+sonar-migration-tool mappings --export_directory ./files/
+
+# 4. Migrate just that one project to SonarQube Cloud.
+sonar-migration-tool migrate YOUR_CLOUD_TOKEN YOUR_ENTERPRISE_KEY \
+  --project_key okorach-oss_sonar-tools \
+  --export_directory ./files/
+```
+
+Only that project is extracted from SQS and pushed to SQC, so the round trip stays fast and your target organization stays clean for repeat tests. Use `reset` (see "Additional Commands" in the [README](../README.md)) between runs to wipe SQC if you need a fresh baseline.
+
+### Selectively re-migrate a few failed projects after a full run
+
+When a full migration succeeded for most of your projects but failed for a handful, you don't need to re-run the whole pipeline. Re-extract and re-migrate just the offenders by listing them:
+
+```bash
+sonar-migration-tool extract http://localhost:9000 YOUR_SQS_TOKEN \
+  --project_key projA,projB,projC \
+  --export_directory ./files/
+
+sonar-migration-tool migrate YOUR_CLOUD_TOKEN YOUR_ENTERPRISE_KEY \
+  --project_key projA,projB,projC \
+  --export_directory ./files/
+```
+
+`createProjects` is idempotent — a project that already exists on SonarQube Cloud is reported as `already exists` and the downstream tasks (profiles, gates, settings, …) proceed normally against the existing project key.
+
+### Flag semantics
+
+- Whitespace around each key is tolerated and trimmed: `--project_key "projA, projB , projC"` parses cleanly.
+- Empty tokens are dropped: `projA,,projB` parses as `{projA, projB}`.
+- Duplicates collapse silently.
+- The same value can come from a JSON config file as `"project_key": "projA,projB,projC"`.
+- Empty / unset → no filter (today's behaviour: every project).
+
+### What's NOT in scope for `--project_key` (yet)
+
+Issue #98 also asks for fuller per-project data migration — issue status, user comments, custom tags, hotspots, external (third-party) issues, and MQR-mode impacts. The scan-history side of that pipeline (files, SCM backdating, basic issues, scanner-report submission) already runs when you pass `--include_scan_history`, but the metadata sync to SonarCloud's REST API for transitions / comments / tags / hotspots ships in a follow-up PR.
 
 ---
 

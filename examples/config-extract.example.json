@@ -3,5 +3,6 @@
   "token": "YOUR_SONARQUBE_TOKEN_HERE",
   "export_directory": "./files",
   "concurrency": 10,
-  "timeout": 60
+  "timeout": 60,
+  "project_key": ""
 }

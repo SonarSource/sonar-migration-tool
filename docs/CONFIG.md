@@ -54,7 +54,8 @@ Create a file named `extract-config.json`:
   "key_file_path": null,
   "cert_password": null,
   "target_task": null,
-  "extract_id": null
+  "extract_id": null,
+  "project_key": null
 }
 ```
 
@@ -76,7 +77,8 @@ Create a file named `migrate-config.json`:
   "export_directory": "./files",
   "concurrency": 10,
   "run_id": null,
-  "target_task": null
+  "target_task": null,
+  "project_key": null
 }
 ```
 
@@ -102,6 +104,7 @@ Usage:
 | `cert_password` | string | `null` | Password for client certificate |
 | `target_task` | string | `null` | Target task to complete |
 | `extract_id` | string | `null` | ID of extract to resume |
+| `project_key` | string | `null` | Comma-separated list of SonarQube project keys to scope the extract to. Empty extracts every project the token can see. |
 
 ### Migrate Command Parameters
 
@@ -115,6 +118,7 @@ Usage:
 | `concurrency` | number | `25` | Maximum concurrent requests |
 | `run_id` | string | `null` | ID of run to resume |
 | `target_task` | string | `null` | Specific migration task |
+| `project_key` | string | `null` | Comma-separated list of SonarQube project keys to scope the migration to. Empty migrates every project in `projects.csv`. |
 
 ## Combining Config Files and CLI Arguments
 
