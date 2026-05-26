@@ -26,7 +26,7 @@ func (c *IssuesClient) SearchAll(ctx context.Context, params url.Values) ([]type
 			return all, err
 		}
 		all = append(all, resp.Issues...)
-		if len(all) >= resp.Total || len(resp.Issues) == 0 {
+		if len(all) >= resp.Paging.Total || len(resp.Issues) == 0 {
 			break
 		}
 	}

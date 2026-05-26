@@ -28,7 +28,7 @@ func (c *HotspotsClient) SearchAll(ctx context.Context, projectKey, org string) 
 			return all, err
 		}
 		all = append(all, resp.Hotspots...)
-		if len(all) >= resp.Total || len(resp.Hotspots) == 0 {
+		if len(all) >= resp.Paging.Total || len(resp.Hotspots) == 0 {
 			break
 		}
 	}
