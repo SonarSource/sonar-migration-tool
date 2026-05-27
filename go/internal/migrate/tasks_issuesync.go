@@ -448,7 +448,7 @@ func syncIssueComments(ctx context.Context, e *Executor, cloudKey string, source
 		prefix += "]\n\n"
 		fullText := prefix + text
 
-		if isAlreadyMigratedIssueComment(fullText, cloudComments) {
+		if isAlreadyMigratedIssueComment(text, cloudComments) {
 			continue
 		}
 
@@ -461,15 +461,16 @@ func syncIssueComments(ctx context.Context, e *Executor, cloudKey string, source
 	return failed
 }
 
-// isAlreadyMigratedIssueComment returns true when an identical migrated comment
-// already exists in the Cloud issue's comment list, preventing duplicates on re-run.
-func isAlreadyMigratedIssueComment(fullText string, cloudComments []issueComment) bool {
+// isAlreadyMigratedIssueComment returns true when a migrated comment containing
+// body already exists in the Cloud issue's comment list, preventing duplicates on re-run.
+// Mirrors the hotspot pattern: checks for the migration prefix AND the original body text.
+func isAlreadyMigratedIssueComment(body string, cloudComments []issueComment) bool {
 	for _, cc := range cloudComments {
 		ccText := cc.Markdown
 		if ccText == "" {
 			ccText = cc.HTMLText
 		}
-		if ccText == fullText {
+		if strings.Contains(ccText, migratedIssueCommentPrefix) && strings.Contains(ccText, body) {
 			return true
 		}
 	}

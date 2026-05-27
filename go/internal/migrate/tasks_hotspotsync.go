@@ -238,8 +238,22 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 	}, nil
 }
 
+// filterActionableHotspotPairs returns pairs that need any work: REVIEWED status
+// sync, or any TO_REVIEW/REVIEWED pair that has source comments to migrate.
+func filterActionableHotspotPairs(pairs []hotspotPair) []hotspotPair {
+	var actionable []hotspotPair
+	for _, p := range pairs {
+		needsStatusSync := strings.ToUpper(p.source.Status) == "REVIEWED"
+		needsCommentSync := len(p.source.Comments) > 0
+		if needsStatusSync || needsCommentSync {
+			actionable = append(actionable, p)
+		}
+	}
+	return actionable
+}
+
 // buildHotspotPairs loads, indexes, matches, and filters hotspot pairs for a
-// project. Returns only REVIEWED pairs that need syncing.
+// project. Returns only actionable pairs that need syncing.
 func buildHotspotPairs(ctx context.Context, e *Executor, input syncHotspotInput) ([]hotspotPair, int, error) {
 	sourceHotspots, err := loadMatchableHotspots(e, input.ServerURL, input.ServerKey)
 	if err != nil {
@@ -260,16 +274,7 @@ func buildHotspotPairs(ctx context.Context, e *Executor, input syncHotspotInput)
 	cloudHotspots := loadCloudMatchableHotspots(cloudAPIHotspots)
 
 	allPairs := matchHotspots(sourceHotspots, cloudHotspots, input.ServerKey, input.CloudKey)
-
-	// Include pairs that need status sync (REVIEWED) OR comment sync (any status with comments).
-	var actionable []hotspotPair
-	for _, p := range allPairs {
-		needsStatusSync := strings.ToUpper(p.source.Status) == "REVIEWED"
-		needsCommentSync := len(p.source.Comments) > 0
-		if needsStatusSync || needsCommentSync {
-			actionable = append(actionable, p)
-		}
-	}
+	actionable := filterActionableHotspotPairs(allPairs)
 
 	e.Logger.Info("syncHotspotMetadata: matched pairs",
 		"project", input.CloudKey,
