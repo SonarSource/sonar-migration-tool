@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-"strconv"
+	"strconv"
 	"strings"
 	"time"
 
@@ -82,13 +82,13 @@ func runImportScanHistory(ctx context.Context, e *Executor) error {
 				TargetBranch: targetBranch,
 			})
 			if err != nil {
-				logAPIWarn(e.Logger, "scan history import failed", err, "project", cloudKey, "branch", branch)
+				logAPIWarn(e.Logger, "scan history import failed", err, "project", cloudKey, "branch", branch.Name)
 				result = &importResult{Status: "failed", Error: err.Error()}
 			}
 
 			record, _ := json.Marshal(map[string]any{
 				"cloud_project_key": cloudKey,
-				"branch":            branch,
+				"branch":            branch.Name,
 				"status":            result.Status,
 				"task_id":           result.TaskID,
 				"error":             result.Error,

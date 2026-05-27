@@ -163,10 +163,32 @@ These differences have been investigated. They do NOT cause CE processing failur
 
 4. **Analysis date**: We use `time.Now()`. CloudVoyager uses the extraction timestamp. Unlikely to cause failures.
 
+### Branch Name Mapping (FIXED)
+<!-- updated: 2026-05-27_19:00:00 -->
+
+**Symptom**: CE fails with "Invalid branch type 'SHORT'. Branch 'main' already exists with type 'LONG'" when the SQ main branch name differs from the SC main branch name.
+
+**Root cause**: The migration tool was using the SQ branch name (`main`) in the protobuf metadata and CE submit, but the SC project's main branch was named `master`.
+
+**Fix**: Added CloudVoyager-pattern branch name mapping in `tasks_scanhistory.go`:
+1. `collectBranchInfo()` now returns `branchInfo` structs with `IsMain` flag (from SQ extracted data)
+2. Before importing, queries SC via `e.Cloud.Branches.List()` to discover the actual SC main branch name
+3. Uses the SC main branch name in the protobuf metadata (`BranchName`) and CE submit (`characteristic=branch=...`), while keeping the SQ branch name for filtering extracted data (issues, components, sources)
+
+### "Component has been deleted by end-user during analysis"
+<!-- updated: 2026-05-27_19:00:00 -->
+
+**Symptom**: ALL CE tasks fail with "Component has been deleted by end-user during analysis", even for projects not involved in migration.
+
+**Root cause**: This is a SonarCloud staging environment issue, not a code issue. All projects in the organization entered a soft-deleted state. The projects still appear via the search API but CE treats them as deleted.
+
+**Solution**: Re-create the projects on the SC staging environment, or use a fresh organization/enterprise. This error is NOT caused by our ZIP format, protobuf content, or submission logic.
+
 ### Resolved Issues
 
 - **ReferenceBranchName**: Previously not set in `MetadataInput`. Now set correctly, defaulting to `BranchName` — matches CloudVoyager behavior.
 - **ZIP data descriptors**: Fixed via `Deflate` + `CreateHeader` (see root cause above).
+- **Branch name mapping**: Fixed to query SC main branch name (see above).
 
 ### Confirmed NON-issues
 
@@ -175,6 +197,8 @@ These differences have been investigated. They do NOT cause CE processing failur
 - **Multipart form structure**: Both use the same form fields: `report`, `projectKey`, `organization`, `characteristic` (branch/branchType), and `properties`.
 - **context-props.pb**: Both include an empty `context-props.pb`.
 - **Auth method**: `sqco_` tokens require Bearer auth (not Basic). Our `authTransport` correctly uses Bearer.
+- **Metadata fields**: Comprehensive comparison against CloudVoyager's `build-metadata.js` shows all fields match: analysisDate (epoch ms), organizationKey, projectKey, rootComponentRef, branchName, branchType (BRANCH=1), referenceBranchName, scmRevisionId (random 40-char hex), projectVersion ("1.0.0"), qprofilesPerLanguage, analyzedIndexedFileCountPerType.
+- **Protobuf content**: Issue, ExternalIssue, AdHocRule, ActiveRule, Component, and Changesets messages all use correct field numbers per the proto schema. Length-delimited encoding (varint prefix) matches the Java CE parser expectations.
 
 ---
 
