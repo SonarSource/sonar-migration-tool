@@ -3,7 +3,6 @@ package summary
 import (
 	"bufio"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,16 +11,27 @@ import (
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
+// gateConditionRef is one (metric, op, threshold) tuple as recorded in the
+// sidecar JSONL. The migrator emits one for the source side and one per
+// target produced by the metric mapping (composite expansions can have
+// several).
+type gateConditionRef struct {
+	Metric string `json:"metric"`
+	Op     string `json:"op"`
+	Error  string `json:"error"`
+}
+
 // gateMappingNote is a single per-condition decision recorded by
 // addGateConditions in its sidecar JSONL (addGateConditions.notes/). It
 // describes either a metric remap (#143) or a dropped condition that had no
-// SonarQube Cloud equivalent.
+// SonarQube Cloud equivalent. Source + Targets carry the full conditions
+// (not just metric names) so the report can render them in #143 notation.
 type gateMappingNote struct {
-	CloudGateID   string   `json:"cloud_gate_id"`
-	GateName      string   `json:"gate_name"`
-	Action        string   `json:"action"` // "remapped" | "dropped"
-	SourceMetric  string   `json:"source_metric"`
-	TargetMetrics []string `json:"target_metrics,omitempty"`
+	CloudGateID string             `json:"cloud_gate_id"`
+	GateName    string             `json:"gate_name"`
+	Action      string             `json:"action"` // "remapped" | "dropped"
+	Source      gateConditionRef   `json:"source"`
+	Targets     []gateConditionRef `json:"targets,omitempty"`
 }
 
 // gateNoteSummary captures the per-gate outcome of addGateConditions: the
@@ -88,24 +98,30 @@ func collectGateMappingNotes(runDir string) map[string]gateNoteSummary {
 			// more than once when the same SQS source gate is mapped to a
 			// single SQC org from multiple source orgs (gates.csv carries
 			// one row per source-org pairing, all sharing the same cloud
-			// gate id). Deduplicate by (action, source, targets) so the
+			// gate id). Deduplicate by (action, source, target) so the
 			// Details column shows each mapping exactly once.
 			switch note.Action {
 			case "remapped":
-				targets := strings.Join(note.TargetMetrics, ", ")
-				key := note.SourceMetric + "→" + targets
-				if ag.remappedSeen[key] {
-					continue
+				sourceStr := formatGateCondition(note.Source.Metric, note.Source.Op, note.Source.Error)
+				// Composite mappings produce several targets; emit one
+				// "source --> target" line per target so a multi-row
+				// expansion is visually obvious (per #234 follow-up).
+				for _, t := range note.Targets {
+					targetStr := formatGateCondition(t.Metric, t.Op, t.Error)
+					line := sourceStr + " --> " + targetStr
+					if ag.remappedSeen[line] {
+						continue
+					}
+					ag.remappedSeen[line] = true
+					ag.remapped = append(ag.remapped, line)
 				}
-				ag.remappedSeen[key] = true
-				ag.remapped = append(ag.remapped,
-					fmt.Sprintf("%s --> %s", note.SourceMetric, targets))
 			case "dropped":
-				if ag.droppedSeen[note.SourceMetric] {
+				sourceStr := formatGateCondition(note.Source.Metric, note.Source.Op, note.Source.Error)
+				if ag.droppedSeen[sourceStr] {
 					continue
 				}
-				ag.droppedSeen[note.SourceMetric] = true
-				ag.dropped = append(ag.dropped, note.SourceMetric)
+				ag.droppedSeen[sourceStr] = true
+				ag.dropped = append(ag.dropped, sourceStr)
 			}
 		}
 		f.Close()

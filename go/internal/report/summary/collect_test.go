@@ -593,17 +593,17 @@ func TestCollectSummaryQualityGateMappingDedupesAcrossSourceOrgs(t *testing.T) {
 	notesDir := filepath.Join(runDir, "addGateConditions.notes")
 	os.MkdirAll(notesDir, 0o755)
 	dup := map[string]any{
-		"cloud_gate_id":  "42",
-		"gate_name":      "Shared QG",
-		"action":         "remapped",
-		"source_metric":  "new_security_rating_with_aica",
-		"target_metrics": []string{"new_security_rating"},
+		"cloud_gate_id": "42",
+		"gate_name":     "Shared QG",
+		"action":        "remapped",
+		"source":        map[string]string{"metric": "new_security_rating_with_aica", "op": "GT", "error": "1"},
+		"targets":       []map[string]string{{"metric": "new_security_rating", "op": "GT", "error": "1"}},
 	}
 	dupDropped := map[string]any{
 		"cloud_gate_id": "42",
 		"gate_name":     "Shared QG",
 		"action":        "dropped",
-		"source_metric": "contains_ai_code",
+		"source":        map[string]string{"metric": "contains_ai_code", "op": "GT", "error": "0"},
 	}
 	f, _ := os.Create(filepath.Join(notesDir, "results.1.jsonl"))
 	for i := 0; i < 3; i++ {
@@ -625,12 +625,14 @@ func TestCollectSummaryQualityGateMappingDedupesAcrossSourceOrgs(t *testing.T) {
 		t.Fatalf("expected 1 Partial gate, got %d", len(gates.Partial))
 	}
 	joined := strings.Join(gates.Partial[0].Issues, "\n")
-	// Each remap/dropped metric should appear exactly once.
-	if got := strings.Count(joined, "new_security_rating_with_aica --> new_security_rating"); got != 1 {
+	// Each remap / dropped condition should appear exactly once, with the
+	// full #143-style "metric <= LETTER" notation on both sides for rating
+	// conditions.
+	if got := strings.Count(joined, "new_security_rating_with_aica <= A --> new_security_rating <= A"); got != 1 {
 		t.Errorf("expected remap line exactly once, got %d occurrences in:\n%s", got, joined)
 	}
-	if got := strings.Count(joined, "contains_ai_code"); got != 1 {
-		t.Errorf("expected dropped metric exactly once, got %d occurrences in:\n%s", got, joined)
+	if got := strings.Count(joined, "contains_ai_code > 0"); got != 1 {
+		t.Errorf("expected dropped condition exactly once, got %d occurrences in:\n%s", got, joined)
 	}
 }
 
@@ -652,17 +654,17 @@ func TestCollectSummaryQualityGateMetricMappingMovesToPartial(t *testing.T) {
 	os.MkdirAll(notesDir, 0o755)
 	lines := []map[string]any{
 		{
-			"cloud_gate_id":  "42",
-			"gate_name":      "Backend QG",
-			"action":         "remapped",
-			"source_metric":  "new_security_rating_with_aica",
-			"target_metrics": []string{"new_security_rating"},
+			"cloud_gate_id": "42",
+			"gate_name":     "Backend QG",
+			"action":        "remapped",
+			"source":        map[string]string{"metric": "new_security_rating_with_aica", "op": "GT", "error": "1"},
+			"targets":       []map[string]string{{"metric": "new_security_rating", "op": "GT", "error": "1"}},
 		},
 		{
 			"cloud_gate_id": "42",
 			"gate_name":     "Backend QG",
 			"action":        "dropped",
-			"source_metric": "contains_ai_code",
+			"source":        map[string]string{"metric": "contains_ai_code", "op": "GT", "error": "0"},
 		},
 	}
 	f, _ := os.Create(filepath.Join(notesDir, "results.1.jsonl"))
@@ -701,19 +703,19 @@ func TestCollectSummaryQualityGateMetricMappingMovesToPartial(t *testing.T) {
 		t.Errorf("expected Backend QG in Partial, got %q", item.Name)
 	}
 	joined := strings.Join(item.Issues, " | ")
-	if !strings.Contains(joined, "new_security_rating_with_aica --> new_security_rating") {
-		t.Errorf("expected remap detail (with -->) in Issues, got %q", joined)
+	if !strings.Contains(joined, "new_security_rating_with_aica <= A --> new_security_rating <= A") {
+		t.Errorf("expected remap detail (full condition --> full condition) in Issues, got %q", joined)
 	}
-	if !strings.Contains(joined, "contains_ai_code") {
-		t.Errorf("expected dropped metric in Issues, got %q", joined)
+	if !strings.Contains(joined, "contains_ai_code > 0") {
+		t.Errorf("expected dropped condition in Issues, got %q", joined)
 	}
 	if strings.Contains(joined, "#143") {
 		t.Errorf("did not expect #143 reference in user-facing message, got %q", joined)
 	}
-	// Each metric entry should be on its own line within an Issues message.
-	if !strings.Contains(joined, "\nnew_security_rating_with_aica -->") &&
+	// Each condition entry should be on its own line within an Issues message.
+	if !strings.Contains(joined, "\nnew_security_rating_with_aica <=") &&
 		!strings.HasPrefix(item.Issues[0], "Some metrics were mapped") {
-		t.Errorf("expected newline-separated metric list, got %q", joined)
+		t.Errorf("expected newline-separated condition list, got %q", joined)
 	}
 }
 
@@ -735,11 +737,11 @@ func TestCollectSummaryQualityGateRemapOnlyMovesToNearPerfect(t *testing.T) {
 	os.MkdirAll(notesDir, 0o755)
 	lines := []map[string]any{
 		{
-			"cloud_gate_id":  "77",
-			"gate_name":      "Ratings QG",
-			"action":         "remapped",
-			"source_metric":  "new_security_rating_with_aica",
-			"target_metrics": []string{"new_security_rating"},
+			"cloud_gate_id": "77",
+			"gate_name":     "Ratings QG",
+			"action":        "remapped",
+			"source":        map[string]string{"metric": "new_security_rating_with_aica", "op": "GT", "error": "1"},
+			"targets":       []map[string]string{{"metric": "new_security_rating", "op": "GT", "error": "1"}},
 		},
 	}
 	f, _ := os.Create(filepath.Join(notesDir, "results.1.jsonl"))
@@ -772,8 +774,8 @@ func TestCollectSummaryQualityGateRemapOnlyMovesToNearPerfect(t *testing.T) {
 			succeededNames(gates.NearPerfect))
 	}
 	joined := strings.Join(gates.NearPerfect[0].Issues, " | ")
-	if !strings.Contains(joined, "new_security_rating_with_aica --> new_security_rating") {
-		t.Errorf("expected remap detail in NearPerfect Issues, got %q", joined)
+	if !strings.Contains(joined, "new_security_rating_with_aica <= A --> new_security_rating <= A") {
+		t.Errorf("expected full-condition remap detail in NearPerfect Issues, got %q", joined)
 	}
 }
 
