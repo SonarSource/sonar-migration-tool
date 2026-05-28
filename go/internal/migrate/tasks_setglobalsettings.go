@@ -73,20 +73,30 @@ var sqsOnlySettings = map[string]func(raw json.RawMessage) sqsOnlyDecision{
 	// these before any API call; predict consults
 	// IsSilentlySkippedGlobalSetting to mirror that and keep the two
 	// reports identical.
+	"sonar.core.id":                                           silentSkip, // internal server identity
 	"sonar.core.serverBaseURL":                                silentSkip,
 	"sonar.core.startTime":                                    silentSkip, // read-only server timestamp
 	"sonar.builtInQualityProfiles.disableNotificationOnUpdate": silentSkip,
 	"sonar.announcement.htmlMessage":                          silentSkip,
 	"sonar.login.displayMessage":                              silentSkip,
+	"sonar.login.message":                                     silentSkip,
 	"sonar.license.notifications.remainingLocThreshold":       silentSkip,
 	"sonar.mcp.healthCheckInterval":                           silentSkip,
+	"sonar.plugins.risk.consent":                              silentSkip,
 	// Bundled analyzer plugin manifest fields — server-emitted, not
-	// user-set, never portable.
-	"sonar.cs.analyzer.security.pluginVersion":                silentSkip,
-	"sonar.cs.analyzer.security.staticResourceName":           silentSkip,
-	"sonaranalyzer-vbnet.ruleNamespace":                       silentSkip,
-	"sonaranalyzer-vbnet.staticResourceName":                  silentSkip,
-	"sonaranalyzer.security.cs.ruleNamespace":                 silentSkip,
+	// user-set, never portable. The sonar.cs.analyzer.* family is
+	// covered by the prefix list below; remaining vbnet keys stay
+	// explicit until the user requests a similar prefix.
+	"sonar.vbnet.analyzer.dotnet.pluginKey":            silentSkip,
+	"sonar.vbnet.analyzer.dotnet.pluginVersion":        silentSkip,
+	"sonar.vbnet.analyzer.dotnet.staticResourceName":   silentSkip,
+	"sonar.vbnet.analyzer.security.pluginKey":          silentSkip,
+	"sonar.vbnet.analyzer.security.pluginVersion":      silentSkip,
+	"sonar.vbnet.analyzer.security.staticResourceName": silentSkip,
+	// Server-side JDBC driver class — internal SQS plumbing, not a
+	// portable setting (no JDBC on SQC).
+	"sonar.plsql.jdbc.driver.class": silentSkip,
+
 	"sonar.qualityProfiles.allowDisableInheritedRules": func(raw json.RawMessage) sqsOnlyDecision {
 		// Only worth mentioning when the SQS-side operator
 		// explicitly enabled the feature; the default ("false") is
@@ -130,6 +140,51 @@ var sqsOnlySettings = map[string]func(raw json.RawMessage) sqsOnlyDecision{
 		}
 		return sqsOnlyDecision{Note: sqsOnlyNoteText}
 	},
+
+	// Features that are *always* enabled on SonarQube Cloud — surface a
+	// FYI note whenever the SQS-side operator has touched the flag,
+	// regardless of value. SQC controls the on/off itself.
+	"sonar.architecture.visualization.enabled": alwaysEnabledOnSQC,
+	"sonar.mcp.enabled":                        alwaysEnabledOnSQC,
+	"sonar.misracompliance.enabled":            alwaysEnabledOnSQC,
+	"sonar.sca.featureEnabled":                 alwaysEnabledOnSQC,
+}
+
+// sqsOnlyPrefixes is the prefix-based fallback when the exact-match
+// sqsOnlySettings map doesn't classify a key. Used for whole families:
+//
+//   - sonaranalyzer-cs.*, sonaranalyzer-vbnet.*, sonar.updatecenter.*
+//     → silently dropped (internal SQS metadata, never user-set).
+//   - sonar.auth.*
+//     → surfaced in the report as Skipped with an auth-specific
+//     note. Customers must re-configure authentication on SQC; it's
+//     not portable, but worth calling out so they don't miss it.
+var sqsOnlyPrefixes = []struct {
+	Prefix  string
+	Handler func(raw json.RawMessage) sqsOnlyDecision
+}{
+	{"sonar.cs.analyzer.", silentSkip},
+	{"sonaranalyzer-cs.", silentSkip},
+	{"sonaranalyzer-vbnet.", silentSkip},
+	{"sonaranalyzer.security.cs.", silentSkip},
+	{"sonar.updatecenter.", silentSkip},
+	{"sonar.auth.", authReconfigureNote},
+}
+
+// authNoteText is the per-row note rendered in the report Skipped
+// bucket for any customised sonar.auth.* setting.
+const authNoteText = "Authentication configuration cannot be migrated automatically; it must be re-configured on SonarQube Cloud."
+
+// authReconfigureNote surfaces a sonar.auth.* setting in the report
+// (Skipped + auth-specific note) when it carries any value. Empty /
+// unset auth keys stay silent.
+func authReconfigureNote(raw json.RawMessage) sqsOnlyDecision {
+	v := extractField(raw, "value")
+	vs := extractStringArray(raw, "values")
+	if v == "" && len(vs) == 0 {
+		return sqsOnlyDecision{SkipSilently: true}
+	}
+	return sqsOnlyDecision{Note: authNoteText}
 }
 
 // sqsOnlyNoteText is the single user-facing wording all SQS-only
@@ -158,6 +213,36 @@ func silentSkip(_ json.RawMessage) sqsOnlyDecision {
 	return sqsOnlyDecision{SkipSilently: true}
 }
 
+// alwaysEnabledOnSQCNoteText is the per-row note rendered for SQS
+// feature flags that SonarQube Cloud has permanently turned on.
+const alwaysEnabledOnSQCNoteText = "This feature is always enabled on SonarQube Cloud."
+
+// alwaysEnabledOnSQC emits a FYI note in the report whenever a SQS
+// feature flag is present, regardless of the SQS-side value. SQC
+// controls the on/off itself, so there's nothing to migrate, but the
+// operator should know the flag is being managed for them.
+func alwaysEnabledOnSQC(_ json.RawMessage) sqsOnlyDecision {
+	return sqsOnlyDecision{Note: alwaysEnabledOnSQCNoteText}
+}
+
+// resolveSQSOnlyHandler looks up the per-key decision function for a
+// SonarQube Server global setting, consulting both the exact-match
+// sqsOnlySettings map and the prefix-based sqsOnlyPrefixes fallback.
+// Returns (nil, false) when the key is not classified by the curated
+// rules — in which case real-migrate falls back to dynamic discovery
+// and predict treats the key as Applied (predicted).
+func resolveSQSOnlyHandler(key string) (func(raw json.RawMessage) sqsOnlyDecision, bool) {
+	if h, ok := sqsOnlySettings[key]; ok {
+		return h, true
+	}
+	for _, p := range sqsOnlyPrefixes {
+		if strings.HasPrefix(key, p.Prefix) {
+			return p.Handler, true
+		}
+	}
+	return nil, false
+}
+
 // EvaluateSQSOnlyGlobalSetting consults the curated sqsOnlySettings list
 // for the given raw getServerSettings record and reports whether the
 // key (i) is in the list AND (ii) is currently at a non-default value
@@ -172,7 +257,7 @@ func silentSkip(_ json.RawMessage) sqsOnlyDecision {
 // read-only server timestamps); callers should additionally consult
 // IsSilentlySkippedGlobalSetting to suppress those from the report.
 func EvaluateSQSOnlyGlobalSetting(key string, raw json.RawMessage) (note string, isSQSOnly bool) {
-	handler, ok := sqsOnlySettings[key]
+	handler, ok := resolveSQSOnlyHandler(key)
 	if !ok {
 		return "", false
 	}
@@ -192,7 +277,7 @@ func EvaluateSQSOnlyGlobalSetting(key string, raw json.RawMessage) (note string,
 // before any API call. The predictive-report pipeline consults this
 // function to keep its output consistent with the real-migrate report.
 func IsSilentlySkippedGlobalSetting(key string, raw json.RawMessage) bool {
-	handler, ok := sqsOnlySettings[key]
+	handler, ok := resolveSQSOnlyHandler(key)
 	if !ok {
 		return false
 	}
@@ -214,7 +299,7 @@ func partitionSQSOnlySettings(values []json.RawMessage) (remaining []json.RawMes
 	remaining = values[:0]
 	for _, raw := range values {
 		key := extractField(raw, "key")
-		handler, isSQSOnly := sqsOnlySettings[key]
+		handler, isSQSOnly := resolveSQSOnlyHandler(key)
 		if !isSQSOnly {
 			remaining = append(remaining, raw)
 			continue

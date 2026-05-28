@@ -12,10 +12,11 @@ import (
 // sectionsSortedByName lists section names whose unified table should be
 // sorted alphabetically by the Name column rather than grouped by outcome.
 var sectionsSortedByName = map[string]bool{
-	"Quality Gates": true,
-	"Groups":        true,
-	"Portfolios":    true,
-	"Projects":      true,
+	"Quality Gates":   true,
+	"Groups":          true,
+	"Portfolios":      true,
+	"Projects":        true,
+	"Global Settings": true,
 }
 
 // Color constants for the PDF report.
@@ -326,10 +327,14 @@ var sectionsWithoutOrganization = map[string]bool{
 func renderUnifiedTable(pdf *fpdf.Fpdf, section Section, predictive bool) {
 	hideOrg := predictive || sectionsWithoutOrganization[section.Name]
 
-	headers := []string{"Name", "Organization", "Outcome", "Details"}
+	nameHeader := "Name"
+	if section.Name == "Global Settings" {
+		nameHeader = "Setting Key"
+	}
+	headers := []string{nameHeader, "Organization", "Outcome", "Details"}
 	widths := []float64{55, 35, 25, 81}
 	if hideOrg {
-		headers = []string{"Name", "Outcome", "Details"}
+		headers = []string{nameHeader, "Outcome", "Details"}
 		widths = []float64{90, 25, 81}
 	}
 
@@ -380,10 +385,12 @@ func renderUnifiedTable(pdf *fpdf.Fpdf, section Section, predictive bool) {
 		detailsText := sanitizeForPDF(row.details)
 		detailsCol := len(widths) - 1
 		multiLine := strings.Contains(detailsText, "\n")
-		detailsFontSize := bodyFontSize
-		if multiLine {
-			detailsFontSize = multiLineFontSize
-		}
+		_ = multiLine // retained for clarity; details now always use the smaller font
+		// Always render the Details column at the smaller (6pt) font —
+		// it carries info-dense notes that benefit from more density
+		// alongside the 8pt Name and Outcome columns. Applies to both
+		// the real-migrate and predictive reports.
+		detailsFontSize := multiLineFontSize
 		pdf.SetFont(pdfFontFamily, "", detailsFontSize)
 		detailsLineCount := len(pdf.SplitLines([]byte(detailsText), widths[detailsCol]))
 		pdf.SetFont(pdfFontFamily, "", bodyFontSize)
