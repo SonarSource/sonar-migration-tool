@@ -191,3 +191,32 @@ func lookupMetricReplacement(sourceMetric string) (targets []replacementConditio
 	t, ok := metricMapping[sourceMetric]
 	return t, ok
 }
+
+// obviousMetricRemaps lists source→target pairs whose mapping is
+// self-evident from the metric names alone. The migration report
+// suppresses callouts for these so the "Near Perfect" Issues section
+// only carries genuinely useful information; gates whose only remaps
+// are obvious stay in Succeeded (green) rather than NearPerfect (yellow).
+var obviousMetricRemaps = map[string]string{
+	"software_quality_reliability_rating":         "reliability_rating",
+	"software_quality_security_rating":            "security_rating",
+	"software_quality_maintainability_rating":     "sqale_rating",
+	"new_software_quality_reliability_rating":     "new_reliability_rating",
+	"new_software_quality_security_rating":        "new_security_rating",
+	"new_software_quality_maintainability_rating": "new_maintainability_rating",
+}
+
+// isObviousMetricRemap reports whether the source metric maps 1:1 to a
+// target metric that is obvious from the names alone (e.g.
+// software_quality_reliability_rating → reliability_rating). Only single-
+// target mappings qualify — composite expansions are never obvious.
+func isObviousMetricRemap(sourceMetric string, targetMetrics []string) bool {
+	if len(targetMetrics) != 1 {
+		return false
+	}
+	want, ok := obviousMetricRemaps[sourceMetric]
+	if !ok {
+		return false
+	}
+	return targetMetrics[0] == want
+}

@@ -145,6 +145,12 @@ func runAddGateConditions(ctx context.Context, e *Executor) error {
 			var conditions []map[string]any
 			json.Unmarshal(conditionsRaw, &conditions)
 
+			// First pass: expand every source condition into zero or more
+			// target conditions, recording notes for drops / remaps. The
+			// actual POSTs are deferred so the resolver (#234) can collapse
+			// collisions across multiple source conditions before any HTTP
+			// traffic.
+			var pending []targetCondition
 			for _, cond := range conditions {
 				metric, _ := cond["metric"].(string)
 				op, _ := cond["op"].(string)
@@ -170,7 +176,15 @@ func runAddGateConditions(ctx context.Context, e *Executor) error {
 					for _, repl := range targets {
 						targetMetrics = append(targetMetrics, repl.Metric)
 					}
-					recordGateConditionNote(notesW, gateIDStr, gateName, "remapped", metric, targetMetrics)
+					// Suppress the sidecar note (and therefore the
+					// report's "Near Perfect" Issues line + yellow
+					// classification) for remaps that are obvious from
+					// the metric names alone — e.g. software_quality_*
+					// _rating → its same-axis SQC equivalent. Operators
+					// don't need a callout for those.
+					if !isObviousMetricRemap(metric, targetMetrics) {
+						recordGateConditionNote(notesW, gateIDStr, gateName, "remapped", metric, targetMetrics)
+					}
 				}
 
 				for _, repl := range targets {
@@ -182,20 +196,30 @@ func runAddGateConditions(ctx context.Context, e *Executor) error {
 					if effErr == "" {
 						effErr = errorVal
 					}
-					e.Logger.Debug("gate api call: POST /api/qualitygates/create_condition",
-						"gate_id", gateID, "metric", repl.Metric, "op", effOp, "error", effErr, "org", orgKey,
-						"source_metric", metric)
-					_, err := e.Cloud.QualityGates.CreateCondition(ctx, cloud.CreateConditionParams{
-						GateID: gateID, Organization: orgKey,
-						Metric: repl.Metric, Op: effOp, Error: effErr,
+					pending = append(pending, targetCondition{
+						Metric:       repl.Metric,
+						Op:           effOp,
+						Error:        effErr,
+						SourceMetric: metric,
 					})
-					if err != nil {
-						counter.Fail()
-						logAPIWarn(e.Logger, "addGateConditions failed", err,
-							"metric", repl.Metric, "source_metric", metric)
-					} else {
-						counter.Success()
-					}
+				}
+			}
+
+			// Second pass: collapse collisions per #234, then POST.
+			for _, tc := range resolveTargetConditions(pending) {
+				e.Logger.Debug("gate api call: POST /api/qualitygates/create_condition",
+					"gate_id", gateID, "metric", tc.Metric, "op", tc.Op, "error", tc.Error, "org", orgKey,
+					"source_metric", tc.SourceMetric)
+				_, err := e.Cloud.QualityGates.CreateCondition(ctx, cloud.CreateConditionParams{
+					GateID: gateID, Organization: orgKey,
+					Metric: tc.Metric, Op: tc.Op, Error: tc.Error,
+				})
+				if err != nil {
+					counter.Fail()
+					logAPIWarn(e.Logger, "addGateConditions failed", err,
+						"metric", tc.Metric, "source_metric", tc.SourceMetric)
+				} else {
+					counter.Success()
 				}
 			}
 			return nil
