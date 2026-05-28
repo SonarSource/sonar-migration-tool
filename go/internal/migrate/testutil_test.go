@@ -458,6 +458,15 @@ func setupExtractData(dir string) {
 		{"profileKey": "prof1", "name": testSonarUsers, "serverUrl": testServerURL},
 	})
 
+	// Profile↔project explicit assignments (issue #160 — definitive
+	// source of project profile bindings, replacing the stale
+	// navigation/component qualityProfiles array).
+	writeJSONL(filepath.Join(extractDir, "getProfileProjects"), []map[string]any{
+		{"key": "proj1", "name": "Project 1", "selected": true,
+			"profileKey": "prof1", "profileName": "Custom", "language": "java",
+			"serverUrl": testServerURL},
+	})
+
 	// Portfolio projects (empty for non-enterprise tests).
 	writeJSONL(filepath.Join(extractDir, "getPortfolioProjects"), nil)
 }

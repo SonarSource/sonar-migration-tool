@@ -82,6 +82,26 @@ func associateTasks() []TaskDef {
 	}
 }
 
+// runSetProjectProfiles drives quality-profile assignments on SonarCloud
+// from the getProfileProjects extract — the definitive list of
+// explicit project↔profile bindings on SonarQube Server.
+//
+// Earlier versions of this task iterated createProjects' embedded
+// profiles array, which was populated from api/navigation/component.
+// That endpoint reports the profile used at the LAST ANALYSIS, not
+// the current explicit binding, so a project that once used a custom
+// profile and was later unassigned still appeared bound to it. The
+// migrate task then re-applied the stale binding on SQC and the
+// custom profile ended up listed for more projects on SQC than on
+// SQS (issue #160).
+//
+// The new flow drives off getProfileProjects, which queries
+// /api/qualityprofiles/projects?selected=selected per non-built-in
+// profile — exactly the projects with an active explicit assignment.
+// Each record carries the SQS project key + profile name/language;
+// we resolve the cloud project key via createProjects output and
+// confirm the profile was migrated via createProfiles output before
+// dispatching POST /api/qualityprofiles/add_project.
 func runSetProjectProfiles(ctx context.Context, e *Executor) error {
 	// Build profile lookup: orgKey+language+name -> true.
 	profiles, _ := e.Store.ReadAll("createProfiles")
@@ -93,30 +113,55 @@ func runSetProjectProfiles(ctx context.Context, e *Executor) error {
 		profileLookup[orgKey+lang+name] = true
 	}
 
-	counter := NewTaskCounter("setProjectProfiles")
-	err := forEachMigrateItem(ctx, e, "setProjectProfiles", "createProjects",
-		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
-			orgKey := extractField(item, "sonarcloud_org_key")
-			projectKey := extractField(item, "cloud_project_key")
-			profilesArr := extractProfilesList(item)
+	// Build project lookup: serverURL+sqsProjectKey ->
+	// (cloudProjectKey, sonarcloudOrgKey). createProjects rows carry
+	// both, so a single pass is enough.
+	type projTarget struct {
+		cloudKey string
+		orgKey   string
+	}
+	projects, _ := e.Store.ReadAll("createProjects")
+	projectLookup := make(map[string]projTarget, len(projects))
+	for _, p := range projects {
+		server := extractField(p, "server_url")
+		srcKey := extractField(p, "key")
+		cloudKey := extractField(p, "cloud_project_key")
+		orgKey := extractField(p, "sonarcloud_org_key")
+		if srcKey == "" || cloudKey == "" {
+			continue
+		}
+		projectLookup[server+srcKey] = projTarget{cloudKey: cloudKey, orgKey: orgKey}
+	}
 
-			for _, p := range profilesArr {
-				lang := getString(p, "language")
-				name := getString(p, "name")
-				if unsupportedLanguages[lang] || getBool(p, "deleted") {
-					continue
-				}
-				if !profileLookup[orgKey+lang+name] {
-					continue
-				}
-				e.Logger.Debug("project api call: POST /api/qualityprofiles/add_project",
-					"project", projectKey, "language", lang, "profile", name, "org", orgKey)
-				if err := e.Cloud.QualityProfiles.AddProject(ctx, lang, name, projectKey, orgKey); err != nil {
-					counter.Fail()
-					logAPIWarn(e.Logger, "setProjectProfiles failed", err, "project", projectKey)
-				} else {
-					counter.Success()
-				}
+	counter := NewTaskCounter("setProjectProfiles")
+	err := forEachExtractItem(ctx, e, "setProjectProfiles", "getProfileProjects",
+		func(ctx context.Context, ext structure.ExtractItem, w *common.ChunkWriter) error {
+			server := extractField(ext.Data, "serverUrl")
+			lang := extractField(ext.Data, "language")
+			name := extractField(ext.Data, "profileName")
+			srcProjectKey := extractField(ext.Data, "key")
+			if unsupportedLanguages[lang] || srcProjectKey == "" {
+				return nil
+			}
+			target, ok := projectLookup[server+srcProjectKey]
+			if !ok {
+				// Project wasn't migrated (e.g., skipped org). Nothing
+				// to assign on SQC.
+				return nil
+			}
+			if !profileLookup[target.orgKey+lang+name] {
+				// Profile wasn't migrated (built-in, or org skipped).
+				// SQC's own default applies; no AddProject needed.
+				return nil
+			}
+			e.Logger.Debug("project api call: POST /api/qualityprofiles/add_project",
+				"project", target.cloudKey, "language", lang, "profile", name, "org", target.orgKey)
+			if err := e.Cloud.QualityProfiles.AddProject(ctx, lang, name, target.cloudKey, target.orgKey); err != nil {
+				counter.Fail()
+				logAPIWarn(e.Logger, "setProjectProfiles failed", err,
+					"project", target.cloudKey, "language", lang, "profile", name)
+			} else {
+				counter.Success()
 			}
 			return nil
 		})

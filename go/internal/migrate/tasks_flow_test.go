@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync"
 	"testing"
 )
@@ -206,6 +207,109 @@ func TestSetProjectProfiles(t *testing.T) {
 	err := reg["setProjectProfiles"].Run(context.Background(), e)
 	if err != nil {
 		t.Fatalf("setProjectProfiles: %v", err)
+	}
+}
+
+// TestSetProjectProfilesUsesExplicitAssignmentsOnly is a regression
+// for issue #160. The old implementation drove off the
+// qualityProfiles array embedded in createProjects (sourced from
+// api/navigation/component) which reports the profile used in the
+// LAST ANALYSIS — historical data that can list a project as bound
+// to a custom profile even after the explicit binding has been
+// removed. The fix drives off getProfileProjects, which queries
+// /api/qualityprofiles/projects?selected=selected — exactly the
+// explicitly-assigned projects.
+//
+// This test seeds two projects (projA + projB), both in the same
+// org. The getProfileProjects extract data lists ONLY projA as
+// assigned to "Custom Python" — projB has no explicit assignment.
+// Even if a stale navigation/component capture had listed projB as
+// using "Custom Python", the new code path must not call
+// AddProject for projB.
+func TestSetProjectProfilesUsesExplicitAssignmentsOnly(t *testing.T) {
+	type addProjectCall struct {
+		language, profile, project, org string
+	}
+	var (
+		mu    sync.Mutex
+		calls []addProjectCall
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/qualityprofiles/add_project", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		mu.Lock()
+		calls = append(calls, addProjectCall{
+			language: r.FormValue("language"),
+			profile:  r.FormValue("qualityProfile"),
+			project:  r.FormValue("project"),
+			org:      r.FormValue("organization"),
+		})
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	cloudSrv := httptest.NewServer(mux)
+	defer cloudSrv.Close()
+
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+
+	dir := t.TempDir()
+	setupExtractData(dir)
+	// Replace the default getProfileProjects with our scenario: only
+	// projA is explicitly assigned to "Custom Python".
+	writeJSONL(filepath.Join(dir, "extract-01", "getProfileProjects"), []map[string]any{
+		{"key": "projA", "name": "Project A", "selected": true,
+			"profileKey": "py-custom", "profileName": "Custom Python", "language": "py",
+			"serverUrl": testServerURL},
+	})
+
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+
+	// Both projects exist and are migrated. createProjects rows carry
+	// the SQS key + cloud key + org.
+	w, _ := e.Store.Writer("createProjects")
+	for _, src := range []string{"projA", "projB"} {
+		b, _ := json.Marshal(map[string]any{
+			"server_url":         testServerURL,
+			"key":                src,
+			"cloud_project_key":  testCloudOrg + "_" + src,
+			"sonarcloud_org_key": testCloudOrg,
+		})
+		w.WriteOne(b)
+	}
+
+	// "Custom Python" is migrated.
+	w, _ = e.Store.Writer("createProfiles")
+	b, _ := json.Marshal(map[string]any{
+		"name":               "Custom Python",
+		"language":           "py",
+		"sonarcloud_org_key": testCloudOrg,
+		"cloud_profile_key":  "py-custom-cloud",
+		"source_profile_key": "py-custom",
+	})
+	w.WriteOne(b)
+
+	if err := runSetProjectProfiles(context.Background(), e); err != nil {
+		t.Fatalf("runSetProjectProfiles: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 1 {
+		t.Fatalf("expected exactly 1 AddProject call (projA), got %d: %+v", len(calls), calls)
+	}
+	got := calls[0]
+	wantProject := testCloudOrg + "_projA"
+	if got.project != wantProject {
+		t.Errorf("AddProject project: got %q want %q", got.project, wantProject)
+	}
+	if got.profile != "Custom Python" || got.language != "py" {
+		t.Errorf("AddProject profile/lang: got %s/%s want \"Custom Python\"/\"py\"", got.profile, got.language)
+	}
+	for _, c := range calls {
+		if c.project == testCloudOrg+"_projB" {
+			t.Errorf("projB must NOT receive AddProject — no explicit assignment in getProfileProjects")
+		}
 	}
 }
 
