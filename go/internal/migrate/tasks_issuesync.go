@@ -396,7 +396,7 @@ func syncOnePair(ctx context.Context, e *Executor, pair issuePair, counter *Task
 
 	cloudKey := pair.cloud.Key
 	transFailed := syncIssueTransition(ctx, e, cloudKey, pair.source)
-	commentFailed := syncIssueComments(ctx, e, cloudKey, pair.source.Comments)
+	commentFailed := syncIssueComments(ctx, e, cloudKey, pair.source.Comments, pair.cloud.Comments)
 	tagsFailed := syncIssueTags(ctx, e, cloudKey, pair.source.Tags)
 
 	if transFailed || commentFailed || tagsFailed {
@@ -424,11 +424,16 @@ func syncIssueTransition(ctx context.Context, e *Executor, cloudKey string, src 
 	return false
 }
 
+// migratedIssueCommentPrefix is the marker prepended to every migrated issue comment.
+// Its presence in a Cloud comment indicates that comment was already migrated.
+const migratedIssueCommentPrefix = "[Migrated from"
+
 // syncIssueComments migrates all source comments to the Cloud issue.
+// Skips comments that are already present (idempotency via prefix match).
 // Returns true if any comment failed to be added.
-func syncIssueComments(ctx context.Context, e *Executor, cloudKey string, comments []issueComment) bool {
+func syncIssueComments(ctx context.Context, e *Executor, cloudKey string, sourceComments []issueComment, cloudComments []issueComment) bool {
 	var failed bool
-	for _, c := range comments {
+	for _, c := range sourceComments {
 		text := c.Markdown
 		if text == "" {
 			text = c.HTMLText
@@ -441,14 +446,35 @@ func syncIssueComments(ctx context.Context, e *Executor, cloudKey string, commen
 			prefix += " on " + c.CreatedAt
 		}
 		prefix += "]\n\n"
+		fullText := prefix + text
 
-		if err := e.Cloud.Issues.AddComment(ctx, cloudKey, prefix+text); err != nil {
+		if isAlreadyMigratedIssueComment(text, cloudComments) {
+			continue
+		}
+
+		if err := e.Cloud.Issues.AddComment(ctx, cloudKey, fullText); err != nil {
 			logAPIWarn(e.Logger, "syncIssueMetadata: add comment failed", err,
 				"issue", cloudKey, "login", c.Login)
 			failed = true
 		}
 	}
 	return failed
+}
+
+// isAlreadyMigratedIssueComment returns true when a migrated comment containing
+// body already exists in the Cloud issue's comment list, preventing duplicates on re-run.
+// Mirrors the hotspot pattern: checks for the migration prefix AND the original body text.
+func isAlreadyMigratedIssueComment(body string, cloudComments []issueComment) bool {
+	for _, cc := range cloudComments {
+		ccText := cc.Markdown
+		if ccText == "" {
+			ccText = cc.HTMLText
+		}
+		if strings.Contains(ccText, migratedIssueCommentPrefix) && strings.Contains(ccText, body) {
+			return true
+		}
+	}
+	return false
 }
 
 // syncIssueTags sets the source tags plus the idempotency marker on the Cloud issue.

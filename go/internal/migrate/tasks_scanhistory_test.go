@@ -285,6 +285,16 @@ func setupScanHistoryExtract(t *testing.T, dir string) {
 	writeJSONL(filepath.Join(extractDir, "getProfiles"), []map[string]any{
 		{"key": "prof1", "name": "Sonar way", "language": "java", "serverUrl": testServerURL},
 	})
+
+	writeJSONL(filepath.Join(extractDir, "getProjectHotspotsFull"), []map[string]any{
+		{
+			"key": "hotspot-1", "ruleKey": "java:S2092", "message": "Make this cookie secure",
+			"component": "proj1:src/Main.java", "project": "proj1", "branch": "main",
+			"vulnerabilityProbability": "HIGH",
+			"creationDate": "2024-03-10T08:00:00+0000",
+			"serverUrl": testServerURL,
+		},
+	})
 }
 
 func newScanHistoryExecutor(t *testing.T, dir string) *Executor {
@@ -448,31 +458,178 @@ func TestLoadExtractedQProfiles(t *testing.T) {
 }
 
 func TestToExtractedIssues(t *testing.T) {
-	dir := t.TempDir()
-	setupScanHistoryExtract(t, dir)
-	e := newScanHistoryExecutor(t, dir)
-
+	createdAt, _ := time.Parse(time.RFC3339, "2023-06-15T10:00:00Z")
 	issues := []scanreport.IssueInput{
-		{RuleRepo: "java", RuleKey: "S100", Component: "proj1:src/Main.java", StartLine: 5, EndLine: 5},
+		{
+			Key:          "issue-abc123",
+			CreationDate: createdAt,
+			RuleRepo:     "java",
+			RuleKey:      "S100",
+			Component:    "proj1:src/Main.java",
+			StartLine:    5,
+			EndLine:       5,
+		},
 	}
 
-	extracted := toExtractedIssues(issues, e)
+	extracted := toExtractedIssues(issues)
 	if len(extracted) != 1 {
 		t.Fatalf("expected 1 extracted issue, got %d", len(extracted))
 	}
-	if extracted[0].Key != "java:S100" {
+	if extracted[0].Key != "issue-abc123" {
 		t.Errorf("unexpected key: %s", extracted[0].Key)
 	}
 	if extracted[0].Component != "proj1:src/Main.java" {
 		t.Errorf("unexpected component: %s", extracted[0].Component)
 	}
-	// Note: dateMap in toExtractedIssues is keyed by the issue's "key" field
-	// from extract data (e.g., "issue-1"), but looked up by RuleRepo:RuleKey
-	// (e.g., "java:S100"). These will only match if the extract data "key"
-	// field happens to equal the rule key. In typical SonarQube data they differ,
-	// so CreationDate will be zero here.
+	if !extracted[0].CreationDate.Equal(createdAt) {
+		t.Errorf("unexpected creation date: %v", extracted[0].CreationDate)
+	}
 	if extracted[0].StartLine != 5 || extracted[0].EndLine != 5 {
 		t.Errorf("unexpected line range: %d-%d", extracted[0].StartLine, extracted[0].EndLine)
+	}
+}
+
+func TestParseISODate(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		wantZero bool
+		wantYear int
+	}{
+		{name: "empty string", input: "", wantZero: true},
+		{name: "invalid string", input: "not-a-date", wantZero: true},
+		{name: "RFC3339 UTC", input: "2024-06-15T10:00:00Z", wantYear: 2024},
+		{name: "RFC3339 with offset", input: "2024-06-15T10:00:00+05:30", wantYear: 2024},
+		{name: "legacy +0000 format", input: "2024-03-10T08:00:00+0000", wantYear: 2024},
+		{name: "legacy -0500 format", input: "2023-11-01T12:30:00-0500", wantYear: 2023},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseISODate(tc.input)
+			if tc.wantZero {
+				if !got.IsZero() {
+					t.Errorf("parseISODate(%q) = %v, want zero time", tc.input, got)
+				}
+				return
+			}
+			if got.Year() != tc.wantYear {
+				t.Errorf("parseISODate(%q) year = %d, want %d", tc.input, got.Year(), tc.wantYear)
+			}
+		})
+	}
+}
+
+func TestLoadExtractedHotspots(t *testing.T) {
+	dir := t.TempDir()
+	setupScanHistoryExtract(t, dir)
+	e := newScanHistoryExecutor(t, dir)
+
+	hotspots := loadExtractedHotspots(e, testServerURL, "proj1", "main")
+	if len(hotspots) != 1 {
+		t.Fatalf("expected 1 hotspot on main, got %d", len(hotspots))
+	}
+	if hotspots[0].Key != "hotspot-1" {
+		t.Errorf("unexpected key: %s", hotspots[0].Key)
+	}
+	if hotspots[0].RuleRepo != "java" || hotspots[0].RuleKey != "S2092" {
+		t.Errorf("unexpected rule: %s:%s", hotspots[0].RuleRepo, hotspots[0].RuleKey)
+	}
+	if hotspots[0].CreationDate.IsZero() {
+		t.Error("expected non-zero CreationDate")
+	}
+	if hotspots[0].CreationDate.Year() != 2024 {
+		t.Errorf("unexpected CreationDate year: %d", hotspots[0].CreationDate.Year())
+	}
+}
+
+func TestLoadExtractedHotspotsWrongProject(t *testing.T) {
+	dir := t.TempDir()
+	setupScanHistoryExtract(t, dir)
+	e := newScanHistoryExecutor(t, dir)
+
+	hotspots := loadExtractedHotspots(e, testServerURL, "other-proj", "main")
+	if len(hotspots) != 0 {
+		t.Errorf("expected 0 hotspots for wrong project, got %d", len(hotspots))
+	}
+}
+
+func TestBuildProjectQProfiles(t *testing.T) {
+	profileByLang := map[string]scanreport.QProfileInfo{
+		"java":   {Key: "java-prof", Name: "Sonar way", Language: "java"},
+		"python": {Key: "py-prof", Name: "Sonar way Python", Language: "python"},
+	}
+
+	langs := map[string]bool{"java": true, "kotlin": true}
+	got := buildProjectQProfiles(langs, profileByLang)
+
+	if len(got) != 1 {
+		t.Fatalf("expected 1 profile (only java matches), got %d", len(got))
+	}
+	if got[0].Key != "java-prof" {
+		t.Errorf("unexpected profile key: %s", got[0].Key)
+	}
+}
+
+func TestBuildProjectQProfilesEmpty(t *testing.T) {
+	got := buildProjectQProfiles(map[string]bool{}, map[string]scanreport.QProfileInfo{})
+	if len(got) != 0 {
+		t.Errorf("expected empty, got %v", got)
+	}
+}
+
+func TestRemapActiveRuleProfiles(t *testing.T) {
+	rules := []scanreport.ActiveRuleInput{
+		{RuleRepo: "java", RuleKey: "S100", QProfileKey: "old-java-key", Language: "Java"},
+		{RuleRepo: "python", RuleKey: "S200", QProfileKey: "old-py-key", Language: "PYTHON"},
+		{RuleRepo: "kotlin", RuleKey: "S300", QProfileKey: "no-change", Language: "kotlin"},
+	}
+	profileByLang := map[string]scanreport.QProfileInfo{
+		"java":   {Key: "new-java-key"},
+		"python": {Key: "new-python-key"},
+	}
+
+	remapActiveRuleProfiles(rules, profileByLang)
+
+	if rules[0].QProfileKey != "new-java-key" {
+		t.Errorf("java: expected new-java-key, got %s", rules[0].QProfileKey)
+	}
+	if rules[1].QProfileKey != "new-python-key" {
+		t.Errorf("python: expected new-python-key, got %s", rules[1].QProfileKey)
+	}
+	if rules[2].QProfileKey != "no-change" {
+		t.Errorf("kotlin: expected no-change (no SC profile), got %s", rules[2].QProfileKey)
+	}
+}
+
+func TestBuildSCProfileMap(t *testing.T) {
+	cloudSrv := newMockCloudServer()
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+	dir := t.TempDir()
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+
+	profiles := buildSCProfileMap(context.Background(), e, testCloudOrg)
+	if len(profiles) == 0 {
+		t.Fatal("expected at least one profile from mock server")
+	}
+	if _, ok := profiles["java"]; !ok {
+		t.Errorf("expected java profile, got keys: %v", func() []string {
+			ks := make([]string, 0, len(profiles))
+			for k := range profiles {
+				ks = append(ks, k)
+			}
+			return ks
+		}())
+	}
+}
+
+func TestBuildSCProfileMapNoCloud(t *testing.T) {
+	dir := t.TempDir()
+	e := newScanHistoryExecutor(t, dir)
+	profiles := buildSCProfileMap(context.Background(), e, testCloudOrg)
+	if len(profiles) != 0 {
+		t.Errorf("expected empty map when Cloud is nil, got %v", profiles)
 	}
 }
 

@@ -68,3 +68,4 @@ README.md.bak
 
 # Node (no longer used — frontend is Go templates + HTMX)
 node_modules/
+.gstack/

@@ -151,15 +151,17 @@ func BuildComponents(projectKey string, files []ComponentInput) (*pb.Component, 
 
 // IssueInput holds extracted issue data for building Issue protobuf messages.
 type IssueInput struct {
-	RuleRepo  string
-	RuleKey   string
-	Message   string
-	Severity  string
-	StartLine int32
-	EndLine   int32
-	StartOff  int32
-	EndOff    int32
-	Component string // component key for ref lookup
+	Key          string    // original SonarQube issue key — used for BackdateChangesets
+	CreationDate time.Time // original creation date — used for BackdateChangesets
+	RuleRepo     string
+	RuleKey      string
+	Message      string
+	Severity     string
+	StartLine    int32
+	EndLine      int32
+	StartOff     int32
+	EndOff       int32
+	Component    string // component key for ref lookup
 }
 
 // BuildIssues groups issues by component ref and returns a map of ref->[]Issue.

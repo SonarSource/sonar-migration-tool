@@ -52,51 +52,65 @@ func runImportScanHistory(ctx context.Context, e *Executor) error {
 			sqBranches = []branchInfo{{Name: "main", IsMain: true}}
 		}
 
-		// Query SC for the actual main branch name (CloudVoyager pattern).
-		scMainBranch := ""
-		if e.Cloud != nil && e.Cloud.Branches != nil {
-			scBranches, err := e.Cloud.Branches.List(ctx, cloudKey)
-			if err != nil {
-				e.Logger.Warn("failed to fetch SC branches, using SQ branch names", "project", cloudKey, "err", err)
-			} else {
-				for _, b := range scBranches {
-					if b.IsMain {
-						scMainBranch = b.Name
-						break
-					}
-				}
-			}
-		}
-
-		for _, branch := range sqBranches {
-			targetBranch := branch.Name
-			if branch.IsMain && scMainBranch != "" {
-				targetBranch = scMainBranch
-			}
-			result, err := importBranch(ctx, e, importBranchInput{
-				CloudKey:     cloudKey,
-				OrgKey:       orgKey,
-				ServerURL:    serverURL,
-				ServerKey:    serverKey,
-				Branch:       branch.Name,
-				TargetBranch: targetBranch,
-			})
-			if err != nil {
-				logAPIWarn(e.Logger, "scan history import failed", err, "project", cloudKey, "branch", branch.Name)
-				result = &importResult{Status: "failed", Error: err.Error()}
-			}
-
-			record, _ := json.Marshal(map[string]any{
-				"cloud_project_key": cloudKey,
-				"branch":            branch.Name,
-				"status":            result.Status,
-				"task_id":           result.TaskID,
-				"error":             result.Error,
-			})
-			w.WriteOne(record)
-		}
+		scMainBranch := fetchSCMainBranch(ctx, e, cloudKey)
+		importProjectBranches(ctx, e, proj, sqBranches, scMainBranch, w)
 	}
 	return nil
+}
+
+// fetchSCMainBranch queries SonarCloud for the main branch name of a project.
+// Returns empty string if unavailable.
+func fetchSCMainBranch(ctx context.Context, e *Executor, cloudKey string) string {
+	if e.Cloud == nil || e.Cloud.Branches == nil {
+		return ""
+	}
+	scBranches, err := e.Cloud.Branches.List(ctx, cloudKey)
+	if err != nil {
+		e.Logger.Warn("failed to fetch SC branches, using SQ branch names", "project", cloudKey, "err", err)
+		return ""
+	}
+	for _, b := range scBranches {
+		if b.IsMain {
+			return b.Name
+		}
+	}
+	return ""
+}
+
+// importProjectBranches imports scan history for every branch of one project.
+func importProjectBranches(ctx context.Context, e *Executor, proj json.RawMessage, sqBranches []branchInfo, scMainBranch string, w *common.ChunkWriter) {
+	cloudKey := extractField(proj, "cloud_project_key")
+	orgKey := extractField(proj, "sonarcloud_org_key")
+	serverURL := extractField(proj, "server_url")
+	serverKey := extractField(proj, "key")
+
+	for _, branch := range sqBranches {
+		targetBranch := branch.Name
+		if branch.IsMain && scMainBranch != "" {
+			targetBranch = scMainBranch
+		}
+		result, err := importBranch(ctx, e, importBranchInput{
+			CloudKey:     cloudKey,
+			OrgKey:       orgKey,
+			ServerURL:    serverURL,
+			ServerKey:    serverKey,
+			Branch:       branch.Name,
+			TargetBranch: targetBranch,
+		})
+		if err != nil {
+			logAPIWarn(e.Logger, "scan history import failed", err, "project", cloudKey, "branch", branch.Name)
+			result = &importResult{Status: "failed", Error: err.Error()}
+		}
+
+		record, _ := json.Marshal(map[string]any{
+			"cloud_project_key": cloudKey,
+			"branch":            branch.Name,
+			"status":            result.Status,
+			"task_id":           result.TaskID,
+			"error":             result.Error,
+		})
+		w.WriteOne(record) //nolint:errcheck
+	}
 }
 
 type importBranchInput struct {
@@ -140,48 +154,14 @@ func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*i
 
 	// Fetch SC quality profiles (CloudVoyager uses SC profile keys, not SQ keys).
 	// The CE validates that qprofile keys in the metadata exist in the SC instance.
-	scProfileByLang := make(map[string]scanreport.QProfileInfo)
-	if e.Cloud != nil && e.Cloud.QualityProfiles != nil {
-		scProfiles, err := e.Cloud.QualityProfiles.Search(ctx, input.OrgKey)
-		if err != nil {
-			e.Logger.Warn("failed to fetch SC profiles, falling back to extract profiles", "err", err)
-		}
-		for _, p := range scProfiles {
-			lang := strings.ToLower(p.Language)
-			if _, exists := scProfileByLang[lang]; !exists {
-				var rulesUpdated time.Time
-				if p.RulesUpdatedAt != "" {
-					rulesUpdated, _ = time.Parse(time.RFC3339, p.RulesUpdatedAt)
-				}
-				scProfileByLang[lang] = scanreport.QProfileInfo{
-					Key:            p.Key,
-					Name:           p.Name,
-					Language:       lang,
-					RulesUpdatedAt: rulesUpdated,
-				}
-			}
-		}
-	}
+	scProfileByLang := buildSCProfileMap(ctx, e, input.OrgKey)
 
 	// Filter profiles and rules to languages present in the project (matches cloudvoyager).
 	projectLangs := collectProjectLanguages(components)
 	activeRules = filterRulesByLanguage(activeRules, projectLangs)
 
-	// Build qprofiles from SC profiles matched by language (matches cloudvoyager).
-	var qprofiles []scanreport.QProfileInfo
-	for lang := range projectLangs {
-		if scP, ok := scProfileByLang[lang]; ok {
-			qprofiles = append(qprofiles, scP)
-		}
-	}
-
-	// Remap active rule qProfileKey from SQ keys to SC keys by language.
-	for i := range activeRules {
-		lang := strings.ToLower(activeRules[i].Language)
-		if scP, ok := scProfileByLang[lang]; ok {
-			activeRules[i].QProfileKey = scP.Key
-		}
-	}
+	qprofiles := buildProjectQProfiles(projectLangs, scProfileByLang)
+	remapActiveRuleProfiles(activeRules, scProfileByLang)
 
 	root, fileComps, cr := scanreport.BuildComponents(input.CloudKey, components)
 	pbIssues := scanreport.BuildIssues(issues, cr)
@@ -198,6 +178,17 @@ func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*i
 
 	now := time.Now()
 	changesets := buildChangesetMap(cr, components, now)
+
+	// Backdate changesets so each issue gets its original SonarQube creation date.
+	// Build a component-key-keyed alias map (same pointers) for BackdateChangesets.
+	changesetsByKey := make(map[string]*pb.Changesets, len(changesets))
+	for compKey, ref := range cr.Refs() {
+		if cs, ok := changesets[ref]; ok {
+			changesetsByKey[compKey] = cs
+		}
+	}
+	extracted := toExtractedIssues(issues)
+	scanreport.BackdateChangesets(extracted, changesetsByKey, now)
 
 	metadata := scanreport.BuildMetadata(scanreport.MetadataInput{
 		AnalysisDate:   now,
@@ -356,15 +347,17 @@ func loadExtractedIssues(e *Executor, serverURL, serverKey, branch string) []sca
 			continue
 		}
 		issues = append(issues, scanreport.IssueInput{
-			RuleRepo:  repo,
-			RuleKey:   key,
-			Message:   extractField(item.Data, "message"),
-			Severity:  extractField(item.Data, "severity"),
-			StartLine: extractInt32(item.Data, "textRange", "startLine"),
-			EndLine:   extractInt32(item.Data, "textRange", "endLine"),
-			StartOff:  extractInt32(item.Data, "textRange", "startOffset"),
-			EndOff:    extractInt32(item.Data, "textRange", "endOffset"),
-			Component: extractField(item.Data, "component"),
+			Key:          extractField(item.Data, "key"),
+			CreationDate: parseISODate(extractField(item.Data, "creationDate")),
+			RuleRepo:     repo,
+			RuleKey:      key,
+			Message:      extractField(item.Data, "message"),
+			Severity:     extractField(item.Data, "severity"),
+			StartLine:    extractInt32(item.Data, "textRange", "startLine"),
+			EndLine:      extractInt32(item.Data, "textRange", "endLine"),
+			StartOff:     extractInt32(item.Data, "textRange", "startOffset"),
+			EndOff:       extractInt32(item.Data, "textRange", "endOffset"),
+			Component:    extractField(item.Data, "component"),
 		})
 	}
 	return issues
@@ -479,13 +472,15 @@ func loadExtractedHotspots(e *Executor, serverURL, serverKey, branch string) []s
 		line := extractInt32Field(item.Data, "line")
 		severity := mapVulnProbToSeverity(extractField(item.Data, "vulnerabilityProbability"))
 		hotspots = append(hotspots, scanreport.IssueInput{
-			RuleRepo:  repo,
-			RuleKey:   key,
-			Message:   extractField(item.Data, "message"),
-			Severity:  severity,
-			StartLine: line,
-			EndLine:   line,
-			Component: extractField(item.Data, "component"),
+			Key:          extractField(item.Data, "key"),
+			CreationDate: parseISODate(extractField(item.Data, "creationDate")),
+			RuleRepo:     repo,
+			RuleKey:      key,
+			Message:      extractField(item.Data, "message"),
+			Severity:     severity,
+			StartLine:    line,
+			EndLine:      line,
+			Component:    extractField(item.Data, "component"),
 		})
 	}
 	return hotspots
@@ -631,6 +626,60 @@ func loadExtractedQProfiles(e *Executor, serverURL, serverKey string) []scanrepo
 	return profiles
 }
 
+// buildSCProfileMap fetches quality profiles from SonarCloud and returns them
+// keyed by lower-cased language. Falls back to an empty map on error.
+func buildSCProfileMap(ctx context.Context, e *Executor, orgKey string) map[string]scanreport.QProfileInfo {
+	profiles := make(map[string]scanreport.QProfileInfo)
+	if e.Cloud == nil || e.Cloud.QualityProfiles == nil {
+		return profiles
+	}
+	scProfiles, err := e.Cloud.QualityProfiles.Search(ctx, orgKey)
+	if err != nil {
+		e.Logger.Warn("failed to fetch SC profiles, falling back to extract profiles", "err", err)
+		return profiles
+	}
+	for _, p := range scProfiles {
+		lang := strings.ToLower(p.Language)
+		if _, exists := profiles[lang]; exists {
+			continue
+		}
+		var rulesUpdated time.Time
+		if p.RulesUpdatedAt != "" {
+			rulesUpdated, _ = time.Parse(time.RFC3339, p.RulesUpdatedAt)
+		}
+		profiles[lang] = scanreport.QProfileInfo{
+			Key:            p.Key,
+			Name:           p.Name,
+			Language:       lang,
+			RulesUpdatedAt: rulesUpdated,
+		}
+	}
+	return profiles
+}
+
+// buildProjectQProfiles returns the SC QProfileInfo values for each language
+// present in the project.
+func buildProjectQProfiles(projectLangs map[string]bool, scProfileByLang map[string]scanreport.QProfileInfo) []scanreport.QProfileInfo {
+	var qprofiles []scanreport.QProfileInfo
+	for lang := range projectLangs {
+		if scP, ok := scProfileByLang[lang]; ok {
+			qprofiles = append(qprofiles, scP)
+		}
+	}
+	return qprofiles
+}
+
+// remapActiveRuleProfiles rewrites each rule's QProfileKey to the matching SC
+// profile key for its language.
+func remapActiveRuleProfiles(rules []scanreport.ActiveRuleInput, scProfileByLang map[string]scanreport.QProfileInfo) {
+	for i := range rules {
+		lang := strings.ToLower(rules[i].Language)
+		if scP, ok := scProfileByLang[lang]; ok {
+			rules[i].QProfileKey = scP.Key
+		}
+	}
+}
+
 func buildChangesetMap(cr *scanreport.ComponentRef, components []scanreport.ComponentInput, date time.Time) map[int32]*pb.Changesets {
 	changesets := make(map[int32]*pb.Changesets)
 	for _, comp := range components {
@@ -641,30 +690,13 @@ func buildChangesetMap(cr *scanreport.ComponentRef, components []scanreport.Comp
 	return changesets
 }
 
-func toExtractedIssues(issues []scanreport.IssueInput, e *Executor) []scanreport.ExtractedIssue {
-	fullItems, _ := readExtractItems(e, "getProjectIssuesFull")
-	dateMap := make(map[string]time.Time)
-	for _, item := range fullItems {
-		key := extractField(item.Data, "key")
-		dateStr := extractField(item.Data, "creationDate")
-		if key != "" && dateStr != "" {
-			t, err := time.Parse(time.RFC3339, dateStr)
-			if err != nil {
-				// SonarQube often returns -0500 instead of -05:00
-				t, err = time.Parse("2006-01-02T15:04:05-0700", dateStr)
-			}
-			if err == nil {
-				dateMap[key] = t
-			}
-		}
-	}
-
+func toExtractedIssues(issues []scanreport.IssueInput) []scanreport.ExtractedIssue {
 	result := make([]scanreport.ExtractedIssue, 0, len(issues))
 	for _, iss := range issues {
 		result = append(result, scanreport.ExtractedIssue{
-			Key:          iss.RuleRepo + ":" + iss.RuleKey,
+			Key:          iss.Key,
 			Component:    iss.Component,
-			CreationDate: dateMap[iss.RuleRepo+":"+iss.RuleKey],
+			CreationDate: iss.CreationDate,
 			StartLine:    iss.StartLine,
 			EndLine:      iss.EndLine,
 		})
@@ -700,6 +732,22 @@ func countFilesByExt(components []scanreport.ComponentInput) map[string]int32 {
 		}
 	}
 	return counts
+}
+
+// parseISODate parses a SonarQube date string in RFC3339 or legacy UTC-offset format.
+// Returns zero time on parse failure.
+func parseISODate(dateStr string) time.Time {
+	if dateStr == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, dateStr)
+	if err != nil {
+		t, err = time.Parse("2006-01-02T15:04:05-0700", dateStr)
+	}
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 func splitRule(rule string) (string, string) {

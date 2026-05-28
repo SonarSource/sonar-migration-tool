@@ -184,11 +184,50 @@ These differences have been investigated. They do NOT cause CE processing failur
 
 **Solution**: Re-create the projects on the SC staging environment, or use a fresh organization/enterprise. This error is NOT caused by our ZIP format, protobuf content, or submission logic.
 
+### Issue Date Preservation (FIXED)
+<!-- updated: 2026-05-27_22:30:00 -->
+
+**Symptom**: All migrated issues appear introduced at migration time; SonarCloud new-code-period logic treats all historical issues as new.
+
+**Root cause** (two bugs, both required fixing):
+
+1. `BackdateChangesets` existed in `scanreport/backdate.go` but was never called from `importBranch()` — dead code.
+2. `toExtractedIssues()` built a date-map keyed by issue key (e.g. `AQAB2...`) but looked it up by `ruleRepo:ruleKey` (e.g. `python:S1234`) — mismatched keys meant every `CreationDate` was zero.
+
+**Fix**:
+1. Added `Key string` and `CreationDate time.Time` fields to `IssueInput` and `ExternalIssueInput` in `builder.go`.
+2. `loadExtractedIssues()` and `loadExtractedHotspots()` now populate these from the raw JSON (`key` and `creationDate` fields).
+3. `toExtractedIssues()` simplified — reads `Key` and `CreationDate` directly from `IssueInput` (no second extract re-read).
+4. `importBranch()` now builds a component-key-keyed alias map and calls `BackdateChangesets(extracted, changesetsByKey, now)` after building changesets.
+
+**Verification**: After fix, migrated issues on SC show their original SonarQube creation dates.
+
+### Issue Comment Deduplication (FIXED)
+<!-- updated: 2026-05-27_22:30:00 -->
+
+**Symptom**: If `syncIssueMetadata` ran multiple times (e.g., first run had a tag-sync failure), user comments would be duplicated on the Cloud issue.
+
+**Root cause**: `syncIssueComments()` had no idempotency check. If comments were added successfully but the final `syncIssueTags()` call failed, the `metadata-synchronized` tag was never set, causing the pair to be retried. On retry, comments were added again.
+
+**Fix**: Added `isAlreadyMigratedIssueComment()` in `tasks_issuesync.go` — mirrors the hotspot pattern. Before adding a comment, it checks whether a Cloud comment with identical text already exists. The `cloudComments` field from `pair.cloud` is passed to `syncIssueComments()` for this check.
+
+### Hotspot TO_REVIEW Comment Sync (FIXED)
+<!-- updated: 2026-05-27_22:30:00 -->
+
+**Symptom**: User comments on TO_REVIEW hotspots were not migrated.
+
+**Root cause**: `buildHotspotPairs()` filtered to only `REVIEWED` hotspot pairs, discarding all TO_REVIEW hotspots even when they had user comments.
+
+**Fix**: Updated filter condition to include any pair that needs status sync (source is REVIEWED) OR needs comment sync (source has any comments), regardless of status.
+
 ### Resolved Issues
 
 - **ReferenceBranchName**: Previously not set in `MetadataInput`. Now set correctly, defaulting to `BranchName` — matches CloudVoyager behavior.
 - **ZIP data descriptors**: Fixed via `Deflate` + `CreateHeader` (see root cause above).
 - **Branch name mapping**: Fixed to query SC main branch name (see above).
+- **Issue date preservation**: Fixed via `BackdateChangesets` wiring + `IssueInput.CreationDate` (see above).
+- **Issue comment deduplication**: Fixed via `isAlreadyMigratedIssueComment` idempotency guard (see above).
+- **Hotspot TO_REVIEW comment sync**: Fixed via inclusive actionable-pair filter (see above).
 
 ### Confirmed NON-issues
 
