@@ -36,7 +36,7 @@ cd go
 go run . <command> [args]
 ```
 
-> **Note:** The default `--export_directory` is `/app/files/` (for Docker). When running natively, always pass `--export_directory` to point to a local directory (e.g., `./files/`).
+> **Note:** The default `--export_directory` is `./migration-files` (created in the current working directory). You can override it with the `--export_directory` flag or the `export_directory` field in the JSON config file. Every command prints `See sonar-migration-tool output results in <directory>` when it finishes so you always know where to look.
 
 ---
 
@@ -93,7 +93,7 @@ sonar-migration-tool gui --export_directory ./files/
 
 | Flag | Description |
 |------|-------------|
-| `--export_directory` | Output directory (default: `/app/files/`) |
+| `--export_directory` | Output directory (default: `./migration-files`) |
 | `--addr` | Address to bind HTTP server (default: `localhost:0` — auto-assigns port) |
 | `--no-browser` | Don't automatically open the browser |
 
@@ -137,7 +137,7 @@ sonar-migration-tool extract <URL> <TOKEN> --export_directory ./files/ [--concur
 | `--concurrency` | Max concurrent requests (default: server-detected) |
 | `--timeout` | Request timeout in seconds |
 | `--extract_type` | Type of extract to run |
-| `--export_directory` | Output directory (default: `/app/files/` — override when running natively) |
+| `--export_directory` | Output directory (default: `./migration-files`) |
 | `--include_scan_history` | Extract full issue data, source code, and SCM blame for scan history import |
 | `--pem_file_path` | Client certificate PEM file (mTLS) |
 | `--key_file_path` | Client certificate key file (mTLS) |
@@ -188,7 +188,7 @@ sonar-migration-tool migrate <TOKEN> <ENTERPRISE_KEY> --export_directory ./files
 | `--edition` | SonarQube Cloud license edition |
 | `--url` | SonarQube Cloud URL (default: `https://sonarcloud.io/`) |
 | `--concurrency` | Max concurrent requests |
-| `--export_directory` | Directory containing SonarQube exports (default: `/app/files/` — override when running natively) |
+| `--export_directory` | Directory containing SonarQube exports (default: `./migration-files`) |
 
 ---
 

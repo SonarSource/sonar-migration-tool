@@ -68,12 +68,16 @@ func TestPredictiveReport_FlagOverridesConfigFile(t *testing.T) {
 	}
 }
 
-// Without --config and without --export_directory, the command should
-// surface a clear error instead of silently picking an empty dir.
-func TestPredictiveReport_RequiresExportDir(t *testing.T) {
+// Without --config and without --export_directory, the command falls
+// back to the implicit default "./migration-files" (issue #247).
+func TestPredictiveReport_DefaultsExportDir(t *testing.T) {
 	cmd := newPredictiveReportTestCmd()
-	if _, err := resolvePredictiveReportExportDir(cmd); err == nil {
-		t.Error("expected error when neither --export_directory nor --config supplied")
+	got, err := resolvePredictiveReportExportDir(cmd)
+	if err != nil {
+		t.Fatalf("resolvePredictiveReportExportDir: %v", err)
+	}
+	if got != DefaultExportDirectory {
+		t.Errorf("got %q, want %q", got, DefaultExportDirectory)
 	}
 }
 

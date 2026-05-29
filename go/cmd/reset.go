@@ -22,7 +22,11 @@ var resetCmd = &cobra.Command{
 		}
 
 		fmt.Println("WARNING: This will delete everything in every organization within the enterprise.")
-		return migrate.RunReset(cmd.Context(), cfg)
+		if err := migrate.RunReset(cmd.Context(), cfg); err != nil {
+			return err
+		}
+		printExportDirNotice(cfg.ExportDirectory)
+		return nil
 	},
 }
 
@@ -32,7 +36,7 @@ func init() {
 	f.String("edition", "enterprise", "SonarQube Cloud license edition")
 	f.String("url", "https://sonarcloud.io/", "URL of SonarQube Cloud")
 	f.Int("concurrency", 25, "Maximum number of concurrent requests")
-	f.String("export_directory", "/app/files/", "Directory to place all interim files")
+	f.String("export_directory", DefaultExportDirectory, "Directory to place all interim files")
 	f.Bool("debug", false, "Enable debug-level logging (verbose request payloads, more detail per task)")
 }
 
@@ -63,6 +67,12 @@ func buildResetConfig(cmd *cobra.Command, args []string) (migrate.ResetConfig, e
 	overrideInt(cmd, "concurrency", &cfg.Concurrency)
 	if cmd.Flags().Changed("debug") {
 		cfg.Debug, _ = cmd.Flags().GetBool("debug")
+	}
+
+	// Default the export directory when neither config nor flag supplied
+	// one (issue #247).
+	if cfg.ExportDirectory == "" {
+		cfg.ExportDirectory = DefaultExportDirectory
 	}
 
 	return cfg, nil

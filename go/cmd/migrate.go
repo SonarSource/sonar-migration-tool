@@ -32,6 +32,7 @@ organization keys to organizations.csv.`,
 		if pdfPath, pdfErr := summary.GeneratePDFReport(runDir, cfg.ExportDirectory, cfg.ExportDirectory); pdfErr == nil {
 			fmt.Printf("PDF summary report: %s\n", pdfPath)
 		}
+		printExportDirNotice(cfg.ExportDirectory)
 		return nil
 	},
 }
@@ -87,6 +88,12 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	}
 	if cmd.Flags().Changed("debug") {
 		cfg.Debug, _ = cmd.Flags().GetBool("debug")
+	}
+
+	// Default the export directory when neither config nor flag supplied
+	// one (issue #247).
+	if cfg.ExportDirectory == "" {
+		cfg.ExportDirectory = DefaultExportDirectory
 	}
 
 	return cfg, nil

@@ -20,7 +20,7 @@ var reportCmd = &cobra.Command{
 
 func init() {
 	f := reportCmd.Flags()
-	f.String("export_directory", "/app/files/", "Root directory containing all SonarQube exports")
+	f.String("export_directory", DefaultExportDirectory, "Root directory containing all SonarQube exports")
 	f.String("report_type", "migration", "Type of report to generate")
 	f.String("filename", "", "Filename for the report")
 }
@@ -57,5 +57,6 @@ func runReport(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Report written to: %s\n", outPath)
+	printExportDirNotice(exportDir)
 	return nil
 }

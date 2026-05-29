@@ -18,7 +18,7 @@ var wizardCmd = &cobra.Command{
 }
 
 func init() {
-	wizardCmd.Flags().String("export_directory", "/app/files/", "Root directory to output the export")
+	wizardCmd.Flags().String("export_directory", DefaultExportDirectory, "Root directory to output the export")
 }
 
 func runWizard(cmd *cobra.Command, args []string) error {
@@ -34,6 +34,9 @@ func runWizard(cmd *cobra.Command, args []string) error {
 		fmt.Println("\nWizard interrupted. Your progress has been saved.")
 		fmt.Println("Run the wizard again to resume from where you left off.")
 		return nil
+	}
+	if err == nil {
+		printExportDirNotice(exportDir)
 	}
 	return err
 }

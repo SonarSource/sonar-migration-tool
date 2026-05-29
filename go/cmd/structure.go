@@ -22,15 +22,23 @@ var structureCmd = &cobra.Command{
 				return err
 			}
 			if len(orgs) == 1 {
-				return structure.RunStructure(exportDir, orgs[0].Key)
+				if err := structure.RunStructure(exportDir, orgs[0].Key); err != nil {
+					return err
+				}
+				printExportDirNotice(exportDir)
+				return nil
 			}
 		}
 
-		return structure.RunStructure(exportDir)
+		if err := structure.RunStructure(exportDir); err != nil {
+			return err
+		}
+		printExportDirNotice(exportDir)
+		return nil
 	},
 }
 
 func init() {
-	structureCmd.Flags().String("export_directory", "/app/files/", "Root directory containing all SonarQube exports")
+	structureCmd.Flags().String("export_directory", DefaultExportDirectory, "Root directory containing all SonarQube exports")
 	structureCmd.Flags().String("config", "", "Path to JSON configuration file (pre-populates sonarcloud_org_key when one org is defined)")
 }
