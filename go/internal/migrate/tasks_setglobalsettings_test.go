@@ -1132,9 +1132,9 @@ func TestPartitionSQSOnlySettings(t *testing.T) {
 			wantSilent: true,
 		},
 		{
-			name:     "allowDisableInheritedRules=true emits a note",
+			name:     "allowDisableInheritedRules=true emits the canonical not-on-SQC note",
 			raw:      map[string]any{"key": "sonar.qualityProfiles.allowDisableInheritedRules", "value": "true"},
-			wantNote: "does not exist on SonarQube Cloud",
+			wantNote: SkipDetailNotOnSQC,
 		},
 		{
 			name:       "ratingGrid at default is silent",
@@ -1142,9 +1142,9 @@ func TestPartitionSQSOnlySettings(t *testing.T) {
 			wantSilent: true,
 		},
 		{
-			name:     "ratingGrid customized emits a note with the configured value",
+			name:     "ratingGrid customized emits the canonical not-on-SQC note",
 			raw:      map[string]any{"key": "sonar.technicalDebt.ratingGrid", "value": "0.03,0.07,0.2,0.5"},
-			wantNote: `Configured value "0.03,0.07,0.2,0.5" will be replaced by the non-configurable SonarQube Cloud default "0.05,0.1,0.2,0.5".`,
+			wantNote: SkipDetailNotOnSQC,
 		},
 		{
 			name: "unknown setting passes through",
@@ -1253,8 +1253,8 @@ func TestRunSetGlobalSettingsSQSOnlyNoteFiresEvenAtSQSDefault(t *testing.T) {
 		if oc.Org != "" || oc.Reason != "sqs-only" {
 			t.Errorf("note must be section-level (Org=\"\") with Reason=sqs-only, got %+v", oc)
 		}
-		if !strings.Contains(oc.Detail, "does not exist on SonarQube Cloud") {
-			t.Errorf("Detail must explain the SQS-only nature, got %q", oc.Detail)
+		if oc.Detail != SkipDetailNotOnSQC {
+			t.Errorf("Detail must be the canonical not-on-SQC string, got %q", oc.Detail)
 		}
 		foundNote = true
 	}

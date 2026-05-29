@@ -134,7 +134,7 @@ func synthesizeSetGlobalSettings(exportDir, runDir string, extractMapping struct
 				"org":    "",
 				"status": "skipped",
 				"reason": "default-value",
-				"detail": "Setting is left to default on SQS, no migration needed.",
+				"detail": migrate.SkipDetailDefaultValue,
 			}},
 		}
 		b, err := json.Marshal(rec)
