@@ -581,7 +581,7 @@ func buildUnifiedRows(section Section, predictive bool) []unifiedRow {
 	// Cloud-side internal ids carry no user value in the report:
 	// suppress them in the Details column for sections where they
 	// dominate the cell (QP cloud key, Portfolio cloud id).
-	hideCloudKey := section.Name == "Quality Profiles" || section.Name == "Portfolios"
+	hideCloudKey := section.Name == "Quality Profiles" || section.Name == "Portfolios" || section.Name == "Quality Gates"
 
 	for _, item := range section.Succeeded {
 		rows = append(rows, unifiedRow{

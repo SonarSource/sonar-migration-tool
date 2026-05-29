@@ -368,8 +368,11 @@ func TestBuildUnifiedRowsOrdering(t *testing.T) {
 	if rows[4].name != "GateD" {
 		t.Errorf("expected unused skipped second, got name %q", rows[4].name)
 	}
-	if rows[1].details != "43\nAdd condition: foo" {
-		t.Errorf("expected partial details to combine cloud key + issues on separate lines, got %q", rows[1].details)
+	// Quality Gates hide the opaque cloud gate id from Details
+	// (same treatment as Quality Profiles and Portfolios), so the
+	// partial row should render only the Issues lines.
+	if rows[1].details != "Add condition: foo" {
+		t.Errorf("expected partial details to be issues only (cloud key suppressed for QG), got %q", rows[1].details)
 	}
 }
 
