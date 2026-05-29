@@ -15,12 +15,20 @@ import "time"
 // executive summary table and the per-section detail tables. The
 // predictive-report command (#235) sets this for "Global Settings"
 // because settings prediction needs runtime SQC support detection.
+//
+// Predictive toggles a small set of presentation tweaks that only
+// apply to the predict pipeline (#240): the title is "SonarQube
+// Migration Prediction" (with "Prediction" underlined), the
+// Organization column is hidden from per-object tables, the success
+// label reads "Perfect" instead of "Success", and synthetic
+// cloud-side IDs are stripped from the Details column.
 type MigrationSummary struct {
 	RunID        string
 	GeneratedAt  time.Time
 	Sections     []Section
 	Limitations  []string
 	OmitSections map[string]bool
+	Predictive   bool
 }
 
 // Section represents a category of migrated entities (e.g., Projects, Quality Gates).

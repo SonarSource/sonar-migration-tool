@@ -1142,9 +1142,9 @@ func TestPartitionSQSOnlySettings(t *testing.T) {
 			wantSilent: true,
 		},
 		{
-			name:     "ratingGrid customized emits a note",
+			name:     "ratingGrid customized emits a note with the configured value",
 			raw:      map[string]any{"key": "sonar.technicalDebt.ratingGrid", "value": "0.03,0.07,0.2,0.5"},
-			wantNote: "does not exist on SonarQube Cloud",
+			wantNote: `Configured value "0.03,0.07,0.2,0.5" will be replaced by the non-configurable SonarQube Cloud default "0.05,0.1,0.2,0.5".`,
 		},
 		{
 			name: "unknown setting passes through",

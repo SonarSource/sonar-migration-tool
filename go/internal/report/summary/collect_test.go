@@ -1118,14 +1118,12 @@ func TestCollectSummaryNCDLimitations(t *testing.T) {
 	}
 }
 
-// TestCollectSummaryAttachesNCDFallbackToProject is a regression for
-// issue #135 — when a project's SQS NCD type isn't supported at SQC
-// project scope, the migrate task sets the project to the org
-// default AND writes a sidecar marker (ncd_fallback=true) so the
-// PDF report can flag the project. This test confirms the marker is
-// picked up and surfaced in the project's Detail field via the
-// |ncdFallback:<type> suffix that the PDF renderer interprets.
-func TestCollectSummaryAttachesNCDFallbackToProject(t *testing.T) {
+// TestCollectSummaryNCDFallbackMovesProjectToPartial is the updated
+// regression for issues #135 / #240 — when a project's SQS NCD type
+// isn't supported at SQC project scope (REFERENCE_BRANCH or
+// SPECIFIC_ANALYSIS), the project now moves from Succeeded into
+// Partial with an explanatory Issue describing what was substituted.
+func TestCollectSummaryNCDFallbackMovesProjectToPartial(t *testing.T) {
 	dir := t.TempDir()
 	runID := "run-ncd-fallback"
 	runDir := filepath.Join(dir, runID)
@@ -1139,8 +1137,8 @@ func TestCollectSummaryAttachesNCDFallbackToProject(t *testing.T) {
 		{"name": "Project B", "sonarcloud_org_key": "org1", "cloud_project_key": "org1_projB"},
 	})
 	writeTaskJSONL(t, runDir, "setNewCodePeriods", []map[string]any{
-		// projA had REFERENCE_BRANCH on SQS — fell back to org default
-		// at runtime, marker written for the report.
+		// projA had REFERENCE_BRANCH on SQS — fell back to org default,
+		// marker written for the report.
 		{"projectKey": "projA", "cloud_project_key": "org1_projA", "type": "REFERENCE_BRANCH", "source_ncd_type": "REFERENCE_BRANCH", "ncd_fallback": true},
 		// projB had NUMBER_OF_DAYS — applied normally, no marker.
 		{"projectKey": "projB", "cloud_project_key": "org1_projB", "type": "NUMBER_OF_DAYS", "value": "30"},
@@ -1155,20 +1153,37 @@ func TestCollectSummaryAttachesNCDFallbackToProject(t *testing.T) {
 		t.Fatal("missing Projects section")
 	}
 
-	var aDetail, bDetail string
-	for _, p := range projSection.Succeeded {
-		switch p.Name {
-		case "Project A":
-			aDetail = p.Detail
-		case "Project B":
-			bDetail = p.Detail
+	// Project A → Partial with the explanatory Issue.
+	var sawA bool
+	for _, p := range projSection.Partial {
+		if p.Name != "Project A" {
+			continue
+		}
+		sawA = true
+		joined := strings.Join(p.Issues, " | ")
+		if !strings.Contains(joined, "reference branch") {
+			t.Errorf("Project A Partial Issues must mention the substituted NCD type, got %q", joined)
+		}
+		if !strings.Contains(joined, "replaced by the org default") {
+			t.Errorf("Project A Partial Issues must mention org-default substitution, got %q", joined)
 		}
 	}
-	if !strings.Contains(aDetail, "|ncdFallback:REFERENCE_BRANCH") {
-		t.Errorf("Project A Detail must carry the ncdFallback marker, got %q", aDetail)
+	if !sawA {
+		t.Errorf("Project A must appear in Partial, got Partial=%v", projSection.Partial)
 	}
-	if strings.Contains(bDetail, "ncdFallback") {
-		t.Errorf("Project B (supported NCD type) must NOT carry the ncdFallback marker, got %q", bDetail)
+
+	// Project B (supported NCD type) → stays in Succeeded.
+	var sawB bool
+	for _, p := range projSection.Succeeded {
+		if p.Name == "Project B" {
+			sawB = true
+		}
+		if p.Name == "Project A" {
+			t.Errorf("Project A must NOT remain in Succeeded after Partial move")
+		}
+	}
+	if !sawB {
+		t.Errorf("Project B must remain in Succeeded, got Succeeded=%v", projSection.Succeeded)
 	}
 }
 

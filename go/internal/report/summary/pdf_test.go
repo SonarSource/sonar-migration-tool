@@ -349,7 +349,7 @@ func TestBuildUnifiedRowsOrdering(t *testing.T) {
 		},
 	}
 
-	rows := buildUnifiedRows(section)
+	rows := buildUnifiedRows(section, false)
 	if len(rows) != 5 {
 		t.Fatalf("expected 5 rows, got %d", len(rows))
 	}
@@ -404,7 +404,7 @@ func TestUnifiedRowDisplayNameWithLanguage(t *testing.T) {
 }
 
 func TestSuccessDetailsScanHistory(t *testing.T) {
-	got := successDetails(EntityItem{Detail: "proj1|scan:failed"})
+	got := successDetails(EntityItem{Detail: "proj1|scan:failed"}, false)
 	if !strings.Contains(got, "proj1") || !strings.Contains(got, "Failed") {
 		t.Errorf("expected scan history in details, got %q", got)
 	}

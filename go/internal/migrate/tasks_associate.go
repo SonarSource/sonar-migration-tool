@@ -569,6 +569,16 @@ func runSetNewCodePeriods(ctx context.Context, e *Executor) error {
 				if !extractBool(item.Data, "inherited") {
 					e.Logger.Info("setNewCodePeriods: per-branch NCD override not migratable to SonarQube Cloud, skipping",
 						"project", pm.CloudKey, "branch", branch, "type", extractField(item.Data, "type"))
+					// Sidecar marker so the PDF report's Projects table
+					// can flag this project as Partial (#240 follow-up):
+					// the branch will silently fall back to the project-
+					// level NCD on SonarQube Cloud since per-branch NCD
+					// overrides don't exist there.
+					_ = w.WriteOne(common.EnrichRaw(item.Data, map[string]any{
+						"cloud_project_key":   pm.CloudKey,
+						"ncd_branch_override": true,
+						"branch":              branch,
+					}))
 				}
 				return nil
 			}

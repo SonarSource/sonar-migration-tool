@@ -9,6 +9,7 @@ import (
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/analysis"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/migrate"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 )
 
@@ -34,6 +35,7 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 
 	scanHistoryMap := collectScanHistory(store)
 	ncdFallbackMap := collectNCDFallback(store)
+	ncdBranchOverrideSet := collectNCDBranchOverrides(store)
 	extractMapping, _ := structure.GetUniqueExtracts(exportDir)
 
 	var sections []Section
@@ -41,7 +43,8 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 		section := collectSection(store, def, failuresByType, configFailures, exportDir, extractMapping)
 		if def.Name == "Projects" {
 			attachScanHistory(section.Succeeded, scanHistoryMap)
-			attachNCDFallback(section.Succeeded, ncdFallbackMap)
+			section.Succeeded, section.Partial = applyNCDFallbackPartials(section.Succeeded, section.Partial, ncdFallbackMap)
+			section.Succeeded, section.Partial = applyNCDBranchOverridePartials(section.Succeeded, section.Partial, ncdBranchOverrideSet)
 		}
 		sections = append(sections, section)
 	}
@@ -259,6 +262,13 @@ func collectSection(store *common.DataStore, def sectionDef,
 	if def.Name == "Quality Gates" {
 		notes := collectGateMappingNotes(store.BaseDir())
 		succeeded, nearPerfect, partial = applyGateMappingNotes(succeeded, nearPerfect, partial, notes)
+	}
+
+	// SonarQube Server built-in groups (e.g. "sonar-users") are skipped
+	// at create time — surface them in the Skipped bucket with the
+	// curated note so the operator knows why the group did not migrate.
+	if def.Name == "Groups" {
+		skipped = appendBuiltInGroupSkips(store, skipped)
 	}
 
 	return Section{
@@ -495,33 +505,115 @@ func collectNCDFallback(store *common.DataStore) map[string]string {
 	return result
 }
 
-// attachNCDFallback appends a per-project NCD-fallback marker to the
-// Detail field for projects whose SQS NCD type couldn't be migrated
-// at project scope on SonarCloud — issue #135. The marker is
-// "|ncdFallback:<sqs_type>"; the PDF renderer (successDetails)
-// splits it back out and prints a human-readable note alongside the
-// cloud key. Robust to attachScanHistory running first: its marker
-// (|scan:...) is preserved by inserting our marker AFTER the cloud
-// key but BEFORE any |scan: marker.
-func attachNCDFallback(projects []EntityItem, ncdMap map[string]string) {
-	if ncdMap == nil {
-		return
+// applyNCDFallbackPartials moves projects whose SQS new-code-definition
+// type isn't supported at project scope on SonarQube Cloud
+// (REFERENCE_BRANCH, SPECIFIC_ANALYSIS) from the Succeeded bucket into
+// Partial — issue #135 / follow-up to #240. The project's Detail
+// retains the cloud key (and any |scan: suffix) so dedup and rendering
+// keep working; an explanatory Issue is appended explaining what was
+// substituted.
+func applyNCDFallbackPartials(succeeded, partial []EntityItem, ncdMap map[string]string) ([]EntityItem, []EntityItem) {
+	if len(ncdMap) == 0 {
+		return succeeded, partial
 	}
-	for i := range projects {
-		detail := projects[i].Detail
-		// Detail is either "cloudKey" or "cloudKey|scan:status".
+	keep := succeeded[:0:0]
+	for _, item := range succeeded {
+		detail := item.Detail
 		cloudKey := detail
-		scanSuffix := ""
 		if idx := strings.Index(detail, "|scan:"); idx >= 0 {
 			cloudKey = detail[:idx]
-			scanSuffix = detail[idx:]
 		}
 		sqsType, ok := ncdMap[cloudKey]
 		if !ok {
+			keep = append(keep, item)
 			continue
 		}
-		projects[i].Detail = cloudKey + "|ncdFallback:" + sqsType + scanSuffix
+		moved := item
+		moved.Issues = append(append([]string(nil), item.Issues...),
+			fmt.Sprintf("The new code period %q does not exist on SonarQube Cloud and has been replaced by the org default.",
+				ncdTypeLabel(sqsType)))
+		partial = append(partial, moved)
 	}
+	return keep, partial
+}
+
+// ncdTypeLabel maps the SonarQube Server new-code-definition enum
+// (REFERENCE_BRANCH, SPECIFIC_ANALYSIS, ...) to the human-readable
+// label used in the migration report.
+func ncdTypeLabel(sqsType string) string {
+	switch sqsType {
+	case "REFERENCE_BRANCH":
+		return "reference branch"
+	case "SPECIFIC_ANALYSIS":
+		return "analysis id"
+	}
+	return sqsType
+}
+
+// collectNCDBranchOverrides reads the setNewCodePeriods JSONL and
+// returns the set of cloud_project_keys for projects that had at
+// least one per-branch NCD override on SonarQube Server. SonarQube
+// Cloud has no per-branch NCD; those branches silently fall back to
+// the project-level NCD, so the report should flag the project as
+// Partial (#240 follow-up).
+func collectNCDBranchOverrides(store *common.DataStore) map[string]bool {
+	items, err := store.ReadAll("setNewCodePeriods")
+	if err != nil || len(items) == 0 {
+		return nil
+	}
+	result := make(map[string]bool)
+	for _, item := range items {
+		if !jsonBool(item, "ncd_branch_override") {
+			continue
+		}
+		cloudKey := jsonStr(item, "cloud_project_key")
+		if cloudKey != "" {
+			result[cloudKey] = true
+		}
+	}
+	return result
+}
+
+// applyNCDBranchOverridePartials moves projects whose branches had
+// custom NCD overrides on SonarQube Server from Succeeded into
+// Partial — those overrides have no SonarQube Cloud equivalent and
+// the branches will silently inherit the project-level NCD.
+func applyNCDBranchOverridePartials(succeeded, partial []EntityItem, overrides map[string]bool) ([]EntityItem, []EntityItem) {
+	if len(overrides) == 0 {
+		return succeeded, partial
+	}
+	const issue = "Per-branch new code period overrides do not exist on SonarQube Cloud; branches will inherit the project-level new code period."
+	// First: tag matching projects already in Partial so they accumulate
+	// the explanatory Issue rather than appearing twice.
+	for i := range partial {
+		key := projectCloudKey(partial[i].Detail)
+		if overrides[key] {
+			partial[i].Issues = append(partial[i].Issues, issue)
+			delete(overrides, key)
+		}
+	}
+	// Then move matching Succeeded entries to Partial.
+	keep := succeeded[:0:0]
+	for _, item := range succeeded {
+		key := projectCloudKey(item.Detail)
+		if !overrides[key] {
+			keep = append(keep, item)
+			continue
+		}
+		moved := item
+		moved.Issues = append(append([]string(nil), item.Issues...), issue)
+		partial = append(partial, moved)
+	}
+	return keep, partial
+}
+
+// projectCloudKey strips trailing | markers (|scan:, |ncdFallback:) so
+// the raw cloud_project_key alone is available for lookup.
+func projectCloudKey(detail string) string {
+	if idx := strings.Index(detail, "|"); idx >= 0 {
+		return detail[:idx]
+	}
+	return detail
 }
 
 // jsonBool extracts a bool value for a key from a JSONL record.
@@ -635,6 +727,37 @@ type outcomeRecord struct {
 	Status string `json:"status"`
 	Detail string `json:"detail"`
 	Reason string `json:"reason"`
+}
+
+// appendBuiltInGroupSkips injects a single Skipped EntityItem into the
+// Groups section for every SonarQube Server built-in group (e.g.
+// "sonar-users") found in generateGroupMappings. Both real migrate
+// (runCreateGroups) and the predictive synthesizer short-circuit
+// creation for these names, so without this injection the report
+// would have no row at all for them.
+func appendBuiltInGroupSkips(store *common.DataStore, skipped []EntityItem) []EntityItem {
+	items, err := store.ReadAll("generateGroupMappings")
+	if err != nil {
+		return skipped
+	}
+	seen := make(map[string]bool, len(items))
+	for _, raw := range items {
+		name := jsonStr(raw, "name")
+		if name == "" || seen[name] {
+			continue
+		}
+		note, ok := migrate.BuiltInGroupSkipNote(name)
+		if !ok {
+			continue
+		}
+		seen[name] = true
+		skipped = append(skipped, EntityItem{
+			Name:       name,
+			Detail:     note,
+			SkipReason: SkipReasonBuiltIn,
+		})
+	}
+	return skipped
 }
 
 // parseOutcomes decodes the outcomes[] field from a setGlobalSettings

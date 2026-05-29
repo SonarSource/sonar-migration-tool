@@ -228,6 +228,13 @@ func runCreateGroups(ctx context.Context, e *Executor) error {
 				return nil
 			}
 			name := extractField(item, "name")
+			// "sonar-users" is the SonarQube Server built-in default
+			// group; the SonarQube Cloud equivalent is "Members" and
+			// is managed by SQC. The report's collectSection injects a
+			// Skipped row so operators see why it didn't migrate.
+			if IsBuiltInGroup(name) {
+				return nil
+			}
 			desc := extractField(item, "description")
 
 			var groupID string

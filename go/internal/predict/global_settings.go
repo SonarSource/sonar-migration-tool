@@ -100,15 +100,20 @@ func synthesizeSetGlobalSettings(exportDir, runDir string, extractMapping struct
 }
 
 // buildPredictedOutcomeRecord constructs the JSONL record for a single
-// setting key. Settings that are SQS-only AND set to a non-default
-// value emit a single section-level Skipped outcome (#240): one row
-// with the standard explanation, no per-org breakdown. Everything else
-// emits one Applied (predicted) outcome per target org.
+// setting key. Both branches now emit a single section-level outcome
+// (Org="") so the predictive report shows one row per setting,
+// regardless of how many SQC orgs the customer is migrating to (#240).
 //
-// Returns the record or (nil,false) when the key is SQS-only but at
-// its default value — those shouldn't appear in the report at all.
+//   - SQS-only with a non-default value → Skipped + standard
+//     "cannot be migrated" detail.
+//   - Anything else → Applied (predicted) + "applied for each
+//     project instead" detail.
+//
+// Returns (nil, false) when the key is SQS-only but at default — that
+// row should not appear in the report.
 func buildPredictedOutcomeRecord(key string, raw json.RawMessage, orgs []string) (map[string]any, bool) {
 	value := jsonStringField(raw, "value")
+	_ = orgs // org count is no longer relevant for the report row count
 
 	if note, isSQSOnly := migrate.EvaluateSQSOnlyGlobalSetting(key, raw); isSQSOnly {
 		return map[string]any{
@@ -122,20 +127,15 @@ func buildPredictedOutcomeRecord(key string, raw json.RawMessage, orgs []string)
 			}},
 		}, true
 	}
-	// Default path: predict applied at every target org.
-	outcomes := make([]map[string]string, 0, len(orgs))
-	for _, org := range orgs {
-		outcomes = append(outcomes, map[string]string{
-			"org":    org,
+	return map[string]any{
+		"key":   key,
+		"value": value,
+		"outcomes": []map[string]string{{
+			"org":    "",
 			"status": "applied",
 			"reason": "",
-			"detail": "Predicted: will be applied at org scope",
-		})
-	}
-	return map[string]any{
-		"key":      key,
-		"value":    value,
-		"outcomes": outcomes,
+			"detail": "Setting does not exist at global org level in SQC, will be applied for each project instead",
+		}},
 	}, true
 }
 

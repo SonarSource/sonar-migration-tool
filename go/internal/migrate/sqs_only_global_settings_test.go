@@ -2,7 +2,6 @@ package migrate
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 )
 
@@ -111,8 +110,8 @@ func TestEvaluateSQSOnlyGlobalSetting(t *testing.T) {
 			if isSQSOnly != tc.wantSQSOnly {
 				t.Errorf("isSQSOnly: got %v, want %v (note=%q)", isSQSOnly, tc.wantSQSOnly, note)
 			}
-			if tc.wantSQSOnly && !strings.Contains(note, "does not exist") {
-				t.Errorf("expected explanatory note containing 'does not exist', got %q", note)
+			if tc.wantSQSOnly && note == "" {
+				t.Errorf("expected a non-empty explanatory note, got empty string")
 			}
 		})
 	}

@@ -37,6 +37,7 @@ func GeneratePredictiveReport(exportDir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("collecting summary: %w", err)
 	}
+	mig.Predictive = true
 
 	pdfBytes, err := summary.RenderPDF(mig)
 	if err != nil {

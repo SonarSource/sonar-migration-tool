@@ -586,9 +586,16 @@ func setupCSVs(t *testing.T, dir string) {
 	writeCSVFromMaps(t, dir, "gates", gates)
 
 	groups := []map[string]any{
+		// "sonar-users" is the SonarQube Server built-in group;
+		// runCreateGroups now skips it (it has no SQC counterpart),
+		// so keep at least one non-built-in group below for tests
+		// that assert createGroups produces output.
 		{"name": "sonar-users", "server_url": testServerURL,
 			"sonarqube_org_key": "org1", "sonarcloud_org_key": testCloudOrg,
 			"description": "Default group"},
+		{"name": "developers", "server_url": testServerURL,
+			"sonarqube_org_key": "org1", "sonarcloud_org_key": testCloudOrg,
+			"description": "Project developers"},
 	}
 	writeCSVFromMaps(t, dir, "groups", groups)
 
