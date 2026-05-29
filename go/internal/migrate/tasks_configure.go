@@ -28,6 +28,15 @@ func configureTasks() []TaskDef {
 			Run:          runAddGateConditions,
 		},
 		{
+			// Analyse each migrated quality profile against the six
+			// #226 yellow criteria and write per-finding rows. The
+			// summary report consumes this output to move QPs from
+			// Succeeded into NearPerfect with rule-key listings.
+			Name:         "analyzeProfileRules",
+			Dependencies: []string{"createProfiles"},
+			Run:          runAnalyzeProfileRules,
+		},
+		{
 			Name:         "setDefaultProfiles",
 			Dependencies: []string{"createProfiles", "restoreProfiles"},
 			Run:          runSetDefaultProfiles,

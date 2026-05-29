@@ -135,6 +135,9 @@ func BuildPredictiveRun(exportDir string) (string, error) {
 		if err := synthesizeSetNewCodePeriods(exportDir, runDir, extractMapping); err != nil {
 			return "", fmt.Errorf("synthesizing setNewCodePeriods: %w", err)
 		}
+		if err := synthesizeAnalyzeProfileRulesNotes(exportDir, runDir, extractMapping); err != nil {
+			return "", fmt.Errorf("synthesizing analyzeProfileRules: %w", err)
+		}
 	}
 
 	return runDir, nil

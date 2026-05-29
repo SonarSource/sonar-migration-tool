@@ -264,6 +264,14 @@ func collectSection(store *common.DataStore, def sectionDef,
 		succeeded, nearPerfect, partial = applyGateMappingNotes(succeeded, nearPerfect, partial, notes)
 	}
 
+	// Quality profiles flagged by analyzeProfileRules (#226 yellow
+	// criteria) move from Succeeded into NearPerfect with per-rule
+	// Issues. Orange (Partial) dominates yellow per the #224 rule.
+	if def.Name == "Quality Profiles" {
+		findings := collectProfileFindings(store)
+		succeeded, nearPerfect, partial = applyProfileFindings(succeeded, nearPerfect, partial, findings)
+	}
+
 	// SonarQube Server built-in groups (e.g. "sonar-users") are skipped
 	// at create time — surface them in the Skipped bucket with the
 	// curated note so the operator knows why the group did not migrate.
