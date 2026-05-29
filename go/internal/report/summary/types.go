@@ -70,10 +70,11 @@ type EntityItem struct {
 // blank) and is rendered last in the Skipped bucket so it appears at
 // the bottom of the section.
 const (
-	SkipReasonOrgSkipped = "org-skipped"
-	SkipReasonBuiltIn    = "built-in"
-	SkipReasonUnused     = "unused"
-	SkipReasonSQSOnly    = "sqs-only"
+	SkipReasonOrgSkipped   = "org-skipped"
+	SkipReasonBuiltIn      = "built-in"
+	SkipReasonUnused       = "unused"
+	SkipReasonSQSOnly      = "sqs-only"
+	SkipReasonDefaultValue = "default-value"
 )
 
 // sectionDef maps a report section to its corresponding task names and analysis entity type.

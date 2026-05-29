@@ -112,22 +112,24 @@ var sqsOnlySettings = map[string]func(raw json.RawMessage) sqsOnlyDecision{
 	"sonar.technicalDebt.ratingGrid": func(raw json.RawMessage) sqsOnlyDecision {
 		// SonarQube Cloud always uses the platform default for the
 		// rating grid; the SQS-side value is dropped on migration.
-		// Surface a note ONLY when the operator customised it away
-		// from that default so they see exactly what reverts.
+		// Surface ONLY when the operator customised it away from the
+		// SQS default, then emit the canonical "not on SQC" Skipped
+		// note. The exact original/replacement values are kept in
+		// the run log, not in the per-row Detail.
 		const ratingGridDefault = "0.05,0.1,0.2,0.5"
 		v := extractField(raw, "value")
 		if v == "" || v == ratingGridDefault {
 			return sqsOnlyDecision{SkipSilently: true}
 		}
-		return sqsOnlyDecision{Note: fmt.Sprintf(
-			"Configured value %q will be replaced by the non-configurable SonarQube Cloud default %q.",
-			v, ratingGridDefault)}
+		return sqsOnlyDecision{Note: skipDetailNotOnSQC}
 	},
 	"sonar.dbcleaner.branchesToKeepWhenInactive": func(raw json.RawMessage) sqsOnlyDecision {
-		// The SQS branch-name list is migrated as a regex to the SQC
-		// org-scope setting sonar.branch.longLivedBranches.regex.
-		// Surface a note whenever the operator has customised it so
-		// they understand the transformation.
+		// Special-cased pending #249: the SQS key is migrated as a
+		// regex into the SQC org-scope setting
+		// sonar.branch.longLivedBranches.regex. Keep the dedicated
+		// transformation note instead of the canonical Skipped
+		// wording so the operator sees the planned behaviour. Will be
+		// revisited when #249 lands the actual transformation.
 		if extractField(raw, "value") == "" && len(extractStringArray(raw, "values")) == 0 {
 			return sqsOnlyDecision{SkipSilently: true}
 		}
@@ -191,27 +193,37 @@ var sqsOnlyPrefixes = []struct {
 	{"sonar.auth.", authReconfigureNote},
 }
 
-// authNoteText is the per-row note rendered in the report Skipped
-// bucket for any customised sonar.auth.* setting.
-const authNoteText = "Authentication configuration cannot be migrated automatically; it must be re-configured on SonarQube Cloud."
-
 // authReconfigureNote surfaces a sonar.auth.* setting in the report
-// (Skipped + auth-specific note) when it carries any value. Empty /
-// unset auth keys stay silent.
+// as Skipped/not-on-SQC when it carries any value. Empty / unset auth
+// keys stay silent.
 func authReconfigureNote(raw json.RawMessage) sqsOnlyDecision {
 	v := extractField(raw, "value")
 	vs := extractStringArray(raw, "values")
 	if v == "" && len(vs) == 0 {
 		return sqsOnlyDecision{SkipSilently: true}
 	}
-	return sqsOnlyDecision{Note: authNoteText}
+	return sqsOnlyDecision{Note: skipDetailNotOnSQC}
 }
 
-// sqsOnlyNoteText is the single user-facing wording all SQS-only
-// settings share in the report's Skipped bucket (#240). Each handler
-// either emits this note (non-default value, surfaces in report) or
-// SkipSilently (default value, nothing to say).
-const sqsOnlyNoteText = "This setting cannot be migrated because it does not exist on SonarQube Cloud."
+// Two canonical Detail strings for every Skipped global setting row
+// in the migration report — one per skip reason. Per #244 follow-up,
+// every per-key handler must surface ONE of these two so operators
+// see consistent wording across the section. Per-setting nuance
+// (auth-reconfiguration, ratingGrid value substitution, the dbcleaner
+// regex transformation) is captured in the run log instead.
+const (
+	skipDetailDefaultValue = "Setting is left to default on SQS, no migration needed"
+	skipDetailNotOnSQC     = "Setting does not exist (feature does not exist or setting irrelevant) on SQC, no migration possible"
+
+	// Exported aliases — the predict pipeline consumes these so the
+	// real and predictive reports share the exact same wording.
+	SkipDetailDefaultValue = skipDetailDefaultValue
+	SkipDetailNotOnSQC     = skipDetailNotOnSQC
+)
+
+// sqsOnlyNoteText kept for backward compatibility with existing
+// callers; it now resolves to the canonical "not on SQC" Detail.
+const sqsOnlyNoteText = skipDetailNotOnSQC
 
 // sandboxBooleanDecision is shared between sonar.issues.sandbox.enabled
 // and sonar.issues.sandbox.override.enabled, which both default to
@@ -233,16 +245,13 @@ func silentSkip(_ json.RawMessage) sqsOnlyDecision {
 	return sqsOnlyDecision{SkipSilently: true}
 }
 
-// alwaysEnabledOnSQCNoteText is the per-row note rendered for SQS
-// feature flags that SonarQube Cloud has permanently turned on.
-const alwaysEnabledOnSQCNoteText = "This feature is always enabled on SonarQube Cloud."
-
-// alwaysEnabledOnSQC emits a FYI note in the report whenever a SQS
-// feature flag is present, regardless of the SQS-side value. SQC
-// controls the on/off itself, so there's nothing to migrate, but the
-// operator should know the flag is being managed for them.
+// alwaysEnabledOnSQC emits the canonical "not on SQC" Skipped note in
+// the report for SQS feature flags that SonarQube Cloud has
+// permanently turned on. SQC controls the on/off itself, so there's
+// nothing to migrate — the operator just sees "setting irrelevant on
+// SQC" via the unified wording.
 func alwaysEnabledOnSQC(_ json.RawMessage) sqsOnlyDecision {
-	return sqsOnlyDecision{Note: alwaysEnabledOnSQCNoteText}
+	return sqsOnlyDecision{Note: skipDetailNotOnSQC}
 }
 
 // resolveSQSOnlyHandler looks up the per-key decision function for a
@@ -414,6 +423,17 @@ func runSetGlobalSettings(ctx context.Context, e *Executor) error {
 	// InheritedRules=true where SQS's parentValue is also true: the
 	// customized filter dropped it, and the section-level note for
 	// "exists only on SQS" never reached the report.
+	// Drop internal settings (#244) before anything else so they never
+	// reach the partition / customized-filter / per-org loops.
+	filtered := sqsValues[:0]
+	for _, raw := range sqsValues {
+		if IsInternalSqsSetting(extractField(raw, "key")) {
+			continue
+		}
+		filtered = append(filtered, raw)
+	}
+	sqsValues = filtered
+
 	sqsValues, sqsOnlyNotes := partitionSQSOnlySettings(sqsValues)
 
 	customized := make([]json.RawMessage, 0, len(sqsValues))
@@ -517,6 +537,55 @@ func runSetGlobalSettings(ctx context.Context, e *Executor) error {
 	// regular per-org rows in the report's Skipped bucket — and
 	// because the writer is shared, the mutex still applies.
 	for _, rec := range sqsOnlyNotes {
+		b, _ := json.Marshal(rec)
+		mu.Lock()
+		_ = w.WriteOne(b)
+		mu.Unlock()
+	}
+
+	// Default-value sweep (#244). Every setting in
+	// getServerSettingsDefinitions that didn't reach the main loop —
+	// because it was at the SQS default value or never customised —
+	// gets a single section-level Skipped row so the operator sees
+	// the inventory of "untouched" settings. Internal keys (sonar-
+	// tools _SQ_INTERNAL_SETTINGS port) and keys already classified
+	// by partitionSQSOnlySettings are excluded.
+	customizedKeys := make(map[string]bool, len(customized))
+	for _, raw := range customized {
+		if k := extractField(raw, "key"); k != "" {
+			customizedKeys[k] = true
+		}
+	}
+	partitionHandled := make(map[string]bool, len(sqsOnlyNotes))
+	for _, note := range sqsOnlyNotes {
+		partitionHandled[note.Key] = true
+	}
+	for _, def := range sqsDefItems {
+		key := extractField(def.Data, "key")
+		if key == "" {
+			continue
+		}
+		if IsInternalSqsSetting(key) {
+			continue
+		}
+		if customizedKeys[key] || partitionHandled[key] {
+			continue
+		}
+		// Already-curated SQS-only keys (sqsOnlySettings map +
+		// sqsOnlyPrefixes) are handled by partitionSQSOnlySettings
+		// when their value is non-default. When their value is at
+		// default, the partition's per-key handler emits SkipSilently
+		// — honour that here too so we don't double-report them.
+		if _, found := resolveSQSOnlyHandler(key); found {
+			continue
+		}
+		rec := globalSettingResult{Key: key}
+		rec.Outcomes = []orgOutcome{{
+			Org:    "",
+			Status: outcomeSkipped,
+			Reason: "default-value",
+			Detail: skipDetailDefaultValue,
+		}}
 		b, _ := json.Marshal(rec)
 		mu.Lock()
 		_ = w.WriteOne(b)
