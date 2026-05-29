@@ -42,6 +42,7 @@ func runPredictiveReport(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Printf("Predictive PDF report: %s\n", pdfPath)
+	printExportDirNotice(exportDir)
 	return nil
 }
 
@@ -67,8 +68,10 @@ func resolvePredictiveReportExportDir(cmd *cobra.Command) (string, error) {
 		}
 	}
 
+	// Default the export directory when neither config nor flag supplied
+	// one (issue #247).
 	if exportDir == "" {
-		return "", fmt.Errorf("--export_directory is required (either as a CLI flag or via --config)")
+		exportDir = DefaultExportDirectory
 	}
 	return exportDir, nil
 }

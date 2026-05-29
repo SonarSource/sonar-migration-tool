@@ -31,6 +31,7 @@ var extractCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "  - %s\n", key)
 			}
 		}
+		printExportDirNotice(cfg.ExportDirectory)
 		return nil
 	},
 }
@@ -41,7 +42,7 @@ func init() {
 	f.String("pem_file_path", "", "Path to client certificate pem file")
 	f.String("key_file_path", "", "Path to client certificate key file")
 	f.String("cert_password", "", "Password for client certificate")
-	f.String("export_directory", "/app/files/", "Root directory to output the export")
+	f.String("export_directory", DefaultExportDirectory, "Root directory to output the export")
 	f.String("extract_type", "", "Type of extract to run")
 	f.Int("concurrency", 0, "Maximum number of concurrent requests")
 	f.Int("timeout", 0, "Number of seconds before a request will timeout")
@@ -84,6 +85,12 @@ func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfi
 	overrideInt(cmd, "timeout", &cfg.Timeout)
 	if cmd.Flags().Changed("include_scan_history") {
 		cfg.IncludeScanHistory, _ = cmd.Flags().GetBool("include_scan_history")
+	}
+
+	// Default the export directory when neither config nor flag supplied
+	// one (issue #247).
+	if cfg.ExportDirectory == "" {
+		cfg.ExportDirectory = DefaultExportDirectory
 	}
 
 	return cfg, nil

@@ -22,7 +22,7 @@ var guiCmd = &cobra.Command{
 }
 
 func init() {
-	guiCmd.Flags().String("export_directory", "/app/files/", "Root directory to output the export")
+	guiCmd.Flags().String("export_directory", DefaultExportDirectory, "Root directory to output the export")
 	guiCmd.Flags().String("addr", "localhost:0", "Address to bind the HTTP server (default: random port)")
 	guiCmd.Flags().Bool("no-browser", false, "Do not open the browser automatically")
 }

@@ -11,10 +11,14 @@ var mappingsCmd = &cobra.Command{
 	Long:  "Maps groups, permission templates, quality profiles, quality gates, and portfolios to relevant organizations. Outputs CSVs for each entity type.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		exportDir, _ := cmd.Flags().GetString("export_directory")
-		return structure.RunMappings(exportDir)
+		if err := structure.RunMappings(exportDir); err != nil {
+			return err
+		}
+		printExportDirNotice(exportDir)
+		return nil
 	},
 }
 
 func init() {
-	mappingsCmd.Flags().String("export_directory", "/app/files/", "Root directory containing all SonarQube exports")
+	mappingsCmd.Flags().String("export_directory", DefaultExportDirectory, "Root directory containing all SonarQube exports")
 }

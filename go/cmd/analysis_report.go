@@ -17,7 +17,7 @@ var analysisReportCmd = &cobra.Command{
 }
 
 func init() {
-	analysisReportCmd.Flags().String("export_directory", "/app/files/", "Root directory containing all SonarQube exports")
+	analysisReportCmd.Flags().String("export_directory", DefaultExportDirectory, "Root directory containing all SonarQube exports")
 }
 
 func runAnalysisReport(cmd *cobra.Command, args []string) error {
@@ -38,6 +38,7 @@ func runAnalysisReport(cmd *cobra.Command, args []string) error {
 	success, failure := countOutcomes(rows)
 	fmt.Printf("Analysis Report: %d total, %d success, %d failure\n", len(rows), success, failure)
 	fmt.Printf("CSV written to: %s/final_analysis_report.csv\n", runDir)
+	printExportDirNotice(exportDir)
 	return nil
 }
 
