@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
+	smtver "github.com/sonar-solutions/sonar-migration-tool/internal/version"
 	sqapi "github.com/sonar-solutions/sq-api-go"
 	"github.com/sonar-solutions/sq-api-go/server"
 	"golang.org/x/sync/errgroup"
@@ -112,7 +113,7 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 		return nil, err
 	}
 
-	fmt.Printf("Extract Complete: %s\n", extractID)
+	fmt.Printf("%s v%s - Extract Complete: %s\n", smtver.ToolName, smtver.Version, extractID)
 	return executor.SkippedProjectKeys(), nil
 }
 

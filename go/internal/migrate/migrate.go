@@ -14,6 +14,7 @@ import (
 	"github.com/sonar-solutions/sq-api-go/cloud"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/version"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -159,7 +160,7 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (string, error) {
 		}
 	}
 
-	fmt.Printf("Migration Complete: %s\n", runID)
+	fmt.Printf("%s v%s - Migration Complete: %s\n", version.ToolName, version.Version, runID)
 	return runID, nil
 }
 

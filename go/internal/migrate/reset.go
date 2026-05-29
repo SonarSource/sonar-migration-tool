@@ -12,6 +12,7 @@ import (
 	sqapi "github.com/sonar-solutions/sq-api-go"
 	"github.com/sonar-solutions/sq-api-go/cloud"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/version"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -128,7 +129,7 @@ func RunReset(ctx context.Context, cfg ResetConfig) error {
 		}
 	}
 
-	fmt.Printf("Reset Complete: %s\n", runID)
+	fmt.Printf("%s v%s - Reset Complete: %s\n", version.ToolName, version.Version, runID)
 	return nil
 }
 
