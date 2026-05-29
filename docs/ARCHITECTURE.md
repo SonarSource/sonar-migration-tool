@@ -50,6 +50,14 @@ sonar-migration-tool/
 │       │   ├── prompter.go      # Prompter interface
 │       │   ├── cli_prompter.go  # Terminal UI (survey library)
 │       │   └── helpers.go       # Phase sequence, validation
+│       ├── pipeline/            # Version-specific extraction pipelines (SPEC-011)
+│       │   ├── pipeline.go      # Pipeline interface + normalized types
+│       │   ├── helpers.go       # Shared paginated HTTP helpers
+│       │   ├── router.go        # Version detection + pipeline selection
+│       │   ├── sq99.go          # SQ 9.9 LTS pipeline
+│       │   ├── sq100.go         # SQ 10.0-10.3 pipeline
+│       │   ├── sq104.go         # SQ 10.4-10.8 pipeline
+│       │   └── sq2025.go        # SQ 2025.1+ pipeline
 │       ├── report/              # Report generation
 │       │   ├── common/          # Data loaders (JSONL → report rows)
 │       │   ├── maturity/        # SonarQube maturity report
@@ -146,13 +154,45 @@ The `lib/sq-api-go/` module provides typed Go methods for SonarQube Server and C
 - **Retry with backoff** — 3 attempts with exponential backoff
 - **Cloud API clients** — `IssuesClient` and `HotspotsClient` in `cloud/` provide typed methods for Cloud issue/hotspot search, transitions, comments, and tags
 
+## Version-Specific Pipeline Architecture (SPEC-011)
+<!-- updated: 2026-05-29_02:30:00 -->
+
+`go/internal/pipeline/` implements four version-specific extraction pipelines selected once at startup via a version router. No runtime version branching occurs inside the extraction or build phases.
+
+```
+go/internal/pipeline/
+├── pipeline.go      # Pipeline interface + normalized types (Issue, Hotspot, Measure, Group)
+├── helpers.go       # Shared paginated HTTP helpers (issues, hotspots, metrics, groups)
+├── router.go        # DetectPipeline(): calls /api/server/version, parses, selects
+├── router_test.go   # Version parsing, routing, interface compliance, parameter tests
+├── sq99.go          # SQ 9.9 LTS — statuses param, 15-key batching
+├── sq100.go         # SQ 10.0-10.3 — statuses param, 15-key batching
+├── sq104.go         # SQ 10.4-10.8 — issueStatuses param, 15-key batching
+└── sq2025.go        # SQ 2025.1+ — issueStatuses, no batching, V2 groups, IN_SANDBOX filter
+```
+
+**Key behaviors per pipeline:**
+
+| Feature | SQ 9.9 | SQ 10.0-10.3 | SQ 10.4-10.8 | SQ 2025.1+ |
+|---------|--------|-------------|-------------|-----------|
+| Issue param | `statuses` | `statuses` | `issueStatuses` | `issueStatuses` |
+| Metric batching | 15 keys | 15 keys | 15 keys | None (single request) |
+| Groups API | `/api/user_groups/search` | same | same | V2 + standard fallback |
+| IN_SANDBOX | N/A | N/A | N/A | Logged + skipped |
+| Clean Code | SPEC-012 stub | Native | Native | Native |
+
+**Forward compatibility:** An unknown major version ≥ 11 falls back to the SQ 10.4 pipeline with a `WARN` log. An error is returned for versions < 9.9.
+
+All four pipelines implement the `Pipeline` interface; compile-time checks (`var _ Pipeline = (*SQ99Pipeline)(nil)`) enforce this.
+
 ## Version Detection
-<!-- updated: 2026-05-26_17:30:00 -->
+<!-- updated: 2026-05-29_02:30:00 -->
 
 The tool auto-detects SonarQube Server version and edition:
 
 - **Server < 10:** Basic authentication (username:token)
 - **Server >= 10:** Bearer token authentication
+- **Version-specific pipelines:** `pipeline.DetectPipeline()` calls `GET /api/server/version` (plain-text response) and selects one of four pipeline implementations. Authentication is injected automatically via the `authTransport` RoundTripper inside the `sqapi.Client`'s HTTP client.
 - **Edition-aware:** Tasks are filtered by edition — portfolio-related tasks only run on Enterprise and Data Center editions
 - **Edition detection fallback:** When `/api/system/info` returns 403 (non-admin token), edition detection falls back to `/api/navigation/global` to extract the edition from the response
 
