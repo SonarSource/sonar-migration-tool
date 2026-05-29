@@ -46,6 +46,11 @@ var skipReasonOrder = []struct {
 	// "not applicable on SQC" notes — one row per such setting,
 	// no Organization (issue #200).
 	{SkipReasonSQSOnly, "Not applicable on SonarQube cloud"},
+	// Default-value settings (#244) — one row per setting in the
+	// SQS list_definitions catalog that was left untouched on the
+	// source. Rendered after SQS-only so the catalog inventory
+	// trails the "needs attention" rows.
+	{SkipReasonDefaultValue, "Left at default value on SonarQube Server"},
 }
 
 // Outcome labels used in the unified per-section table.
