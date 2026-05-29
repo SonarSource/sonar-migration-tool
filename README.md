@@ -223,15 +223,20 @@ go run . predictive-report --export_directory ./files/
 
 # Built binary
 sonar-migration-tool predictive-report --export_directory ./files/
+
+# Or read export_directory from the same JSON config used by extract / migrate (#246)
+sonar-migration-tool predictive-report --config extract-config.json
 ```
 
-Output: `<export_directory>/predictive_migration_summary.pdf`. Two
-classes of outcomes from a real migrate run are excluded because they
-cannot be predicted ahead of time:
+Output: `<export_directory>/predictive_migration_summary.pdf`. The
+`--config` flag accepts the same configuration file shape as `extract`
+or `migrate` — only the `export_directory` field is read. An explicit
+`--export_directory` flag overrides whatever the config file carries.
 
-- SonarQube Cloud API errors or rate limiting.
-- Global settings — discovery of SQC-supported settings is dynamic, so
-  the Global Settings section is omitted from the predictive report.
+The Global Settings section is included with the SQS-only settings
+predicted to be Skipped (Setting Key column, sorted alphabetically).
+SonarQube Cloud API errors or rate-limiting cannot be predicted ahead
+of time, so they have no row in the Failed bucket.
 
 **Reset** — deletes all content in every org in the enterprise:
 ```bash
