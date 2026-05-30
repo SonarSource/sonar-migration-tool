@@ -1012,6 +1012,12 @@ func runSetProjectLinks(ctx context.Context, e *Executor) error {
 // POST per webhook; failures surface as an orange "Webhook not
 // migrated" Issue on the project in the migration report (#228).
 //
+// Idempotency: before creating, the task lists existing webhooks at
+// the (org, project) scope and skips the create when one with the
+// same (name, url) already exists. This makes re-runs cheap and
+// avoids duplicate webhooks on SonarQube Cloud when migrate is
+// resumed.
+//
 // Webhook secrets on SonarQube Server are stored only as a flag on the
 // extracted record ({hasSecret: true}) — the value itself is not
 // exposed by the source API. We don't forward a secret, so the
@@ -1029,6 +1035,36 @@ func runSetProjectWebhooks(ctx context.Context, e *Executor) error {
 		}
 	}
 
+	// Cache existing webhooks per (org, project) to avoid an extra
+	// list call per webhook record when a project has many webhooks.
+	// Cleared between projects since the cache holds raw webhook data.
+	type webhookScope struct{ org, project string }
+	existing := make(map[webhookScope]map[string]bool)
+	var existingMu sync.Mutex
+	hasExisting := func(ctx context.Context, org, project, name, urlStr string) bool {
+		existingMu.Lock()
+		defer existingMu.Unlock()
+		scope := webhookScope{org: org, project: project}
+		known, ok := existing[scope]
+		if !ok {
+			webhooks, err := e.Cloud.Webhooks.List(ctx, cloud.ListWebhooksParams{
+				Organization: org, Project: project,
+			})
+			if err != nil {
+				logAPIWarn(e.Logger, "setProjectWebhooks: list existing failed (will attempt create)", err,
+					"org", org, "project", project)
+				existing[scope] = nil
+				return false
+			}
+			known = make(map[string]bool, len(webhooks))
+			for _, wh := range webhooks {
+				known[wh.Name+"\x00"+wh.URL] = true
+			}
+			existing[scope] = known
+		}
+		return known[name+"\x00"+urlStr]
+	}
+
 	counter := NewTaskCounter("setProjectWebhooks")
 	err := forEachExtractItem(ctx, e, "setProjectWebhooks", "getProjectWebhooks",
 		func(ctx context.Context, item structure.ExtractItem, w *common.ChunkWriter) error {
@@ -1040,6 +1076,16 @@ func runSetProjectWebhooks(ctx context.Context, e *Executor) error {
 			name := extractField(item.Data, "name")
 			urlStr := extractField(item.Data, "url")
 			if name == "" || urlStr == "" {
+				return nil
+			}
+			if hasExisting(ctx, pm.OrgKey, pm.CloudKey, name, urlStr) {
+				e.Logger.Info("setProjectWebhooks: webhook already exists, skipping",
+					"project", pm.CloudKey, "name", name)
+				counter.Success()
+				_ = w.WriteOne(common.EnrichRaw(item.Data, map[string]any{
+					"cloud_project_key": pm.CloudKey,
+					"was_preexisting":   true,
+				}))
 				return nil
 			}
 			params := cloud.CreateWebhookParams{
