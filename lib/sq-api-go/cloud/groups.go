@@ -42,6 +42,44 @@ func (g *GroupsClient) Delete(ctx context.Context, groupID int, organization str
 	return g.postForm(ctx, "api/user_groups/delete", form, nil)
 }
 
+// DeleteByName deletes a group by name via /api/user_groups/delete.
+// SonarQube Cloud accepts either `id` or `name` as the identifier;
+// the migration-group cleanup path doesn't carry IDs (the create
+// task only records names) so the name form is the simpler choice.
+func (g *GroupsClient) DeleteByName(ctx context.Context, name, organization string) error {
+	form := url.Values{}
+	form.Set("name", name)
+	form.Set("organization", organization)
+	return g.postForm(ctx, "api/user_groups/delete", form, nil)
+}
+
+// List returns every group visible in the given SonarQube Cloud
+// organization. Paginates through /api/user_groups/search until the
+// result set is exhausted. Used by the reset path to enumerate
+// groups for deletion (the migrate-side createGroups JSONL lives in
+// a different run directory and is not accessible from a fresh
+// reset run).
+func (g *GroupsClient) List(ctx context.Context, organization string) ([]types.Group, error) {
+	var all []types.Group
+	page := 1
+	for {
+		q := url.Values{}
+		q.Set("organization", organization)
+		q.Set("p", strconv.Itoa(page))
+		q.Set("ps", "500")
+		var resp types.GroupsSearchResponse
+		if err := g.getJSON(ctx, "api/user_groups/search?"+q.Encode(), &resp); err != nil {
+			return nil, err
+		}
+		all = append(all, resp.Groups...)
+		if len(resp.Groups) == 0 || resp.Paging.PageIndex*resp.Paging.PageSize >= resp.Paging.Total {
+			break
+		}
+		page++
+	}
+	return all, nil
+}
+
 // AddUser adds a user to a group via /api/user_groups/add_user.
 func (g *GroupsClient) AddUser(ctx context.Context, groupName, login, organization string) error {
 	form := url.Values{}

@@ -4,9 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
 
+	sqapi "github.com/sonar-solutions/sq-api-go"
 	"github.com/sonar-solutions/sq-api-go/types"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
@@ -81,8 +81,14 @@ func deleteTasks() []TaskDef {
 			Run:          runDeleteGates,
 		},
 		{
+			// Issue #210: reset doesn't share a run directory with the
+			// migrate that produced createGroups, so iterating that
+			// JSONL would always come up empty. Enumerate groups via
+			// the SQC API per org (same pattern as deleteProfiles /
+			// deleteGates) and delete every non-default group. The
+			// "Members" default group is preserved.
 			Name:         "deleteGroups",
-			Dependencies: []string{"createGroups"},
+			Dependencies: []string{"generateOrganizationMappings"},
 			Run:          runDeleteGroups,
 		},
 		{
@@ -248,21 +254,47 @@ func runDeleteGates(ctx context.Context, e *Executor) error {
 	return err
 }
 
+// runDeleteGroups enumerates every group in each in-scope SQC org and
+// deletes the non-default ones. SQC's per-org "Members" group is the
+// only built-in (Default=true) and is preserved. Issue #210.
+//
+// Previous implementation iterated createGroups JSONL — that worked
+// during a migrate run but came up empty during reset because reset
+// creates a fresh run directory with no createGroups output of its
+// own. Listing via /api/user_groups/search lets reset clean up
+// everything the migration created, including the helper
+// migration-scanners / migration-viewers groups.
 func runDeleteGroups(ctx context.Context, e *Executor) error {
 	counter := NewTaskCounter("deleteGroups")
-	err := forEachMigrateItem(ctx, e, "deleteGroups", "createGroups",
+	err := forEachMigrateItem(ctx, e, "deleteGroups", "generateOrganizationMappings",
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
-			groupIDStr := extractField(item, "cloud_group_id")
-			groupID, _ := strconv.Atoi(groupIDStr)
-			if groupID == 0 {
+			orgKey := extractField(item, "sonarcloud_org_key")
+			if shouldSkipOrg(orgKey) {
 				return nil
 			}
-			orgKey := extractField(item, "sonarcloud_org_key")
-			err := e.Cloud.Groups.Delete(ctx, groupID, orgKey)
+			groups, err := e.Cloud.Groups.List(ctx, orgKey)
 			if err != nil {
 				counter.Fail()
-				logAPIWarn(e.Logger, "deleteGroups failed", err, "group", groupIDStr)
-			} else {
+				logAPIWarn(e.Logger, "deleteGroups: listing groups failed", err, "org", orgKey)
+				return nil
+			}
+			e.Logger.Info("deleteGroups: listed groups", "org", orgKey, "count", len(groups))
+			for _, g := range groups {
+				if g.Default {
+					e.Logger.Info("deleteGroups: keeping default group",
+						"org", orgKey, "group", g.Name)
+					continue
+				}
+				err := e.Cloud.Groups.DeleteByName(ctx, g.Name, orgKey)
+				if err != nil {
+					if sqapi.IsNotFound(err) {
+						counter.Success()
+						continue
+					}
+					counter.Fail()
+					logAPIWarn(e.Logger, "deleteGroups failed", err, "group", g.Name, "org", orgKey)
+					continue
+				}
 				counter.Success()
 			}
 			return nil
