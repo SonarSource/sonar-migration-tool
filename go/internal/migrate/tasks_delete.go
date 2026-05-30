@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	sqapi "github.com/sonar-solutions/sq-api-go"
 	"github.com/sonar-solutions/sq-api-go/types"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
@@ -84,6 +85,17 @@ func deleteTasks() []TaskDef {
 			Name:         "deleteGroups",
 			Dependencies: []string{"createGroups"},
 			Run:          runDeleteGroups,
+		},
+		{
+			// Issue #210: createMigrationGroups creates the migration
+			// tool's own helper groups (migration-scanners,
+			// migration-viewers) on every target org. deleteGroups
+			// only iterates the createGroups output, so without this
+			// task the migration groups stay on SQC after reset and
+			// the org isn't restored to a fresh state.
+			Name:         "deleteMigrationGroups",
+			Dependencies: []string{"createMigrationGroups"},
+			Run:          runDeleteMigrationGroups,
 		},
 		{
 			Name:         "deleteTemplates",
@@ -264,6 +276,44 @@ func runDeleteGroups(ctx context.Context, e *Executor) error {
 				logAPIWarn(e.Logger, "deleteGroups failed", err, "group", groupIDStr)
 			} else {
 				counter.Success()
+			}
+			return nil
+		})
+	counter.LogSummary(e.Logger)
+	return err
+}
+
+// runDeleteMigrationGroups deletes the migration tool's own helper
+// groups (migration-scanners, migration-viewers) on every org. The
+// create task records the group NAMES per org but not their IDs,
+// so we use the SonarQube Cloud /api/user_groups/delete `name`
+// form. "Not found" responses on a re-run are tolerated and counted
+// as success since the group already being gone is the desired
+// end state. Issue #210.
+func runDeleteMigrationGroups(ctx context.Context, e *Executor) error {
+	counter := NewTaskCounter("deleteMigrationGroups")
+	err := forEachMigrateItem(ctx, e, "deleteMigrationGroups", "createMigrationGroups",
+		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
+			orgKey := extractField(item, "sonarcloud_org_key")
+			if orgKey == "" {
+				return nil
+			}
+			for _, name := range extractStringArray(item, "groups") {
+				if name == "" {
+					continue
+				}
+				err := e.Cloud.Groups.DeleteByName(ctx, name, orgKey)
+				if err != nil {
+					if sqapi.IsNotFound(err) {
+						e.Logger.Info("deleteMigrationGroups: already gone", "group", name, "org", orgKey)
+						counter.Success()
+						continue
+					}
+					counter.Fail()
+					logAPIWarn(e.Logger, "deleteMigrationGroups failed", err, "group", name, "org", orgKey)
+				} else {
+					counter.Success()
+				}
 			}
 			return nil
 		})

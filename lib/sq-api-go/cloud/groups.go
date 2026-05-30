@@ -42,6 +42,17 @@ func (g *GroupsClient) Delete(ctx context.Context, groupID int, organization str
 	return g.postForm(ctx, "api/user_groups/delete", form, nil)
 }
 
+// DeleteByName deletes a group by name via /api/user_groups/delete.
+// SonarQube Cloud accepts either `id` or `name` as the identifier;
+// the migration-group cleanup path doesn't carry IDs (the create
+// task only records names) so the name form is the simpler choice.
+func (g *GroupsClient) DeleteByName(ctx context.Context, name, organization string) error {
+	form := url.Values{}
+	form.Set("name", name)
+	form.Set("organization", organization)
+	return g.postForm(ctx, "api/user_groups/delete", form, nil)
+}
+
 // AddUser adds a user to a group via /api/user_groups/add_user.
 func (g *GroupsClient) AddUser(ctx context.Context, groupName, login, organization string) error {
 	form := url.Values{}
