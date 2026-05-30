@@ -610,6 +610,69 @@ func TestCollectSummaryPortfolioApplicationsClassification(t *testing.T) {
 	t.Errorf("PlainPortfolio should remain in Succeeded")
 }
 
+// Empty portfolios — those with no resolved projects in the source
+// extract — go to Skipped with the standardised message, even if they
+// were already created on SonarQube Cloud and landed in Succeeded.
+func TestCollectSummaryPortfolioEmpty(t *testing.T) {
+	dir := t.TempDir()
+	runID := "run-01"
+	runDir := filepath.Join(dir, runID)
+	os.MkdirAll(runDir, 0o755)
+
+	extractDir := filepath.Join(dir, "extract-01")
+	writeExtractMeta(t, extractDir, "https://sq.example.com")
+	// "NonEmpty" has one resolved project, "Empty" has none.
+	writeTaskJSONL(t, extractDir, "getPortfolioProjects", []map[string]any{
+		{"portfolioKey": "neKey", "refKey": "proj-a"},
+	})
+	writeTaskJSONL(t, extractDir, "getPortfolioDetails", []map[string]any{
+		{"key": "neKey", "name": "NonEmpty"},
+		{"key": "emptyKey", "name": "Empty"},
+	})
+
+	writeTaskJSONL(t, runDir, "generatePortfolioMappings", []map[string]any{
+		{"name": "NonEmpty", "server_url": "https://sq.example.com", "source_portfolio_key": "neKey"},
+		{"name": "Empty", "server_url": "https://sq.example.com", "source_portfolio_key": "emptyKey"},
+	})
+	writeTaskJSONL(t, runDir, "createPortfolios", []map[string]any{
+		{"name": "NonEmpty", "server_url": "https://sq.example.com", "source_portfolio_key": "neKey", "cloud_portfolio_id": "1"},
+		// Migrate might still have created an empty portfolio in an
+		// older binary; assert the report flips it to Skipped anyway.
+		{"name": "Empty", "server_url": "https://sq.example.com", "source_portfolio_key": "emptyKey", "cloud_portfolio_id": "2"},
+	})
+
+	summary, err := CollectSummary(runDir, dir)
+	if err != nil {
+		t.Fatalf("CollectSummary: %v", err)
+	}
+	portfolios := findSection(summary, "Portfolios")
+	if portfolios == nil {
+		t.Fatal("missing Portfolios section")
+	}
+
+	for _, it := range portfolios.Succeeded {
+		if it.Name == "Empty" {
+			t.Errorf("Empty portfolio should not be in Succeeded")
+		}
+	}
+	var emptyRow *EntityItem
+	for i := range portfolios.Skipped {
+		if portfolios.Skipped[i].Name == "Empty" {
+			emptyRow = &portfolios.Skipped[i]
+			break
+		}
+	}
+	if emptyRow == nil {
+		t.Fatalf("Empty portfolio should be in Skipped, got %+v", portfolios.Skipped)
+	}
+	if emptyRow.SkipReason != SkipReasonEmpty {
+		t.Errorf("expected SkipReason=%q, got %q", SkipReasonEmpty, emptyRow.SkipReason)
+	}
+	if !strings.Contains(emptyRow.Detail, "empty") {
+		t.Errorf("expected message to mention empty, got %q", emptyRow.Detail)
+	}
+}
+
 func TestCollectSummaryPortfolioPATCHFailureMovesToFailed(t *testing.T) {
 	dir := t.TempDir()
 	runID := "run-01"

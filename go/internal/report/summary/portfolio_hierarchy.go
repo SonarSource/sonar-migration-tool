@@ -33,6 +33,9 @@ const (
 	// catch-all). No SQC equivalent — falls back to a flat project
 	// list of whatever the source resolved at extract time.
 	portfolioIssueRestMode = "The SQS portfolio is defined with REST selection mode, it will be converted to a flat list of projects in SQC. The portfolio perimeter may be slightly different"
+	// Grey (Skipped): portfolio's resolved project list is empty at
+	// extract time — there is nothing to migrate.
+	portfolioIssueEmpty = "The SQS portfolio is empty, will not be migrated"
 )
 
 // portfolioClassification rolls up the per-portfolio composition flags
@@ -131,6 +134,107 @@ func classificationFor(portfolio map[string]any) portfolioClassification {
 func strFieldFromMap(m map[string]any, k string) string {
 	s, _ := m[k].(string)
 	return s
+}
+
+// emptyPortfolioInfo carries the per-portfolio data needed to emit a
+// Skipped row: the entity name (so it shows up correctly in the report)
+// and the composite key (so we can match against entries already
+// present in other buckets and pull them out).
+type emptyPortfolioInfo struct {
+	Composite string
+	Name      string
+}
+
+// detectEmptyPortfolios reads generatePortfolioMappings (every portfolio
+// from portfolios.csv, regardless of whether migrate actually created
+// it) and getPortfolioProjects (the resolved project membership) and
+// returns one info entry per portfolio whose resolved project list is
+// empty.
+//
+// The resolved list reflects how SonarQube Server evaluated the
+// portfolio's selection criteria, so an empty list means the portfolio
+// has no projects regardless of selection mode (MANUAL with no picks,
+// REGEXP/TAGS with no matches, REST that caught nothing).
+func detectEmptyPortfolios(store *common.DataStore, exportDir string,
+	mapping structure.ExtractMapping) []emptyPortfolioInfo {
+
+	mappings, err := store.ReadAll("generatePortfolioMappings")
+	if err != nil || len(mappings) == 0 {
+		return nil
+	}
+	nonEmpty := make(map[string]bool)
+	items, err := structure.ReadExtractData(exportDir, mapping, "getPortfolioProjects")
+	if err == nil {
+		for _, it := range items {
+			pk := jsonStr(it.Data, "portfolioKey")
+			rk := jsonStr(it.Data, "refKey")
+			if pk == "" || rk == "" {
+				continue
+			}
+			nonEmpty[it.ServerURL+"|"+pk] = true
+		}
+	}
+
+	var out []emptyPortfolioInfo
+	seen := make(map[string]bool)
+	for _, m := range mappings {
+		serverURL := jsonStr(m, "server_url")
+		sourceKey := jsonStr(m, "source_portfolio_key")
+		name := jsonStr(m, "name")
+		if serverURL == "" || sourceKey == "" || name == "" {
+			continue
+		}
+		composite := serverURL + "|" + sourceKey
+		if seen[composite] || nonEmpty[composite] {
+			continue
+		}
+		seen[composite] = true
+		out = append(out, emptyPortfolioInfo{Composite: composite, Name: name})
+	}
+	return out
+}
+
+// applyEmptyPortfolioSkips removes empty portfolios from every active
+// bucket (Succeeded, NearPerfect, Partial) and appends one Skipped row
+// per empty portfolio. Works whether migrate created the empty
+// portfolio on SQC (it'll be in one of the buckets and we move it) or
+// skipped it (it isn't anywhere and we add a fresh Skipped row).
+func applyEmptyPortfolioSkips(store *common.DataStore, succeeded, nearPerfect, partial, skipped []EntityItem,
+	empties []emptyPortfolioInfo) ([]EntityItem, []EntityItem, []EntityItem, []EntityItem) {
+
+	if len(empties) == 0 {
+		return succeeded, nearPerfect, partial, skipped
+	}
+
+	emptyNames := make(map[string]bool, len(empties))
+	for _, e := range empties {
+		emptyNames[e.Name] = true
+	}
+
+	// Pull any empty portfolios out of the non-Skipped buckets — they
+	// may have been routed there before the empty check ran.
+	filter := func(bucket []EntityItem) (kept []EntityItem) {
+		kept = bucket[:0:0]
+		for _, item := range bucket {
+			if emptyNames[item.Name] {
+				continue
+			}
+			kept = append(kept, item)
+		}
+		return kept
+	}
+	succeeded = filter(succeeded)
+	nearPerfect = filter(nearPerfect)
+	partial = filter(partial)
+
+	for _, e := range empties {
+		skipped = append(skipped, EntityItem{
+			Name:       e.Name,
+			Detail:     portfolioIssueEmpty,
+			SkipReason: SkipReasonEmpty,
+		})
+	}
+	return succeeded, nearPerfect, partial, skipped
 }
 
 // applyPortfolioClassifications moves classified portfolios out of

@@ -369,6 +369,40 @@ func transformPortfolioRegex(regex string, orgKeys []string) string {
 	return prefix + regex
 }
 
+// buildEmptyPortfolioSet returns composite serverURL|portfolioKey strings
+// for every source portfolio that has zero resolved projects in the
+// getPortfolioProjects extract. Used by createPortfolios to skip
+// portfolios that would land empty on SonarQube Cloud anyway.
+func buildEmptyPortfolioSet(e *Executor) map[string]bool {
+	mappings, _ := e.Store.ReadAll("generatePortfolioMappings")
+	if len(mappings) == 0 {
+		return nil
+	}
+	nonEmpty := make(map[string]bool)
+	items, _ := readExtractItems(e, "getPortfolioProjects")
+	for _, it := range items {
+		pk := extractField(it.Data, "portfolioKey")
+		rk := extractField(it.Data, "refKey")
+		if pk == "" || rk == "" {
+			continue
+		}
+		nonEmpty[it.ServerURL+"|"+pk] = true
+	}
+	out := make(map[string]bool)
+	for _, m := range mappings {
+		serverURL := extractField(m, "server_url")
+		sourceKey := extractField(m, "source_portfolio_key")
+		if serverURL == "" || sourceKey == "" {
+			continue
+		}
+		composite := serverURL + "|" + sourceKey
+		if !nonEmpty[composite] {
+			out[composite] = true
+		}
+	}
+	return out
+}
+
 // indexPortfolioCompositions reads getPortfolioDetails JSONL and returns
 // a map of composite serverURL|portfolioKey → PortfolioComposition for
 // every parent portfolio. Leaf portfolios (no subviews) are absent —

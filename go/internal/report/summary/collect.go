@@ -243,6 +243,13 @@ func collectSection(store *common.DataStore, def sectionDef,
 	if def.Name == "Portfolios" && extractMapping != nil {
 		classifications := portfolioClassifications(exportDir, extractMapping)
 		succeeded, nearPerfect, partial = applyPortfolioClassifications(store, succeeded, nearPerfect, partial, classifications)
+
+		// Empty portfolios (no resolved projects on the source) are
+		// not worth migrating — surface them in the Skipped bucket
+		// with a standard message and remove from any non-Skipped
+		// bucket they may have landed in.
+		empties := detectEmptyPortfolios(store, exportDir, extractMapping)
+		succeeded, nearPerfect, partial, skipped = applyEmptyPortfolioSkips(store, succeeded, nearPerfect, partial, skipped, empties)
 	}
 
 	// Portfolio PATCH/DELETE failures encode the id in the URL — re-parse

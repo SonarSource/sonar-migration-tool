@@ -74,6 +74,9 @@ const (
 	SkipReasonUnused       = "unused"
 	SkipReasonSQSOnly      = "sqs-only"
 	SkipReasonDefaultValue = "default-value"
+	// SkipReasonEmpty marks portfolios that resolve to zero projects
+	// on the source — empty SQS portfolios are not migrated.
+	SkipReasonEmpty = "empty"
 )
 
 // sectionDef maps a report section to its corresponding task names and analysis entity type.

@@ -337,11 +337,23 @@ func runCreatePortfolios(ctx context.Context, e *Executor) error {
 		existingByName = map[string]string{}
 	}
 
+	// Empty portfolios (no resolved projects on the source) are not
+	// migrated — there is nothing to populate them with on SQC. The
+	// summary report surfaces them in the Skipped bucket via the
+	// generatePortfolioMappings + getPortfolioProjects join.
+	emptySourceKeys := buildEmptyPortfolioSet(e)
+
 	counter := NewTaskCounter("createPortfolios")
 	err = forEachMigrateItem(ctx, e, "createPortfolios", "generatePortfolioMappings",
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
 			name := extractField(item, "name")
 			desc := extractField(item, "description")
+			serverURL := extractField(item, "server_url")
+			sourceKey := extractField(item, "source_portfolio_key")
+			if emptySourceKeys[serverURL+"|"+sourceKey] {
+				e.Logger.Info("createPortfolios: skipping empty source portfolio", "name", name, "source_key", sourceKey)
+				return nil
+			}
 
 			if existingID, ok := existingByName[name]; ok {
 				e.Logger.Info("createPortfolios: already exists, reusing", "name", name, "id", existingID)

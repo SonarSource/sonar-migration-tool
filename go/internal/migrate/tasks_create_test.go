@@ -212,12 +212,20 @@ func TestCreatePortfoliosReusesExisting(t *testing.T) {
 
 	dir := t.TempDir()
 	setupExtractData(dir)
+	// Inject one resolved project for src-1 so the portfolio is not
+	// considered "empty" and skipped by the new empty-portfolio guard
+	// in createPortfolios. The serverURL has to match the test
+	// executor's extract Mapping (testServerURL) so readExtractItems
+	// can find this record.
+	writeJSONL(filepath.Join(dir, "extract-01", "getPortfolioProjects"), []map[string]any{
+		{"portfolioKey": "src-1", "refKey": "proj-a", "serverUrl": testServerURL},
+	})
 	e := newTestExecutor(cloudSrv, apiSrv, dir)
 
 	// Write a portfolios.csv with the same name as the pre-existing portfolio.
 	csvPath := filepath.Join(dir, "portfolios.csv")
 	csv := "source_portfolio_key,name,server_url,description\n" +
-		"src-1,PreExistingPortfolio,https://sq.example.com,Reused\n"
+		"src-1,PreExistingPortfolio," + testServerURL + ",Reused\n"
 	if err := os.WriteFile(csvPath, []byte(csv), 0o644); err != nil {
 		t.Fatalf("write portfolios.csv: %v", err)
 	}

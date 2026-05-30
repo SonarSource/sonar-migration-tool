@@ -41,6 +41,7 @@ var skipReasonOrder = []struct {
 	{SkipReasonOrgSkipped, "Organization skipped"},
 	{SkipReasonBuiltIn, "Built-in"},
 	{SkipReasonUnused, "Unused"},
+	{SkipReasonEmpty, "Empty (no projects)"},
 	{"", "Other"},
 	// SQS-only settings appear last so the section ends with the
 	// "not applicable on SQC" notes — one row per such setting,
