@@ -1,5 +1,5 @@
 # CloudVoyager Delta — Full Bug & Logic Error Audit
-<!-- updated: 2026-05-27_22:00:00 -->
+<!-- updated: 2026-05-30_08:00:00 -->
 
 This document catalogues every confirmed bug, logic error, and missing feature in the
 migration tool compared to CloudVoyager. Items are ordered by **severity** (data-loss risk
@@ -13,10 +13,12 @@ Migration tool: `go/internal/`
 ## P0 — Data-Loss / Silent Wrong-Data Bugs
 
 ### BUG-01: `BackdateChangesets` and `toExtractedIssues` are dead code
-<!-- updated: 2026-05-27_22:00:00 -->
+<!-- updated: 2026-05-30_08:00:00 -->
 
 **File**: [go/internal/migrate/tasks_scanhistory.go](../go/internal/migrate/tasks_scanhistory.go)
 **Severity**: P0 — all migrated issues get wrong creation dates
+
+**Progress note (2026-05-30)**: Commit `e71b690` wired up the original creation date flow for changeset construction, but `BackdateChangesets` and `toExtractedIssues` may still not be called from `importBranch()` in the final form. Verify the current state of the task before proceeding with the full fix.
 
 `toExtractedIssues()` (line 644) and `BackdateChangesets()` (in
 [go/internal/scanreport/backdate.go](../go/internal/scanreport/backdate.go)) both exist but
@@ -70,23 +72,25 @@ Reliability, Security) won't reflect the source configuration.
 
 ---
 
-### BUG-03: `ReferenceBranchName` never set in `MetadataInput` inside `importBranch`
-<!-- updated: 2026-05-27_22:00:00 -->
+### ~~BUG-03: `ReferenceBranchName` never set in `MetadataInput` inside `importBranch`~~ **[FIXED]**
+<!-- updated: 2026-05-30_08:00:00 -->
 
-**File**: [go/internal/migrate/tasks_scanhistory.go:200](../go/internal/migrate/tasks_scanhistory.go#L200)
+**Status**: FIXED — commit `1eeb9d8`. `MetadataInput` now includes `ReferenceBranchName`; `BuildMetadata` sets it on the protobuf `Metadata` message, defaulting to `BranchName` if not explicitly provided. This matches CloudVoyager's behavior and resolves the CE processing rejection.
 
-`BuildMetadata()` accepts `ReferenceBranchName` (field in `MetadataInput`) and propagates it
+~~**File**: [go/internal/migrate/tasks_scanhistory.go:200](../go/internal/migrate/tasks_scanhistory.go#L200)~~
+
+~~`BuildMetadata()` accepts `ReferenceBranchName` (field in `MetadataInput`) and propagates it
 to the protobuf `Metadata.ReferenceBranchName`. However `importBranch()` constructs
-`MetadataInput` without setting this field — it is always empty string.
+`MetadataInput` without setting this field — it is always empty string.~~
 
-**CloudVoyager**: explicitly sets `referenceBranchName` to the SC branch name (same as
-`branchName` for the main branch).
+~~**CloudVoyager**: explicitly sets `referenceBranchName` to the SC branch name (same as
+`branchName` for the main branch).~~
 
-**Impact**: SC cannot determine the reference branch for new-code comparisons, breaking
-"New Code" periods that rely on reference branch comparison.
+~~**Impact**: SC cannot determine the reference branch for new-code comparisons, breaking
+"New Code" periods that rely on reference branch comparison.~~
 
-**Fix**: Set `ReferenceBranchName: targetBranch` in the `MetadataInput` struct literal in
-`importBranch()`. (For non-main branches it should be the main branch name.)
+~~**Fix**: Set `ReferenceBranchName: targetBranch` in the `MetadataInput` struct literal in
+`importBranch()`. (For non-main branches it should be the main branch name.)~~
 
 ---
 
@@ -460,7 +464,7 @@ systematic wrong dates for projects with multiple issues of the same rule.
 |----|----------|------|-------------|
 | BUG-01 | P0 | Scan History | `BackdateChangesets` never called — all issues get `time.Now()` date |
 | BUG-02 | P0 | Scan History | `ActiveRuleInput` missing `ParamsByKey`, `CreatedAt`, `UpdatedAt`, `Impacts` |
-| BUG-03 | P0 | Scan History | `ReferenceBranchName` never set in `MetadataInput` |
+| BUG-03 | ~~P0~~ **FIXED** | Scan History | ~~`ReferenceBranchName` never set in `MetadataInput`~~ Fixed in commit `1eeb9d8` |
 | BUG-04 | P1 | Scan History | `toExtractedIssues` date lookup keyed on rule key, not issue key |
 | BUG-05 | P1 | Issue Sync | `Assignee` loaded but never synced |
 | BUG-06 | P1 | Issue+Hotspot Sync | No source-link comment added back to SQ |
@@ -489,7 +493,7 @@ systematic wrong dates for projects with multiple issues of the same rule.
 ## Recommended Fix Order
 
 1. **BUG-01** — Wire up `BackdateChangesets` + fix date key (BUG-04/BUG-15 simultaneously)
-2. **BUG-03** — Set `ReferenceBranchName` in `importBranch` (one line)
+2. ~~**BUG-03**~~ — ~~Set `ReferenceBranchName` in `importBranch`~~ **DONE** (commit `1eeb9d8`)
 3. **BUG-02** — Extend `ActiveRuleInput` + `BuildActiveRules` with missing fields
 4. **BUG-11** — Add `loadExtractedMeasures()` and populate `reportData.Measures`
 5. **BUG-10** — Add duplication support to `ReportData` and `PackageReport`

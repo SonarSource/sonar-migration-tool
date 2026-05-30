@@ -5,6 +5,7 @@
 sonar-migration-tool is a Go CLI application built with [Cobra](https://github.com/spf13/cobra). It compiles to a single static binary with no runtime dependencies. Its purpose is to migrate configurations from SonarQube Server to SonarQube Cloud.
 
 ## Project Structure
+<!-- updated: 2026-05-30_08:00:00 -->
 
 The repository contains two Go modules:
 
@@ -21,7 +22,9 @@ sonar-migration-tool/
 │   │   ├── migrate.go           # Phase 4: Push to SonarQube Cloud
 │   │   ├── reset.go             # Delete all migrated content
 │   │   ├── report.go            # Maturity/migration reports
-│   │   └── analysis_report.go   # API call outcome summary
+│   │   ├── analysis_report.go   # API call outcome summary
+│   │   ├── gui.go               # Browser-based GUI server
+│   │   └── predictive_report.go # Pre-migration PDF summary
 │   └── internal/
 │       ├── common/              # Shared utilities
 │       │   ├── rawclient.go     # HTTP client with auth + retry
@@ -62,9 +65,14 @@ sonar-migration-tool/
 │       │   ├── common/          # Data loaders (JSONL → report rows)
 │       │   ├── maturity/        # SonarQube maturity report
 │       │   ├── migration/       # Migration readiness report
+│       │   ├── summary/         # Predictive report summary (collect.go, pdf.go, types.go)
 │       │   ├── markdown.go      # Markdown rendering
 │       │   └── jsonpath.go      # JSON path extraction
-│       └── analysis/            # API call analysis (requests.log → CSV)
+│       ├── analysis/            # API call analysis (requests.log → CSV)
+│       ├── gui/                 # WebSocket-backed browser GUI server
+│       ├── predict/             # Predictive report engine (no Cloud API calls)
+│       ├── scanreport/          # Protobuf scan report builder + submitter
+│       └── version/             # Tool name + version constants
 ├── lib/
 │   └── sq-api-go/               # Typed SonarQube API binding library
 │       ├── client.go            # Client factory (Server + Cloud)
@@ -109,7 +117,7 @@ Organized by category in `go/internal/extract/tasks_*.go`:
 - **Webhooks** — Global and project-level webhooks
 
 ### Migrate Tasks (44+ tasks)
-<!-- updated: 2026-05-26_17:30:00 -->
+<!-- updated: 2026-05-30_08:00:00 -->
 
 Organized by category in `go/internal/migrate/tasks_*.go`:
 - **Create** — Projects, groups, quality gates, quality profiles, permission templates, portfolios
@@ -121,6 +129,7 @@ Organized by category in `go/internal/migrate/tasks_*.go`:
 - **Scan History** — Import scan reports via reconstructed protobuf format (native issues, external issues via ExternalIssue protobuf, hotspots mapped to issues)
 - **Issue Metadata Sync** — `syncIssueMetadata`: two-phase task that waits for Cloud indexing, matches source→cloud issues by composite key (rule|filePath|line), then syncs status transitions (with fallback transition paths), comments, and tags per matched pair. Idempotent via `metadata-synchronized` tag. Requires `--include-scan-history`.
 - **Hotspot Metadata Sync** — `syncHotspotMetadata`: same two-phase pattern, matches source→cloud hotspots by composite key, syncs REVIEWED status/resolution and comments. Idempotent. Requires `--include-scan-history`.
+- **Global Settings** — Migrates only SQS-supported settings; `sonar.dbcleaner.branchesToKeepWhenInactive` is migrated as a regex on SonarQube Cloud
 - **Delete/Reset** — Cleanup tasks for the `reset` command
 
 ## Data Flow
@@ -155,7 +164,7 @@ The `lib/sq-api-go/` module provides typed Go methods for SonarQube Server and C
 - **Cloud API clients** — `IssuesClient` and `HotspotsClient` in `cloud/` provide typed methods for Cloud issue/hotspot search, transitions, comments, and tags
 
 ## Version-Specific Pipeline Architecture (SPEC-011)
-<!-- updated: 2026-05-29_08:00:00 -->
+<!-- updated: 2026-05-30_08:00:00 -->
 
 `go/internal/pipeline/` implements four version-specific extraction pipelines selected once at startup via a version router. No runtime version branching occurs inside the extraction or build phases.
 
@@ -189,7 +198,7 @@ All four pipelines implement the `Pipeline` interface; compile-time checks (`var
 
 **URL construction:** All helpers use `client.BaseURL() + "api/..."` (no leading `/`). `BaseURL()` always returns a URL ending with `/` (enforced by `normalizeBaseURL` in sq-api-go), so prepending a `/` would produce double-slash paths (`//api/...`) that Go's `httptest` server does not normalize.
 
-**V2 groups note:** The `/api/v2/authorizations/groups` response omits `membersCount`, `id`, and `default`. Those fields are zero/false for any group fetched via V2. The standard-API fallback is triggered by any V2 error (not just 404), intentionally ensuring callers get groups even when the V2 endpoint is temporarily unavailable.
+**V2 groups note:** The `/api/v2/authorizations/groups` response omits `membersCount`. The `id` field is a UUID string (incompatible with `Group.ID int`, left zero); `managed` has no `Group` field and is discarded; `default` IS captured and propagated to `Group.Default`. The standard-API fallback is triggered by any V2 error (not just 404), intentionally ensuring callers get groups even when the V2 endpoint is temporarily unavailable.
 
 ## Version Detection
 <!-- updated: 2026-05-29_02:30:00 -->
@@ -205,6 +214,50 @@ The tool auto-detects SonarQube Server version and edition:
 ## Configuration
 
 Commands accept flags, positional arguments, or a JSON config file (`--config path/to/config.json`). CLI flags override config file values. See `docs/CONFIG.md` for details.
+
+## Browser-Based GUI
+<!-- updated: 2026-05-30_08:00:00 -->
+
+`go/internal/gui/` implements a local HTTP server that serves a React-based single-page application for running the full wizard workflow in a browser.
+
+- **WebSocket event stream** — real-time progress events pushed from the Go backend to the browser as each migration phase runs
+- **Wizard stepper** — same 6-phase sequence as the CLI wizard
+- **Run history** — lists past extraction/migration run IDs with their status
+- **CSV viewers** — displays mapping files (`organizations.csv`, `gates.csv`, etc.) in-browser
+- **Report viewers** — renders migration and maturity reports
+- **Dark/light theme** — persisted in browser localStorage
+
+The `gui` command (`go/cmd/gui.go`) starts the server on `localhost:0` (auto-assigned port) and opens the browser automatically. Pass `--no-browser` to suppress auto-open, or `--addr` to bind to a specific address.
+
+## Predictive Report Engine
+<!-- updated: 2026-05-30_08:00:00 -->
+
+`go/internal/predict/` generates a PDF migration summary from local data only — no SonarQube Cloud API calls are made. The engine reads from files produced by `extract`, `structure`, and `mappings` and predicts how the migration will go.
+
+### Architecture
+
+- **`BuildPredictiveRun`** — reads JSONL extract files and mapping CSVs; produces a `PredictiveRun` struct
+- **`CollectSummary`** — walks `PredictiveRun` and classifies each entity using a five-status taxonomy
+- **`RenderPDF`** — writes the summary to `<export_directory>/predictive_migration_summary.pdf`
+
+Report summary logic lives in `go/internal/report/summary/` (`collect.go`, `pdf.go`, `types.go`).
+
+### Five-Status Taxonomy
+
+| Status | Color | Meaning |
+|--------|-------|---------|
+| Succeeded | Green | Entity will migrate without issues |
+| Near Perfect | Yellow | Minor gaps detected (e.g. unsupported settings) |
+| Partial | Amber | Some sub-entities will fail |
+| Failed | Red | Entity cannot migrate as-is |
+| Skipped | Grey | Entity explicitly excluded |
+
+### Limitations
+
+Two outcome classes cannot be predicted ahead of time and are omitted from the predictive report:
+
+- **SonarQube Cloud API errors** — rate limiting, auth failures, or transient network errors
+- **Global settings** — the list of SQC-supported settings is discovered dynamically at migrate time
 
 ## Testing
 
