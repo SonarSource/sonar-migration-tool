@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
+	sqapi "github.com/sonar-solutions/sq-api-go"
 	"github.com/sonar-solutions/sq-api-go/cloud"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
@@ -132,8 +133,18 @@ func runCreateMigrationGroups(ctx context.Context, e *Executor) error {
 					Organization: orgKey,
 				})
 				if err != nil {
-					counter.Fail()
-					logAPIWarn(e.Logger, "createMigrationGroups failed", err, "group", groupName)
+					// "already exists" is the steady-state outcome for
+					// re-runs (the migration groups are deterministic
+					// per org) — surface it at Info so it doesn't
+					// pollute the warn channel, and count it as a
+					// success since the group is in the desired state.
+					if sqapi.IsAlreadyExists(err) {
+						e.Logger.Info("createMigrationGroups: already exists", "group", groupName, "org", orgKey)
+						counter.Success()
+					} else {
+						counter.Fail()
+						logAPIWarn(e.Logger, "createMigrationGroups failed", err, "group", groupName)
+					}
 				} else {
 					counter.Success()
 				}

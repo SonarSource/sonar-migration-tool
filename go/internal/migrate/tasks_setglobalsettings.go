@@ -764,7 +764,7 @@ func fanOutOutcome(ctx context.Context, e *Executor, raw json.RawMessage,
 		}
 	}
 	if alreadyKnown {
-		e.Logger.Info("setGlobalSettings: org-level write already rejected for this key, propagating to projects without retrying",
+		e.Logger.Debug("setGlobalSettings: org-level write already rejected for this key, propagating to projects without retrying",
 			"key", key, "org", org)
 	} else {
 		e.Logger.Info("setGlobalSettings: key not settable at org level despite list_definitions claim, propagating to projects",

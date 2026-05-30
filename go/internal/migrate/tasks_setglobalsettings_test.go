@@ -508,7 +508,9 @@ func TestRunSetGlobalSettingsOrgLevelRejectionTriedOncePerKey(t *testing.T) {
 	dir := t.TempDir()
 	e := newTestExecutor(cloudSrv, apiSrv, dir)
 	var logBuf bytes.Buffer
-	e.Logger = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// The memoization log was demoted to Debug in #258 — open the
+	// logger to Debug so the assertion below still picks it up.
+	e.Logger = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettings", []map[string]any{
 		{"key": "sonar.coverage.jacoco.xmlReportPaths", "values": []string{"**/jacoco*.xml"}},

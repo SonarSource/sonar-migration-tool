@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 // HTTPError represents an HTTP error response with a status code.
@@ -21,7 +22,35 @@ type HTTPError struct {
 }
 
 func (e *HTTPError) Error() string {
-	return fmt.Sprintf("HTTP %d %s %s: %s", e.StatusCode, e.Method, e.URL, e.Body)
+	return fmt.Sprintf("HTTP %d %s %s - %s", e.StatusCode, e.Method, e.URL, e.Message())
+}
+
+// Message returns the human-readable error text extracted from a
+// SonarQube JSON error body (the first `errors[*].msg`). Falls back to
+// the raw body when the response is not the expected JSON shape, so
+// non-API errors are never accidentally hidden.
+func (e *HTTPError) Message() string {
+	if e.Body == "" {
+		return ""
+	}
+	var obj struct {
+		Errors []struct {
+			Msg string `json:"msg"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal([]byte(e.Body), &obj); err != nil || len(obj.Errors) == 0 {
+		return e.Body
+	}
+	msgs := make([]string, 0, len(obj.Errors))
+	for _, item := range obj.Errors {
+		if item.Msg != "" {
+			msgs = append(msgs, item.Msg)
+		}
+	}
+	if len(msgs) == 0 {
+		return e.Body
+	}
+	return strings.Join(msgs, "; ")
 }
 
 // IsHTTPError checks whether an error is an HTTPError with one of the given status codes.

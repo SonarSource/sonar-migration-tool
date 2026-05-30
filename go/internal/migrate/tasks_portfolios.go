@@ -150,7 +150,7 @@ func runConfigurePortfolios(ctx context.Context, e *Executor) error {
 				params.Projects = refs
 			}
 
-			e.Logger.Info("configurePortfolios: sending PATCH",
+			e.Logger.Debug("configurePortfolios: sending PATCH",
 				"portfolio", portfolioID,
 				"name", name,
 				"selection", params.Selection,

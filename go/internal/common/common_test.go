@@ -293,3 +293,48 @@ func TestTruncate(t *testing.T) {
 		t.Errorf("expected 'hello...', got %q", got)
 	}
 }
+
+func TestHTTPErrorMessageDecoding(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"sonarqube json with one msg",
+			`{"errors":[{"msg":"This organization is not bound to an ALM application"}]}`,
+			"This organization is not bound to an ALM application"},
+		{"sonarqube json with multiple msgs",
+			`{"errors":[{"msg":"one"},{"msg":"two"}]}`,
+			"one; two"},
+		{"non-json body falls back to raw",
+			`Internal server error`,
+			"Internal server error"},
+		{"empty errors array falls back to raw",
+			`{"errors":[]}`,
+			`{"errors":[]}`},
+		{"empty body",
+			``,
+			""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := &HTTPError{StatusCode: 400, Method: "GET", URL: "https://x/api/y", Body: tc.body}
+			if got := err.Message(); got != tc.want {
+				t.Errorf("Message: got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestHTTPErrorErrorFormat(t *testing.T) {
+	err := &HTTPError{
+		StatusCode: 400,
+		Method:     "GET",
+		URL:        "https://sc-staging.io/api/alm_integration/list_repositories?organization=migration-tool-test-gh",
+		Body:       `{"errors":[{"msg":"This organization is not bound to an ALM application"}]}`,
+	}
+	want := "HTTP 400 GET https://sc-staging.io/api/alm_integration/list_repositories?organization=migration-tool-test-gh - This organization is not bound to an ALM application"
+	if got := err.Error(); got != want {
+		t.Errorf("Error: got %q, want %q", got, want)
+	}
+}
