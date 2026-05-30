@@ -448,10 +448,11 @@ func TestCollectSummaryPortfolioHierarchyPartial(t *testing.T) {
 			"name": "Top",
 			"subViews": []map[string]any{
 				{
-					"key":  "midKey",
-					"name": "Mid",
+					"key":       "midKey",
+					"name":      "Mid",
+					"qualifier": "VW",
 					"subViews": []map[string]any{
-						{"key": "leafKey", "name": "Leaf"},
+						{"key": "leafKey", "name": "Leaf", "qualifier": "SVW", "selectionMode": "REGEXP", "regexp": ".*"},
 					},
 				},
 			},
@@ -481,14 +482,24 @@ func TestCollectSummaryPortfolioHierarchyPartial(t *testing.T) {
 	for _, item := range portfolios.Succeeded {
 		succeededNames[item.Name] = true
 	}
+	nearPerfectNames := map[string]bool{}
+	for _, item := range portfolios.NearPerfect {
+		nearPerfectNames[item.Name] = true
+	}
 	partialNames := map[string]bool{}
 	for _, item := range portfolios.Partial {
 		partialNames[item.Name] = true
 	}
 
-	// Top and Mid have subportfolios → Partial.
-	if !partialNames["Top"] || !partialNames["Mid"] {
-		t.Errorf("expected Top and Mid in Partial, got %v", partialNames)
+	// Top has nested depth ≥ 2 (Mid itself has Leaf) → Partial (orange).
+	if !partialNames["Top"] {
+		t.Errorf("expected Top in Partial, got partials=%v nearPerfect=%v", partialNames, nearPerfectNames)
+	}
+	// Mid has direct subportfolios with uniform REGEXP mode (Leaf only) →
+	// NearPerfect (yellow). Per #229: depth=1 + same mode is the combinable
+	// path with perimeter perfectly replicated.
+	if !nearPerfectNames["Mid"] {
+		t.Errorf("expected Mid in NearPerfect, got %v", nearPerfectNames)
 	}
 	// Leaf (subportfolio with no children) and Solo (standalone) → Success.
 	if !succeededNames["Leaf"] {
@@ -501,16 +512,102 @@ func TestCollectSummaryPortfolioHierarchyPartial(t *testing.T) {
 		t.Errorf("Top/Mid should not remain in Succeeded, got %v", succeededNames)
 	}
 
-	// Issue text should explain the hierarchy.
+	// Issue text should explain why each portfolio left the green bucket.
 	for _, item := range portfolios.Partial {
 		if len(item.Issues) == 0 {
 			t.Errorf("portfolio %q has no issues attached", item.Name)
 			continue
 		}
-		if !strings.Contains(item.Issues[0], "subportfolios") {
-			t.Errorf("portfolio %q: issue does not mention subportfolios: %q", item.Name, item.Issues[0])
+		if item.Name == "Top" && !strings.Contains(item.Issues[0], "nested subportfolios depth") {
+			t.Errorf("Top: expected nested-depth message, got %q", item.Issues[0])
 		}
 	}
+	for _, item := range portfolios.NearPerfect {
+		if item.Name == "Mid" && (len(item.Issues) == 0 || !strings.Contains(item.Issues[0], "uniform selection mode")) {
+			t.Errorf("Mid: expected uniform-mode message, got %v", item.Issues)
+		}
+	}
+}
+
+// Portfolios composed of applications (qualifier APP) are migrated as a flat
+// list of the projects enclosed in those apps — apps-only routes to
+// NearPerfect (yellow) with a distinct Issues line. A portfolio that also
+// has a subportfolio with no parseable selection mode (mixed) routes to
+// Partial (orange dominates) and carries both messages.
+func TestCollectSummaryPortfolioApplicationsClassification(t *testing.T) {
+	dir := t.TempDir()
+	runID := "run-01"
+	runDir := filepath.Join(dir, runID)
+	os.MkdirAll(runDir, 0o755)
+
+	extractDir := filepath.Join(dir, "extract-01")
+	writeExtractMeta(t, extractDir, "https://sq.example.com")
+	writeTaskJSONL(t, extractDir, "getPortfolioDetails", []map[string]any{
+		{
+			"key":  "appsKey",
+			"name": "AppsPortfolio",
+			"subViews": []map[string]any{
+				{"key": "app1", "name": "App1", "qualifier": "APP"},
+				{"key": "app2", "name": "App2", "qualifier": "APP"},
+			},
+		},
+		{
+			"key":  "mixedKey",
+			"name": "MixedPortfolio",
+			"subViews": []map[string]any{
+				{"key": "vw1", "name": "SubP", "qualifier": "SVW"},
+				{"key": "app3", "name": "App3", "qualifier": "APP"},
+			},
+		},
+		{"key": "plainKey", "name": "PlainPortfolio"},
+	})
+
+	writeTaskJSONL(t, runDir, "createPortfolios", []map[string]any{
+		{"name": "AppsPortfolio", "server_url": "https://sq.example.com", "source_portfolio_key": "appsKey", "cloud_portfolio_id": "1"},
+		{"name": "MixedPortfolio", "server_url": "https://sq.example.com", "source_portfolio_key": "mixedKey", "cloud_portfolio_id": "2"},
+		{"name": "PlainPortfolio", "server_url": "https://sq.example.com", "source_portfolio_key": "plainKey", "cloud_portfolio_id": "3"},
+	})
+
+	summary, err := CollectSummary(runDir, dir)
+	if err != nil {
+		t.Fatalf("CollectSummary: %v", err)
+	}
+	portfolios := findSection(summary, "Portfolios")
+	if portfolios == nil {
+		t.Fatal("missing Portfolios section")
+	}
+
+	nearPerfectByName := map[string]EntityItem{}
+	for _, it := range portfolios.NearPerfect {
+		nearPerfectByName[it.Name] = it
+	}
+	partialByName := map[string]EntityItem{}
+	for _, it := range portfolios.Partial {
+		partialByName[it.Name] = it
+	}
+
+	apps, ok := nearPerfectByName["AppsPortfolio"]
+	if !ok {
+		t.Fatalf("AppsPortfolio should be NearPerfect (apps-only is yellow), got partial=%v nearPerfect=%v", partialByName, nearPerfectByName)
+	}
+	if len(apps.Issues) != 1 || !strings.Contains(apps.Issues[0], "applications") {
+		t.Errorf("AppsPortfolio issues: %v", apps.Issues)
+	}
+
+	mixed, ok := partialByName["MixedPortfolio"]
+	if !ok {
+		t.Fatalf("MixedPortfolio should be Partial (subportfolio with no mode + app = mixed-modes orange)")
+	}
+	if len(mixed.Issues) != 2 {
+		t.Errorf("MixedPortfolio should carry both apps + mixed-modes issues, got %v", mixed.Issues)
+	}
+
+	for _, it := range portfolios.Succeeded {
+		if it.Name == "PlainPortfolio" {
+			return
+		}
+	}
+	t.Errorf("PlainPortfolio should remain in Succeeded")
 }
 
 func TestCollectSummaryPortfolioPATCHFailureMovesToFailed(t *testing.T) {

@@ -236,12 +236,13 @@ func collectSection(store *common.DataStore, def sectionDef,
 		skipped = append(skipped, collectExtractSkipped(def, exportDir, extractMapping, store)...)
 	}
 
-	// SonarQube Cloud has no portfolio hierarchy: any source portfolio that
-	// has subportfolios is migrated as a flat project list, so its perimeter
-	// may differ from the source. Mark those as Partial.
+	// Portfolio classification (#229): apps and combinable subportfolios
+	// (depth=1 with a uniform selection mode) route to NearPerfect with
+	// the appropriate Issues line; deeper nesting or mixed-mode
+	// subportfolios route to Partial. Plain portfolios stay in Succeeded.
 	if def.Name == "Portfolios" && extractMapping != nil {
-		parents := portfoliosWithSubportfolios(exportDir, extractMapping)
-		succeeded, partial = markPartialPortfolios(store, succeeded, partial, parents)
+		classifications := portfolioClassifications(exportDir, extractMapping)
+		succeeded, nearPerfect, partial = applyPortfolioClassifications(store, succeeded, nearPerfect, partial, classifications)
 	}
 
 	// Portfolio PATCH/DELETE failures encode the id in the URL — re-parse

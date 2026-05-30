@@ -73,6 +73,7 @@ func runConfigurePortfolios(ctx context.Context, e *Executor) error {
 	portfolioProjects := buildPortfolioProjectList(e, projectIndex)
 	portfolioOrgs := buildPortfolioOrgIndex(e, projectIndex)
 	allMigratedOrgs := collectAllMigratedOrgs(projectIndex)
+	portfolioCompositions := indexPortfolioCompositions(e)
 
 	// Side-channel writer that records per-portfolio task-level failures
 	// (skipped because of missing data, etc.) so the summary report can mark
@@ -86,11 +87,9 @@ func runConfigurePortfolios(ctx context.Context, e *Executor) error {
 	err := forEachMigrateItem(ctx, e, "configurePortfolios", "createPortfolios",
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
 			selectionMode := strings.ToUpper(extractField(item, "selection_mode"))
-			if selectionMode != "REGEXP" && selectionMode != "TAGS" && selectionMode != "MANUAL" {
-				return nil
-			}
 			portfolioID := extractField(item, "cloud_portfolio_id")
 			sourceKey := extractField(item, "source_portfolio_key")
+			serverURL := extractField(item, "server_url")
 			name := extractField(item, "name")
 			if portfolioID == "" || sourceKey == "" {
 				return nil
@@ -103,19 +102,30 @@ func runConfigurePortfolios(ctx context.Context, e *Executor) error {
 				orgs = allMigratedOrgs
 			}
 
+			composition := portfolioCompositions[serverURL+"|"+sourceKey]
+			// Effective selection mode + criteria after #229: a parent
+			// portfolio whose own selection_mode is empty/NONE/REST is
+			// configured from the composition of its direct subviews —
+			// apps (substituted by their enclosed projects), or
+			// subportfolios (combined when uniform / flattened
+			// otherwise). Single-mode portfolios are unaffected.
+			effMode, effRegexp, effTags := resolveEffectivePortfolioConfig(selectionMode,
+				extractField(item, "regexp"), extractField(item, "tags"),
+				composition, orgs)
+			if effMode == "" {
+				return nil
+			}
+
 			params := cloud.UpdatePortfolioParams{
 				PortfolioID: portfolioID,
 			}
-			switch selectionMode {
+			switch effMode {
 			case "REGEXP":
 				params.Selection = "regex"
-				params.RegularExpression = transformPortfolioRegex(
-					extractField(item, "regexp"), orgs)
+				params.RegularExpression = effRegexp
 			case "TAGS":
 				params.Selection = "tags"
-				if tagsStr := extractField(item, "tags"); tagsStr != "" {
-					params.Tags = strings.Split(tagsStr, ",")
-				}
+				params.Tags = effTags
 			case "MANUAL":
 				cloudKeys := portfolioProjects[sourceKey]
 				if len(cloudKeys) == 0 {
@@ -359,3 +369,130 @@ func transformPortfolioRegex(regex string, orgKeys []string) string {
 	return prefix + regex
 }
 
+// indexPortfolioCompositions reads getPortfolioDetails JSONL and returns
+// a map of composite serverURL|portfolioKey → PortfolioComposition for
+// every parent portfolio. Leaf portfolios (no subviews) are absent —
+// the caller treats a zero-value composition as "no special handling".
+func indexPortfolioCompositions(e *Executor) map[string]PortfolioComposition {
+	items, _ := readExtractItems(e, "getPortfolioDetails")
+	out := make(map[string]PortfolioComposition, len(items))
+	for _, item := range items {
+		var d map[string]any
+		if err := json.Unmarshal(item.Data, &d); err != nil {
+			continue
+		}
+		k, _ := d["key"].(string)
+		if k == "" {
+			continue
+		}
+		pc := AnalyzePortfolio(d)
+		if !pc.HasApps && !pc.HasSubportfolios {
+			continue
+		}
+		out[item.ServerURL+"|"+k] = pc
+	}
+	return out
+}
+
+// resolveEffectivePortfolioConfig produces the (mode, regex, tags) that
+// configurePortfolios should apply to a single SQC portfolio.
+//
+//  1. When the source portfolio's own selection_mode is one of
+//     REGEXP/TAGS/MANUAL, that takes precedence — single-portfolio
+//     migration is unchanged.
+//  2. When the source portfolio has only applications and no own mode,
+//     the SQC portfolio is configured as MANUAL with the flat resolved
+//     project list (apps are substituted by their enclosed projects via
+//     api/views/projects_status).
+//  3. When the source portfolio has direct subportfolios whose modes
+//     all agree (REGEXP / TAGS / MANUAL) AND none of them has further
+//     nested subportfolios, the criteria are combined — regex
+//     alternation, tag union, or the same flat project list for MANUAL.
+//  4. Anything else (mixed modes, nested depth ≥ 2) falls back to
+//     MANUAL with the flat resolved project list — the only safe
+//     translation of a non-uniform hierarchy on SQC.
+//
+// An empty effMode return means "no configurePortfolios call" (e.g. a
+// truly empty parent with no children).
+func resolveEffectivePortfolioConfig(parentMode, parentRegexp, parentTags string,
+	composition PortfolioComposition, orgs []string) (effMode, effRegexp string, effTags []string) {
+
+	if parentMode == "REGEXP" {
+		return "REGEXP", transformPortfolioRegex(parentRegexp, orgs), nil
+	}
+	if parentMode == "TAGS" {
+		if parentTags == "" {
+			return "TAGS", "", nil
+		}
+		return "TAGS", "", splitTrim(parentTags)
+	}
+	if parentMode == "MANUAL" {
+		return "MANUAL", "", nil
+	}
+	// REST mode (catch-all for "rest of projects") has no SQC
+	// equivalent — flatten to the resolved project list captured at
+	// extract time. #229.
+	if parentMode == "REST" {
+		return "MANUAL", "", nil
+	}
+
+	// Composition-driven configuration (#229).
+	switch {
+	case composition.HasSubportfolios && !composition.DepthGT1 && composition.CommonSelectionMode != "":
+		switch composition.CommonSelectionMode {
+		case "REGEXP":
+			parts := make([]string, 0, len(composition.Subportfolios))
+			for _, sp := range composition.Subportfolios {
+				if sp.Regexp == "" {
+					continue
+				}
+				parts = append(parts, transformPortfolioRegex(sp.Regexp, orgs))
+			}
+			if len(parts) == 0 {
+				return "", "", nil
+			}
+			if len(parts) == 1 {
+				return "REGEXP", parts[0], nil
+			}
+			return "REGEXP", "(" + strings.Join(parts, "|") + ")", nil
+		case "TAGS":
+			seen := map[string]bool{}
+			var union []string
+			for _, sp := range composition.Subportfolios {
+				for _, t := range sp.Tags {
+					t = strings.TrimSpace(t)
+					if t == "" || seen[t] {
+						continue
+					}
+					seen[t] = true
+					union = append(union, t)
+				}
+			}
+			if len(union) == 0 {
+				return "", "", nil
+			}
+			return "TAGS", "", union
+		case "MANUAL":
+			return "MANUAL", "", nil
+		}
+	case composition.HasSubportfolios:
+		// Depth ≥ 2 or mixed modes → flat project list.
+		return "MANUAL", "", nil
+	case composition.HasApps:
+		// Apps only → flat project list (apps substituted by enclosed
+		// projects via the resolved getPortfolioProjects data).
+		return "MANUAL", "", nil
+	}
+	return "", "", nil
+}
+
+func splitTrim(csv string) []string {
+	parts := strings.Split(csv, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
