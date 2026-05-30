@@ -45,6 +45,14 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 			attachScanHistory(section.Succeeded, scanHistoryMap)
 			section.Succeeded, section.Partial = applyNCDFallbackPartials(section.Succeeded, section.Partial, ncdFallbackMap)
 			section.Succeeded, section.Partial = applyNCDBranchOverridePartials(section.Succeeded, section.Partial, ncdBranchOverrideSet)
+			// #228 — per-project follow-up operations (tags, settings,
+			// group permissions, links, webhooks) that failed for an
+			// otherwise-successfully-created project route the project
+			// to NearPerfect (yellow) or Partial (orange) with one
+			// Issues line per failing operation.
+			projectFailures := collectProjectFailures(runDir)
+			section.Succeeded, section.NearPerfect, section.Partial = applyProjectFailures(
+				section.Succeeded, section.NearPerfect, section.Partial, projectFailures)
 		}
 		sections = append(sections, section)
 	}
