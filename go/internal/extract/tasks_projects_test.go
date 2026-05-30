@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
@@ -101,6 +102,78 @@ func TestExtractTagsArray(t *testing.T) {
 				t.Errorf("got %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestGetProjectsTaskNoFilter verifies that getProjects sends no `projects`
+// query param when ProjectKeys is empty (full extract).
+func TestGetProjectsTaskNoFilter(t *testing.T) {
+	var capturedQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedQuery = r.URL.RawQuery
+		json.NewEncoder(w).Encode(map[string]any{
+			"paging":     map[string]any{"pageIndex": 1, "pageSize": 500, "total": 1},
+			"components": []map[string]any{{"key": "all-projects"}},
+		})
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	store := NewDataStore(dir)
+	raw := common.NewRawClient(srv.Client(), srv.URL+"/")
+	e := &Executor{
+		Raw:   raw, Store: store,
+		ServerURL: srv.URL + "/",
+		Logger:    slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Sem:       make(chan struct{}, 1),
+	}
+
+	def := projectTasks()[0] // getProjects is first in the list
+	if def.Name != "getProjects" {
+		t.Fatalf("expected getProjects task, got %s", def.Name)
+	}
+	if err := def.Run(context.Background(), e); err != nil {
+		t.Fatalf("getProjects: %v", err)
+	}
+	if strings.Contains(capturedQuery, "projects=") {
+		t.Errorf("expected no projects= param for empty ProjectKeys, got query: %s", capturedQuery)
+	}
+}
+
+// TestGetProjectsTaskWithFilter verifies that getProjects sends `projects=key1,key2`
+// when ProjectKeys is set — server-side filter that scopes downstream tasks.
+func TestGetProjectsTaskWithFilter(t *testing.T) {
+	var capturedQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedQuery = r.URL.RawQuery
+		json.NewEncoder(w).Encode(map[string]any{
+			"paging":     map[string]any{"pageIndex": 1, "pageSize": 500, "total": 1},
+			"components": []map[string]any{{"key": "proj-a"}},
+		})
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	store := NewDataStore(dir)
+	raw := common.NewRawClient(srv.Client(), srv.URL+"/")
+	e := &Executor{
+		Raw:         raw, Store: store,
+		ServerURL:   srv.URL + "/",
+		ProjectKeys: []string{"proj-a", "proj-b"},
+		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Sem:         make(chan struct{}, 1),
+	}
+
+	def := projectTasks()[0]
+	if def.Name != "getProjects" {
+		t.Fatalf("expected getProjects task, got %s", def.Name)
+	}
+	if err := def.Run(context.Background(), e); err != nil {
+		t.Fatalf("getProjects: %v", err)
+	}
+	if !strings.Contains(capturedQuery, "projects=proj-a%2Cproj-b") &&
+		!strings.Contains(capturedQuery, "projects=proj-a,proj-b") {
+		t.Errorf("expected projects=proj-a,proj-b in query, got: %s", capturedQuery)
 	}
 }
 

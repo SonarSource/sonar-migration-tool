@@ -562,18 +562,47 @@ A full clean pass requires **ALL** of the following. Not a subset. Not "close en
 ---
 
 ## Current Test Status
-<!-- updated: 2026-05-29_02:10:00 -->
+<!-- updated: 2026-05-30_15:00:00 -->
 
-As of **2026-05-29**, all regression tests pass cleanly on branch `fix/four-pipelines-compatibility`:
+As of **2026-05-30**, all regression tests pass cleanly on branch `fix/four-pipelines-compatibility`:
 
 | Check | Status |
 |---|---|
 | `go vet ./...` | PASS |
-| `go test ./...` | PASS |
+| `go test ./...` | PASS (15 packages, 0 failures) |
 | `go test -race ./...` | PASS — zero data race warnings |
 | `go build -race` | PASS |
 
-No panics, no `DATA RACE` reports, no `FATAL` log lines. Loop iteration count to reach this clean pass: **1**.
+### Changes Tested This Session
+
+**SPEC-011 four-pipeline architecture** (`paginateAll` generic, URL double-slash fix, V2 groups `Default` field):
+- All pipeline unit tests pass with race detector (sq2025_test.go, helpers_test.go, router_test.go)
+- SQ server at localhost:9000 is SQ 2026.2 Enterprise — would route to SQ2025Pipeline
+
+**`transfer` command** (new single-project migration path):
+- Validation tested: missing `--sq-url`, `--sq-token`, `--sc-token`, `--sc-org` all produce clear error messages with exit code 1
+- Config file parsing: CloudVoyager-compatible JSON shape parses correctly
+- Race detector: passes with no warnings
+
+**`ProjectKeys` filter in `getProjects`** (server-side project filtering for `transfer`):
+- `TestGetProjectsTaskNoFilter`: verified no `projects=` param when `ProjectKeys` is empty
+- `TestGetProjectsTaskWithFilter`: verified `projects=key1,key2` param is sent when set
+- Both tests pass with race detector
+
+### Live Environment Notes
+
+The test SQ instance (localhost:9000, SQ 2026.2 Enterprise) has an admin token (`sqa_*`) that lacks `canAdmin` privileges. This causes `403 Insufficient Privileges` on:
+- `api/projects/search` → `getProjects` task
+- `api/permissions/search_templates` → `getDefaultTemplates` task
+- `api/ce/activity` → `getTasks` task
+- `api/user_groups/search` → `getGroups` task
+
+These 403 failures are a **pre-existing test environment limitation** (token scoped without Administer System permission), not regressions introduced by this branch. The token CAN access:
+- Project issues: 12 issues on `sonar-rules-to-eslint-mapping`
+- Quality profiles: 45 profiles
+- Quality gates: 2 gates
+
+No panics, no `DATA RACE` reports, no `FATAL` log lines. Loop iterations to clean pass: **1**.
 
 ---
 
