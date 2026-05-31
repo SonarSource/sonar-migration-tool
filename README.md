@@ -119,6 +119,78 @@ All examples below show both forms. Use whichever matches your setup:
 
 Commands can be configured via CLI flags, positional arguments, or a JSON config file (`--config path/to/config.json`). Config file values are overridden by CLI flags when both are provided.
 
+#### Unified config file
+
+`extract`, `migrate`, `reset`, and `predictive-report` all read the same JSON file. The recommended shape carries one top-level block of defaults and one `source` / `target` sub-block per side of the migration — `extract` reads `source`, `migrate` / `reset` read `target`, and each command silently ignores the block that isn't its own.
+
+```jsonc
+{
+  "concurrency": 10,
+  "timeout": 60,
+  "export_directory": "./migration-files",
+
+  "source": {
+    "url":   "http://sonarqube.example.com",
+    "token": "squ_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "extract_type": "all",
+    "pem_file_path": null,
+    "key_file_path": null,
+    "cert_password": null,
+    "target_task": null,
+    "extract_id":  null
+  },
+
+  "target": {
+    "url":   "https://sonarcloud.io/",
+    "token": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "enterprise_key": "your-enterprise",
+    "edition": "enterprise",
+    "run_id": null,
+    "target_task": null
+  }
+}
+```
+
+**Top-level fields** (all optional):
+
+| Field | Default | Description |
+|---|---|---|
+| `concurrency` | `10` | Default max parallel HTTP calls. |
+| `timeout` | `60` | Default HTTP request timeout in seconds. |
+| `export_directory` | `./migration-files` | Root directory for extract / migrate output. |
+
+The same `concurrency` and `timeout` fields exist inside `source` and `target` — when set there they override the top-level value for that command only.
+
+**`source` block** (consumed by `extract`):
+
+| Field | Required | Description |
+|---|---|---|
+| `url` | ✅ | SonarQube Server base URL. |
+| `token` | ✅ | SonarQube Server user token. |
+| `extract_type` | | `"all"` (default) or the name of a specific extract task. |
+| `concurrency` / `timeout` | | Override the top-level defaults. |
+| `pem_file_path` / `key_file_path` / `cert_password` | | Client-side mTLS certificate, if required. |
+| `target_task` | | Stop extract at a specific task (dependencies still run). |
+| `extract_id` | | Reuse an existing extract directory ID instead of generating a new one. |
+| `enterprise_key` / `organization_key` / `edition` | | Provisional — accepted but ignored today; reserved for future SQC-to-SQC migration. |
+
+**`target` block** (consumed by `migrate` and `reset`):
+
+| Field | Required | Description |
+|---|---|---|
+| `url` | ✅ | SonarQube Cloud base URL (e.g. `https://sonarcloud.io/`). |
+| `token` | ✅ | SonarQube Cloud user token. |
+| `enterprise_key` | | Enterprise key used to scope enterprise endpoints. |
+| `edition` | | `"enterprise"` (default), `"team"`, or `"foss"`. |
+| `concurrency` / `timeout` | | Override the top-level defaults. |
+| `run_id` | | Resume an in-progress migrate run by ID. |
+| `target_task` | | Stop migrate at a specific task. |
+| `organization_key` | | Provisional — accepted but ignored today. |
+
+A full example lives at [`examples/config.unified.example.json`](examples/config.unified.example.json) and a JSON Schema for editor autocomplete at [`schemas/config.schema.json`](schemas/config.schema.json). Add the schema to your editor by referencing it in `.vscode/settings.json` or by adding a `"$schema"` pointer at the top of your config.
+
+The three legacy shapes (flat top-level keys, `extract` / `migrate` sub-objects, and `sonarqube` + `sonarcloud` side-sectioned) still parse — existing configs keep working.
+
 ### 1. Extract
 
 ```bash
