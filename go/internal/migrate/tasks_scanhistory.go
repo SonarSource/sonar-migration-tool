@@ -144,9 +144,10 @@ func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*i
 	// Combine native issues with hotspot issues for the regular Issue protobuf.
 	issues = append(issues, hotspotIssues...)
 
-	// Only include components that have matching source code (matches cloudvoyager behavior).
-	sourceKeys := buildSourceKeySet(sources)
-	components := filterComponentsWithSource(allComponents, sourceKeys)
+	// Include ALL FIL components, not just those with source code.
+	// External issues can reference files without source; filtering by
+	// source drops those issues. CloudVoyager includes all FIL components.
+	components := allComponents
 
 	if len(components) == 0 {
 		return &importResult{Status: "skipped"}, nil
