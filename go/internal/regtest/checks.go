@@ -562,19 +562,26 @@ func checkTemplatePermissions(ctx context.Context, s *Suite) []CheckResult {
 	var results []CheckResult
 	for _, t := range resp.PermissionTemplates {
 		for _, perm := range perms {
-			count, err := queryCount(ctx, s.sqsRaw, "api/permissions/template_groups",
+			// SQS records the baseline group count for manual review. The
+			// corresponding SC permission-template group endpoint does not
+			// expose a directly comparable structure, so this is reported
+			// as SKIPPED rather than unconditionally PASS.
+			sqsCount, err := queryCount(ctx, s.sqsRaw, "api/permissions/template_groups",
 				urlParams("templateId", t.ID, "permission", perm, "ps", "500"), "groups")
 			if err != nil {
 				results = append(results, makeError("Permission Templates",
 					fmt.Sprintf("%s/%s", t.Name, perm), err))
 				continue
 			}
-			results = append(results, CheckResult{
+			r := CheckResult{
 				Category: "Permission Templates",
 				Name:     fmt.Sprintf("%s/%s groups", t.Name, perm),
-				SQSValue: strconv.Itoa(count), SCValue: "recorded", Match: true,
-				Notes: "SQS baseline recorded",
-			})
+				SQSValue: strconv.Itoa(sqsCount),
+				SCValue:  "N/A",
+				Match:    false,
+				Notes:    "SKIPPED",
+			}
+			results = append(results, r)
 		}
 	}
 	return results
@@ -594,9 +601,12 @@ func checkGlobalSettings(ctx context.Context, s *Suite) []CheckResult {
 	}
 	r := makeResult("Settings", "Global settings", sqsCount, scCount, "SC-compatible subset")
 	r.Notes = "SC supports subset of SQS settings"
-	if scCount > 0 {
-		r.Match = true
-	}
+	// SC's supported setting set is intentionally a subset of SQS, so a
+	// direct equality is not expected. The check passes when SC has at
+	// least one migrated setting AND that count is no larger than SQS;
+	// a count larger than SQS would indicate a misconfiguration worth
+	// surfacing as a real failure.
+	r.Match = scCount > 0 && scCount <= sqsCount
 	return []CheckResult{r}
 }
 
@@ -676,7 +686,10 @@ func checkCustomRules(ctx context.Context, s *Suite) []CheckResult {
 	}
 	r := makeResult("Rules", "Rule count", sqsTotal, scTotal, "Rule sets may differ")
 	r.Notes = "Rule sets may differ between SQS and SC"
-	r.Match = true
+	// Match is left to makeResult's sqsCount == scCount comparison: SC's
+	// rule catalogue is a subset of SQS so equality is rare and a mismatch
+	// is informational, not a failure. The Notes field explains the gap
+	// for reviewers.
 	return []CheckResult{r}
 }
 
