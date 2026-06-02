@@ -256,15 +256,27 @@ func runSetProjectGroupPermissions(ctx context.Context, e *Executor) error {
 
 func applyGroupPermissions(ctx context.Context, e *Executor, data json.RawMessage, pm projectMapping, w *common.ChunkWriter, counter *TaskCounter) {
 	name := extractField(data, "name")
+	// Issue #269: remap SQS built-in groups to their SQC equivalents
+	// (today: sonar-users → Members). The write to the task output is
+	// still done with the source name so downstream / report code can
+	// correlate back to the SQS data; only the SQC API call uses the
+	// remapped name.
+	cloudName, ok := MapGroupNameToCloud(name)
+	if !ok {
+		_ = w.WriteOne(common.EnrichRaw(data, map[string]any{
+			"cloud_project_key": pm.CloudKey,
+		}))
+		return
+	}
 	permsRaw := extractPermissions(data)
 	for _, perm := range permsRaw {
 		if !validPermissions[perm] {
 			continue
 		}
-		if err := e.Cloud.Permissions.AddGroup(ctx, name, perm, pm.OrgKey, pm.CloudKey); err != nil {
+		if err := e.Cloud.Permissions.AddGroup(ctx, cloudName, perm, pm.OrgKey, pm.CloudKey); err != nil {
 			counter.Fail()
 			logAPIWarn(e.Logger, "setProjectGroupPermissions failed", err,
-				"project", pm.CloudKey, "group", name, "perm", perm)
+				"project", pm.CloudKey, "group", cloudName, "perm", perm)
 		} else {
 			counter.Success()
 		}

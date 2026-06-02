@@ -256,15 +256,22 @@ func runSetOrgGroupPermissions(ctx context.Context, e *Executor) error {
 }
 
 func applyOrgPermissions(ctx context.Context, e *Executor, data json.RawMessage, name, orgKey string, counter *TaskCounter) {
+	// Issue #269: remap SQS built-in groups to their SQC equivalents
+	// (today: sonar-users → Members). Skip the grant if no equivalent
+	// exists.
+	cloudName, ok := MapGroupNameToCloud(name)
+	if !ok {
+		return
+	}
 	perms := extractPermissions(data)
 	for _, perm := range perms {
 		if !validPermissions[perm] {
 			continue
 		}
-		err := e.Cloud.Permissions.AddGroup(ctx, name, perm, orgKey, "")
+		err := e.Cloud.Permissions.AddGroup(ctx, cloudName, perm, orgKey, "")
 		if err != nil {
 			counter.Fail()
-			logAPIWarn(e.Logger, "setOrgGroupPermissions failed", err, "group", name, "perm", perm)
+			logAPIWarn(e.Logger, "setOrgGroupPermissions failed", err, "group", cloudName, "perm", perm)
 		} else {
 			counter.Success()
 		}
@@ -289,13 +296,18 @@ func runSetProfileGroupPermissions(ctx context.Context, e *Executor) error {
 		func(ctx context.Context, item structure.ExtractItem, w *common.ChunkWriter) error {
 			profileKey := extractField(item.Data, "profileKey")
 			groupName := extractField(item.Data, "name")
+			// Issue #269: remap SQS built-in groups (sonar-users → Members).
+			cloudGroup, ok := MapGroupNameToCloud(groupName)
+			if !ok {
+				return nil
+			}
 			refs := profileInfo[profileKey]
 			for _, ref := range refs {
-				err := e.Cloud.QualityProfiles.AddGroup(ctx, ref.Language, ref.Name, groupName, ref.OrgKey)
+				err := e.Cloud.QualityProfiles.AddGroup(ctx, ref.Language, ref.Name, cloudGroup, ref.OrgKey)
 				if err != nil {
 					counter.Fail()
 					logAPIWarn(e.Logger, "setProfileGroupPermissions failed", err,
-						"profile", ref.Name, "group", groupName)
+						"profile", ref.Name, "group", cloudGroup)
 				} else {
 					counter.Success()
 				}
@@ -363,8 +375,10 @@ func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 		}
 	}
 
+	// sonar-users is intentionally NOT in skipGroups (issue #269): the
+	// apply closure remaps it to SQC's built-in `Members` group via
+	// MapGroupNameToCloud and grants the permission there.
 	skipGroups := map[string]bool{
-		"sonar-users":          true,
 		"sonar-administrators": true,
 		migrationScanners:      true,
 		migrationViewers:       true,
@@ -389,7 +403,16 @@ func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 		if !ok || tmpl.cloudID == "" || tmpl.org == "" {
 			return
 		}
-		if !groupExists[tmpl.org+"\x00"+groupName] {
+		// Issue #269: remap SQS built-in groups (sonar-users → Members).
+		// Aliased built-ins exist on SQC by default and won't appear in
+		// the createGroups output, so the groupExists check is skipped
+		// for them.
+		cloudGroup, mapOK := MapGroupNameToCloud(groupName)
+		if !mapOK {
+			return
+		}
+		aliased := cloudGroup != groupName
+		if !aliased && !groupExists[tmpl.org+"\x00"+groupName] {
 			return
 		}
 		perms := extractStringArray(data, "permissions")
@@ -397,7 +420,7 @@ func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 			if perm == "" {
 				continue
 			}
-			k := triple{tmpl.cloudID, groupName, perm}
+			k := triple{tmpl.cloudID, cloudGroup, perm}
 			appliedMu.Lock()
 			if applied[k] {
 				appliedMu.Unlock()
@@ -405,10 +428,10 @@ func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 			}
 			applied[k] = true
 			appliedMu.Unlock()
-			if err := e.Cloud.Permissions.AddGroupToTemplate(ctx, tmpl.cloudID, groupName, perm, tmpl.org); err != nil {
+			if err := e.Cloud.Permissions.AddGroupToTemplate(ctx, tmpl.cloudID, cloudGroup, perm, tmpl.org); err != nil {
 				counter.Fail()
 				logAPIWarn(e.Logger, "setTemplateGroupPermissions failed", err,
-					"template", tmpl.cloudID, "group", groupName, "perm", perm)
+					"template", tmpl.cloudID, "group", cloudGroup, "perm", perm)
 			} else {
 				counter.Success()
 			}
