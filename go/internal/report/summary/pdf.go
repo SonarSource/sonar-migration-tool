@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/go-pdf/fpdf"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/migrate"
 )
 
 // sectionsSortedByName lists section names whose unified table should be
@@ -20,17 +22,33 @@ var sectionsSortedByName = map[string]bool{
 }
 
 // Color constants for the PDF report.
+//
+// Issue #167 introduced the Sonar-branded palette below. The legacy
+// "Med/Dark Blue" names are aliased to the new Sonar colours rather
+// than removed so the (many) existing callers keep compiling without
+// per-call rewrites. Status colours (green/yellow/amber/red/grey) are
+// unchanged — they convey outcome semantics, not branding.
 var (
-	colorDarkBlue  = [3]int{26, 60, 110}
-	colorMedBlue   = [3]int{45, 95, 154}
+	// Sonar brand palette (issue #167).
+	colorSonarBlue      = [3]int{0x12, 0x6e, 0xd3} // #126ed3 — primary brand, table & summary headers
+	colorSonarLightBlue = [3]int{0xb7, 0xd3, 0xf2} // #b7d3f2 — title banner + footer band
+	colorSonarGrey      = [3]int{0x9e, 0x9e, 0x9e} // #9e9e9e — table cell borders
+
+	// Aliases retained for compatibility with existing rendering code.
+	// Anything currently using colorDarkBlue / colorMedBlue picks up
+	// the Sonar primary; legacy "off-white" alternation stays.
+	colorDarkBlue  = colorSonarBlue
+	colorMedBlue   = colorSonarBlue
 	colorLightGray = [3]int{245, 245, 245}
 	colorWhite     = [3]int{255, 255, 255}
 	colorBlack     = [3]int{0, 0, 0}
-	colorGreen     = [3]int{34, 139, 34}
-	colorYellow    = [3]int{180, 150, 0} // near-perfect (issue #224 yellow status)
-	colorRed       = [3]int{200, 0, 0}
-	colorAmber     = [3]int{200, 110, 0} // partial migration (issue #224 orange status)
-	colorDarkGray  = [3]int{90, 90, 90}
+
+	// Outcome colours.
+	colorGreen    = [3]int{34, 139, 34}
+	colorYellow   = [3]int{180, 150, 0} // near-perfect (issue #224 yellow status)
+	colorRed      = [3]int{200, 0, 0}
+	colorAmber    = [3]int{200, 110, 0} // partial migration (issue #224 orange status)
+	colorDarkGray = [3]int{90, 90, 90}
 )
 
 // Skip reason display order and labels.
@@ -69,9 +87,22 @@ func RenderPDF(summary *MigrationSummary) ([]byte, error) {
 	pdf.SetAutoPageBreak(true, 20)
 
 	registerUnicodeFont(pdf)
+	registerLogoImages(pdf)
+
+	// Sonar grey cell borders for every CellFormat / Rect call in the
+	// document (#167). SetDrawColor is sticky in fpdf, so setting it
+	// once at document creation suffices — individual renderers only
+	// need to override it if they want a non-Sonar-grey border.
+	pdf.SetDrawColor(colorSonarGrey[0], colorSonarGrey[1], colorSonarGrey[2])
+
+	// Body content on every page starts below the header band so the
+	// table top borders don't collide with the Sonar logo. headerBandH
+	// gives ~4mm of breathing room past the rasterised logo height
+	// (9.5mm scaled) plus the band's top inset.
+	pdf.SetTopMargin(headerBandH)
 
 	pdf.SetHeaderFuncMode(func() {
-		addPageHeader(pdf, summary.RunID)
+		addPageHeader(pdf, summary.RunID, summary.GeneratedAt)
 	}, true)
 	pdf.SetFooterFunc(func() {
 		addPageFooter(pdf)
@@ -87,7 +118,7 @@ func RenderPDF(summary *MigrationSummary) ([]byte, error) {
 		renderSection(pdf, section, summary.Predictive)
 	}
 
-	renderLimitations(pdf, summary.Limitations)
+	renderLimitations(pdf, summary.Limitations, summary.Predictive)
 
 	var buf bytes.Buffer
 	if err := pdf.Output(&buf); err != nil {
@@ -100,97 +131,219 @@ func RenderPDF(summary *MigrationSummary) ([]byte, error) {
 // very end of the report (issue #154). Each entry is rendered as a
 // single bulleted line. No-op when the list is empty so reports for
 // instances without any limitation stay clean.
-func renderLimitations(pdf *fpdf.Fpdf, limitations []string) {
+func renderLimitations(pdf *fpdf.Fpdf, limitations []string, predictive bool) {
 	if len(limitations) == 0 {
 		return
 	}
 	pdf.Ln(8)
 	checkPageBreak(pdf, 30)
 
-	setColor(pdf, colorMedBlue)
-	pdf.SetFont(pdfFontFamily, "B", 14)
+	setColor(pdf, colorSonarBlue)
+	pdf.SetFont(pdfFontFamilyHeading, "B", 14)
 	pdf.CellFormat(0, 10, "Migration limitations", "", 1, "L", false, 0, "")
 
 	setColor(pdf, colorBlack)
-	pdf.SetFont(pdfFontFamily, "", 9)
+	pdf.SetFont(pdfFontFamilyBody, "", 9)
 	for _, line := range limitations {
 		// MultiCell so long messages wrap instead of running off
 		// the edge. Bullet prefix mirrors the visual treatment used
 		// by other free-text sections.
-		pdf.MultiCell(0, 5, "• "+sanitizeForPDF(line), "", "L", false)
+		pdf.MultiCell(0, 5, "• "+sanitizeForPDF(toPredictiveTense(line, predictive)), "", "L", false)
 	}
 }
 
-// registerUnicodeFont registers the embedded Noto Sans regular + bold variants
-// so SetFont(pdfFontFamily, ...) renders strings as UTF-8 with broad coverage
-// instead of the single-byte Helvetica fallback that mangles non-ASCII text.
+// registerUnicodeFont registers every embedded TTF (NotoSans, Poppins,
+// Inter) so SetFont(<family>, ...) can switch families per usage:
+// Poppins for headings (#167), Inter for body cells (#167), NotoSans as
+// the Unicode-coverage fallback for legacy callers and any string the
+// Sonar-branded fonts can't render. Embedded once at PDF creation so
+// the per-cell SetFont calls don't repay registration cost.
 func registerUnicodeFont(pdf *fpdf.Fpdf) {
 	pdf.AddUTF8FontFromBytes(pdfFontFamily, "", notoSansRegular)
 	pdf.AddUTF8FontFromBytes(pdfFontFamily, "B", notoSansBold)
+	pdf.AddUTF8FontFromBytes(pdfFontFamilyHeading, "", poppinsRegular)
+	pdf.AddUTF8FontFromBytes(pdfFontFamilyHeading, "B", poppinsBold)
+	pdf.AddUTF8FontFromBytes(pdfFontFamilyBody, "", interRegular)
+	pdf.AddUTF8FontFromBytes(pdfFontFamilyBody, "B", interBold)
 }
 
-func addPageHeader(pdf *fpdf.Fpdf, runID string) {
-	pdf.SetY(5)
-	setColor(pdf, colorDarkBlue)
-	pdf.SetFont(pdfFontFamily, "B", 8)
-	pdf.CellFormat(0, 6, "SonarQube Migration Summary - "+runID, "", 0, "R", false, 0, "")
-	pdf.Ln(8)
+// registerLogoImages registers the embedded Sonar logo PNGs with fpdf
+// under fixed names so the header/footer functions can stamp them on
+// every page via pdf.ImageOptions(name, ...). Registration is
+// idempotent within an fpdf document, but we still call it once at
+// document creation to keep first-page rendering free of an extra
+// allocation.
+func registerLogoImages(pdf *fpdf.Fpdf) {
+	pdf.RegisterImageOptionsReader("sonar-logo-header",
+		fpdf.ImageOptions{ImageType: "PNG", ReadDpi: false},
+		bytes.NewReader(sonarLogoHeader))
+	pdf.RegisterImageOptionsReader("sonar-logo-footer",
+		fpdf.ImageOptions{ImageType: "PNG", ReadDpi: false},
+		bytes.NewReader(sonarLogoFooter))
 }
 
-func addPageFooter(pdf *fpdf.Fpdf) {
-	pdf.SetY(-15)
-	pdf.SetFont(pdfFontFamily, "", 8)
+// pageMarginLeft / pageMarginRight mirror fpdf's default Letter margins
+// so the header / footer logos and bands line up with the table edges.
+const (
+	pageMarginLeft  = 10.0
+	pageMarginRight = 10.0
+	// Header logo footprint. The upstream Sonar wordmark is 1010×320,
+	// which we scale to a width of 30mm here — height auto-scales via
+	// pdf.ImageOptions's h=0 convention. Used on page 1 only.
+	headerLogoWidth = 30.0
+	// From page 2 onward the header carries the small standalone Sonar
+	// glyph (77×78) instead of the full wordmark — keeps the band low
+	// and leaves room on the right for the run id + timestamp.
+	headerGlyphWidth = 8.0
+	// Footer logo footprint. The standalone Sonar glyph is 77×78 so
+	// we keep it small; the footer height accommodates the glyph plus
+	// the page-number text on the same band.
+	footerLogoWidth = 7.0
+	footerBandH     = 12.0
+	// headerBandH is the vertical space reserved above the body on
+	// every page so tables / banners never collide with the page
+	// header. Generous on page 1 (where the wordmark dominates) and
+	// already-comfortable for subsequent pages where only the small
+	// glyph + run id sit in the band.
+	headerBandH = 22.0
+)
+
+// addPageHeader stamps a Sonar-branded band at the top of every page
+// (#167). Page 1 carries the full Sonar wordmark, mirroring the title
+// page mockup; pages 2+ switch to the standalone Sonar glyph on the
+// left with the Run ID and generation timestamp right-aligned, both in
+// small Inter so the band stays a single visual line.
+func addPageHeader(pdf *fpdf.Fpdf, runID string, generatedAt time.Time) {
+	pageW, _ := pdf.GetPageSize()
+
+	if pdf.PageNo() == 1 {
+		pdf.ImageOptions("sonar-logo-header", pageMarginLeft, 6,
+			headerLogoWidth, 0, false,
+			fpdf.ImageOptions{ImageType: "PNG"}, 0, "")
+		pdf.SetY(headerBandH)
+		return
+	}
+
+	// Page 2+ header: small Sonar glyph left, Run ID + timestamp right.
+	glyphY := 6.0
+	pdf.ImageOptions("sonar-logo-footer", pageMarginLeft, glyphY,
+		headerGlyphWidth, 0, false,
+		fpdf.ImageOptions{ImageType: "PNG"}, 0, "")
+
+	pdf.SetFont(pdfFontFamilyBody, "", 8)
+	setColor(pdf, colorDarkGray)
+	rightText := fmt.Sprintf("Run ID: %s  |  Generated: %s",
+		runID, generatedAt.Format("2006-01-02 15:04:05"))
+	textY := glyphY + (headerGlyphWidth-4)/2
+	rightW := pageW - 2*pageMarginRight
+	pdf.SetXY(pageMarginLeft, textY)
+	pdf.CellFormat(rightW, 5, rightText, "", 0, "R", false, 0, "")
 	setColor(pdf, colorBlack)
-	pdf.CellFormat(0, 10, fmt.Sprintf("Page %d", pdf.PageNo()), "", 0, "C", false, 0, "")
+
+	pdf.SetY(headerBandH)
 }
 
-// renderPredictiveTitle renders the title for the predictive report
-// (#240): "SonarQube Migration Prediction" centered, with "Prediction"
-// underlined while the rest stays plain bold. fpdf draws the underline
-// programmatically when "U" is part of the style string, so no extra
-// font registration is needed.
-func renderPredictiveTitle(pdf *fpdf.Fpdf) {
-	const fontSize = 22.0
-	const lineH = 12.0
-	prefix := "SonarQube Migration "
-	suffix := "Prediction"
+// addPageFooter renders the Sonar-branded footer band (#167):
+//   - light-blue full-width background (#b7d3f2)
+//   - Sonar glyph + "© <year>, SonarSource Sàrl" on the left, Inter 8pt
+//   - "Page <n>" on the right, Inter 8pt
+//
+// The band sits flush against the bottom margin so it visually frames
+// the page like the mockup in #167.
+func addPageFooter(pdf *fpdf.Fpdf) {
+	pageW, pageH := pdf.GetPageSize()
+	bandY := pageH - footerBandH - 2
 
-	pdf.SetFont(pdfFontFamily, "B", fontSize)
-	prefixW := pdf.GetStringWidth(prefix)
-	pdf.SetFont(pdfFontFamily, "BU", fontSize)
-	suffixW := pdf.GetStringWidth(suffix)
+	// Light-blue band.
+	setFillColor(pdf, colorSonarLightBlue)
+	pdf.Rect(0, bandY, pageW, footerBandH, "F")
+
+	// Sonar glyph, centred vertically in the band, with a small left
+	// inset. h=0 means "preserve aspect ratio".
+	glyphY := bandY + (footerBandH-footerLogoWidth)/2
+	pdf.ImageOptions("sonar-logo-footer", pageMarginLeft, glyphY,
+		footerLogoWidth, 0, false,
+		fpdf.ImageOptions{ImageType: "PNG"}, 0, "")
+
+	// Copyright text — Inter 8pt, vertically centred.
+	pdf.SetFont(pdfFontFamilyBody, "", 8)
+	setColor(pdf, colorBlack)
+	copyText := fmt.Sprintf("© %d, SonarSource Sàrl", time.Now().Year())
+	textW := pageW - 2*pageMarginLeft - footerLogoWidth - 4
+	pdf.SetXY(pageMarginLeft+footerLogoWidth+4, bandY+(footerBandH-5)/2)
+	pdf.CellFormat(textW/2, 5, copyText, "", 0, "L", false, 0, "")
+
+	// Page number on the right.
+	pdf.SetXY(pageW/2, bandY+(footerBandH-5)/2)
+	pdf.CellFormat(pageW/2-pageMarginRight, 5,
+		fmt.Sprintf("Page %d", pdf.PageNo()), "", 0, "R", false, 0, "")
+}
+
+// renderTitleBanner draws the Sonar-branded title banner (#167): full-
+// width light-blue (#b7d3f2) background with the report title centred
+// inside it. The predictive variant renders "SonarQube Migration
+// Predictive Report" with "Predictive" underlined; the actual variant
+// renders "SonarQube Migration Report" with no underline. Title font
+// is Poppins Bold.
+func renderTitleBanner(pdf *fpdf.Fpdf, predictive bool) {
+	const fontSize = 22.0
+	const bannerH = 18.0
+	const lineH = 12.0
 
 	pageW, _ := pdf.GetPageSize()
-	leftMargin, _, rightMargin, _ := pdf.GetMargins()
-	usableW := pageW - leftMargin - rightMargin
-	startX := leftMargin + (usableW-(prefixW+suffixW))/2
-
 	y := pdf.GetY()
-	pdf.SetXY(startX, y)
-	pdf.SetFont(pdfFontFamily, "B", fontSize)
+
+	// Light-blue background, full page width.
+	setFillColor(pdf, colorSonarLightBlue)
+	pdf.Rect(0, y, pageW, bannerH, "F")
+
+	pdf.SetFont(pdfFontFamilyHeading, "B", fontSize)
+	setColor(pdf, colorSonarBlue)
+
+	prefix := "SonarQube Migration "
+	var middle, suffix string
+	if predictive {
+		middle, suffix = "Predictive", " Report"
+	} else {
+		// Whole title is plain bold; no underlined segment.
+		prefix = "SonarQube Migration Report"
+	}
+
+	pdf.SetFont(pdfFontFamilyHeading, "B", fontSize)
+	prefixW := pdf.GetStringWidth(prefix)
+	var middleW, suffixW float64
+	if predictive {
+		pdf.SetFont(pdfFontFamilyHeading, "BU", fontSize)
+		middleW = pdf.GetStringWidth(middle)
+		pdf.SetFont(pdfFontFamilyHeading, "B", fontSize)
+		suffixW = pdf.GetStringWidth(suffix)
+	}
+	totalW := prefixW + middleW + suffixW
+	startX := (pageW - totalW) / 2
+	textY := y + (bannerH-lineH)/2
+
+	pdf.SetXY(startX, textY)
+	pdf.SetFont(pdfFontFamilyHeading, "B", fontSize)
 	pdf.Write(lineH, prefix)
-	pdf.SetFont(pdfFontFamily, "BU", fontSize)
-	pdf.Write(lineH, suffix)
-	pdf.Ln(lineH)
+	if predictive {
+		pdf.SetFont(pdfFontFamilyHeading, "BU", fontSize)
+		pdf.Write(lineH, middle)
+		pdf.SetFont(pdfFontFamilyHeading, "B", fontSize)
+		pdf.Write(lineH, suffix)
+	}
+	pdf.SetY(y + bannerH)
 }
 
 func renderTitlePage(pdf *fpdf.Fpdf, summary *MigrationSummary) {
-	pdf.SetY(30)
-
-	setColor(pdf, colorDarkBlue)
-	if summary.Predictive {
-		renderPredictiveTitle(pdf)
-	} else {
-		pdf.SetFont(pdfFontFamily, "B", 22)
-		pdf.CellFormat(0, 12, "SonarQube Migration Summary", "", 1, "C", false, 0, "")
-	}
-	pdf.Ln(4)
+	pdf.SetY(28)
+	renderTitleBanner(pdf, summary.Predictive)
+	pdf.Ln(6)
 
 	setColor(pdf, colorBlack)
-	pdf.SetFont(pdfFontFamily, "", 11)
+	pdf.SetFont(pdfFontFamilyBody, "", 11)
 	pdf.CellFormat(0, 7, "Run ID: "+summary.RunID, "", 1, "C", false, 0, "")
 	pdf.CellFormat(0, 7, "Generated: "+summary.GeneratedAt.Format("2006-01-02 15:04:05"), "", 1, "C", false, 0, "")
-	pdf.Ln(10)
+	pdf.Ln(8)
 
 	renderExecutiveSummary(pdf, summary.Sections, summary.OmitSections)
 }
@@ -209,9 +362,11 @@ func renderExecutiveSummary(pdf *fpdf.Fpdf, sections []Section, omit map[string]
 	)
 	widths := []float64{objectsWidth, countWidth, countWidth, countWidth, countWidth, countWidth}
 
-	setFillColor(pdf, colorDarkBlue)
+	// Header row — Poppins Bold on the Sonar primary background (#167).
+	pdf.SetDrawColor(colorSonarGrey[0], colorSonarGrey[1], colorSonarGrey[2])
+	setFillColor(pdf, colorSonarBlue)
 	pdf.SetTextColor(255, 255, 255)
-	pdf.SetFont(pdfFontFamily, "B", 10)
+	pdf.SetFont(pdfFontFamilyHeading, "B", 10)
 	for i, h := range headers {
 		align := "C"
 		if i == 0 {
@@ -221,7 +376,8 @@ func renderExecutiveSummary(pdf *fpdf.Fpdf, sections []Section, omit map[string]
 	}
 	pdf.Ln(-1)
 
-	pdf.SetFont(pdfFontFamily, "", 10)
+	// Body rows — Inter for readable counts.
+	pdf.SetFont(pdfFontFamilyBody, "", 10)
 	var totalPerfect, totalYellow, totalOrange, totalRed, totalGrey int
 	rowIdx := 0
 	for _, sec := range sections {
@@ -255,10 +411,10 @@ func renderExecutiveSummary(pdf *fpdf.Fpdf, sections []Section, omit map[string]
 		pdf.Ln(-1)
 	}
 
-	// Totals row.
-	setFillColor(pdf, colorDarkBlue)
+	// Totals row — matches the header styling (Poppins Bold on #126ed3).
+	setFillColor(pdf, colorSonarBlue)
 	pdf.SetTextColor(255, 255, 255)
-	pdf.SetFont(pdfFontFamily, "B", 10)
+	pdf.SetFont(pdfFontFamilyHeading, "B", 10)
 	pdf.CellFormat(widths[0], 8, "Total", "1", 0, "L", true, 0, "")
 	pdf.CellFormat(widths[1], 8, itoa(totalPerfect), "1", 0, "C", true, 0, "")
 	pdf.CellFormat(widths[2], 8, itoa(totalYellow), "1", 0, "C", true, 0, "")
@@ -286,13 +442,17 @@ func renderSection(pdf *fpdf.Fpdf, section Section, predictive bool) {
 	pdf.Ln(8)
 	checkPageBreak(pdf, 30)
 
-	setColor(pdf, colorMedBlue)
-	pdf.SetFont(pdfFontFamily, "B", 14)
+	// Section header — Poppins Bold, Sonar primary (#167).
+	setColor(pdf, colorSonarBlue)
+	pdf.SetFont(pdfFontFamilyHeading, "B", 14)
 	pdf.CellFormat(0, 10, section.Name, "", 1, "L", false, 0, "")
 
 	setColor(pdf, colorBlack)
-	pdf.SetFont(pdfFontFamily, "", 9)
-	pdf.CellFormat(0, 6, sectionCountSummary(section), "", 1, "L", false, 0, "")
+	pdf.SetFont(pdfFontFamilyBody, "", 9)
+	// MultiCell so long count summaries — particularly Global Settings
+	// where the skipped breakdown can reach 150+ chars — wrap onto a
+	// second line instead of running off the right page edge.
+	pdf.MultiCell(0, 5, sectionCountSummary(section), "", "L", false)
 	pdf.Ln(2)
 
 	renderUnifiedTable(pdf, section, predictive)
@@ -400,7 +560,9 @@ func renderUnifiedTable(pdf *fpdf.Fpdf, section Section, predictive bool) {
 		bodyFontSize      = 8.0
 		multiLineFontSize = 6.0
 	)
-	pdf.SetFont(pdfFontFamily, "", bodyFontSize)
+	// Body cells render in Inter per #167; the Outcome bold and
+	// per-row Details inherit the family unless overridden.
+	pdf.SetFont(pdfFontFamilyBody, "", bodyFontSize)
 	// All sections word-wrap the Name column now (#226 follow-up).
 	// Long object names / QP names / setting keys overflow the
 	// narrowed Name column otherwise; wrapping keeps the value fully
@@ -419,9 +581,9 @@ func renderUnifiedTable(pdf *fpdf.Fpdf, section Section, predictive bool) {
 		// alongside the 8pt Name and Outcome columns. Applies to both
 		// the real-migrate and predictive reports.
 		detailsFontSize := multiLineFontSize
-		pdf.SetFont(pdfFontFamily, "", detailsFontSize)
+		pdf.SetFont(pdfFontFamilyBody, "", detailsFontSize)
 		detailsLineCount := len(pdf.SplitLines([]byte(detailsText), widths[detailsCol]))
-		pdf.SetFont(pdfFontFamily, "", bodyFontSize)
+		pdf.SetFont(pdfFontFamilyBody, "", bodyFontSize)
 		if detailsLineCount < 1 {
 			detailsLineCount = 1
 		}
@@ -493,9 +655,9 @@ func renderUnifiedTable(pdf *fpdf.Fpdf, section Section, predictive bool) {
 			pdf.CellFormat(widths[col], rowHeight, truncate(row.org, 24), "1", 0, "L", true, 0, "")
 			col++
 		}
-		// Outcome cell in its color, bold.
+		// Outcome cell in its color, bold (Inter Bold per #167).
 		setColor(pdf, row.color)
-		pdf.SetFont(pdfFontFamily, "B", 8)
+		pdf.SetFont(pdfFontFamilyBody, "B", 8)
 		pdf.CellFormat(widths[col], rowHeight, row.outcome, "1", 0, "C", true, 0, "")
 		col++
 		// Details in black, regular — MultiCell wraps long text across lines
@@ -504,16 +666,79 @@ func renderUnifiedTable(pdf *fpdf.Fpdf, section Section, predictive bool) {
 		// font so a long metric-mapping block doesn't visually dominate the
 		// table.
 		setColor(pdf, colorBlack)
-		pdf.SetFont(pdfFontFamily, "", detailsFontSize)
+		pdf.SetFont(pdfFontFamilyBody, "", detailsFontSize)
 		// Render Details with the same explicit per-line approach as
-		// Name so the cell always reaches rowHeight. Issue #207.
-		drawWrappedCell(pdf, widths[col], lineH, lineCount, pdf.SplitLines([]byte(detailsText), widths[col]))
-		pdf.SetFont(pdfFontFamily, "", bodyFontSize)
+		// Name so the cell always reaches rowHeight. drawDetailsCell
+		// falls through to drawWrappedCell when no inline bold markers
+		// are present and otherwise renders the row by hand so it can
+		// switch fonts mid-line. Issue #207 / Olivier's "New Project
+		// Key: <key>" follow-up.
+		drawDetailsCell(pdf, widths[col], lineH, lineCount, detailsText, detailsFontSize)
+		pdf.SetFont(pdfFontFamilyBody, "", bodyFontSize)
 		// Advance to the next row. drawWrappedCell leaves the cursor
 		// flush right of the cell at the row's start Y; explicitly
 		// move to (rowStartX, rowStartY + rowHeight) so the next
 		// iteration's GetXY() reports the correct position.
 		pdf.SetXY(rowStartX, rowStartY+rowHeight)
+	}
+}
+
+// drawDetailsCell renders the Details column for a unified-table row.
+// It supports inline bold markers (inlineBoldStart / inlineBoldEnd) by
+// drawing the cell border + fill manually via pdf.Rect and rendering
+// the text with pdf.Write so the font style can flip mid-line. When
+// the text contains no markers the function delegates to the regular
+// drawWrappedCell, preserving the existing wrap semantics for every
+// section that doesn't need inline bold (i.e. everything except the
+// Projects section's "New Project Key:" label).
+func drawDetailsCell(pdf *fpdf.Fpdf, w, lineH float64, lineCount int, text string, fontSize float64) {
+	if !strings.Contains(text, inlineBoldStart) {
+		drawWrappedCell(pdf, w, lineH, lineCount, pdf.SplitLines([]byte(text), w))
+		return
+	}
+	x, y := pdf.GetXY()
+	rowH := lineH * float64(lineCount)
+	// Fill background + draw outer border in one Rect call. SetFillColor
+	// and SetDrawColor are sticky and already match the row's expected
+	// styling at this point.
+	pdf.Rect(x, y, w, rowH, "FD")
+
+	const leftPad = 1.0
+	for i, line := range strings.Split(text, "\n") {
+		if i >= lineCount {
+			break
+		}
+		pdf.SetXY(x+leftPad, y+float64(i)*lineH)
+		writeInlineBold(pdf, line, lineH, fontSize)
+	}
+	pdf.SetXY(x+w, y)
+}
+
+// writeInlineBold renders a single line of text with optional inline
+// bold ranges marked by inlineBoldStart / inlineBoldEnd. Anything
+// outside a marker pair is rendered in the regular body font; the
+// marked span flips to bold and back.
+func writeInlineBold(pdf *fpdf.Fpdf, line string, lineH, fontSize float64) {
+	pdf.SetFont(pdfFontFamilyBody, "", fontSize)
+	parts := strings.Split(line, inlineBoldStart)
+	if len(parts) > 0 {
+		pdf.Write(lineH, parts[0])
+	}
+	for _, p := range parts[1:] {
+		idx := strings.Index(p, inlineBoldEnd)
+		if idx < 0 {
+			// Unclosed marker — treat the rest of the line as bold so
+			// at least the intent ("emphasise the trailing portion")
+			// survives.
+			pdf.SetFont(pdfFontFamilyBody, "B", fontSize)
+			pdf.Write(lineH, p)
+			pdf.SetFont(pdfFontFamilyBody, "", fontSize)
+			continue
+		}
+		pdf.SetFont(pdfFontFamilyBody, "B", fontSize)
+		pdf.Write(lineH, p[:idx])
+		pdf.SetFont(pdfFontFamilyBody, "", fontSize)
+		pdf.Write(lineH, p[idx+len(inlineBoldEnd):])
 	}
 }
 
@@ -570,19 +795,29 @@ type fpdfCell interface {
 //
 // When predictive is true (#240), the Details column drops the
 // synthetic predict:<task>:<org>:<name> cloud-id placeholder (those
-// carry no useful information for prediction).
+// carry no useful information for prediction) and rewrites past-tense
+// detail strings to the future tense (#167) so the predictive report
+// reads as "will be …" while the actual report keeps "was …".
 func buildUnifiedRows(section Section, predictive bool) []unifiedRow {
 	var rows []unifiedRow
 
 	successLabel := outcomeSuccess
 
-	// Quality profile cloud ids (cloud_profile_key) are opaque SQC
-	// identifiers, not user-facing — strip them from the Details
-	// column for the Quality Profiles section regardless of mode.
-	// Cloud-side internal ids carry no user value in the report:
-	// suppress them in the Details column for sections where they
-	// dominate the cell (QP cloud key, Portfolio cloud id).
-	hideCloudKey := section.Name == "Quality Profiles" || section.Name == "Portfolios" || section.Name == "Quality Gates"
+	// Cloud-side internal ids (quality profile cloud_profile_key,
+	// portfolio cloud id, group id, permission template id, etc.) are
+	// opaque SQC identifiers — not user-facing and not actionable.
+	// Strip them from the Details column for the sections where they
+	// would otherwise dominate the cell. Permission Templates and
+	// Groups added per Olivier's #167 follow-up (internal ids removed).
+	hideCloudKey := section.Name == "Quality Profiles" ||
+		section.Name == "Portfolios" ||
+		section.Name == "Quality Gates" ||
+		section.Name == "Permission Templates" ||
+		section.Name == "Groups"
+	// Projects gets a "New Project Key: <key>" label with the key in
+	// inline bold. The bold markers survive into the PDF renderer where
+	// drawDetailsCell switches font style mid-line.
+	labelProjectKey := section.Name == "Projects"
 
 	for _, item := range section.Succeeded {
 		rows = append(rows, unifiedRow{
@@ -591,7 +826,7 @@ func buildUnifiedRows(section Section, predictive bool) []unifiedRow {
 			org:      item.Organization,
 			outcome:  successLabel,
 			color:    colorGreen,
-			details:  successDetails(item, predictive, hideCloudKey),
+			details:  toPredictiveTense(successDetails(item, predictive, hideCloudKey, labelProjectKey), predictive),
 		})
 	}
 	for _, item := range section.NearPerfect {
@@ -605,7 +840,7 @@ func buildUnifiedRows(section Section, predictive bool) []unifiedRow {
 			org:      item.Organization,
 			outcome:  outcomeNearPerfect,
 			color:    colorYellow,
-			details:  partialDetails(item, predictive, hideCloudKey),
+			details:  toPredictiveTense(partialDetails(item, predictive, hideCloudKey, labelProjectKey), predictive),
 		})
 	}
 	for _, item := range section.Partial {
@@ -619,7 +854,7 @@ func buildUnifiedRows(section Section, predictive bool) []unifiedRow {
 			org:      item.Organization,
 			outcome:  outcomePartial,
 			color:    colorAmber,
-			details:  partialDetails(item, predictive, hideCloudKey),
+			details:  toPredictiveTense(partialDetails(item, predictive, hideCloudKey, labelProjectKey), predictive),
 		})
 	}
 	for _, item := range section.Failed {
@@ -629,7 +864,7 @@ func buildUnifiedRows(section Section, predictive bool) []unifiedRow {
 			org:      item.Organization,
 			outcome:  outcomeFailed,
 			color:    colorRed,
-			details:  item.ErrorMessage,
+			details:  toPredictiveTense(item.ErrorMessage, predictive),
 		})
 	}
 	// Skipped — preserve group ordering by SkipReason.
@@ -645,12 +880,85 @@ func buildUnifiedRows(section Section, predictive bool) []unifiedRow {
 				org:      item.Organization,
 				outcome:  outcomeSkipped,
 				color:    colorDarkGray,
-				details:  skippedDetails(item),
+				details:  toPredictiveTense(skippedDetails(item), predictive),
 			})
 		}
 	}
 	return rows
 }
+
+// toPredictiveTense rewrites past-tense / "Applied" / "Migrated" phrasing
+// in a Detail string to the future tense when the report is being rendered
+// in predictive mode (#167). Source strings throughout the migrate and
+// predict packages stay in the natural "what happened" voice; this helper
+// is the single point that switches them to "what will happen" so the
+// predictive PDF reads consistently as a forward-looking forecast.
+//
+// Returns input unchanged when predictive=false. Replacements are ordered
+// longest-first so multi-word phrases ("has been applied") win over
+// single-word matches ("applied").
+func toPredictiveTense(s string, predictive bool) string {
+	if !predictive || s == "" {
+		return s
+	}
+	type rule struct{ from, to string }
+	rules := []rule{
+		// Negative phrasing first so "will not be X" wins over the
+		// generic "will be X" mapping. The order also catches "Were
+		// not migrated" / "was not changed" idioms cleanly.
+		{"was not ", "will not be "},
+		{"were not ", "will not be "},
+		// Multi-word phrases next.
+		{"Has been applied", "Will be applied"},
+		{"has been applied", "will be applied"},
+		{"Have been applied", "Will be applied"},
+		{"have been applied", "will be applied"},
+		{"has been ", "will be "},
+		{"have been ", "will be "},
+		{"was turned off", "will be turned off"},
+		{"was turned on", "will be turned on"},
+		{"was disabled", "will be disabled"},
+		{"was enabled", "will be enabled"},
+		{"was changed", "will be changed"},
+		{"was applied", "will be applied"},
+		{"was set", "will be set"},
+		{"was migrated", "will be migrated"},
+		{"were applied", "will be applied"},
+		{"were migrated", "will be migrated"},
+		{"were disabled", "will be disabled"},
+		{"were enabled", "will be enabled"},
+		// Sentence-leading verb forms emitted by the migrate task.
+		// Order matters: "Applied to all projects" is for the legacy
+		// form (no longer emitted but kept as a safety net); the
+		// "Applied value=" rule covers the new format that always
+		// carries the value summary.
+		{"Applied to all projects", "Will be applied to all projects"},
+		{"Applied value=", "Will be applied value="},
+		{"Applied (", "Will be applied ("},
+		{"Migrated to ", "Will be migrated to "},
+		{"Combined ", "Will combine "},
+		{"Mirrored ", "Will mirror "},
+		{"mirroring ", "will mirror "},
+		// Standalone "was" / "were" as a last-resort fallback.
+		{" was ", " will be "},
+		{" were ", " will be "},
+	}
+	out := s
+	for _, r := range rules {
+		out = strings.ReplaceAll(out, r.from, r.to)
+	}
+	return out
+}
+
+// Inline bold markers used by drawDetailsCell. Private-use Unicode so
+// they never collide with real data, and they survive sanitizeForPDF
+// (which only strips astral-plane runes). The markers wrap the bold
+// portion: "regular text " + inlineBoldStart + "bold text" +
+// inlineBoldEnd + " more regular text".
+const (
+	inlineBoldStart = migrate.InlineBoldStart
+	inlineBoldEnd   = migrate.InlineBoldEnd
+)
 
 // successDetails formats the Details column for a Succeeded item.
 // Projects may carry up to two trailing markers added by the
@@ -666,14 +974,23 @@ func buildUnifiedRows(section Section, predictive bool) []unifiedRow {
 // other Detail string (e.g. the #249 dbcleaner-branches transformation
 // note) is kept verbatim so genuinely informative content reaches the
 // report.
-func successDetails(item EntityItem, predictive, hideCloudKey bool) string {
+//
+// When labelProjectKey is true (Projects section), the cloud key is
+// rendered as "New Project Key: <key>" with <key> wrapped in inline
+// bold markers so the PDF renderer can stress it. Other sections keep
+// the bare cloud key as-is.
+func successDetails(item EntityItem, predictive, hideCloudKey, labelProjectKey bool) string {
 	cloudKey, scan, ncdFallback := parseProjectDetailMarkers(item.Detail)
 	if hideCloudKey || (predictive && strings.HasPrefix(cloudKey, "predict:")) {
 		cloudKey = ""
 	}
 	parts := []string{}
 	if cloudKey != "" {
-		parts = append(parts, cloudKey)
+		if labelProjectKey {
+			parts = append(parts, "New Project Key: "+inlineBoldStart+cloudKey+inlineBoldEnd)
+		} else {
+			parts = append(parts, cloudKey)
+		}
 	}
 	if ncdFallback != "" {
 		parts = append(parts, fmt.Sprintf(
@@ -692,11 +1009,18 @@ func successDetails(item EntityItem, predictive, hideCloudKey bool) string {
 // synthetic predict:<task>:<org>:<name> placeholder is suppressed
 // (issue #240). Non-synthetic Detail strings are kept so genuinely
 // informative content (e.g. transformation notes) still renders.
-func partialDetails(item EntityItem, predictive, hideCloudKey bool) string {
+//
+// labelProjectKey mirrors successDetails: when true, a non-empty
+// project cloud key is rendered as "New Project Key: <key>" with the
+// key bold.
+func partialDetails(item EntityItem, predictive, hideCloudKey, labelProjectKey bool) string {
 	issues := strings.Join(item.Issues, "\n")
 	detail := item.Detail
 	if hideCloudKey || (predictive && strings.HasPrefix(detail, "predict:")) {
 		detail = ""
+	}
+	if labelProjectKey && detail != "" {
+		detail = "New Project Key: " + inlineBoldStart + detail + inlineBoldEnd
 	}
 	if detail != "" && issues != "" {
 		return detail + "\n" + issues
@@ -775,9 +1099,12 @@ func skipBreakdown(skipped []EntityItem) []string {
 }
 
 func renderTableHeader(pdf *fpdf.Fpdf, headers []string, widths []float64) {
-	setFillColor(pdf, colorMedBlue)
+	// Sonar primary (#126ed3) bg + white Poppins Bold text (#167).
+	// Cell borders use the Sonar grey (#9e9e9e) set via SetDrawColor.
+	pdf.SetDrawColor(colorSonarGrey[0], colorSonarGrey[1], colorSonarGrey[2])
+	setFillColor(pdf, colorSonarBlue)
 	pdf.SetTextColor(255, 255, 255)
-	pdf.SetFont(pdfFontFamily, "B", 8)
+	pdf.SetFont(pdfFontFamilyHeading, "B", 8)
 	for i, h := range headers {
 		pdf.CellFormat(widths[i], 6, h, "1", 0, "L", true, 0, "")
 	}

@@ -48,6 +48,17 @@ const aiCodeFixNearPerfectMarker = "|nearperfect"
 // report packages can share the same constant.
 const AiCodeFixNearPerfectMarker = aiCodeFixNearPerfectMarker
 
+// InlineBoldStart / InlineBoldEnd wrap a substring of a Detail string
+// that the PDF renderer should display in bold. Private-use Unicode so
+// they never collide with real data and survive sanitizeForPDF intact.
+// Producers (this migrate package) emit them around the value portion
+// of "Applied value=…" details; consumers (report/summary) interpret
+// them via the inline-bold-aware cell renderer.
+const (
+	InlineBoldStart = ""
+	InlineBoldEnd   = ""
+)
+
 // SQC enums — what we PATCH back to the cloud side.
 const (
 	sqcEnablementDisabled = "DISABLED"

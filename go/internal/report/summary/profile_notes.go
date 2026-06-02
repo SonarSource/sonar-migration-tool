@@ -131,20 +131,24 @@ func collectProfileFindings(store *common.DataStore) map[string]*profileFindings
 			// (the message itself states the outcome — revert to
 			// default), and third-party drops the repo name (the
 			// message itself says the rules will be removed).
+			// All issue messages here describe what migrate ACTUALLY
+			// did to the profile, so they are written in past tense.
+			// The predictive report swaps "were X" → "will be X" via
+			// toPredictiveTense at render time (#167).
 			if kind == "custom-severity" {
-				lines = append(lines, "Because rules custom severities are not supported in SQC, the following rules with will be reverted to their default severities: "+strings.Join(order, ", "))
+				lines = append(lines, "Because rules custom severities are not supported in SQC, the following rules were reverted to their default severities: "+strings.Join(order, ", "))
 				continue
 			}
 			if kind == "third-party" {
-				lines = append(lines, "Because SQC does not support 3rd party plugins, the following 3rd party rules will be removed from the quality profile: "+strings.Join(order, ", "))
+				lines = append(lines, "Because SQC does not support 3rd party plugins, the following 3rd party rules were removed from the quality profile: "+strings.Join(order, ", "))
 				continue
 			}
 			if kind == "prioritized" {
-				lines = append(lines, "Since SQC does not support prioritized rules, the following rules will be migrated in the profile as regular rules: "+strings.Join(order, ", "))
+				lines = append(lines, "Since SQC does not support prioritized rules, the following rules were migrated in the profile as regular rules: "+strings.Join(order, ", "))
 				continue
 			}
 			if kind == "template-instance" {
-				lines = append(lines, "Because rule templates and instantiated rules are not supported in SQC, the following rules will not be migrated: "+strings.Join(order, ", "))
+				lines = append(lines, "Because rule templates and instantiated rules are not supported in SQC, the following rules were not migrated: "+strings.Join(order, ", "))
 				continue
 			}
 			if kind == "custom-params" {
@@ -152,7 +156,7 @@ func collectProfileFindings(store *common.DataStore) map[string]*profileFindings
 				continue
 			}
 			if kind == "disabled-inherited" {
-				lines = append(lines, "Since SQC does not support parent profile rules disabled in child profiles, the following rules will be enabled in the profile: "+strings.Join(order, ", "))
+				lines = append(lines, "Since SQC does not support parent profile rules disabled in child profiles, the following rules were enabled in the profile: "+strings.Join(order, ", "))
 				continue
 			}
 			var ruleLines []string

@@ -682,7 +682,7 @@ func applyOneGlobalSetting(ctx context.Context, e *Executor, raw json.RawMessage
 					Org:    org,
 					Status: outcomeSkipped,
 					Reason: "project-scope-only",
-					Detail: "Setting does not exist at global org level on SonarQube Cloud; has been applied for each project instead." + mergeSuffix,
+					Detail: "Setting does not exist at global org level on SonarQube Cloud; was applied for each project instead." + mergeSuffix,
 				})
 				continue
 			}
@@ -734,26 +734,33 @@ func applyOneGlobalSetting(ctx context.Context, e *Executor, raw json.RawMessage
 			counter.Success()
 			rec.Outcomes = append(rec.Outcomes, orgOutcome{
 				Org: org, Status: outcomeApplied,
-				Detail: "Applied (" + valueSummary + ")" + mergeSuffix,
+				Detail: "Applied " + valueSummary + mergeSuffix,
 			})
 		}
 	}
 	return rec
 }
 
-// renderValueSummary picks the compact form of the value (value=X /
-// values=[a,b] / fieldValues=[...]) for inclusion in per-row Detail
-// strings. The shape mirrors what /api/settings/set would receive.
+// renderValueSummary returns the "value=<bold>X</bold>" fragment used
+// inside per-row Detail strings ("Applied value=X", "Applied value=X
+// to all projects", …). The value portion is wrapped in
+// InlineBoldStart / InlineBoldEnd so the PDF renderer can stress it.
+// Multi-value lists are joined by comma without brackets, mirroring
+// the CSV form the SQC API actually expects. Property-set settings
+// stay in their JSON-encoded form since collapsing them into a
+// comma list would lose structure.
 func renderValueSummary(r globalSettingResult) string {
+	var value string
 	switch {
 	case len(r.FieldValues) > 0:
 		b, _ := json.Marshal(r.FieldValues)
-		return "fieldValues=" + string(b)
+		value = string(b)
 	case len(r.Values) > 0:
-		return "values=[" + strings.Join(r.Values, ",") + "]"
+		value = strings.Join(r.Values, ",")
 	default:
-		return "value=" + r.Value
+		value = r.Value
 	}
+	return "value=" + InlineBoldStart + value + InlineBoldEnd
 }
 
 // apiErrMessage extracts the API error message when err is an
@@ -813,9 +820,9 @@ func fanOutOutcome(ctx context.Context, e *Executor, raw json.RawMessage,
 	// failures — that's the contradictory text the report showed
 	// before. Three cases:
 	//
-	//   - applied=N, failed=0 → "Applied to all projects (value=…)"
-	//   - applied=N, failed=M → "Applied to N of (N+M) projects
-	//                            (value=…) (failed: …; skipped: …)"
+	//   - applied=N, failed=0 → "Applied value=… to all projects"
+	//   - applied=N, failed=M → "Applied value=… to N of (N+M) projects
+	//                            (failed: …; skipped: …)"
 	//   - applied=0, failed=M → "Failed: N projects (e.g. <error>)"
 	//
 	// Override-skipped projects (per-project SQS override wins) are
@@ -826,10 +833,10 @@ func fanOutOutcome(ctx context.Context, e *Executor, raw json.RawMessage,
 	var status string
 	switch {
 	case a > 0 && f == 0:
-		detail = "Applied to all projects (" + valueSummary + ")"
+		detail = "Applied " + valueSummary + " to all projects"
 		status = outcomeAppliedToProjects
 	case a > 0 && f > 0:
-		detail = fmt.Sprintf("Applied to %d of %d projects (%s)", a, total, valueSummary)
+		detail = fmt.Sprintf("Applied %s to %d of %d projects", valueSummary, a, total)
 		status = outcomePartial
 	default: // a == 0 — every fan-out project failed (or no targets).
 		if f > 0 {

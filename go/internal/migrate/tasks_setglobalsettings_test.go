@@ -456,11 +456,11 @@ func TestRunSetGlobalSettingsFallsBackToProjectsOnOrgLevelRejection(t *testing.T
 	if len(rec.Outcomes) != 1 || rec.Outcomes[0].Status != "applied-to-projects" {
 		t.Fatalf("expected one applied-to-projects outcome, got %+v", rec.Outcomes)
 	}
-	if !strings.Contains(rec.Outcomes[0].Detail, "Applied to all projects") {
-		t.Errorf("Detail must say \"Applied to all projects\", got %q", rec.Outcomes[0].Detail)
+	if !strings.Contains(rec.Outcomes[0].Detail, "to all projects") {
+		t.Errorf("Detail must include \"to all projects\", got %q", rec.Outcomes[0].Detail)
 	}
-	if !strings.Contains(rec.Outcomes[0].Detail, "values=[**/jacoco*.xml]") {
-		t.Errorf("Detail must include the value summary, got %q", rec.Outcomes[0].Detail)
+	if !strings.Contains(rec.Outcomes[0].Detail, "**/jacoco*.xml") {
+		t.Errorf("Detail must include the value, got %q", rec.Outcomes[0].Detail)
 	}
 	if strings.Contains(rec.Outcomes[0].Detail, "projA") || strings.Contains(rec.Outcomes[0].Detail, "projB") {
 		t.Errorf("Detail must NOT list individual projects when fan-out applied to ALL, got %q", rec.Outcomes[0].Detail)
@@ -819,22 +819,24 @@ func TestRunSetGlobalSettingsAppliesGlobalTestExclusionsWhenTestExclusionsAtDefa
 	}
 }
 
-// renderValueSummary picks the compact value representation each
-// orgOutcome.Detail string uses for the parenthesised data tag —
-// "Applied (value=X)", "Applied (values=[a,b])", or
-// "Applied (fieldValues=[...])". Pinning this directly keeps the
-// per-row wording stable across refactors.
+// renderValueSummary returns the "value=<bold>X</bold>" fragment used
+// in per-row Detail strings, e.g. "Applied value=true" / "Applied
+// value=a,b to all projects". The value portion is wrapped with the
+// inline bold markers so the PDF renderer stresses it. Multi-value
+// settings collapse to a comma-joined CSV (matching what /api/settings/set
+// actually expects); property-set settings keep their JSON form because
+// flattening would lose structure.
 func TestRenderValueSummary(t *testing.T) {
 	cases := []struct {
 		name string
 		rec  globalSettingResult
 		want string
 	}{
-		{"single", globalSettingResult{Value: "true"}, "value=true"},
-		{"multi", globalSettingResult{Values: []string{"a", "b"}}, "values=[a,b]"},
+		{"single", globalSettingResult{Value: "true"}, "value=" + InlineBoldStart + "true" + InlineBoldEnd},
+		{"multi", globalSettingResult{Values: []string{"a", "b"}}, "value=" + InlineBoldStart + "a,b" + InlineBoldEnd},
 		{"fieldValues", globalSettingResult{
 			FieldValues: []map[string]any{{"fileRegexp": "x"}},
-		}, `fieldValues=[{"fileRegexp":"x"}]`},
+		}, "value=" + InlineBoldStart + `[{"fileRegexp":"x"}]` + InlineBoldEnd},
 	}
 	for _, c := range cases {
 		got := renderValueSummary(c.rec)
@@ -995,7 +997,7 @@ func TestRunSetGlobalSettingsFanOutPartialRendersAsPartial(t *testing.T) {
 	if len(rec.Outcomes) != 1 || rec.Outcomes[0].Status != "partial" {
 		t.Fatalf("expected status=partial when fan-out is mixed, got %+v", rec.Outcomes)
 	}
-	if !strings.Contains(rec.Outcomes[0].Detail, "Applied to 1 of 2 projects") {
+	if !strings.Contains(rec.Outcomes[0].Detail, " to 1 of 2 projects") {
 		t.Errorf("Detail must report the N/M count, got %q", rec.Outcomes[0].Detail)
 	}
 	if !strings.Contains(rec.Outcomes[0].Detail, "failed: "+failProject) {

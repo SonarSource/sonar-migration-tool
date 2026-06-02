@@ -15,27 +15,29 @@ import (
 const (
 	// Yellow: portfolio contains application references. Apps don't
 	// exist on SQC and are substituted by their enclosed projects.
-	portfolioIssueApps = "The SQS portfolio contains applications that will be replaced by their enclosed projects"
+	portfolioIssueApps = "The SQS portfolio contains applications that were replaced by their enclosed projects"
 	// Yellow: every direct subportfolio uses the same selection mode
 	// and there is no further nesting — the perimeter is perfectly
 	// replicated on SQC via a combined regex / tag union / project
 	// list.
-	portfolioIssueSubportfoliosUniform = "The source portfolio has subportfolios with a uniform selection mode. Their criteria have been combined on SonarQube Cloud — the portfolio perimeter is preserved."
+	portfolioIssueSubportfoliosUniform = "The source portfolio has subportfolios with a uniform selection mode. Their criteria were combined on SonarQube Cloud — the portfolio perimeter is preserved."
 	// Orange: nesting depth ≥ 2 — can't be represented as a single
 	// SQC portfolio with one selection criterion; falls back to a
-	// flat project list.
-	portfolioIssueNestedDepth = "The SQS portfolio has nested subportfolios depth higher than 2, it will be converted to a flat list of projects in SQC. The portfolio perimeter may be slightly different"
+	// flat project list. (Past tense for the actual report; the
+	// predictive renderer swaps back to "will be" via
+	// toPredictiveTense — issue #167.)
+	portfolioIssueNestedDepth = "The SQS portfolio has nested subportfolios depth higher than 2, it was converted to a flat list of projects in SQC. The portfolio perimeter may be slightly different"
 	// Orange: direct subportfolios use mixed selection modes — can't
 	// combine into a single criterion; falls back to a flat project
 	// list.
-	portfolioIssueMixedModes = "The SQS portfolio has nested subportfolios with different selection modes, it will be converted to a flat list of projects in SQC. The portfolio perimeter may be slightly different"
+	portfolioIssueMixedModes = "The SQS portfolio has nested subportfolios with different selection modes, it was converted to a flat list of projects in SQC. The portfolio perimeter may be slightly different"
 	// Orange: portfolio uses REST selection mode ("rest of projects"
 	// catch-all). No SQC equivalent — falls back to a flat project
 	// list of whatever the source resolved at extract time.
-	portfolioIssueRestMode = "The SQS portfolio is defined with REST selection mode, it will be converted to a flat list of projects in SQC. The portfolio perimeter may be slightly different"
+	portfolioIssueRestMode = "The SQS portfolio is defined with REST selection mode, it was converted to a flat list of projects in SQC. The portfolio perimeter may be slightly different"
 	// Grey (Skipped): portfolio's resolved project list is empty at
 	// extract time — there is nothing to migrate.
-	portfolioIssueEmpty = "The SQS portfolio is empty, will not be migrated"
+	portfolioIssueEmpty = "The SQS portfolio is empty, was not migrated"
 )
 
 // portfolioClassification rolls up the per-portfolio composition flags

@@ -407,8 +407,70 @@ func TestUnifiedRowDisplayNameWithLanguage(t *testing.T) {
 }
 
 func TestSuccessDetailsScanHistory(t *testing.T) {
-	got := successDetails(EntityItem{Detail: "proj1|scan:failed"}, false, false)
+	got := successDetails(EntityItem{Detail: "proj1|scan:failed"}, false, false, false)
 	if !strings.Contains(got, "proj1") || !strings.Contains(got, "Failed") {
 		t.Errorf("expected scan history in details, got %q", got)
+	}
+}
+
+func TestSuccessDetailsLabelProjectKey(t *testing.T) {
+	// labelProjectKey=true wraps the cloud key with the inline bold
+	// markers and prepends the human-readable label so the Projects
+	// section renders "New Project Key: <bold key>" in the PDF.
+	got := successDetails(EntityItem{Detail: "acme_proj-a"}, false, false, true)
+	want := "New Project Key: " + inlineBoldStart + "acme_proj-a" + inlineBoldEnd
+	if got != want {
+		t.Errorf("expected %q, got %q", want, got)
+	}
+	// labelProjectKey=false keeps the bare key (legacy behaviour for
+	// non-Projects sections that still show a cloud key).
+	plain := successDetails(EntityItem{Detail: "acme_proj-a"}, false, false, false)
+	if plain != "acme_proj-a" {
+		t.Errorf("expected bare key, got %q", plain)
+	}
+}
+
+func TestToPredictiveTense(t *testing.T) {
+	cases := []struct {
+		in         string
+		predictive bool
+		want       string
+	}{
+		// Actual report: never rewrite.
+		{"AI Code Fix was turned off instead.", false, "AI Code Fix was turned off instead."},
+		{"Applied (value=ENABLED_FOR_ALL_PROJECTS)", false, "Applied (value=ENABLED_FOR_ALL_PROJECTS)"},
+
+		// Predictive: past → future.
+		{"AI Code Fix was turned off instead.", true, "AI Code Fix will be turned off instead."},
+		{"The LLM was changed to GPT-5.1.", true, "The LLM will be changed to GPT-5.1."},
+		{"Applied (value=ENABLED_FOR_ALL_PROJECTS)", true, "Will be applied (value=ENABLED_FOR_ALL_PROJECTS)"},
+		{"Applied to all projects (value=foo)", true, "Will be applied to all projects (value=foo)"},
+		{"Migrated to sonar.branch.longLivedBranches.regex on SonarQube Cloud", true, "Will be migrated to sonar.branch.longLivedBranches.regex on SonarQube Cloud"},
+		{"Setting has been applied for each project instead.", true, "Setting will be applied for each project instead."},
+		{"3 SQS applications were not migrated.", true, "3 SQS applications will not be migrated."},
+		// Empty input passes through.
+		{"", true, ""},
+	}
+	for _, c := range cases {
+		got := toPredictiveTense(c.in, c.predictive)
+		if got != c.want {
+			t.Errorf("toPredictiveTense(%q, %v) = %q, want %q", c.in, c.predictive, got, c.want)
+		}
+	}
+}
+
+func TestToPredictiveTenseAppliedValue(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"Applied value=duplex*,triplex*", "Will be applied value=duplex*,triplex*"},
+		{"Applied value=**/jacoco*.xml to all projects", "Will be applied value=**/jacoco*.xml to all projects"},
+		{"Applied value=.html to 1 of 2 projects (failed: acme_projA)", "Will be applied value=.html to 1 of 2 projects (failed: acme_projA)"},
+	}
+	for _, c := range cases {
+		got := toPredictiveTense(c.in, true)
+		if got != c.want {
+			t.Errorf("toPredictiveTense(%q, true) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }
