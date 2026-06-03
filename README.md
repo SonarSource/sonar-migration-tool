@@ -269,7 +269,15 @@ go run . structure --export_directory ./files/
 
 # Built binary
 sonar-migration-tool structure --export_directory ./files/
+
+# Or, reuse the extract config (export_directory is read from it)
+sonar-migration-tool structure --config extract-config.json
 ```
+
+| Flag | Description |
+|------|-------------|
+| `--export_directory` | Root directory containing the extract output (default: `./migration-files`) |
+| `--config` | Path to JSON config file (same shape as `extract --config`). `export_directory` is read from it; when exactly one SonarCloud organization is defined, its key pre-populates `sonarcloud_org_key`. `--export_directory` on the CLI overrides the config value. |
 
 Then edit `files/organizations.csv` — fill in `sonarcloud_org_key` for each row before continuing.
 
@@ -281,7 +289,15 @@ go run . mappings --export_directory ./files/
 
 # Built binary
 sonar-migration-tool mappings --export_directory ./files/
+
+# Or, reuse the extract config (export_directory is read from it)
+sonar-migration-tool mappings --config extract-config.json
 ```
+
+| Flag | Description |
+|------|-------------|
+| `--export_directory` | Root directory containing the extract output (default: `./migration-files`) |
+| `--config` | Path to JSON config file (same shape as `extract --config`); `export_directory` is read from it. `--export_directory` on the CLI overrides the config value. |
 
 Outputs `gates.csv`, `profiles.csv`, `groups.csv`, `templates.csv`, `portfolios.csv`.
 

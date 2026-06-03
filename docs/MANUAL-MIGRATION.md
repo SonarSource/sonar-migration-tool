@@ -98,7 +98,15 @@ cd go && go run . structure --export_directory ../files/
 
 # Built binary
 sonar-migration-tool structure --export_directory ./files/
+
+# Or, reuse the same JSON config you passed to extract
+sonar-migration-tool structure --config extract-config.json
 ```
+
+| Flag | Description |
+|------|-------------|
+| `--export_directory` | Directory containing the extract output |
+| `--config` | JSON config file (same shape as `extract --config`). `export_directory` is read from it; when exactly one SonarCloud organization is defined, its key pre-populates `sonarcloud_org_key`. `--export_directory` on the CLI overrides the config value. |
 
 ---
 
@@ -127,7 +135,15 @@ cd go && go run . mappings --export_directory ../files/
 
 # Built binary
 sonar-migration-tool mappings --export_directory ./files/
+
+# Or, reuse the same JSON config you passed to extract
+sonar-migration-tool mappings --config extract-config.json
 ```
+
+| Flag | Description |
+|------|-------------|
+| `--export_directory` | Directory containing the extract output |
+| `--config` | JSON config file (same shape as `extract --config`); `export_directory` is read from it. `--export_directory` on the CLI overrides the config value. |
 
 This produces the following files in your `files/` directory:
 

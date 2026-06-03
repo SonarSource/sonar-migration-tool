@@ -116,6 +116,27 @@ Usage:
 | `run_id` | string | `null` | ID of run to resume |
 | `target_task` | string | `null` | Specific migration task |
 
+### Structure and Mappings Commands
+
+Both `structure` and `mappings` accept `--config` pointing at the same JSON
+file used by `extract`. They read **only `export_directory`** from it — every
+other field is ignored. `structure` additionally pre-populates the
+`sonarcloud_org_key` column in `organizations.csv` when exactly one
+SonarCloud organization is defined in the config (under `target.organizations`
+in the unified shape, or `organizations` in the migrate shape).
+
+```bash
+# Reuse the extract config — export_directory comes from the JSON
+./sonar-migration-tool structure --config extract-config.json
+./sonar-migration-tool mappings  --config extract-config.json
+```
+
+Precedence (same as `extract`, `migrate`, and `predictive-report`):
+
+1. `--export_directory` on the CLI wins when explicitly set.
+2. Otherwise `export_directory` from `--config` is used.
+3. Otherwise the default `./migration-files` is used.
+
 ## Combining Config Files and CLI Arguments
 
 Command-line arguments **override** config file values. This allows you to:
@@ -231,10 +252,10 @@ Create `prod-config.json`:
 ./sonar-migration-tool extract --config extract-config.json
 
 # Generate structure
-./sonar-migration-tool structure --export_directory ./migration-data
+./sonar-migration-tool structure --config extract-config.json
 
 # Generate mappings
-./sonar-migration-tool mappings --export_directory ./migration-data
+./sonar-migration-tool mappings --config extract-config.json
 
 # Edit organizations.csv to add SonarCloud org keys
 # Then migrate
