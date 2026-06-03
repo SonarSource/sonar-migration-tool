@@ -457,31 +457,34 @@ comments.
 
 ---
 
-### BUG-15: `toExtractedIssues` builds incorrect key for date lookup
-<!-- updated: 2026-05-27_22:00:00 -->
+### ~~BUG-15: `toExtractedIssues` builds incorrect key for date lookup~~ **[FIXED]**
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
-Already covered in BUG-04 but worth noting: the function is defined but its date-map logic
-has a second bug independent of BUG-04:
+**Status**: FIXED — resolved as part of the BUG-01/BUG-04 fix (commits `e769b95` and `21d74e8`, branch `fix/history-creation-date-fix`, merged to main via PR #291). `extIssuesToExtracted()` was added as a helper that properly maps external issue creation dates, eliminating the date-map key mismatch.
 
-When looking up `dateMap[iss.RuleRepo+":"+iss.RuleKey]`, it maps issue creation dates to a
+~~Already covered in BUG-04 but worth noting: the function is defined but its date-map logic
+has a second bug independent of BUG-04:~~
+
+~~When looking up `dateMap[iss.RuleRepo+":"+iss.RuleKey]`, it maps issue creation dates to a
 **rule key**, not an issue key. Many issues can share the same rule. The date map overwrites
 on each iteration, so only the last issue's date is preserved per rule. This would cause
-systematic wrong dates for projects with multiple issues of the same rule.
+systematic wrong dates for projects with multiple issues of the same rule.~~
 
 ---
 
 ## Summary Table
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 | ID | Severity | Area | Description |
 |----|----------|------|-------------|
-| BUG-01 | P0 | Scan History | `BackdateChangesets` never called — all issues get `time.Now()` date |
+| BUG-01 | ~~P0~~ **FIXED** | Scan History | ~~`BackdateChangesets` never called~~ Fixed in commits `e769b95`/`21d74e8` (PR #291) |
 | BUG-02 | P0 | Scan History | `ActiveRuleInput` missing `ParamsByKey`, `CreatedAt`, `UpdatedAt`, `Impacts` |
 | BUG-03 | ~~P0~~ **FIXED** | Scan History | ~~`ReferenceBranchName` never set in `MetadataInput`~~ Fixed in commit `1eeb9d8` |
-| BUG-04 | P1 | Scan History | `toExtractedIssues` date lookup keyed on rule key, not issue key |
+| BUG-04 | ~~P1~~ **FIXED** | Scan History | ~~`toExtractedIssues` date lookup keyed on rule key, not issue key~~ Fixed in commits `e769b95`/`21d74e8` (PR #291) |
 | BUG-05 | P1 | Issue Sync | `Assignee` loaded but never synced |
 | BUG-06 | P1 | Issue+Hotspot Sync | No source-link comment added back to SQ |
 | BUG-07 | P2 | Issue Sync | Issue comment format differs from CloudVoyager convention |
-| BUG-08 | P1 | Hotspot Sync | `TO_REVIEW` hotspots not synced (only REVIEWED) |
+| BUG-08 | ~~P1~~ **FIXED** | Hotspot Sync | ~~`TO_REVIEW` hotspots not synced~~ Fixed (confirmed in TROUBLESHOOTING.md) |
 | BUG-09 | P1 | Hotspot Sync | Metadata marker incompatible with CloudVoyager marker |
 | BUG-10 | P1 | Scan History | No duplication data in protobuf report |
 | BUG-11 | P1 | Scan History | No measures data in protobuf report |
@@ -494,17 +497,18 @@ systematic wrong dates for projects with multiple issues of the same rule.
 | FEAT-07 | P2 | CLI | No `--only` selective migration flag |
 | FEAT-08 | P3 | CLI | No incremental transfer mode |
 | FEAT-09 | P2 | Issue Sync | `syncIssueMetadata` writes no per-project output file |
-| FEAT-10 | P2 | CLI | `--url` default silently targets production |
+| FEAT-10 | ~~P2~~ **FIXED** | CLI | ~~`--url` default silently targets production~~ Fixed: `--sc-url` flag added to transfer command |
 | BUG-12 | P1 | Extract | `getActiveProfileRules` missing from scan-history-only extract |
 | BUG-13 | P2 | Scan History | Analysis date is migration time, not extraction timestamp |
 | BUG-14 | P3 | Hotspot Sync | No inter-comment delay for rate-limit protection |
-| BUG-15 | P1 | Scan History | `toExtractedIssues` date map uses wrong key (part of BUG-04) |
+| BUG-15 | ~~P1~~ **FIXED** | Scan History | ~~`toExtractedIssues` date map uses wrong key~~ Fixed in commits `e769b95`/`21d74e8` (PR #291) |
 
 ---
 
 ## Recommended Fix Order
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
-1. **BUG-01** — Wire up `BackdateChangesets` + fix date key (BUG-04/BUG-15 simultaneously)
+1. ~~**BUG-01**~~ — ~~Wire up `BackdateChangesets` + fix date key (BUG-04/BUG-15 simultaneously)~~ **DONE** (commits `e769b95`/`21d74e8`, PR #291)
 2. ~~**BUG-03**~~ — ~~Set `ReferenceBranchName` in `importBranch`~~ **DONE** (commit `1eeb9d8`)
 3. **BUG-02** — Extend `ActiveRuleInput` + `BuildActiveRules` with missing fields
 4. **BUG-11** — Add `loadExtractedMeasures()` and populate `reportData.Measures`
@@ -513,7 +517,7 @@ systematic wrong dates for projects with multiple issues of the same rule.
 7. **BUG-06** — Add source-link comments to both issue and hotspot sync
 8. **FEAT-09** — Add per-project output file to `syncIssueMetadata`
 9. **BUG-12** — Add `getActiveProfileRules` to scan-history extract task list
-10. **FEAT-10** — Add URL default warning
+10. ~~**FEAT-10**~~ — ~~Add URL default warning~~ **DONE** (`--sc-url` flag added to transfer command)
 11. **FEAT-05** — Add CE submission retry
 12. **BUG-13** — Use extraction timestamp for analysis date
 13. **FEAT-02** — Extract issue changelog data

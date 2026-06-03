@@ -1749,6 +1749,7 @@ A full clean pass requires **ALL** of the following. Not a subset. Not "close en
 - [ ] Zero unexpected `ERROR` log lines
 
 ### Code Quality Gates
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 - [x] `go vet ./...` passes
 - [x] `go test ./...` passes — all tests pass cleanly as of 2026-05-31
 - [x] `go test -race ./...` passes — zero data race warnings as of 2026-05-31
