@@ -191,7 +191,7 @@ func projectComponentTreeTask() func(ctx context.Context, e *Executor) error {
 				params := url.Values{
 					"component":  {projectKey},
 					"branch":     {branch},
-					"qualifiers": {"FIL"},
+					"qualifiers": {"FIL,UTS"},
 					"metricKeys": {"ncloc"},
 					"ps":         {"500"},
 				}
