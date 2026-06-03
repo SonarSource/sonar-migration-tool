@@ -1,293 +1,160 @@
-# Configuration File Documentation
+# Configuration File Reference
 
-This document explains how to use JSON configuration files with sonar-migration-tool instead of command-line arguments.
+This document is the **format reference** for the JSON configuration files that the `extract`, `migrate`, `reset`, `predictive-report`, `structure`, and `mappings` commands accept via `--config`.
 
-## Why Use Configuration Files?
+For the **how to use a config file in your migration** (per-command examples, step-by-step workflow, multi-server migration), see the relevant guide:
 
-Configuration files offer several advantages:
+- [Using `migrate` — Migrate All Projects](MIGRATE.md)
+- [Using `transfer` — Transfer One Project](TRANSFER.md)
 
-- **Security**: Keep sensitive tokens in a file that's not in version control
-- **Convenience**: Avoid typing long command-line arguments repeatedly
-- **Reproducibility**: Share configurations easily across teams
-- **Clarity**: All settings in one place, easy to review and modify
+---
 
-## Quick Start
+## Why use a config file
 
-1. Copy an example config file:
+Configuration files are useful when you want to:
+
+- **Keep tokens out of your shell history** — store them in a file with restricted permissions.
+- **Run the same migration repeatedly** — share the same config with your team or CI.
+- **Review all settings in one place** — easier to audit than a long CLI invocation.
+
+For security best-practices (`.gitignore`, file permissions, env-var substitution), see [SECURITY.md](SECURITY.md).
+
+---
+
+## Quick start
+
+1. Copy an example config:
    ```bash
-   cp config-extract.example.json my-config.json
+   cp examples/config.unified.example.json my-config.json
    ```
-
-2. Edit the file with your values:
-   ```json
-   {
-     "url": "http://localhost:9000",
-     "token": "squ_your_actual_token_here",
-     "export_directory": "./files",
-     "concurrency": 10,
-     "timeout": 60
-   }
-   ```
-
-3. Use it with the executable:
+2. Edit the values (URL, tokens, organization key, etc.).
+3. Pass it to a command:
    ```bash
    ./sonar-migration-tool extract --config my-config.json
    ```
 
-## Configuration File Format
+---
 
-Configuration files are standard JSON format. All fields are optional - you can specify only the values you need, and use command-line arguments for the rest.
+## Unified config shape
 
-### For Extract Command
+`extract`, `migrate`, `reset`, and `predictive-report` all read the same JSON file. The recommended shape has one top-level block of defaults and one `source` / `target` sub-block per side of the migration. Each command silently ignores the block that isn't its own.
 
-Create a file named `extract-config.json`:
-
-```json
+```jsonc
 {
-  "url": "http://localhost:9000",
-  "token": "YOUR_SONARQUBE_TOKEN",
-  "export_directory": "./files",
-  "extract_type": "all",
   "concurrency": 10,
   "timeout": 60,
-  "pem_file_path": null,
-  "key_file_path": null,
-  "cert_password": null,
-  "target_task": null,
-  "extract_id": null
+  "export_directory": "./migration-files",
+
+  "source": {
+    "url":   "http://sonarqube.example.com",
+    "token": "squ_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "extract_type": "all",
+    "pem_file_path": null,
+    "key_file_path": null,
+    "cert_password": null,
+    "target_task": null,
+    "extract_id":  null
+  },
+
+  "target": {
+    "url":   "https://sonarcloud.io/",
+    "token": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "enterprise_key": "your-enterprise",
+    "edition": "enterprise",
+    "run_id": null,
+    "target_task": null
+  }
 }
 ```
 
-Usage:
-```bash
-./sonar-migration-tool extract --config extract-config.json
-```
+### Top-level fields (all optional)
 
-### For Migrate Command
+| Field | Default | Description |
+|---|---|---|
+| `concurrency` | `10` | Default max parallel HTTP calls |
+| `timeout` | `60` | Default HTTP request timeout in seconds |
+| `export_directory` | `./migration-files` | Root directory for extract / migrate output |
 
-Create a file named `migrate-config.json`:
+The same `concurrency` and `timeout` fields exist inside `source` and `target` — when set there they override the top-level value for that command only.
 
-```json
-{
-  "token": "YOUR_SONARCLOUD_TOKEN",
-  "enterprise_key": "YOUR_ENTERPRISE_KEY",
-  "url": "https://sonarcloud.io/",
-  "edition": "enterprise",
-  "export_directory": "./files",
-  "concurrency": 10,
-  "run_id": null,
-  "target_task": null
-}
-```
+### `source` block (consumed by `extract`)
 
-Usage:
-```bash
-./sonar-migration-tool migrate --config migrate-config.json
-```
+| Field | Required | Description |
+|---|---|---|
+| `url` | ✅ | SonarQube Server base URL |
+| `token` | ✅ | SonarQube Server user token |
+| `extract_type` | | `"all"` (default) or the name of a specific extract task |
+| `concurrency` / `timeout` | | Override the top-level defaults |
+| `pem_file_path` / `key_file_path` / `cert_password` | | Client-side mTLS certificate, if required |
+| `target_task` | | Stop extract at a specific task (dependencies still run) |
+| `extract_id` | | Reuse an existing extract directory ID instead of generating a new one |
+| `enterprise_key` / `organization_key` / `edition` | | Provisional — accepted but ignored today; reserved for future SQC-to-SQC migration |
 
-## Configuration Parameters
+### `target` block (consumed by `migrate` and `reset`)
 
-### Extract Command Parameters
+| Field | Required | Description |
+|---|---|---|
+| `url` | ✅ | SonarQube Cloud base URL (e.g. `https://sonarcloud.io/`) |
+| `token` | ✅ | SonarQube Cloud user token |
+| `enterprise_key` | | Enterprise key used to scope enterprise endpoints |
+| `edition` | | `"enterprise"` (default), `"team"`, or `"foss"` |
+| `concurrency` / `timeout` | | Override the top-level defaults |
+| `run_id` | | Resume an in-progress migrate run by ID |
+| `target_task` | | Stop migrate at a specific task |
+| `organization_key` | | Provisional — accepted but ignored today |
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `url` | string | **required** | SonarQube server URL |
-| `token` | string | **required** | Admin user token for SonarQube |
-| `export_directory` | string | `/app/files/` | Directory to output export files |
-| `extract_type` | string | `all` | Type of extract to run |
-| `concurrency` | number | `25` | Maximum concurrent requests |
-| `timeout` | number | `60` | Request timeout in seconds |
-| `pem_file_path` | string | `null` | Path to client certificate PEM file |
-| `key_file_path` | string | `null` | Path to client certificate key file |
-| `cert_password` | string | `null` | Password for client certificate |
-| `target_task` | string | `null` | Target task to complete |
-| `extract_id` | string | `null` | ID of extract to resume |
+---
 
-### Migrate Command Parameters
+## Legacy config shapes
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `token` | string | **required** | SonarCloud admin token |
-| `enterprise_key` | string | **required** | SonarCloud enterprise key |
-| `url` | string | `https://sonarcloud.io/` | SonarCloud URL |
-| `edition` | string | `enterprise` | SonarCloud license edition |
-| `export_directory` | string | `/app/files/` | Directory containing exports |
-| `concurrency` | number | `25` | Maximum concurrent requests |
-| `run_id` | string | `null` | ID of run to resume |
-| `target_task` | string | `null` | Specific migration task |
-| `default_organization` | string | `null` | SonarCloud organization applied to every project when `organizations.csv` has no mapping. Ignored (WARN) if any row already carries a `sonarcloud_org_key`. In the unified config shape this lives under `target.default_organization`. CLI `--default_organization` wins. Issue #281. |
+Three older config shapes are still parsed for backward compatibility — existing configs keep working:
 
-### Structure and Mappings Commands
+- **Flat top-level keys** — e.g. `{ "url": "...", "token": "...", "export_directory": "..." }` (the original `extract-config.json` shape).
+- **`extract` / `migrate` sub-objects** — `{ "extract": { ... }, "migrate": { ... } }`.
+- **`sonarqube` + `sonarcloud` side-sectioned** — used by `transfer`: `{ "sonarqube": { ... }, "sonarcloud": { ... } }`. See [TRANSFER.md](TRANSFER.md) for an example.
 
-Both `structure` and `mappings` accept `--config` pointing at the same JSON
-file used by `extract`. They read **only `export_directory`** from it — every
-other field is ignored. `structure` additionally pre-populates the
-`sonarcloud_org_key` column in `organizations.csv` when exactly one
-SonarCloud organization is defined in the config (under `target.organizations`
-in the unified shape, or `organizations` in the migrate shape).
+When in doubt, copy the unified example (`examples/config.unified.example.json`) — it parses everywhere.
+
+---
+
+## Schema for editor autocomplete
+
+A JSON Schema lives at [`schemas/config.schema.json`](../schemas/config.schema.json). Reference it in `.vscode/settings.json` or by adding a `"$schema"` pointer at the top of your config to get inline validation and autocomplete in your editor.
+
+---
+
+## Combining config files and CLI arguments
+
+Command-line arguments **override** config-file values. This lets you:
+
+- Keep common settings in a config file.
+- Override specific values on the command line for a one-off run.
 
 ```bash
-# Reuse the extract config — export_directory comes from the JSON
-./sonar-migration-tool structure --config extract-config.json
-./sonar-migration-tool mappings  --config extract-config.json
-```
-
-Precedence (same as `extract`, `migrate`, and `predictive-report`):
-
-1. `--export_directory` on the CLI wins when explicitly set.
-2. Otherwise `export_directory` from `--config` is used.
-3. Otherwise the default `./migration-files` is used.
-
-## Combining Config Files and CLI Arguments
-
-Command-line arguments **override** config file values. This allows you to:
-
-- Keep common settings in a config file
-- Override specific values on the command line
-
-Example:
-```bash
-# Config file has concurrency: 10
+# Config has concurrency: 10. CLI forces 5.
 ./sonar-migration-tool extract --config my-config.json --concurrency 5
-
-# This will use concurrency of 5, overriding the config file
 ```
 
-## Security Best Practices
+---
 
-### 1. Never Commit Tokens to Version Control
+## Example config files
 
-Add your config files to `.gitignore`:
+The repository includes these starter files in `examples/`:
 
-```bash
-echo "config.json" >> .gitignore
-echo "*-config.json" >> .gitignore
-echo "my-*.json" >> .gitignore
-```
+- `config.unified.example.json` — recommended shape, used by `extract` / `migrate` / `reset` / `predictive-report`
+- `config.example.json` — full reference with every documented field
+- `config-extract.example.json` — minimal extract-only config
+- `config-migrate.example.json` — minimal migrate-only config
+- `migration-config.example.json` — `transfer`-style `sonarqube` + `sonarcloud` block
 
-### 2. Use Environment Variables
+Copy and customize the one that matches your command.
 
-You can reference environment variables in your workflow:
-
-```bash
-# Set token as environment variable
-export SONAR_TOKEN="squ_your_token"
-
-# Create config file dynamically
-cat > config.json <<EOF
-{
-  "url": "http://localhost:9000",
-  "token": "$SONAR_TOKEN",
-  "export_directory": "./files"
-}
-EOF
-
-# Run the tool
-./sonar-migration-tool extract --config config.json
-
-# Clean up
-rm config.json
-```
-
-### 3. Use File Permissions
-
-Restrict access to config files containing sensitive data:
-
-```bash
-chmod 600 my-config.json
-```
-
-This ensures only you can read/write the file.
-
-## Example Workflows
-
-### Development Environment
-
-Create `dev-config.json`:
-```json
-{
-  "url": "http://localhost:9000",
-  "token": "LOCAL_DEV_TOKEN",
-  "export_directory": "./dev-files",
-  "concurrency": 5
-}
-```
-
-### Production Environment
-
-Create `prod-config.json`:
-```json
-{
-  "url": "https://sonarqube.company.com",
-  "token": "PROD_TOKEN_HERE",
-  "export_directory": "/data/sonar-exports",
-  "concurrency": 20,
-  "timeout": 120
-}
-```
-
-### Full Migration Workflow
-
-1. Extract config (`extract-config.json`):
-```json
-{
-  "url": "http://sonarqube-server:9000",
-  "token": "SONARQUBE_TOKEN",
-  "export_directory": "./migration-data"
-}
-```
-
-2. Migrate config (`migrate-config.json`):
-```json
-{
-  "token": "SONARCLOUD_TOKEN",
-  "enterprise_key": "my-enterprise",
-  "url": "https://sonarcloud.io/",
-  "export_directory": "./migration-data"
-}
-```
-
-3. Run the workflow:
-```bash
-# Extract from SonarQube
-./sonar-migration-tool extract --config extract-config.json
-
-# Generate structure
-./sonar-migration-tool structure --config extract-config.json
-
-# Generate mappings
-./sonar-migration-tool mappings --config extract-config.json
-
-# Edit organizations.csv to add SonarCloud org keys
-# Then migrate
-./sonar-migration-tool migrate --config migrate-config.json
-```
+---
 
 ## Troubleshooting
 
-### "Error loading config file: ..."
+- **"Error loading config file"** — check the file path and JSON syntax (no trailing commas, proper quotes).
+- **"Error: URL and TOKEN are required"** — make sure these fields are in the config file or passed as CLI arguments, and check for typos in field names.
+- **Values not being applied** — remember that CLI arguments override config values. Confirm you're pointing at the right config file.
 
-- Check that the file path is correct
-- Ensure the JSON syntax is valid (no trailing commas, proper quotes)
-- Verify the file is readable
-
-### "Error: URL and TOKEN are required"
-
-- Make sure these fields are in your config file OR provided as CLI arguments
-- Check for typos in the field names
-
-### Values Not Being Applied
-
-- Remember: CLI arguments override config file values
-- Check that you're using the correct config file path
-- Verify JSON syntax is valid
-
-## Example Config Files
-
-The repository includes these example files:
-
-- `config.example.json` - Complete example with all options
-- `config-extract.example.json` - Minimal extract config
-- `config-migrate.example.json` - Minimal migrate config
-
-Copy and customize these for your needs.
+For broader issues, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
