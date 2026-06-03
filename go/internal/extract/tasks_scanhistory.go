@@ -6,7 +6,14 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
+
+// issueStatusesRename is the SonarQube Server release where the issue
+// search swapped its statuses parameter to issueStatuses + the new
+// ACCEPTED value.
+var issueStatusesRename = common.MustParseVersion("10.4")
 
 // scanHistoryTasks returns extract tasks needed for scan history migration.
 // These tasks extract full issue data, component trees, source code, and SCM
@@ -58,7 +65,7 @@ func projectIssuesFullTask() func(ctx context.Context, e *Executor) error {
 					"ps":               {"500"},
 					"additionalFields": {"_all"},
 				}
-				if e.Version < 10.4 {
+				if e.Version.Less(issueStatusesRename) {
 					params.Set("statuses", "OPEN,CONFIRMED,REOPENED,RESOLVED")
 				} else {
 					params.Set("issueStatuses", "OPEN,CONFIRMED,FALSE_POSITIVE,ACCEPTED")
@@ -94,8 +101,8 @@ func projectHotspotsFullTask() func(ctx context.Context, e *Executor) error {
 		return forEachProjectBranch(ctx, e, "getProjectHotspotsFull",
 			func(ctx context.Context, projectKey, branch string, w *ChunkWriter) error {
 				params := url.Values{
-					"projectKey": {projectKey},
-					"ps":         {"500"},
+					hotspotsProjectParam(e.Version): {projectKey},
+					"ps":                            {"500"},
 				}
 				if branch != "" {
 					params.Set("branch", branch)

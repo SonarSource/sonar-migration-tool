@@ -157,6 +157,11 @@ var metricMapping = map[string][]ReplacementCondition{
 		ratingWorseThan("new_reliability_rating", "A"),
 	},
 
+	// SonarQube Server 9.9 named the "accepted" issue metric
+	// wont_fix_issues; SQC (and SQS 10.2+) renamed it accepted_issues.
+	// Migrate 9.9 gate conditions to the SQC name. Issue #143 / #278.
+	"wont_fix_issues": keep("accepted_issues"),
+
 	// Source metrics with no meaningful SQC equivalent — drop the condition.
 	"contains_ai_code": {},
 	"effort_to_reach_software_quality_maintainability_rating_a": {},

@@ -5,13 +5,30 @@ import (
 	"encoding/json"
 	"net/url"
 	"strings"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
+
+// sqs10 is the boundary at which several SonarQube API parameter names
+// changed (e.g. /api/hotspots/search's project filter). Versions strictly
+// below it require the legacy name.
+var sqs10 = common.MustParseVersion("10")
 
 var (
 	issueTypes      = []string{"CODE_SMELL", "BUG", "VULNERABILITY"}
 	issueSeverities = []string{"INFO", "MINOR", "MAJOR", "CRITICAL", "BLOCKER"}
 	resolutions     = []string{"FALSE-POSITIVE", "WONTFIX", "FIXED", "REMOVED"}
 )
+
+// hotspotsProjectParam returns the parameter name /api/hotspots/search
+// expects for the project filter. SonarQube Server 9.9 requires
+// "projectKey"; 10.x and later renamed it to "project". Issue #278.
+func hotspotsProjectParam(version common.Version) string {
+	if version.Less(sqs10) {
+		return "projectKey"
+	}
+	return "project"
+}
 
 func issueTasks() []TaskDef {
 	return []TaskDef{
@@ -44,7 +61,7 @@ func safeHotspotsTask() func(ctx context.Context, e *Executor) error {
 			func(ctx context.Context, item json.RawMessage, w *ChunkWriter) error {
 				key := extractField(item, "key")
 				raw, err := e.Raw.Get(ctx, "api/hotspots/search",
-					url.Values{"project": {key}, "status": {"REVIEWED"}, "resolution": {"SAFE"}, "ps": {"1"}})
+					url.Values{hotspotsProjectParam(e.Version): {key}, "status": {"REVIEWED"}, "resolution": {"SAFE"}, "ps": {"1"}})
 				if err != nil {
 					return err
 				}

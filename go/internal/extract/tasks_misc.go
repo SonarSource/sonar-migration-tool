@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/url"
 	"time"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
 // ceTaskTypes is the set of Compute Engine task types to query.
@@ -75,6 +77,15 @@ func fetchCETasks(ctx context.Context, e *Executor, taskName string, taskTypes [
 		})
 		<-e.Sem
 		if err != nil {
+			// Older SonarQube Server versions (e.g. 9.9) don't recognise CE
+			// task types that arrived in 10.x like GITHUB_AUTH_PROVISIONING
+			// and reject the request with HTTP 400 listing the supported
+			// types. Skip that type rather than aborting the whole task
+			// (issue #278).
+			if common.IsHTTPError(err, 400) {
+				e.Logger.Warn(taskName+" skipped task type", "type", taskType, "err", err)
+				continue
+			}
 			return err
 		}
 		if err := w.WriteChunk(enrichAll(items, map[string]any{"serverUrl": e.ServerURL})); err != nil {

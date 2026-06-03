@@ -5,10 +5,28 @@ import (
 	"encoding/json"
 	"net/url"
 	"strings"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
-// measureMetricKeys is the set of metric keys extracted for each project.
-const measureMetricKeys = "ncloc_language_distribution,new_violations,accepted_issues,alert_status,false_positive_issues,violations,new_lines_to_cover,lines_to_cover,new_coverage,coverage,uncovered_lines,new_uncovered_lines"
+// acceptedIssuesRename is the SonarQube Server release that renamed
+// wont_fix_issues → accepted_issues.
+var acceptedIssuesRename = common.MustParseVersion("10.2")
+
+// measureMetricKeysFor returns the comma-separated metric keys requested
+// from /api/measures/search for each project. The "accepted" issue metric
+// was renamed in SonarQube Server 10.2: prior versions exposed it as
+// "wont_fix_issues", 10.2+ uses "accepted_issues". Issue #278.
+func measureMetricKeysFor(version common.Version) string {
+	acceptedMetric := "accepted_issues"
+	if version.Less(acceptedIssuesRename) {
+		acceptedMetric = "wont_fix_issues"
+	}
+	return "ncloc_language_distribution,new_violations," + acceptedMetric +
+		",alert_status,false_positive_issues,violations," +
+		"new_lines_to_cover,lines_to_cover,new_coverage,coverage," +
+		"uncovered_lines,new_uncovered_lines"
+}
 
 // projectPermissions is the set of permissions expanded for getProjectGroupsPermissions.
 var projectPermissions = []string{"admin", "codeviewer", "issueadmin", "securityhotspotadmin", "scan", "user"}
@@ -143,7 +161,7 @@ func projectMeasuresTask() func(ctx context.Context, e *Executor) error {
 			func(ctx context.Context, item json.RawMessage, w *ChunkWriter) error {
 				key := extractField(item, "key")
 				items, err := e.Raw.GetArray(ctx, "api/measures/search", "measures",
-					url.Values{"projectKeys": {key}, "metricKeys": {measureMetricKeys}})
+					url.Values{"projectKeys": {key}, "metricKeys": {measureMetricKeysFor(e.Version)}})
 				if err != nil {
 					return err
 				}

@@ -14,7 +14,6 @@ import (
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	smtver "github.com/sonar-solutions/sonar-migration-tool/internal/version"
 	sqapi "github.com/sonar-solutions/sq-api-go"
-	"github.com/sonar-solutions/sq-api-go/server"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -46,7 +45,7 @@ type Executor struct {
 	Store       *DataStore
 	ServerURL   string
 	Edition     Edition
-	Version     float64
+	Version     common.Version
 	Sem         chan struct{}
 	Logger      *slog.Logger
 	ProjectKeys []string // non-empty → limit extraction to these project keys
@@ -125,23 +124,25 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 	return executor.SkippedProjectKeys(), nil
 }
 
-func initClient(ctx context.Context, cfg ExtractConfig) (*sqapi.Client, *RawClient, float64, Edition, error) {
+func initClient(ctx context.Context, cfg ExtractConfig) (*sqapi.Client, *RawClient, common.Version, Edition, error) {
 	opts := baseSDKOptions(cfg)
 
 	version, err := detectVersion(ctx, cfg)
 	if err != nil {
-		return nil, nil, 0, "", fmt.Errorf("detecting server version: %w", err)
+		return nil, nil, nil, "", fmt.Errorf("detecting server version: %w", err)
 	}
 
-	client := sqapi.NewServerClient(cfg.URL, cfg.Token, version, opts...)
+	// The SDK still picks Bearer vs Basic auth from a float; major.minor
+	// is sufficient for that gate (10.x+ = Bearer).
+	client := sqapi.NewServerClient(cfg.URL, cfg.Token, version.LegacyFloat(), opts...)
 	if client.CertErr() != nil {
-		return nil, nil, 0, "", fmt.Errorf("certificate error: %w", client.CertErr())
+		return nil, nil, nil, "", fmt.Errorf("certificate error: %w", client.CertErr())
 	}
 
 	raw := NewRawClient(client.HTTPClient(), client.BaseURL())
 	edition, err := detectEdition(ctx, raw)
 	if err != nil {
-		return nil, nil, 0, "", fmt.Errorf("detecting edition: %w", err)
+		return nil, nil, nil, "", fmt.Errorf("detecting edition: %w", err)
 	}
 
 	return client, raw, version, edition, nil
@@ -182,7 +183,7 @@ func buildPlan(cfg ExtractConfig, edition Edition) (map[string]*TaskDef, [][]str
 	return registry, plan, targets, nil
 }
 
-func newExecutor(raw *RawClient, store *DataStore, baseURL string, edition Edition, version float64, concurrency int) *Executor {
+func newExecutor(raw *RawClient, store *DataStore, baseURL string, edition Edition, version common.Version, concurrency int) *Executor {
 	// Delegate to slog.Default() so the global --debug persistent flag
 	// (configured in cmd.root.PersistentPreRun) controls visibility of
 	// e.Logger.Debug calls here. Hardcoding LevelInfo previously hid
@@ -246,11 +247,21 @@ func (cfg *ExtractConfig) applyDefaults() {
 	}
 }
 
-func detectVersion(ctx context.Context, cfg ExtractConfig) (float64, error) {
-	// Make a temporary client with version 10 (bearer auth) to fetch version.
+func detectVersion(ctx context.Context, cfg ExtractConfig) (common.Version, error) {
+	// Temporary client with version 10 (bearer auth) to fetch the raw
+	// version string. Parsing into common.Version preserves all components
+	// so 9.9.3 can be compared against 9.9.12 without precision loss.
 	tmpClient := sqapi.NewServerClient(cfg.URL, cfg.Token, 10.0, baseSDKOptions(cfg)...)
-	sc := server.New(tmpClient)
-	return sc.System.Version(ctx)
+	raw := NewRawClient(tmpClient.HTTPClient(), tmpClient.BaseURL())
+	body, err := raw.GetRaw(ctx, "api/server/version", nil)
+	if err != nil {
+		return nil, err
+	}
+	v := common.ParseVersion(string(body))
+	if v == nil {
+		return nil, fmt.Errorf("could not parse server version %q", string(body))
+	}
+	return v, nil
 }
 
 // baseSDKOptions assembles the SDK option set shared by every extract API
@@ -300,11 +311,13 @@ func generateRunID(directory string) string {
 	return fmt.Sprintf("%s-%02d", today, count+1)
 }
 
-// extractMeta groups the parameters for writeMetadata.
+// extractMeta groups the parameters for writeMetadata. Version stays as
+// the parsed tuple internally; it is downcast to a float in the on-disk
+// JSON for backwards compatibility with reports written before #278.
 type extractMeta struct {
 	Plan     [][]string
 	RunID    string
-	Version  float64
+	Version  common.Version
 	Edition  Edition
 	URL      string
 	Targets  []string
@@ -319,7 +332,8 @@ func writeMetadataFile(dir string, m extractMeta) error {
 
 	meta := map[string]any{
 		"plan":              m.Plan,
-		"version":           m.Version,
+		"version":           m.Version.LegacyFloat(),
+		"version_string":    m.Version.String(),
 		"edition":           string(m.Edition),
 		"url":               m.URL,
 		"target_tasks":      m.Targets,
