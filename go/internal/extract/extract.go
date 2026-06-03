@@ -32,6 +32,7 @@ type ExtractConfig struct {
 	ExtractID       string
 	TargetTask         string
 	IncludeScanHistory bool
+	Debug              bool // Enable HTTP request/response logging via SDK debug transport
 	// ProjectKeys, when non-empty, limits extraction to these project keys.
 	// The /api/projects/search endpoint filters server-side, so only the
 	// requested projects are fetched and all downstream per-project tasks
@@ -125,11 +126,7 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 }
 
 func initClient(ctx context.Context, cfg ExtractConfig) (*sqapi.Client, *RawClient, float64, Edition, error) {
-	var opts []sqapi.Option
-	opts = append(opts, sqapi.WithTimeout(cfg.Timeout))
-	if cfg.PEMFilePath != "" {
-		opts = append(opts, sqapi.WithClientCert(cfg.PEMFilePath, cfg.KeyFilePath, cfg.CertPassword))
-	}
+	opts := baseSDKOptions(cfg)
 
 	version, err := detectVersion(ctx, cfg)
 	if err != nil {
@@ -186,7 +183,10 @@ func buildPlan(cfg ExtractConfig, edition Edition) (map[string]*TaskDef, [][]str
 }
 
 func newExecutor(raw *RawClient, store *DataStore, baseURL string, edition Edition, version float64, concurrency int) *Executor {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// Delegate to slog.Default() so the global --debug persistent flag
+	// (configured in cmd.root.PersistentPreRun) controls visibility of
+	// e.Logger.Debug calls here. Hardcoding LevelInfo previously hid
+	// every Debug entry the extract pipeline emits.
 	return &Executor{
 		Raw:       raw,
 		Store:     store,
@@ -194,7 +194,7 @@ func newExecutor(raw *RawClient, store *DataStore, baseURL string, edition Editi
 		Edition:   edition,
 		Version:   version,
 		Sem:       make(chan struct{}, concurrency),
-		Logger:    logger,
+		Logger:    slog.Default(),
 	}
 }
 
@@ -248,14 +248,24 @@ func (cfg *ExtractConfig) applyDefaults() {
 
 func detectVersion(ctx context.Context, cfg ExtractConfig) (float64, error) {
 	// Make a temporary client with version 10 (bearer auth) to fetch version.
-	var opts []sqapi.Option
-	opts = append(opts, sqapi.WithTimeout(cfg.Timeout))
+	tmpClient := sqapi.NewServerClient(cfg.URL, cfg.Token, 10.0, baseSDKOptions(cfg)...)
+	sc := server.New(tmpClient)
+	return sc.System.Version(ctx)
+}
+
+// baseSDKOptions assembles the SDK option set shared by every extract API
+// client: timeout, optional mTLS, and (when --debug is set) the HTTP
+// request/response debug logger that surfaces every API call as a Debug
+// slog entry.
+func baseSDKOptions(cfg ExtractConfig) []sqapi.Option {
+	opts := []sqapi.Option{sqapi.WithTimeout(cfg.Timeout)}
 	if cfg.PEMFilePath != "" {
 		opts = append(opts, sqapi.WithClientCert(cfg.PEMFilePath, cfg.KeyFilePath, cfg.CertPassword))
 	}
-	tmpClient := sqapi.NewServerClient(cfg.URL, cfg.Token, 10.0, opts...)
-	sc := server.New(tmpClient)
-	return sc.System.Version(ctx)
+	if cfg.Debug {
+		opts = append(opts, sqapi.WithDebugLogger(common.NewHTTPDebugLogger(slog.Default())))
+	}
+	return opts
 }
 
 func detectEdition(ctx context.Context, raw *RawClient) (Edition, error) {

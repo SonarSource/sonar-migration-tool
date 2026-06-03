@@ -86,6 +86,11 @@ func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfi
 	if cmd.Flags().Changed("include_scan_history") {
 		cfg.IncludeScanHistory, _ = cmd.Flags().GetBool("include_scan_history")
 	}
+	// --debug is a persistent flag on rootCmd; pick it up here so the
+	// SDK can install the HTTP request/response logger.
+	if cmd.Flags().Changed("debug") {
+		cfg.Debug, _ = cmd.Flags().GetBool("debug")
+	}
 
 	// Default the export directory when neither config nor flag supplied
 	// one (issue #247).
