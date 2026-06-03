@@ -48,7 +48,6 @@ func init() {
 	f.String("target_task", "", "Name of a specific migration task to complete")
 	f.Bool("skip_profiles", false, "Skip quality profile migration/provisioning in SonarQube Cloud")
 	f.Bool("include_scan_history", false, "Import scan history (issues, metrics) into SonarQube Cloud projects")
-	f.Bool("debug", false, "Enable debug-level logging (verbose request payloads, more detail per task)")
 }
 
 func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfig, error) {

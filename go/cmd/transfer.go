@@ -73,7 +73,6 @@ func init() {
 	f.String(flagExportDir, "./migration-files/", "Working directory for intermediate files")
 	f.Bool(flagIncludeScanHistory, false, "Extract and import full issue/hotspot scan history")
 	f.Int(flagConcurrency, 0, "Max concurrent requests (default: 25)")
-	f.Bool(flagDebug, false, "Enable debug-level logging")
 }
 
 // transferConfig holds the resolved configuration after merging file and flag values.

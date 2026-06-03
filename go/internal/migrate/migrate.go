@@ -74,7 +74,7 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (string, error) {
 	}
 	clientOpts := []sqapi.Option{sqapi.WithRetryLogger(retryLog)}
 	if cfg.Debug {
-		clientOpts = append(clientOpts, sqapi.WithDebugLogger(httpDebugLogger(logger)))
+		clientOpts = append(clientOpts, sqapi.WithDebugLogger(common.NewHTTPDebugLogger(logger)))
 	}
 	cloudClient := sqapi.NewCloudClient(cloudURL, cfg.Token, clientOpts...)
 	apiClient := sqapi.NewCloudClient(apiURL, cfg.Token, clientOpts...)

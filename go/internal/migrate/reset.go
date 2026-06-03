@@ -44,7 +44,7 @@ func RunReset(ctx context.Context, cfg ResetConfig) error {
 
 	var clientOpts []sqapi.Option
 	if cfg.Debug {
-		clientOpts = append(clientOpts, sqapi.WithDebugLogger(httpDebugLogger(logger)))
+		clientOpts = append(clientOpts, sqapi.WithDebugLogger(common.NewHTTPDebugLogger(logger)))
 	}
 	cloudClient := sqapi.NewCloudClient(cloudURL, cfg.Token, clientOpts...)
 	apiClient := sqapi.NewCloudClient(apiURL, cfg.Token, clientOpts...)

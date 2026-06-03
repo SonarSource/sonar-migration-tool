@@ -37,7 +37,6 @@ func init() {
 	f.String("url", "https://sonarcloud.io/", "URL of SonarQube Cloud")
 	f.Int("concurrency", 25, "Maximum number of concurrent requests")
 	f.String("export_directory", DefaultExportDirectory, "Directory to place all interim files")
-	f.Bool("debug", false, "Enable debug-level logging (verbose request payloads, more detail per task)")
 }
 
 func buildResetConfig(cmd *cobra.Command, args []string) (migrate.ResetConfig, error) {
