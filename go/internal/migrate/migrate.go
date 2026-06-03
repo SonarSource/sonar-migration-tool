@@ -71,7 +71,8 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (string, error) {
 	// Validate the SQC org mapping and apply --default_organization
 	// fallback if requested (issues #279 + #281). Done before any API
 	// client setup so the failure or warning surfaces immediately.
-	if err := applyOrgMapping(cfg.ExportDirectory, cfg.DefaultOrganization, logger); err != nil {
+	appliedDefault, err := applyOrgMapping(cfg.ExportDirectory, cfg.DefaultOrganization, logger)
+	if err != nil {
 		return "", err
 	}
 
@@ -93,6 +94,13 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (string, error) {
 	apiClient := sqapi.NewCloudClient(apiURL, cfg.Token, clientOpts...)
 	cc := cloud.New(cloudClient)
 	apiCC := cloud.New(apiClient)
+
+	// Verify every SQC organization the migration will touch exists and
+	// is visible to the token (issue #283). Done early so a typo aborts
+	// the run before any extract data is touched.
+	if err := validateOrgsExist(ctx, cc.Organizations, cfg.ExportDirectory, cfg.EnterpriseKey, cfg.DefaultOrganization, appliedDefault); err != nil {
+		return "", err
+	}
 
 	// Create RawClients for read operations.
 	raw := common.NewRawClient(cloudClient.HTTPClient(), cloudClient.BaseURL())

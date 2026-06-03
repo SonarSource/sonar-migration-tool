@@ -34,7 +34,7 @@ org-a,
 org-b,
 org-c,
 `)
-	err := applyOrgMapping(dir, "", discardLogger())
+	_, err := applyOrgMapping(dir, "", discardLogger())
 	if err == nil {
 		t.Fatal("expected an error when no mapping is defined and no default")
 	}
@@ -55,8 +55,12 @@ func TestApplyOrgMapping_AllEmptyWithDefaultFillsRows(t *testing.T) {
 org-a,,https://sqs-a.example.com
 org-b,,https://sqs-b.example.com
 `)
-	if err := applyOrgMapping(dir, "my-cloud-org", discardLogger()); err != nil {
+	applied, err := applyOrgMapping(dir, "my-cloud-org", discardLogger())
+	if err != nil {
 		t.Fatalf("expected success with default_organization, got %v", err)
+	}
+	if !applied {
+		t.Error("appliedDefault must be true when CSV was empty and default was applied")
 	}
 
 	// CSV must now carry the default for every row, original columns preserved.
@@ -93,8 +97,12 @@ org-b,
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	if err := applyOrgMapping(dir, "default-cloud-org", logger); err != nil {
+	applied, err := applyOrgMapping(dir, "default-cloud-org", logger)
+	if err != nil {
 		t.Fatalf("expected nil with mapped CSV + default, got %v", err)
+	}
+	if applied {
+		t.Error("appliedDefault must be false when CSV already has mappings")
 	}
 	// CSV must be unchanged.
 	got, _ := os.ReadFile(filepath.Join(dir, "organizations.csv"))
@@ -120,7 +128,7 @@ org-b,real-cloud-org
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	if err := applyOrgMapping(dir, "", logger); err != nil {
+	if _, err := applyOrgMapping(dir, "", logger); err != nil {
 		t.Errorf("expected nil for partial mapping, got %v", err)
 	}
 	if strings.Contains(buf.String(), "level=WARN") {
@@ -135,7 +143,7 @@ func TestApplyOrgMapping_OnlySkippedRowsPass(t *testing.T) {
 org-a,SKIPPED
 org-b,SKIPPED
 `)
-	if err := applyOrgMapping(dir, "", discardLogger()); err != nil {
+	if _, err := applyOrgMapping(dir, "", discardLogger()); err != nil {
 		t.Errorf("expected nil when all rows are SKIPPED, got %v", err)
 	}
 }
@@ -144,7 +152,7 @@ org-b,SKIPPED
 // without rows).
 func TestApplyOrgMapping_MissingFileReturnsExit2(t *testing.T) {
 	dir := t.TempDir()
-	if err := applyOrgMapping(dir, "any-default", discardLogger()); err == nil {
+	if _, err := applyOrgMapping(dir, "any-default", discardLogger()); err == nil {
 		t.Fatal("expected error when organizations.csv is missing")
 	}
 }

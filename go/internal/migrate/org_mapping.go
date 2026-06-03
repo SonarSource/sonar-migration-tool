@@ -1,6 +1,7 @@
 package migrate
 
 import (
+	"context"
 	"encoding/csv"
 	"fmt"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
+	sqcTypes "github.com/sonar-solutions/sq-api-go/types"
 )
 
 // applyOrgMapping checks organizations.csv has at least one row with a
@@ -27,17 +29,21 @@ import (
 //
 // SKIPPED rows count as "mapped" — the user has deliberately chosen to
 // exclude them, distinct from forgetting to fill in the file at all.
-func applyOrgMapping(exportDir, defaultOrg string, logger *slog.Logger) error {
-	rows, err := structure.LoadCSV(exportDir, "organizations.csv")
-	if err != nil {
-		return fmt.Errorf("loading organizations.csv: %w", err)
+//
+// Returns appliedDefault=true when the CSV was rewritten with the
+// default; this drives the message variant produced by
+// validateOrgsExist for issue #283.
+func applyOrgMapping(exportDir, defaultOrg string, logger *slog.Logger) (appliedDefault bool, err error) {
+	rows, loadErr := structure.LoadCSV(exportDir, "organizations.csv")
+	if loadErr != nil {
+		return false, fmt.Errorf("loading organizations.csv: %w", loadErr)
 	}
 	csvPath := filepath.Join(exportDir, "organizations.csv")
 
 	if len(rows) == 0 {
 		// No file at all → cannot synthesize even with defaultOrg
 		// because the columns/rows aren't there yet.
-		return missingMappingError(csvPath)
+		return false, missingMappingError(csvPath)
 	}
 
 	hasMapping := false
@@ -54,21 +60,21 @@ func applyOrgMapping(exportDir, defaultOrg string, logger *slog.Logger) error {
 			logger.Warn("Since organizations.csv mapping is defined, the provided default organization parameter is ignored",
 				"default_organization", defaultOrg, "file", csvPath)
 		}
-		return nil
+		return false, nil
 	}
 
 	// No mapping defined.
 	if defaultOrg == "" {
-		return missingMappingError(csvPath)
+		return false, missingMappingError(csvPath)
 	}
 
 	// Apply defaultOrg to every row and write back.
 	if err := writeOrgCSVWithDefault(csvPath, rows, defaultOrg); err != nil {
-		return fmt.Errorf("applying default_organization to organizations.csv: %w", err)
+		return false, fmt.Errorf("applying default_organization to organizations.csv: %w", err)
 	}
 	logger.Info("organizations.csv was empty — every project will migrate to the provided default organization",
 		"default_organization", defaultOrg, "rows", len(rows))
-	return nil
+	return true, nil
 }
 
 func missingMappingError(csvPath string) error {
@@ -121,6 +127,109 @@ func writeOrgCSVWithDefault(path string, rows []map[string]any, defaultOrg strin
 		return err
 	}
 	return os.Rename(tmpPath, path)
+}
+
+// orgLookup is the contract validateOrgsExist needs from the SQC SDK.
+// Defined as an interface so unit tests can stub it without spinning
+// up a full client. Production code passes cc.Organizations.
+type orgLookup interface {
+	Search(ctx context.Context, keys ...string) ([]sqcTypes.Organization, error)
+}
+
+// validateOrgsExist checks that every SonarQube Cloud organization the
+// migration is about to use actually exists / is visible to the
+// authenticated token. The two failure modes from issue #283:
+//
+//   - appliedDefault=true: the only org in play is defaultOrg; missing
+//     org → "Default organization …" message.
+//   - appliedDefault=false: every distinct non-empty/non-SKIPPED
+//     sonarcloud_org_key in organizations.csv is checked. Missing
+//     org → "Organization X specified in <csv>" message.
+//
+// Returns an *common.ExitCodeError with code 3 on failure.
+func validateOrgsExist(ctx context.Context, lookup orgLookup, exportDir, enterpriseKey, defaultOrg string, appliedDefault bool) error {
+	csvPath := filepath.Join(exportDir, "organizations.csv")
+
+	if appliedDefault {
+		if defaultOrg == "" {
+			return nil
+		}
+		known, err := orgsByKey(ctx, lookup, []string{defaultOrg})
+		if err != nil {
+			return fmt.Errorf("looking up default organization in SonarQube Cloud: %w", err)
+		}
+		if _, ok := known[defaultOrg]; !ok {
+			return defaultOrgMissingError(defaultOrg, enterpriseKey)
+		}
+		return nil
+	}
+
+	rows, err := structure.LoadCSV(exportDir, "organizations.csv")
+	if err != nil {
+		return fmt.Errorf("loading organizations.csv: %w", err)
+	}
+	seen := make(map[string]bool)
+	ordered := make([]string, 0)
+	for _, row := range rows {
+		k, _ := row["sonarcloud_org_key"].(string)
+		k = strings.TrimSpace(k)
+		if k == "" || k == "SKIPPED" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		ordered = append(ordered, k)
+	}
+	if len(ordered) == 0 {
+		return nil
+	}
+	known, err := orgsByKey(ctx, lookup, ordered)
+	if err != nil {
+		return fmt.Errorf("looking up organizations in SonarQube Cloud: %w", err)
+	}
+	for _, k := range ordered {
+		if _, ok := known[k]; !ok {
+			return csvOrgMissingError(k, csvPath, enterpriseKey)
+		}
+	}
+	return nil
+}
+
+// orgsByKey returns a set of organization keys that the SQC search
+// endpoint confirmed exist and are visible to the caller. Chunks the
+// request at 50 keys per call to stay under SonarCloud's URL-length
+// limit on /api/organizations/search?organizations=...
+func orgsByKey(ctx context.Context, lookup orgLookup, keys []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(keys))
+	const chunkSize = 50
+	for i := 0; i < len(keys); i += chunkSize {
+		end := i + chunkSize
+		if end > len(keys) {
+			end = len(keys)
+		}
+		batch := keys[i:end]
+		orgs, err := lookup.Search(ctx, batch...)
+		if err != nil {
+			return nil, err
+		}
+		for _, o := range orgs {
+			if o.Key != "" {
+				out[o.Key] = true
+			}
+		}
+	}
+	return out, nil
+}
+
+func defaultOrgMissingError(defaultOrg, enterpriseKey string) error {
+	return common.NewExitError(3, fmt.Errorf(
+		`Default organization %q does not exists in SonarQube Cloud, or is not part of Enterprise %q`,
+		defaultOrg, enterpriseKey))
+}
+
+func csvOrgMissingError(orgKey, csvPath, enterpriseKey string) error {
+	return common.NewExitError(3, fmt.Errorf(
+		`Organization %q specified in %q does not exists in SonarQube Cloud, or does not belong to Enterprise %q`,
+		orgKey, csvPath, enterpriseKey))
 }
 
 func readOrgCSVHeaders(path string) ([]string, error) {
