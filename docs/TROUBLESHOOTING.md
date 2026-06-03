@@ -1,10 +1,12 @@
 # Troubleshooting
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 This guide covers common issues when using the SonarQube to SonarCloud migration tool.
 
 ---
 
 ## Finding Logs
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 - **Request logs**: `./files/<extract_id>/requests.log` -- Detailed log of every HTTP request and response. Check here first when diagnosing issues.
 - **Analysis report**: Run `sonar-migration-tool analysis_report <RUN_ID> --export_directory ./files/` to generate a CSV summary of a migration run.
@@ -12,8 +14,10 @@ This guide covers common issues when using the SonarQube to SonarCloud migration
 ---
 
 ## Common Errors
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 ### "Token does not have sufficient permissions"
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **Cause**: The admin token does not have the required permissions.
 
@@ -25,6 +29,7 @@ This guide covers common issues when using the SonarQube to SonarCloud migration
 ---
 
 ### "Organization not found"
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **Cause**: The `sonarcloud_org_key` in `organizations.csv` does not match any organization in SonarCloud.
 
@@ -37,6 +42,7 @@ This guide covers common issues when using the SonarQube to SonarCloud migration
 ---
 
 ### "Request timeout"
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **Cause**: Large datasets or slow network can exceed the default timeout.
 
@@ -49,6 +55,7 @@ sonar-migration-tool extract <URL> <TOKEN> --timeout 120 --export_directory ./fi
 ---
 
 ### "Connection refused" or SSL errors
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **Cause**: Network connectivity issues or certificate problems.
 
@@ -67,6 +74,7 @@ sonar-migration-tool extract <URL> <TOKEN> \
 ---
 
 ### Migration task fails midway
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **Cause**: API error, rate limiting, or network interruption.
 
@@ -81,6 +89,7 @@ Completed tasks are skipped automatically.
 ---
 
 ### No Projects Extracted
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 - Verify your token has admin-level permissions.
 - Confirm projects exist in your SonarQube instance.
@@ -89,6 +98,7 @@ Completed tasks are skipped automatically.
 ---
 
 ### Authentication Errors
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 - Verify tokens are valid and not expired.
 - **SonarQube Server < 10**: Uses Basic authentication.
@@ -98,6 +108,7 @@ Completed tasks are skipped automatically.
 ---
 
 ### API Rate Limiting
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 Reduce concurrency and increase timeout:
 
@@ -108,6 +119,7 @@ sonar-migration-tool extract <URL> <TOKEN> --concurrency 5 --timeout 120 --expor
 ---
 
 ## Reducing Memory Usage
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 For large instances (50,000+ projects), lower the concurrency:
 
@@ -118,6 +130,7 @@ sonar-migration-tool extract <URL> <TOKEN> --concurrency 10 --export_directory .
 ---
 
 ## Resetting After a Bad Migration
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 Use the `reset` command to delete all migrated content in the SonarCloud enterprise:
 
@@ -130,12 +143,12 @@ sonar-migration-tool reset <TOKEN> <ENTERPRISE_KEY> --export_directory ./files/
 ---
 
 ## CE Task "Issue whilst processing the report" (importScanHistory)
-<!-- updated: 2026-05-27_20:40:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 When `importScanHistory` CE tasks fail on SonarCloud with "There was an issue whilst processing the report", the following causes have been identified:
 
 ### ROOT CAUSE: Go ZIP Data Descriptors (FIXED)
-<!-- updated: 2026-05-27_20:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **Symptom**: All CE tasks fail within ~150ms with "There was an issue whilst processing the report" and `hasScannerContext: false`.
 
@@ -152,6 +165,7 @@ When `importScanHistory` CE tasks fail on SonarCloud with "There was an issue wh
 **Verification**: After the fix, CE errors changed from the generic "issue processing the report" to legitimate business logic errors (e.g., "no matching quality profile for language 'js'"), confirming the ZIP is now parsed correctly.
 
 ### Known Differences from CloudVoyager (Informational)
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 These differences have been investigated. They do NOT cause CE processing failures but represent areas of reduced fidelity:
 
@@ -163,8 +177,10 @@ These differences have been investigated. They do NOT cause CE processing failur
 
 4. **Analysis date**: We use `time.Now()`. CloudVoyager uses the extraction timestamp. Unlikely to cause failures.
 
+5. ~~**Issue date backdating (BackdateChangesets)**~~: **RESOLVED.** Creation dates are now preserved for both native and external issues via `BackdateChangesets` wiring and `IssueInput.CreationDate` / `ExternalIssueInput.CreationDate` fields. See "Issue Date Preservation (FIXED)" section above.
+
 ### Branch Name Mapping (FIXED)
-<!-- updated: 2026-05-27_19:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **Symptom**: CE fails with "Invalid branch type 'SHORT'. Branch 'main' already exists with type 'LONG'" when the SQ main branch name differs from the SC main branch name.
 
@@ -176,7 +192,7 @@ These differences have been investigated. They do NOT cause CE processing failur
 3. Uses the SC main branch name in the protobuf metadata (`BranchName`) and CE submit (`characteristic=branch=...`), while keeping the SQ branch name for filtering extracted data (issues, components, sources)
 
 ### "Component has been deleted by end-user during analysis"
-<!-- updated: 2026-05-27_19:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **Symptom**: ALL CE tasks fail with "Component has been deleted by end-user during analysis", even for projects not involved in migration.
 
@@ -185,7 +201,7 @@ These differences have been investigated. They do NOT cause CE processing failur
 **Solution**: Re-create the projects on the SC staging environment, or use a fresh organization/enterprise. This error is NOT caused by our ZIP format, protobuf content, or submission logic.
 
 ### Issue Date Preservation (FIXED)
-<!-- updated: 2026-05-27_22:30:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **Symptom**: All migrated issues appear introduced at migration time; SonarCloud new-code-period logic treats all historical issues as new.
 
@@ -203,7 +219,7 @@ These differences have been investigated. They do NOT cause CE processing failur
 **Verification**: After fix, migrated issues on SC show their original SonarQube creation dates.
 
 ### Issue Comment Deduplication (FIXED)
-<!-- updated: 2026-05-27_22:30:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **Symptom**: If `syncIssueMetadata` ran multiple times (e.g., first run had a tag-sync failure), user comments would be duplicated on the Cloud issue.
 
@@ -212,7 +228,7 @@ These differences have been investigated. They do NOT cause CE processing failur
 **Fix**: Added `isAlreadyMigratedIssueComment()` in `tasks_issuesync.go` — mirrors the hotspot pattern. Before adding a comment, it checks whether a Cloud comment with identical text already exists. The `cloudComments` field from `pair.cloud` is passed to `syncIssueComments()` for this check.
 
 ### Hotspot TO_REVIEW Comment Sync (FIXED)
-<!-- updated: 2026-05-27_22:30:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **Symptom**: User comments on TO_REVIEW hotspots were not migrated.
 
@@ -221,6 +237,7 @@ These differences have been investigated. They do NOT cause CE processing failur
 **Fix**: Updated filter condition to include any pair that needs status sync (source is REVIEWED) OR needs comment sync (source has any comments), regardless of status.
 
 ### Resolved Issues
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 - **ReferenceBranchName**: Previously not set in `MetadataInput`. Now set correctly, defaulting to `BranchName` — matches CloudVoyager behavior.
 - **ZIP data descriptors**: Fixed via `Deflate` + `CreateHeader` (see root cause above).
@@ -230,6 +247,7 @@ These differences have been investigated. They do NOT cause CE processing failur
 - **Hotspot TO_REVIEW comment sync**: Fixed via inclusive actionable-pair filter (see above).
 
 ### Confirmed NON-issues
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 - **ZIP entry names**: Our code uses `external-issues-{ref}.pb` (with hyphens) at `packager.go`. CloudVoyager's working `report-packager` also uses hyphens. These match.
 - **Submit endpoint**: Both use `/api/ce/submit`.
@@ -242,6 +260,7 @@ These differences have been investigated. They do NOT cause CE processing failur
 ---
 
 ## Getting Help
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 1. Check `files/*/requests.log` for detailed error information.
 2. Generate an analysis report: `sonar-migration-tool analysis_report <RUN_ID> --export_directory ./files/`

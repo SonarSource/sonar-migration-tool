@@ -1,5 +1,5 @@
 # CloudVoyager Delta — Full Bug & Logic Error Audit
-<!-- updated: 2026-05-30_08:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 This document catalogues every confirmed bug, logic error, and missing feature in the
 migration tool compared to CloudVoyager. Items are ordered by **severity** (data-loss risk
@@ -11,40 +11,43 @@ Migration tool: `go/internal/`
 ---
 
 ## P0 — Data-Loss / Silent Wrong-Data Bugs
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
-### BUG-01: `BackdateChangesets` and `toExtractedIssues` are dead code
-<!-- updated: 2026-05-30_08:00:00 -->
+### ~~BUG-01: `BackdateChangesets` and `toExtractedIssues` are dead code~~ **[FIXED]**
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
-**File**: [go/internal/migrate/tasks_scanhistory.go](../go/internal/migrate/tasks_scanhistory.go)
-**Severity**: P0 — all migrated issues get wrong creation dates
+**Status**: FIXED — commits `e769b95` and `21d74e8` on branch `fix/history-creation-date-fix` (merged to main via PR #291). `BackdateChangesets` is now called with both native AND external issues. `extIssuesToExtracted()` was added as a helper that properly maps external issue creation dates. The date-map key mismatch (BUG-04/BUG-15) was also resolved as part of this fix.
 
-**Progress note (2026-05-30)**: Commit `e71b690` wired up the original creation date flow for changeset construction, but `BackdateChangesets` and `toExtractedIssues` may still not be called from `importBranch()` in the final form. Verify the current state of the task before proceeding with the full fix.
+~~**File**: [go/internal/migrate/tasks_scanhistory.go](../go/internal/migrate/tasks_scanhistory.go)~~
+~~**Severity**: P0 — all migrated issues get wrong creation dates~~
 
-`toExtractedIssues()` (line 644) and `BackdateChangesets()` (in
+~~**Progress note (2026-05-30)**: Commit `e71b690` wired up the original creation date flow for changeset construction, but `BackdateChangesets` and `toExtractedIssues` may still not be called from `importBranch()` in the final form. Verify the current state of the task before proceeding with the full fix.~~
+
+~~`toExtractedIssues()` (line 644) and `BackdateChangesets()` (in
 [go/internal/scanreport/backdate.go](../go/internal/scanreport/backdate.go)) both exist but
 are **never called** from `importBranch()`. The changesets passed to CE are built with
-`time.Now()` as every line's blame date.
+`time.Now()` as every line's blame date.~~
 
-**CloudVoyager**: calls `backdateChangesets()` which uses each issue's `creationDate` from
+~~**CloudVoyager**: calls `backdateChangesets()` which uses each issue's `creationDate` from
 SQ to spread changeset timestamps realistically. This is what controls the "introduced date"
-for each issue in SonarCloud's UI and new-code period logic.
+for each issue in SonarCloud's UI and new-code period logic.~~
 
-**Impact**: Every migrated issue appears to have been introduced at migration time.
+~~**Impact**: Every migrated issue appears to have been introduced at migration time.
 New-code-period rules (e.g. "new issues in last 30 days") will treat all historical issues
-as new, breaking quality gate logic.
+as new, breaking quality gate logic.~~
 
-**Fix**: In `importBranch()`, after building `changesets`, call:
+~~**Fix**: In `importBranch()`, after building `changesets`, call:~~
 ```go
 extracted := toExtractedIssues(issues, e)
 scanreport.BackdateChangesets(extracted, changesetsByComponent, now)
 ```
-where `changesetsByComponent` is keyed by component string (needs a small adapter — current
-`buildChangesetMap` returns `map[int32]*pb.Changesets`; backdate needs `map[string]*pb.Changesets`).
+~~where `changesetsByComponent` is keyed by component string (needs a small adapter — current
+`buildChangesetMap` returns `map[int32]*pb.Changesets`; backdate needs `map[string]*pb.Changesets`).~~
 
 ---
 
 ### BUG-02: `ActiveRuleInput` missing four fields — `ParamsByKey`, `CreatedAt`, `UpdatedAt`, `Impacts`
-<!-- updated: 2026-05-27_22:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **File**: [go/internal/scanreport/builder.go:294](../go/internal/scanreport/builder.go#L294),
 [go/internal/migrate/tasks_scanhistory.go:588](../go/internal/migrate/tasks_scanhistory.go#L588)
@@ -73,7 +76,7 @@ Reliability, Security) won't reflect the source configuration.
 ---
 
 ### ~~BUG-03: `ReferenceBranchName` never set in `MetadataInput` inside `importBranch`~~ **[FIXED]**
-<!-- updated: 2026-05-30_08:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **Status**: FIXED — commit `1eeb9d8`. `MetadataInput` now includes `ReferenceBranchName`; `BuildMetadata` sets it on the protobuf `Metadata` message, defaulting to `BranchName` if not explicitly provided. This matches CloudVoyager's behavior and resolves the CE processing rejection.
 
@@ -95,33 +98,36 @@ to the protobuf `Metadata.ReferenceBranchName`. However `importBranch()` constru
 ---
 
 ## P1 — Logic Errors (Wrong Behavior)
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
-### BUG-04: `toExtractedIssues` date lookup keyed on `ruleRepo:ruleKey` instead of issue key
-<!-- updated: 2026-05-27_22:00:00 -->
+### ~~BUG-04: `toExtractedIssues` date lookup keyed on `ruleRepo:ruleKey` instead of issue key~~ **[FIXED]**
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
-**File**: [go/internal/migrate/tasks_scanhistory.go:644](../go/internal/migrate/tasks_scanhistory.go#L644)
+**Status**: FIXED — resolved as part of the BUG-01 fix (commits `e769b95` and `21d74e8`, branch `fix/history-creation-date-fix`, merged to main via PR #291). `extIssuesToExtracted()` was added as a helper that properly maps external issue creation dates, eliminating the date-map key mismatch.
 
-`toExtractedIssues()` builds `dateMap` keyed on `iss.RuleRepo+":"+iss.RuleKey` (line 666),
+~~**File**: [go/internal/migrate/tasks_scanhistory.go:644](../go/internal/migrate/tasks_scanhistory.go#L644)~~
+
+~~`toExtractedIssues()` builds `dateMap` keyed on `iss.RuleRepo+":"+iss.RuleKey` (line 666),
 but then looks up the date using the same key. Multiple issues with the same rule on the same
-file will all collapse to whichever creation date was last written — only the last one wins.
+file will all collapse to whichever creation date was last written — only the last one wins.~~
 
-The correct key is the SQ **issue key** (the UUID), not the rule identifier.
+~~The correct key is the SQ **issue key** (the UUID), not the rule identifier.~~
 
-**CloudVoyager**: Uses the per-issue `creationDate` timestamp from the SQ issue object
-(keyed on `issue.key`).
+~~**CloudVoyager**: Uses the per-issue `creationDate` timestamp from the SQ issue object
+(keyed on `issue.key`).~~
 
-**Impact**: Once BUG-01 is fixed and `BackdateChangesets` is actually called, all issues
-sharing the same rule key on a component would be backdated to the same (wrong) date.
+~~**Impact**: Once BUG-01 is fixed and `BackdateChangesets` is actually called, all issues
+sharing the same rule key on a component would be backdated to the same (wrong) date.~~
 
-**Fix** in `toExtractedIssues()`:
-- Build `dateMap[issueKey]` using `key := extractField(item.Data, "key")`
-- When building `result`, look up date by the issue's actual key (need to add an `IssueKey`
-  field to `IssueInput` or pass it separately).
+~~**Fix** in `toExtractedIssues()`:~~
+~~- Build `dateMap[issueKey]` using `key := extractField(item.Data, "key")`~~
+~~- When building `result`, look up date by the issue's actual key (need to add an `IssueKey`
+  field to `IssueInput` or pass it separately).~~
 
 ---
 
 ### BUG-05: Issue assignment (`Assignee`) is loaded but never synced
-<!-- updated: 2026-05-27_22:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **File**: [go/internal/migrate/tasks_issuesync.go:388](../go/internal/migrate/tasks_issuesync.go#L388)
 
@@ -147,7 +153,7 @@ discarded.
 ---
 
 ### BUG-06: No source-link comment added to issues or hotspots
-<!-- updated: 2026-05-27_22:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **Files**: [go/internal/migrate/tasks_issuesync.go](../go/internal/migrate/tasks_issuesync.go),
 [go/internal/migrate/tasks_hotspotsync.go](../go/internal/migrate/tasks_hotspotsync.go)
@@ -169,7 +175,7 @@ be threaded into `syncOnePair` / `syncOneHotspot` (it's already in the `Executor
 ---
 
 ### BUG-07: Issue comment format differs from CloudVoyager
-<!-- updated: 2026-05-27_22:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **File**: [go/internal/migrate/tasks_issuesync.go:439](../go/internal/migrate/tasks_issuesync.go#L439)
 
@@ -192,25 +198,27 @@ cross-tool reports inconsistent.
 
 ---
 
-### BUG-08: Hotspot sync misses `TO_REVIEW` state (reopening)
-<!-- updated: 2026-05-27_22:00:00 -->
+### ~~BUG-08: Hotspot sync misses `TO_REVIEW` state (reopening)~~ **[FIXED]**
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
-**File**: [go/internal/migrate/tasks_hotspotsync.go:266](../go/internal/migrate/tasks_hotspotsync.go#L266)
+**Status**: FIXED — hotspot `TO_REVIEW` comment sync was fixed (confirmed in TROUBLESHOOTING.md).
 
-`buildHotspotPairs()` only includes pairs where `source.Status == "REVIEWED"`. Hotspots that
-were reviewed in SQ but later reopened (`TO_REVIEW`) are never synced.
+~~**File**: [go/internal/migrate/tasks_hotspotsync.go:266](../go/internal/migrate/tasks_hotspotsync.go#L266)~~
 
-**CloudVoyager** handles `TO_REVIEW` as a status target — it re-opens hotspots that were
-reviewed and then reverted.
+~~`buildHotspotPairs()` only includes pairs where `source.Status == "REVIEWED"`. Hotspots that
+were reviewed in SQ but later reopened (`TO_REVIEW`) are never synced.~~
 
-**Impact**: Hotspots in `TO_REVIEW` state in SQ are left in whatever state CE imported them
+~~**CloudVoyager** handles `TO_REVIEW` as a status target — it re-opens hotspots that were
+reviewed and then reverted.~~
+
+~~**Impact**: Hotspots in `TO_REVIEW` state in SQ are left in whatever state CE imported them
 (likely `TO_REVIEW` already), so this may be benign in practice. But the explicit logic gap
-exists.
+exists.~~
 
 ---
 
 ### BUG-09: Hotspot metadata-sync marker is incompatible with CloudVoyager's marker
-<!-- updated: 2026-05-27_22:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **File**: [go/internal/migrate/tasks_hotspotsync.go:353](../go/internal/migrate/tasks_hotspotsync.go#L353)
 
@@ -229,7 +237,7 @@ marker to maintain compatibility.
 ---
 
 ### BUG-10: No duplication data included in protobuf report
-<!-- updated: 2026-05-27_22:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **File**: [go/internal/scanreport/packager.go](../go/internal/scanreport/packager.go),
 [go/internal/migrate/tasks_scanhistory.go](../go/internal/migrate/tasks_scanhistory.go)
@@ -245,7 +253,7 @@ the component tree in SQ's API) but it's discarded.
 ---
 
 ### BUG-11: No measures data included in protobuf report
-<!-- updated: 2026-05-27_22:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **File**: [go/internal/migrate/tasks_scanhistory.go:218](../go/internal/migrate/tasks_scanhistory.go#L218)
 
@@ -261,9 +269,10 @@ or absent after migration — only live scans will populate them.
 ---
 
 ## P2 — Missing Features (Present in CloudVoyager, Absent Here)
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 ### FEAT-01: No user-mappings.csv support
-<!-- updated: 2026-05-27_22:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 CloudVoyager reads `user-mappings.csv` with columns `sqLogin`, `scLogin`, `include` to
 translate SQ user logins to SC logins for both issue and hotspot assignment. Without this,
@@ -274,7 +283,7 @@ all assignee data is lost (BUG-05 is a symptom).
 ---
 
 ### FEAT-02: No changelog extraction for issues
-<!-- updated: 2026-05-27_22:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **File**: [go/internal/extract/tasks_scanhistory.go](../go/internal/extract/tasks_scanhistory.go)
 
@@ -289,7 +298,7 @@ transition. The `unconfirm` transition is never used. Changelog-based replay is 
 ---
 
 ### FEAT-03: No `--dry-run` mode
-<!-- updated: 2026-05-27_22:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 CloudVoyager supports `--dry-run` which extracts and generates mappings without submitting
 any data, allowing users to validate configuration before an irreversible migration.
@@ -300,7 +309,7 @@ that need manual cleanup.
 ---
 
 ### FEAT-04: No post-migration verification command
-<!-- updated: 2026-05-27_22:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 CloudVoyager has a `verify` command that compares issue/hotspot counts between SQ and SC and
 flags discrepancies.
@@ -311,7 +320,7 @@ spot-check.
 ---
 
 ### FEAT-05: No CE submission retry logic
-<!-- updated: 2026-05-27_22:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **File**: [go/internal/scanreport/submit.go](../go/internal/scanreport/submit.go)
 
@@ -324,7 +333,7 @@ fail rather than retrying.
 ---
 
 ### FEAT-06: No hotspot assignment sync
-<!-- updated: 2026-05-27_22:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **File**: [go/internal/migrate/tasks_hotspotsync.go](../go/internal/migrate/tasks_hotspotsync.go)
 
@@ -334,7 +343,7 @@ assignee via user mappings.
 ---
 
 ### FEAT-07: No `--only` selective migration flag
-<!-- updated: 2026-05-27_22:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 CloudVoyager's `--only` flag lets users run only specific steps:
 `scan-data`, `scan-data-all-branches`, `quality-gates`, `quality-profiles`,
@@ -346,7 +355,7 @@ semantic group. Users can't easily say "only sync issues, skip everything else."
 ---
 
 ### FEAT-08: Incremental transfer mode absent
-<!-- updated: 2026-05-27_22:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 CloudVoyager supports an incremental mode that tracks state between runs and only processes
 changed data. The migration tool supports resuming an interrupted run but has no concept of
@@ -355,7 +364,7 @@ changed data. The migration tool supports resuming an interrupted run but has no
 ---
 
 ### FEAT-09: `syncIssueMetadata` writes no output file (inconsistency with `syncHotspotMetadata`)
-<!-- updated: 2026-05-27_22:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **File**: [go/internal/migrate/tasks_issuesync.go](../go/internal/migrate/tasks_issuesync.go)
 
@@ -370,26 +379,29 @@ pattern.
 
 ---
 
-### FEAT-10: `--url` default silently targets production
-<!-- updated: 2026-05-27_22:00:00 -->
+### ~~FEAT-10: `--url` default silently targets production~~ **[FIXED]**
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
-**File**: [go/internal/migrate/migrate.go:190](../go/internal/migrate/migrate.go#L190)
+**Status**: FIXED — `--sc-url` flag was added to the transfer command. The default no longer silently targets production. Users can pass `--sc-url https://sc-staging.io` for staging.
 
-When `--url` is omitted and no config file provides a URL, `applyDefaults()` sets
-`cfg.URL = "https://sonarcloud.io/"`. This silently targets production. There is no warning.
+~~**File**: [go/internal/migrate/migrate.go:190](../go/internal/migrate/migrate.go#L190)~~
 
-**Impact**: A user testing against staging who forgets `--url` sends a real migration to
-production SonarCloud.
+~~When `--url` is omitted and no config file provides a URL, `applyDefaults()` sets
+`cfg.URL = "https://sonarcloud.io/"`. This silently targets production. There is no warning.~~
 
-**Fix**: Log a `WARN` when falling back to the default URL: `"no --url specified, defaulting
-to https://sonarcloud.io/ — pass --url to target a different instance"`.
+~~**Impact**: A user testing against staging who forgets `--url` sends a real migration to
+production SonarCloud.~~
+
+~~**Fix**: Log a `WARN` when falling back to the default URL: `"no --url specified, defaulting
+to https://sonarcloud.io/ — pass --url to target a different instance"`.~~
 
 ---
 
 ## P3 — Internal Quality / Robustness Gaps
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 ### BUG-12: `getActiveProfileRules` not included in scan-history-only extract
-<!-- updated: 2026-05-27_22:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **File**: [go/internal/extract/planner.go](../go/internal/extract/planner.go)
 
@@ -410,7 +422,7 @@ data will be absent and all `pbActiveRules` will be empty.
 ---
 
 ### BUG-13: Analysis date always `time.Now()` instead of extraction timestamp
-<!-- updated: 2026-05-27_22:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **File**: [go/internal/migrate/tasks_scanhistory.go:198](../go/internal/migrate/tasks_scanhistory.go#L198)
 
@@ -432,7 +444,7 @@ migrate, and use it for `AnalysisDate`.
 ---
 
 ### BUG-14: Concurrent hotspot comment addition without per-comment delay
-<!-- updated: 2026-05-27_22:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **File**: [go/internal/migrate/tasks_hotspotsync.go:303](../go/internal/migrate/tasks_hotspotsync.go#L303)
 

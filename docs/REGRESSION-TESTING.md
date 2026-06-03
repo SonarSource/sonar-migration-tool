@@ -1,5 +1,5 @@
 # Live Regression Testing Protocol (Dynamic Workflow Edition)
-<!-- updated: 2026-05-31_00:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 A reusable protocol for verifying **any change** — bug fix, new feature, refactor, or enhancement — by running the sonar-migration-tool **live** against real SonarQube Server and SonarQube Cloud instances. The goal is to prove that the change works correctly AND that nothing else broke.
 
@@ -38,7 +38,7 @@ A reusable protocol for verifying **any change** — bug fix, new feature, refac
 ---
 
 ## Dynamic Workflow Architecture
-<!-- updated: 2026-05-31_00:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 When running this protocol as a Claude Dynamic Workflow, use the following phase and agent structure. Sequential steps are explicit — everything else is a parallel fan-out.
 
@@ -53,7 +53,7 @@ When running this protocol as a Claude Dynamic Workflow, use the following phase
 | Phase 6 — Declare | `Declare` | 5 (checklist categories) + 1 (synthesis) | Full |
 
 ### Workflow Script Template
-<!-- updated: 2026-05-31_00:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 Copy this into the `Workflow` tool to run this protocol as a Dynamic Workflow:
 
@@ -189,7 +189,7 @@ return verdict
 ---
 
 ## Phase 0 — Understand the Change
-<!-- updated: 2026-05-31_00:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **MANDATORY. Do not proceed until you can answer every question below.**
 
@@ -202,6 +202,7 @@ return verdict
 > - **Agent 4 — Acceptance & Edge Cases**: Answers questions 6 and 7 — writes 3–5 measurable acceptance criteria; enumerates all edge cases (empty, single, large, missing fields, idempotency)
 
 ### 0.1 — What Did You Change?
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 Answer ALL of the following:
 
@@ -214,6 +215,7 @@ Answer ALL of the following:
 7. **What edge cases exist?** — At minimum: empty input (zero entities), single entity, large volume (pagination), missing/optional fields, entities that already exist on SC (idempotency).
 
 ### 0.2 — Build the Regression Checklist
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[SEQUENTIAL]** Runs after all 4 Phase 0.1 agents complete — synthesizes their outputs into the two checklists below.
 
@@ -229,6 +231,7 @@ From 0.1, write down TWO lists:
 - [ ] Summary stats for unchanged features are the same as before your change
 
 ### 0.3 — Identify the Regression Watchlist
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM — N agents]** Spawn one grep/check agent per item discovered from the diff. All run concurrently.
 > - **Agent per function name**: greps the codebase for each function name found in the diff; reports every file referencing it
@@ -248,7 +251,7 @@ Find ALL code paths that share code with your change:
 ---
 
 ## Phase 1 — Adversarial Code Review
-<!-- updated: 2026-05-31_00:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > Re-read every changed file and every file on your regression watchlist. For each, ask:
 
@@ -261,24 +264,29 @@ Find ALL code paths that share code with your change:
 > - **Agent 6 — Synthesis** (waits for Agents 1–5): Aggregates all concerns into a single prioritized list. Format per concern: "This could cause [failure] if [condition]."
 
 ### Data Integrity
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 1. **Serialization boundaries**: Does data survive `json.Marshal`/`json.Unmarshal` round-trips? Do `nil` slices, empty maps, zero values, unexported fields survive? Do NDJSON extract outputs deserialize correctly in the migrate phase?
 2. **Field mapping**: Is every field from the SQ API response correctly mapped to the SC API request? Check: field name, type, nil handling, slice vs scalar.
 3. **Stat integrity**: Are counters accumulated correctly across goroutines? Protected by mutexes or atomics?
 
 ### Error Handling
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 4. **Every `error` return**: Is it checked? `_ = err` is a bug.
 5. **Retry logic**: Max attempts cap? Respects Retry-After? Distinguishes retriable (5xx, timeout) from non-retriable (4xx)?
 6. **Error propagation**: Can goroutine errors bubble up, or are they silently dropped?
 
 ### Concurrency Safety
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 7. **Shared state**: Any maps, slices, or counters mutated from concurrent goroutines without mutex/atomic protection?
 8. **Goroutine lifecycle**: Properly joined via `WaitGroup`/`errgroup`/channel close before exit? Cleaned up on error?
 9. **Channel safety**: Properly closed? No send-on-closed-channel panic? No leaked goroutines?
 
 ### API Contract Compliance
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 10. **HTTP method, endpoint path, request body, auth**: All exactly correct per the SonarQube API docs?
 
 ### Edge Cases
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 11. **0, 1, N**: Empty input, single item, pagination boundary?
 12. **Missing/nil fields**: Handled gracefully or panic?
 13. **Duplicates**: Could an entity be processed/created twice?
@@ -288,13 +296,14 @@ Find ALL code paths that share code with your change:
 ---
 
 ## Phase 2 — Environment Setup (Clean Slate)
-<!-- updated: 2026-05-31_00:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > Every test run starts from ZERO. No stale state. No leftover data.
 
 > **[SEQUENTIAL → PARALLEL FAN-OUT]** Execution order: 2.0 (read config, sequential prerequisite) → [2.1 ∥ 2.2 health checks] → [2.3 entity data swarm] → 2.4 (clean slate, sequential) → [2.5 baseline metric swarm]
 
 ### 2.0 — Connection Details Are in `config.json`
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[SEQUENTIAL]** 2.0 is a prerequisite — all subsequent agents need the exported env vars. Read config first.
 
@@ -327,6 +336,7 @@ export SC_ORG=$(jq -r '.sonarcloud.organizations[0].key' config.json)
 > **Do NOT skip this step.** If an agent claims it has no access to SQS or SC, it is wrong — `config.json` has everything needed.
 
 ### 2.1 — Verify Source (SQS) Is Accessible
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM — 2 agents]** 2.1 and 2.2 run concurrently after 2.0 completes:
 > - **Agent 1 — SQS Health**: runs the commands below; confirms status=UP, auth works, project exists
@@ -344,6 +354,7 @@ curl -s -u "${SONAR_TOKEN}:" "${SQ_URL}/api/issues/search?projectKeys=${PROJECT_
 ```
 
 ### 2.2 — Verify Target (SC) Is Accessible
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 ```bash
 # Verify SC auth works
@@ -351,6 +362,7 @@ curl -s -H "Authorization: Bearer ${SC_TOKEN}" "${SC_URL}/api/system/status" | j
 ```
 
 ### 2.3 — Verify Test Data Exists
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM — 8+ agents]** Spawn one agent per entity type. All run concurrently after 2.1+2.2 confirm environment is up.
 > - **Agent — Issues**: counts issues with manual changes (required for issue sync)
@@ -381,6 +393,7 @@ curl -s -u "${SONAR_TOKEN}:" "${SQ_URL}/api/qualitygates/list" | jq '.qualitygat
 ```
 
 ### 2.4 — Clean Slate
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[SEQUENTIAL]** Must run after 2.1+2.2+2.3 confirm the environment is live. Resets all state before running.
 
@@ -402,6 +415,7 @@ curl -s -H "Authorization: Bearer ${SC_TOKEN}" "${SC_URL}/api/projects/search?or
 ```
 
 ### 2.5 — Record Baseline (ALL Entity Types — Exhaustive)
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM — 40+ agents]** Spawn one agent per row in the table below. ALL rows are mandatory — not a subset. All are independent API calls and run concurrently.
 
@@ -471,7 +485,7 @@ Before running, record the COMPLETE source state. **Every cell must have a numbe
 ---
 
 ## Phase 3 — Build and Run LIVE
-<!-- updated: 2026-05-31_00:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > This is the core of the protocol. You are running the actual tool against real instances.
 
@@ -479,6 +493,7 @@ Before running, record the COMPLETE source state. **Every cell must have a numbe
 > 3.1 (build binary, sequential prerequisite) → [3.2 unit tests ∥ 3.3 race build ∥ 3.4 config verify] → 3.5 (pipeline, sequential data-dependency order) → [3.6 log analysis swarm]
 
 ### 3.1 — Build
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[SEQUENTIAL]** Prerequisite for everything else. Do not proceed until the binary exists.
 
@@ -489,6 +504,7 @@ cd go && go build -o ../sonar-migration-tool ./main.go && cd ..
 **If the build fails, STOP. Fix the compilation error. This counts as a loop iteration — after fixing, return to Phase 3.1.**
 
 ### 3.2 — Run Unit Tests
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM — 3 agents]** After 3.1 completes, spawn all three concurrently:
 > - **Agent 1 — Unit Tests**: runs `cd go && go test ./...`; reports pass/fail per package (Go parallelises packages internally)
@@ -502,12 +518,14 @@ cd go && go test ./... && cd ..
 **If any test fails, STOP. Fix the test. Return to Phase 3.1.**
 
 ### 3.3 — Run Race Detector Build
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 ```bash
 cd go && go build -race -o ../sonar-migration-tool-race ./main.go && cd ..
 ```
 
 ### 3.4 — Verify Config
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 ```bash
 cat migration-config.json | jq '.'
@@ -516,6 +534,7 @@ cat migration-config.json | jq '.'
 Confirm all URLs, tokens, project keys, organization keys, and feature flags are correct.
 
 ### 3.5 — Run the Full Pipeline LIVE
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[SEQUENTIAL PIPELINE]** extract → structure → mappings → migrate run in strict order — each phase reads the prior phase's NDJSON output.
 
@@ -550,6 +569,7 @@ echo "EXIT CODE: $?"
 ```
 
 ### 3.6 — Capture Evidence
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM — 4 agents]** Spawn one log analysis agent per pipeline command after all commands complete:
 > - **Agent 1 — Extract Log**: scans `/tmp/smt-extract-*.log` for panics, DATA RACE, FATAL, ERROR; extracts summary stats
@@ -570,7 +590,7 @@ For each command, record:
 ---
 
 ## Phase 4 — Exhaustive Verification of ALL Migrated Data
-<!-- updated: 2026-05-31_23:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **The stop condition is NOT "the tool ran without errors." The stop condition is "EVERY piece of data from SonarQube Server exists and is correct in SonarCloud."** Do NOT trust the tool's own summary. Query the source and target APIs independently to verify EVERY entity type below.
 
@@ -579,6 +599,7 @@ For each command, record:
 > **[PARALLEL AGENT SWARM — 100+ agents]** This is the maximum parallelization phase. All subsections (4.1–4.18) are independent and spawn their own swarms concurrently. Spawn one agent per entity type per subsection. Every agent queries both SQS and SC APIs independently and returns `{entity, sqsCount, scCount, match, diff}`.
 
 ### 4.1 — Verify Extract Output (ALL Entity Types)
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM — 30+ agents]** Spawn one inspection agent per NDJSON entity type file. ALL files must be checked — not a sample.
 
@@ -617,6 +638,7 @@ for f in ./files/*/*.ndjson; do echo "=== $f ==="; head -3 "$f" | jq '.'; done
 **FAIL condition:** Any file that should exist (source has data) but is missing or empty.
 
 ### 4.2 — Verify Projects (Per-Project Identity)
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM]** Spawn one agent per project.
 
@@ -649,6 +671,7 @@ done
 **FAIL condition:** Any project missing, or any field mismatch.
 
 ### 4.3 — Verify Quality Profiles (Exhaustive)
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM]** Spawn agents for: count comparison, per-profile rule count, inheritance chains, defaults, permissions, project associations.
 
@@ -716,6 +739,7 @@ done
 **FAIL condition:** Any non-built-in profile missing, rule count mismatch, broken inheritance, wrong default, or wrong project association.
 
 ### 4.4 — Verify Quality Gates (Exhaustive)
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM]** Spawn agents for: count, per-gate conditions, defaults, permissions, project associations.
 
@@ -783,6 +807,7 @@ done
 **FAIL condition:** Any custom gate missing, condition mismatch, wrong default, or wrong project association.
 
 ### 4.5 — Verify Groups & Membership (Exhaustive)
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM]** Spawn one agent per group for existence + membership verification.
 
@@ -834,6 +859,7 @@ done
 **FAIL condition:** Any non-built-in group missing, or membership not transferred for users that exist in SC.
 
 ### 4.6 — Verify Permission Templates (Exhaustive)
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM]** Spawn one agent per template × permission.
 
@@ -882,6 +908,7 @@ curl -s -u "${SONAR_TOKEN}:" "${SQ_URL}/api/permissions/search_templates" \
 **FAIL condition:** Any template missing, description wrong, or group permission not transferred.
 
 ### 4.7 — Verify Issues (Exhaustive — Per-Project)
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM]** Spawn one swarm per project. Within each project, spawn agents for: total count, status distribution, resolution distribution, severity distribution, type distribution, metadata spot-checks (5+ issues), and comment verification.
 
@@ -1037,6 +1064,7 @@ done
 **FAIL condition:** ANY count mismatch, any dropped status transition, any missing comment, any wrong assignee.
 
 ### 4.8 — Verify Hotspots (Exhaustive — Per-Project)
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM]** Spawn one agent per project for count + one agent for metadata spot-checks.
 
@@ -1093,6 +1121,7 @@ done
 **FAIL condition:** Any hotspot missing, status wrong, resolution wrong, or comments dropped.
 
 ### 4.9 — Verify Settings (Global + Per-Project)
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM]** Spawn one agent for global settings + one agent per project.
 
@@ -1140,6 +1169,7 @@ done
 **FAIL condition:** Any SC-compatible setting not migrated, or any setting migrated with wrong value, or any setting silently dropped without a log WARN.
 
 ### 4.10 — Verify New Code Periods (Global + Per-Project + Per-Branch)
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM]** One agent for global NCD + one agent per project.
 
@@ -1185,6 +1215,7 @@ done
 **FAIL condition:** Any NCD type or value mismatch.
 
 ### 4.11 — Verify Rules (Custom Rules)
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM]** One agent per language for rule comparison.
 
@@ -1228,6 +1259,7 @@ echo "User-created custom rules on SQ: ${SQ_USER_RULES}"
 **FAIL condition:** Any custom rule missing or parameter mismatch.
 
 ### 4.12 — Verify Project Permissions (Exhaustive — Per-Project × Per-Permission)
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM]** Spawn one agent per project. Within each, check all 6 permission types for both groups and users.
 
@@ -1283,6 +1315,7 @@ done
 **FAIL condition:** Any permission not transferred (except documented built-in group remapping).
 
 ### 4.13 — Verify ALM Bindings (Per-Project)
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM]** One agent per project.
 
@@ -1312,6 +1345,7 @@ done
 **FAIL condition:** Any binding missing or pointing to wrong repo.
 
 ### 4.14 — Verify Portfolios (Enterprise Only)
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM]** One agent for portfolio count + one per portfolio for hierarchy.
 
@@ -1349,6 +1383,7 @@ fi
 **FAIL condition (if Enterprise):** Any portfolio missing or hierarchy broken. **Known limitation:** Enterprise API may require elevated token — document if 403.
 
 ### 4.15 — Verify Measures & Metrics (Per-Project)
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM]** One agent per project.
 
@@ -1406,6 +1441,7 @@ done
 **FAIL condition:** Any key metric mismatch (exact or outside tolerance).
 
 ### 4.16 — Verify Users (Lookup Verification)
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM]** One agent for user existence check.
 
@@ -1433,6 +1469,7 @@ done
 **FAIL condition:** User lookup failures that silently break permission or assignee migration.
 
 ### 4.17 — Silent Failure Detection
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM — 4 agents]** All independent scans.
 
@@ -1480,6 +1517,7 @@ grep -E "(matched|synced|migrated|created|updated).*=\s*0" /tmp/smt-migrate-*.lo
 **FAIL condition:** Any undocumented error, any silent data drop, any suspicious count gap.
 
 ### 4.18 — Exhaustive Regression Table (ALL Entity Types)
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM]** Spawn one agent per row. All independent API queries. This table must have ZERO blank cells.
 
@@ -1567,6 +1605,7 @@ For EVERY entity type — **whether or not it was touched by the change** — fi
 - **If ALL 73 rows match** (or mismatches are documented known limitations with justification) → **proceed to Phase 6 (declare clean pass).**
 
 ### 4.19 — Edge Cases
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM — 5 agents]** All 5 edge cases are independent — spawn all concurrently.
 
@@ -1579,13 +1618,14 @@ For EVERY entity type — **whether or not it was touched by the change** — fi
 ---
 
 ## Phase 5 — Investigate, Fix, and Loop Back
-<!-- updated: 2026-05-31_00:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **This is the recursive part. For every failure, trace it to root cause, fix it, and re-run the entire pipeline from Phase 3.**
 
 > **[SEQUENTIAL → PARALLEL FAN-OUT]** 5.1 classifies failures (sequential) → 5.2 launches parallel isolation agents → 5.3 runs parallel hypothesis agents → 5.4 applies minimal fix (sequential) → 5.5 runs parallel pre-flight checks → loop back to Phase 3.
 
 ### 5.1 — Classify the Failure
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **ADVERSARIAL NOTE — Never Blame Infrastructure First:**
 >
@@ -1610,6 +1650,7 @@ For EVERY entity type — **whether or not it was touched by the change** — fi
 | **CE task failed** | `status: FAILED` in CE task response | Compare protobuf output against CloudVoyager's. Check every field in metadata.pb. Verify ZIP structure matches. Do NOT assume infrastructure failure. |
 
 ### 5.2 — Isolate with API Queries
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM — 3 agents]** Three independent isolation agents run concurrently to triangulate the failure:
 > - **Agent 1 — SQS Query**: makes the exact API calls the code makes against SQS; reports what data exists at the source
@@ -1630,6 +1671,7 @@ curl -s -H "Authorization: Bearer ${SC_TOKEN}" "${SC_URL}/api/..." | jq '.'
 ```
 
 ### 5.3 — Root Cause Statement
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM — 3–5 hypothesis agents]** Before writing the root cause, spawn agents to investigate each plausible hypothesis simultaneously:
 > - **Agent 1 — Field Mapping Hypothesis**: checks every field in the diff against the SQS API response schema; reports any name/type mismatch
@@ -1644,10 +1686,12 @@ Before fixing, write:
 > "The [specific behavior] was wrong because [specific reason]. Evidence: [API response / log line / code path]."
 
 ### 5.4 — Apply Minimal Fix
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 Fix only the root cause. Do not make unrelated changes.
 
 ### 5.5 — Loop Back to Phase 3
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **[PARALLEL AGENT SWARM — 2 agents]** Pre-flight runs concurrently:
 > - **Agent 1 — go vet**: runs `go vet ./...`; reports any errors
@@ -1670,7 +1714,7 @@ After fixing:
 ---
 
 ## Phase 6 — Declare Full Clean Pass (STOP Condition)
-<!-- updated: 2026-05-31_00:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 A full clean pass requires **ALL** of the following. Not a subset. Not "close enough."
 
@@ -1697,6 +1741,7 @@ A full clean pass requires **ALL** of the following. Not a subset. Not "close en
 > 5. **Is "0 matched pairs" actually correct, or is it masking a bug?** Zero matches could mean: (a) the matching algorithm is broken, (b) component key stripping is wrong, (c) issues weren't created in Cloud, or (d) there genuinely are no matchable issues. Only (d) is a clean pass. Verify (a)-(c) before accepting (d).
 
 ### Crash-Free Execution
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 - [ ] Every command exited with code 0
 - [ ] Zero panics in output
 - [ ] Zero `DATA RACE` warnings from race detector
@@ -1710,11 +1755,13 @@ A full clean pass requires **ALL** of the following. Not a subset. Not "close en
 - [x] `go build -race` compiles and runs clean
 
 ### Feature Verification (from Phase 0.1.6)
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 - [ ] Every acceptance criterion for the change passes
 - [ ] Every edge case (empty, single, large, missing fields, idempotency) handled correctly
 - [ ] **The feature's core code path was exercised with real data** — not just the no-op/empty path
 
 ### Exhaustive Data Correctness (ALL 73 rows from Phase 4.18)
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 > **This is the core stop condition. "Clean pass" means EVERY piece of data migrated correctly — not just "the tool ran without errors."**
 
@@ -1808,11 +1855,13 @@ A full clean pass requires **ALL** of the following. Not a subset. Not "close en
 - [ ] **CE tasks succeeded** — if scan history import is part of the feature, the CE task must complete with status SUCCESS, not FAILED
 
 ### Regression Verification
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 - [ ] All entity types NOT touched by the change still extract/migrate correctly
 - [ ] Phase 4.18 regression table has zero unexpected mismatches
 - [ ] No new errors or warnings in logs for unchanged features
 
 ### Run Metadata
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 - [ ] Number of loop iterations to reach clean pass: ___
 - [ ] Total wall-clock time: ___
 - [ ] Final summary stats captured and saved
@@ -1827,11 +1876,12 @@ A full clean pass requires **ALL** of the following. Not a subset. Not "close en
 ---
 
 ## Programmatic Regression Testing Suite (`regtest` command)
-<!-- updated: 2026-05-31_23:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 The `regtest` command is the **automated equivalent of Phase 4**. Instead of manually querying APIs and filling in tables, it programmatically connects to both SQS and SC, runs 70+ parallel checks across all entity types, and produces a pass/fail report.
 
 ### Usage
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 ```bash
 # After running the full pipeline (extract → structure → mappings → migrate):
@@ -1849,6 +1899,7 @@ The `regtest` command is the **automated equivalent of Phase 4**. Instead of man
 ```
 
 ### What It Checks (43 check functions, 70+ individual checks)
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 | Category | Checks |
 |---|---|
@@ -1869,11 +1920,13 @@ The `regtest` command is the **automated equivalent of Phase 4**. Instead of man
 | Extract Files | NDJSON file existence and non-emptiness |
 
 ### Exit Code
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 - `0` — ALL checks passed (verdict: PASS)
 - `1` — One or more checks failed (verdict: FAIL)
 
 ### Integration with the Regression Protocol
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 Run `regtest` as a replacement for Phase 4.18 (Exhaustive Regression Table). If it returns exit code 1, proceed to Phase 5 (investigate + fix). If it returns exit code 0, proceed to Phase 6 (declare clean pass).
 
@@ -1896,6 +1949,7 @@ fi
 ```
 
 ### Source Code
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 - [go/internal/regtest/suite.go](go/internal/regtest/suite.go) — Suite orchestrator, config loading, parallel runner
 - [go/internal/regtest/checks.go](go/internal/regtest/checks.go) — All 43 check function implementations
@@ -1906,12 +1960,12 @@ fi
 ---
 
 ## Current Test Status
-<!-- updated: 2026-05-31_20:20:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 As of **2026-05-31**, full live end-to-end regression passes on branch `fix/four-pipelines-compatibility`.
 
 ### Code Quality Gates
-<!-- updated: 2026-05-31_20:20:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 | Check | Status |
 |---|---|
@@ -1922,7 +1976,7 @@ As of **2026-05-31**, full live end-to-end regression passes on branch `fix/four
 | pipeline coverage | 89.9% (up from 75.6% — threshold 80%) |
 
 ### Live End-to-End Migration (2026-05-30-01 → 2026-05-30-05)
-<!-- updated: 2026-05-30_18:45:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 **Environment:**
 - Source: SonarQube Server 2026.2.0 Enterprise at `localhost:9000` (admin token `squ_*`)
@@ -1964,7 +2018,7 @@ As of **2026-05-31**, full live end-to-end regression passes on branch `fix/four
 | `ProjectKeys` filter | Unit-tested (`TestGetProjectsTaskNoFilter`, `TestGetProjectsTaskWithFilter`) |
 
 ### Pre-existing Environment Limitations (not regressions from this PR)
-<!-- updated: 2026-05-30_18:45:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 1. **Enterprise API** (`api.sc-staging.io/enterprises/enterprises`) returns 403 with a standard user token. This only affects `createPortfolios` (enterprise-only task). Since our test SQS has 0 portfolios, this has no impact on the 1:1 result. Workaround: run with `--edition developer` (skips enterprise-only tasks). In a real enterprise migration with portfolios, an enterprise API token is required.
 
@@ -1979,12 +2033,12 @@ Loop iterations to clean pass: **1** (live run). No panics, no DATA RACE, exit 0
 ---
 
 ## Full Entity Registry
-<!-- updated: 2026-05-26_00:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 All entity types handled by the tool. Use this as your regression checklist.
 
 ### Extract + Migrate (both phases)
-<!-- updated: 2026-05-26_00:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 | Entity Type | Extract API (SQS) | Migrate API (SC) |
 |---|---|---|
@@ -2024,7 +2078,7 @@ All entity types handled by the tool. Use this as your regression checklist.
 | SCM Blame Data | `/api/sources/scm` | (via scan report) |
 
 ### Extract Only (not migrated)
-<!-- updated: 2026-05-26_00:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 | Entity Type | Extract API (SQS) | Purpose |
 |---|---|---|
@@ -2049,7 +2103,7 @@ All entity types handled by the tool. Use this as your regression checklist.
 ---
 
 ## Reference: CLI Commands
-<!-- updated: 2026-05-26_00:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 | Command | Purpose | When to Run in Tests |
 |---------|---------|---------------------|
@@ -2067,7 +2121,7 @@ All entity types handled by the tool. Use this as your regression checklist.
 ---
 
 ## Reference: Config Files
-<!-- updated: 2026-05-26_00:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 | File | Purpose |
 |------|---------|
@@ -2081,12 +2135,12 @@ All entity types handled by the tool. Use this as your regression checklist.
 ---
 
 ## Reference: Creating Test Data
-<!-- updated: 2026-05-26_00:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 When your SQS instance doesn't have enough data to exercise a feature:
 
 ### Bulk-Tag Issues
-<!-- updated: 2026-05-26_00:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 ```bash
 python3 -c "
@@ -2114,7 +2168,7 @@ print(f'Tagged: {sum(1 for r in results if r == \"ok\")}/{len(keys)}')
 ```
 
 ### Other Operations
-<!-- updated: 2026-05-26_00:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 Adapt the pattern above for:
 - `POST /api/issues/do_transition` — change issue statuses

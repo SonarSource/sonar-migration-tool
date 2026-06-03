@@ -1,11 +1,13 @@
 # Architecture
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 ## Overview
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
-sonar-migration-tool is a Go CLI application built with [Cobra](https://github.com/spf13/cobra). It compiles to a single static binary with no runtime dependencies. Its purpose is to migrate configurations from SonarQube Server to SonarQube Cloud.
+sonar-migration-tool is a Go CLI application built with [Cobra](https://github.com/spf13/cobra). It compiles to a single static binary with no runtime dependencies. Its purpose is to migrate configurations, source code, issues, and history from SonarQube Server to SonarQube Cloud.
 
 ## Project Structure
-<!-- updated: 2026-05-30_08:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 The repository contains two Go modules:
 
@@ -95,10 +97,12 @@ sonar-migration-tool/
 ```
 
 ## Task Engine
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 Both `extract` and `migrate` use a typed task engine with topological sort planning.
 
 ### How It Works
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 1. **Task registration** — Each task is a Go function with typed dependencies and a defined execution function. Tasks declare which other tasks they depend on.
 
@@ -109,7 +113,7 @@ Both `extract` and `migrate` use a typed task engine with topological sort plann
 4. **Data flow** — Tasks read input from a `DataStore` (which loads JSONL files from previous tasks) and write output via a `ChunkWriter` (which produces JSONL files for downstream tasks).
 
 ### Extract Tasks (67 tasks)
-<!-- updated: 2026-05-26_17:30:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 Organized by category in `go/internal/extract/tasks_*.go`:
 - **System** — Server version, edition, plugins
@@ -120,11 +124,11 @@ Organized by category in `go/internal/extract/tasks_*.go`:
 - **Templates** — Permission templates, associated groups/users
 - **Views** — Portfolios, applications (Enterprise+ only)
 - **Issues** — Accepted issues, safe hotspots
-- **Scan History** — `getProjectIssuesFull` (issues with comments/tags/flows), `getProjectHotspotsFull` (hotspots with review details), component trees, source code, SCM data (requires `--include-scan-history`)
+- **Scan History** — `getProjectIssuesFull` (issues with comments/tags/flows), `getProjectHotspotsFull` (hotspots with review details), component trees (using `FIL,UTS` qualifiers for files and unit test source files), source code, SCM data. External issues (ruff, pylint, flake8, etc.) are extracted alongside native issues. Requires `--include-scan-history`.
 - **Webhooks** — Global and project-level webhooks
 
 ### Migrate Tasks (44+ tasks)
-<!-- updated: 2026-05-30_08:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 Organized by category in `go/internal/migrate/tasks_*.go`:
 - **Create** — Projects, groups, quality gates, quality profiles, permission templates, portfolios
@@ -133,13 +137,14 @@ Organized by category in `go/internal/migrate/tasks_*.go`:
 - **Permissions** — Template permissions, project permissions
 - **Rules** — Custom rule activation
 - **ALM** — DevOps platform binding detection
-- **Scan History** — Import scan reports via reconstructed protobuf format (native issues, external issues via ExternalIssue protobuf, hotspots mapped to issues)
+- **Scan History** — Import scan reports via reconstructed protobuf format (native issues, external issues via ExternalIssue protobuf, hotspots mapped to issues). BackdateChangesets mechanism preserves original issue creation dates; external issues are included in changeset backdating alongside native issues.
 - **Issue Metadata Sync** — `syncIssueMetadata`: two-phase task that waits for Cloud indexing, matches source→cloud issues by composite key (rule|filePath|line), then syncs status transitions (with fallback transition paths), comments, and tags per matched pair. Idempotent via `metadata-synchronized` tag. Requires `--include-scan-history`.
 - **Hotspot Metadata Sync** — `syncHotspotMetadata`: same two-phase pattern, matches source→cloud hotspots by composite key, syncs REVIEWED status/resolution and comments. Idempotent. Requires `--include-scan-history`.
 - **Global Settings** — Migrates only SQS-supported settings; `sonar.dbcleaner.branchesToKeepWhenInactive` is migrated as a regex on SonarQube Cloud
 - **Delete/Reset** — Cleanup tasks for the `reset` command
 
 ## Data Flow
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 ```
 SonarQube Server API
@@ -159,7 +164,7 @@ SonarQube Cloud API
 ```
 
 ## API Binding Library (sq-api-go)
-<!-- updated: 2026-05-26_17:30:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 The `lib/sq-api-go/` module provides typed Go methods for SonarQube Server and Cloud APIs. Key features:
 
@@ -171,7 +176,7 @@ The `lib/sq-api-go/` module provides typed Go methods for SonarQube Server and C
 - **Cloud API clients** — `IssuesClient` and `HotspotsClient` in `cloud/` provide typed methods for Cloud issue/hotspot search, transitions, comments, and tags
 
 ## Version-Specific Pipeline Architecture (SPEC-011)
-<!-- updated: 2026-05-31_20:20:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 `go/internal/pipeline/` implements four version-specific extraction pipelines selected once at startup via a version router. No runtime version branching occurs inside the extraction or build phases.
 
@@ -212,7 +217,7 @@ All four pipelines implement the `Pipeline` interface; compile-time checks (`var
 **V2 groups note:** The `/api/v2/authorizations/groups` response omits `membersCount`. The `id` field is a UUID string (incompatible with `Group.ID int`, left zero); `managed` has no `Group` field and is discarded; `default` IS captured and propagated to `Group.Default`. The standard-API fallback is triggered by any V2 error (not just 404), intentionally ensuring callers get groups even when the V2 endpoint is temporarily unavailable.
 
 ## Transfer Command (Single-Project Migration)
-<!-- updated: 2026-05-31_20:20:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 `go/cmd/transfer.go` provides a CloudVoyager-compatible single-command migration path. It
 chains the four manual phases automatically so users never touch a CSV file. Flag names
@@ -257,7 +262,7 @@ the SonarCloud enterprise key differs from the organization key (typically only 
 portfolio migration in large Enterprise deployments).
 
 ## Version Detection
-<!-- updated: 2026-05-29_02:30:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 The tool auto-detects SonarQube Server version and edition:
 
@@ -268,11 +273,12 @@ The tool auto-detects SonarQube Server version and edition:
 - **Edition detection fallback:** When `/api/system/info` returns 403 (non-admin token), edition detection falls back to `/api/navigation/global` to extract the edition from the response
 
 ## Configuration
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 Commands accept flags, positional arguments, or a JSON config file (`--config path/to/config.json`). CLI flags override config file values. See `docs/CONFIG.md` for details.
 
 ## Browser-Based GUI
-<!-- updated: 2026-05-30_08:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 `go/internal/gui/` implements a local HTTP server that serves a React-based single-page application for running the full wizard workflow in a browser.
 
@@ -286,11 +292,12 @@ Commands accept flags, positional arguments, or a JSON config file (`--config pa
 The `gui` command (`go/cmd/gui.go`) starts the server on `localhost:0` (auto-assigned port) and opens the browser automatically. Pass `--no-browser` to suppress auto-open, or `--addr` to bind to a specific address.
 
 ## Predictive Report Engine
-<!-- updated: 2026-05-30_08:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 `go/internal/predict/` generates a PDF migration summary from local data only — no SonarQube Cloud API calls are made. The engine reads from files produced by `extract`, `structure`, and `mappings` and predicts how the migration will go.
 
 ### Architecture
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 - **`BuildPredictiveRun`** — reads JSONL extract files and mapping CSVs; produces a `PredictiveRun` struct
 - **`CollectSummary`** — walks `PredictiveRun` and classifies each entity using a five-status taxonomy
@@ -299,6 +306,7 @@ The `gui` command (`go/cmd/gui.go`) starts the server on `localhost:0` (auto-ass
 Report summary logic lives in `go/internal/report/summary/` (`collect.go`, `pdf.go`, `types.go`).
 
 ### Five-Status Taxonomy
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 | Status | Color | Meaning |
 |--------|-------|---------|
@@ -309,6 +317,7 @@ Report summary logic lives in `go/internal/report/summary/` (`collect.go`, `pdf.
 | Skipped | Grey | Entity explicitly excluded |
 
 ### Limitations
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 Two outcome classes cannot be predicted ahead of time and are omitted from the predictive report:
 
@@ -316,13 +325,14 @@ Two outcome classes cannot be predicted ahead of time and are omitted from the p
 - **Global settings** — the list of SQC-supported settings is discovered dynamically at migrate time
 
 ## Testing
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 - **Framework:** stdlib `testing` + `net/http/httptest` for HTTP mocking
 - **Run tests:** `cd go && go test ./... -count=1`
 - **Coverage:** `cd go && go test ./... -coverprofile=coverage.out`
 
 ## Roadmap: Data Migration Specs
-<!-- updated: 2026-05-26_17:30:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 The `roadmap/specs/` directory contains 25 PRD specifications for harvesting data migration features from CloudVoyager (the Node.js predecessor). These specs provide a complete blueprint for building full SonarQube Server → Cloud migration — including issues, hotspots, source code, measures, and all metadata — via a reconstructed SonarScanner protobuf report format.
 
@@ -339,7 +349,7 @@ See [roadmap/README.md](../roadmap/README.md) for the full spec index, dependenc
 | User Experience | SPEC-023 through SPEC-025 | P2/P3 | Desktop app, sync-metadata command, config validation |
 
 ### Issue #104: Migrate All Issues (Implementation Status)
-<!-- updated: 2026-05-27_08:00:00 -->
+<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 Full end-to-end issue and hotspot migration pipeline. Current status by phase:
 
