@@ -325,7 +325,14 @@ func syncProjectIssues(ctx context.Context, e *Executor, cloudKey, orgKey, serve
 		return nil // non-fatal — skip project
 	}
 	if len(cloudIssues) == 0 {
-		e.Logger.Debug("syncIssueMetadata: no cloud issues to match", "project", cloudKey)
+		// Source had issues worth syncing, but Cloud has nothing to
+		// match against. Most common cause: the scan-history CE task
+		// for this project failed (or was skipped), so the report was
+		// never indexed and Cloud has no issues yet. Promote to INFO
+		// so the operator can correlate the skip with the upstream
+		// failure log instead of wondering why nothing happened. #299.
+		e.Logger.Info("syncIssueMetadata: skipping project — no Cloud issues to match (scan-history CE task likely failed or was skipped)",
+			"project", cloudKey, "source_issues", len(sourceIssues))
 		return nil
 	}
 
