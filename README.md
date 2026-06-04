@@ -83,14 +83,16 @@ The tool ships with several commands. Pick the workflow that matches your situat
 
 Use `transfer`. It runs the whole migration in a single command — extracting from SonarQube Server, mapping the configuration, importing source code and issues, and pushing everything to SonarQube Cloud — then writes a PDF summary you can hand to your team.
 
+`transfer` shares the same `--config` file and the same direction-neutral CLI flags as `extract` / `migrate` / `reset` — `--source-*` for the SonarQube Server side, `--target-*` for the SonarQube Cloud side. Anything you don't pass on the CLI is read from the config file; CLI flags always win.
+
 ```bash
 ./sonar-migration-tool transfer \
-  --sq-url https://sonarqube.example.com \
-  --sq-token sqp_xxx \
+  --source-url https://sonarqube.example.com \
+  --source-token sqp_xxx \
   --project-key my-project \
-  --sc-token squ_xxx \
-  --sc-org my-org \
-  --include-scan-history
+  --target-token squ_xxx \
+  --default_organization my-org \
+  --include_scan_history
 ```
 
 Or use a **config file** to keep tokens out of your shell history:
@@ -98,10 +100,12 @@ Or use a **config file** to keep tokens out of your shell history:
 ```bash
 cp examples/config-transfer.example.json my-config.json
 # Edit my-config.json with your SonarQube Server and SonarQube Cloud credentials
-./sonar-migration-tool transfer -c my-config.json
+./sonar-migration-tool transfer -c my-config.json --project-key my-project
 ```
 
-Add `--sc-url` to target a different SonarQube Cloud instance (e.g. `--sc-url https://sc-staging.io` for staging).
+The config file uses the same unified shape as every other command — one top-level block of shared defaults plus `source` and `target` sub-objects. `concurrency`, `timeout`, `export_directory`, mTLS (`pem_file_path` / `key_file_path` / `cert_password`), and `--default_organization` / `--enterprise_key` are all honored either via the JSON file or as CLI overrides.
+
+Add `--target-url` to target a different SonarQube Cloud instance (e.g. `--target-url https://sc-staging.io` for staging).
 
 Full reference, more examples, and the config-file format:
 👉 **[Using `transfer` — Transfer One Project](docs/TRANSFER.md)**

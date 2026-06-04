@@ -1,19 +1,19 @@
 {
-  "sonarqube": {
+  "concurrency": 10,
+  "timeout": 60,
+  "export_directory": "./migration-files",
+  "source": {
     "url": "https://sonarqube.example.com",
     "token": "sqp_YOUR_SONARQUBE_SERVER_TOKEN",
-    "projectKey": "my-project-key"
+    "pem_file_path": null,
+    "key_file_path": null,
+    "cert_password": null
   },
-  "sonarcloud": {
+  "target": {
     "url": "https://sonarcloud.io/",
     "token": "YOUR_SONARCLOUD_TOKEN",
-    "organization": "my-org",
-    "enterpriseKey": "my-enterprise"
-  },
-  "settings": {
-    "exportDirectory": "./migration-files",
-    "concurrency": 10,
-    "includeScanHistory": true,
-    "debug": false
+    "default_organization": "my-org",
+    "enterprise_key": "my-enterprise",
+    "include_scan_history": true
   }
 }
