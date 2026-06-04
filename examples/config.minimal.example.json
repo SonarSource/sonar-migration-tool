@@ -1,0 +1,11 @@
+{
+  "source": {
+    "url":   "https://sonarqube.example.com",
+    "token": "squ_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  "target": {
+    "url":   "https://sonarcloud.io/",
+    "token": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "enterprise_key": "your-enterprise"
+  }
+}
