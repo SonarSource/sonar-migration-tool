@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-pdf/fpdf"
 )
 
 // TestRenderPDFGlobalSettingsWrappingRow is a regression for issue
@@ -472,5 +474,91 @@ func TestToPredictiveTenseAppliedValue(t *testing.T) {
 		if got != c.want {
 			t.Errorf("toPredictiveTense(%q, true) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// Issue #302: long inline-bold values must wrap inside the cell
+// instead of bleeding past the page right margin and continuing at
+// the page left margin (which used to clobber the Setting Key column
+// in the next row).
+func TestWrapInlineBoldLines_LongValueStaysInCell(t *testing.T) {
+	// Set up a minimal pdf with the embedded fonts so GetStringWidth
+	// returns realistic mm widths.
+	pdf := fpdf.New("P", "mm", "Letter", "")
+	registerUnicodeFont(pdf)
+	pdf.AddPage()
+
+	longVal := "**/lib/**,**/vendor/**,**/node_modules/**,**/build/**,**/dist/**,**/.gradle/**,**/target/**,**/.tox/**,**/__pycache__/**"
+	text := "Applied value=" + inlineBoldStart + longVal + inlineBoldEnd
+
+	const cellWidth = 80.0
+	const fontSize = 6.0
+
+	phys := wrapInlineBoldLines(pdf, text, cellWidth, fontSize)
+	if len(phys) < 2 {
+		t.Fatalf("expected the value to wrap to multiple physical lines, got %d", len(phys))
+	}
+	// Every line's rendered width must fit within the cell — otherwise
+	// pdf.Write would still trigger its page-margin wrap at render time.
+	for i, segs := range phys {
+		var lineW float64
+		for _, s := range segs {
+			style := ""
+			if s.bold {
+				style = "B"
+			}
+			pdf.SetFont(pdfFontFamilyBody, style, fontSize)
+			lineW += pdf.GetStringWidth(s.text)
+		}
+		if lineW > cellWidth {
+			t.Errorf("physical line %d width %.2f exceeds cellWidth %.2f", i, lineW, cellWidth)
+		}
+	}
+}
+
+// Style is preserved across the wrap boundary — the "Applied value="
+// prefix stays regular, the bold value stays bold even when the wrap
+// point falls inside it.
+func TestWrapInlineBoldLines_PreservesStyleAcrossWrap(t *testing.T) {
+	pdf := fpdf.New("P", "mm", "Letter", "")
+	registerUnicodeFont(pdf)
+	pdf.AddPage()
+
+	longBold := strings.Repeat("ABCDEF,", 30)
+	text := "Applied value=" + inlineBoldStart + longBold + inlineBoldEnd
+
+	phys := wrapInlineBoldLines(pdf, text, 60.0, 6.0)
+	if len(phys) < 2 {
+		t.Fatalf("expected multi-line wrap, got %d", len(phys))
+	}
+	// First line: should start with a regular "Applied value=" segment.
+	if len(phys[0]) == 0 || phys[0][0].bold {
+		t.Errorf("first physical line should start regular, got %+v", phys[0])
+	}
+	// Some later line should still be bold (the trailing value continues).
+	sawBold := false
+	for _, segs := range phys[1:] {
+		for _, s := range segs {
+			if s.bold {
+				sawBold = true
+			}
+		}
+	}
+	if !sawBold {
+		t.Error("bold attribute should carry across the wrap to the trailing lines")
+	}
+}
+
+// A short value still renders on a single physical line — the new
+// wrap path mustn't regress the common case.
+func TestWrapInlineBoldLines_ShortValueOneLine(t *testing.T) {
+	pdf := fpdf.New("P", "mm", "Letter", "")
+	registerUnicodeFont(pdf)
+	pdf.AddPage()
+
+	text := "Applied value=" + inlineBoldStart + "true" + inlineBoldEnd
+	phys := wrapInlineBoldLines(pdf, text, 80.0, 6.0)
+	if len(phys) != 1 {
+		t.Errorf("short value should fit on one line, got %d", len(phys))
 	}
 }

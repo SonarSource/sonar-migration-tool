@@ -582,7 +582,19 @@ func renderUnifiedTable(pdf *fpdf.Fpdf, section Section, predictive bool) {
 		// the real-migrate and predictive reports.
 		detailsFontSize := multiLineFontSize
 		pdf.SetFont(pdfFontFamilyBody, "", detailsFontSize)
-		detailsLineCount := len(pdf.SplitLines([]byte(detailsText), widths[detailsCol]))
+		// When the details carry inline bold markers (#167) the
+		// drawDetailsCell renderer does its own width-aware wrap that
+		// accounts for the regular-vs-bold glyph width difference.
+		// Use the same wrap here for the line count so the row height
+		// matches what gets drawn — pdf.SplitLines treats the markers
+		// as opaque glyphs and miscounts on long bold values (#302).
+		const detailsCellPad = 1.0
+		var detailsLineCount int
+		if strings.Contains(detailsText, inlineBoldStart) {
+			detailsLineCount = len(wrapInlineBoldLines(pdf, detailsText, widths[detailsCol]-detailsCellPad, detailsFontSize))
+		} else {
+			detailsLineCount = len(pdf.SplitLines([]byte(detailsText), widths[detailsCol]))
+		}
 		pdf.SetFont(pdfFontFamilyBody, "", bodyFontSize)
 		if detailsLineCount < 1 {
 			detailsLineCount = 1
@@ -686,11 +698,16 @@ func renderUnifiedTable(pdf *fpdf.Fpdf, section Section, predictive bool) {
 // drawDetailsCell renders the Details column for a unified-table row.
 // It supports inline bold markers (inlineBoldStart / inlineBoldEnd) by
 // drawing the cell border + fill manually via pdf.Rect and rendering
-// the text with pdf.Write so the font style can flip mid-line. When
-// the text contains no markers the function delegates to the regular
-// drawWrappedCell, preserving the existing wrap semantics for every
-// section that doesn't need inline bold (i.e. everything except the
-// Projects section's "New Project Key:" label).
+// the text with width-aware wrapping (#302). When the text contains
+// no markers the function delegates to the regular drawWrappedCell,
+// preserving the existing wrap semantics for every section that
+// doesn't need inline bold.
+//
+// Width-aware wrap matters because pdf.Write — the only fpdf helper
+// that lets us flip font style mid-line — wraps at the *page* right
+// margin, not the cell's right edge. A long bold value would
+// otherwise overflow and "wrap" by continuing at the page's LEFT
+// margin, splashing into the next row's leftmost column (#302).
 func drawDetailsCell(pdf *fpdf.Fpdf, w, lineH float64, lineCount int, text string, fontSize float64) {
 	if !strings.Contains(text, inlineBoldStart) {
 		drawWrappedCell(pdf, w, lineH, lineCount, pdf.SplitLines([]byte(text), w))
@@ -704,41 +721,177 @@ func drawDetailsCell(pdf *fpdf.Fpdf, w, lineH float64, lineCount int, text strin
 	pdf.Rect(x, y, w, rowH, "FD")
 
 	const leftPad = 1.0
-	for i, line := range strings.Split(text, "\n") {
+	cellWidth := w - leftPad
+	phys := wrapInlineBoldLines(pdf, text, cellWidth, fontSize)
+	for i, segs := range phys {
 		if i >= lineCount {
 			break
 		}
 		pdf.SetXY(x+leftPad, y+float64(i)*lineH)
-		writeInlineBold(pdf, line, lineH, fontSize)
+		writeInlineBoldLine(pdf, segs, lineH, fontSize)
 	}
 	pdf.SetXY(x+w, y)
 }
 
-// writeInlineBold renders a single line of text with optional inline
-// bold ranges marked by inlineBoldStart / inlineBoldEnd. Anything
-// outside a marker pair is rendered in the regular body font; the
-// marked span flips to bold and back.
-func writeInlineBold(pdf *fpdf.Fpdf, line string, lineH, fontSize float64) {
-	pdf.SetFont(pdfFontFamilyBody, "", fontSize)
+// styledSeg is a contiguous run of characters that all share the
+// same font style (regular or bold). A single physical line of a
+// details cell is a slice of styledSegs in left-to-right order.
+type styledSeg struct {
+	text string
+	bold bool
+}
+
+// splitStyledLine turns a logical line (no embedded newlines) into
+// styled segments by tokenising on inlineBoldStart / inlineBoldEnd.
+// Unclosed markers cause the rest of the line to render as bold so
+// the operator's intent isn't lost on malformed input.
+func splitStyledLine(line string) []styledSeg {
+	var out []styledSeg
 	parts := strings.Split(line, inlineBoldStart)
-	if len(parts) > 0 {
-		pdf.Write(lineH, parts[0])
+	if parts[0] != "" {
+		out = append(out, styledSeg{text: parts[0], bold: false})
 	}
 	for _, p := range parts[1:] {
 		idx := strings.Index(p, inlineBoldEnd)
 		if idx < 0 {
-			// Unclosed marker — treat the rest of the line as bold so
-			// at least the intent ("emphasise the trailing portion")
-			// survives.
-			pdf.SetFont(pdfFontFamilyBody, "B", fontSize)
-			pdf.Write(lineH, p)
-			pdf.SetFont(pdfFontFamilyBody, "", fontSize)
+			out = append(out, styledSeg{text: p, bold: true})
 			continue
 		}
-		pdf.SetFont(pdfFontFamilyBody, "B", fontSize)
-		pdf.Write(lineH, p[:idx])
-		pdf.SetFont(pdfFontFamilyBody, "", fontSize)
-		pdf.Write(lineH, p[idx+len(inlineBoldEnd):])
+		if idx > 0 {
+			out = append(out, styledSeg{text: p[:idx], bold: true})
+		}
+		if rest := p[idx+len(inlineBoldEnd):]; rest != "" {
+			out = append(out, styledSeg{text: rest, bold: false})
+		}
+	}
+	return out
+}
+
+// tokenizeForWrap splits a segment of text into atomic break units.
+// Words are kept together; whitespace and commas act as break points
+// but stay attached to the preceding token so commas don't end up
+// orphaned at the start of a wrapped line (most settings values are
+// long CSVs with no whitespace — commas are the only natural break).
+func tokenizeForWrap(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var out []string
+	var cur strings.Builder
+	for _, r := range s {
+		cur.WriteRune(r)
+		if r == ' ' || r == '\t' || r == ',' {
+			out = append(out, cur.String())
+			cur.Reset()
+		}
+	}
+	if cur.Len() > 0 {
+		out = append(out, cur.String())
+	}
+	return out
+}
+
+// wrapInlineBoldLines wraps each newline-delimited logical line in
+// `text` to fit within `cellWidth` mm, accounting for the different
+// glyph widths of the regular and bold body fonts. Returns one slice
+// of styledSegs per physical line, ready for writeInlineBoldLine to
+// render. Pure measurement; no drawing.
+func wrapInlineBoldLines(pdf *fpdf.Fpdf, text string, cellWidth, fontSize float64) [][]styledSeg {
+	var out [][]styledSeg
+	for _, logical := range strings.Split(text, "\n") {
+		segs := splitStyledLine(logical)
+		out = append(out, wrapOneLogicalLine(pdf, segs, cellWidth, fontSize)...)
+	}
+	return out
+}
+
+// wrapOneLogicalLine performs the greedy word-wrap for a single
+// logical line's worth of styledSegs. Tokens that are wider than
+// cellWidth on their own (rare, but possible for path-like values
+// with no separators) are hard-broken at character boundaries.
+func wrapOneLogicalLine(pdf *fpdf.Fpdf, segs []styledSeg, cellWidth, fontSize float64) [][]styledSeg {
+	setStyle := func(bold bool) {
+		if bold {
+			pdf.SetFont(pdfFontFamilyBody, "B", fontSize)
+		} else {
+			pdf.SetFont(pdfFontFamilyBody, "", fontSize)
+		}
+	}
+
+	var out [][]styledSeg
+	var line []styledSeg
+	var lineW float64
+
+	appendToken := func(tok string, bold, isHardBreak bool) {
+		if !isHardBreak && len(line) > 0 && line[len(line)-1].bold == bold {
+			line[len(line)-1].text += tok
+		} else {
+			line = append(line, styledSeg{text: tok, bold: bold})
+		}
+	}
+	flush := func() {
+		if len(line) > 0 {
+			out = append(out, line)
+			line = nil
+			lineW = 0
+		}
+	}
+
+	for _, seg := range segs {
+		setStyle(seg.bold)
+		for _, tok := range tokenizeForWrap(seg.text) {
+			tw := pdf.GetStringWidth(tok)
+			// Token fits on the current line.
+			if lineW+tw <= cellWidth {
+				appendToken(tok, seg.bold, false)
+				lineW += tw
+				continue
+			}
+			// Token doesn't fit. Try wrapping to a new line first.
+			if lineW > 0 {
+				flush()
+				if tw <= cellWidth {
+					appendToken(tok, seg.bold, false)
+					lineW += tw
+					continue
+				}
+			}
+			// Token alone is wider than the cell — hard-break at runes.
+			for _, r := range tok {
+				rs := string(r)
+				rw := pdf.GetStringWidth(rs)
+				if lineW+rw > cellWidth && lineW > 0 {
+					flush()
+				}
+				appendToken(rs, seg.bold, false)
+				lineW += rw
+			}
+		}
+	}
+	flush()
+	// Empty logical line still occupies one physical line so a stray
+	// "\n\n" in the source doesn't collapse to zero rows.
+	if len(out) == 0 {
+		out = append(out, nil)
+	}
+	return out
+}
+
+// writeInlineBoldLine renders one physical line's styled segments at
+// the cursor's current (x, y). Caller is responsible for positioning
+// the cursor (drawDetailsCell does this per line). The line is
+// guaranteed by wrapInlineBoldLines to fit within the cell, so
+// pdf.Write won't trigger its own (page-margin-based) wrap.
+func writeInlineBoldLine(pdf *fpdf.Fpdf, segs []styledSeg, lineH, fontSize float64) {
+	for _, s := range segs {
+		if s.bold {
+			pdf.SetFont(pdfFontFamilyBody, "B", fontSize)
+		} else {
+			pdf.SetFont(pdfFontFamilyBody, "", fontSize)
+		}
+		if s.text != "" {
+			pdf.Write(lineH, s.text)
+		}
 	}
 }
 
