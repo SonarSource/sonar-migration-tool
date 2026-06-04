@@ -46,44 +46,42 @@ cd go && go run . transfer -c config.json
 sonar-migration-tool transfer -c config.json
 ```
 
-`config.json` shape — the required blocks are `sonarqube` and `sonarcloud`; the `settings` block is optional and has sensible defaults. See [CONFIG.md](CONFIG.md) for the full reference.
+`config.json` uses the **same unified shape** as `extract` and `migrate` — one top-level block of shared defaults plus `source` and `target` sub-objects. See [ADVANCED-CONFIG.md](ADVANCED-CONFIG.md) for the full reference.
 
 Minimal form:
 
 ```json
 {
-  "sonarqube": {
+  "source": {
     "url": "https://sonarqube.example.com",
-    "token": "sqp_xxx",
-    "projectKey": "my-project"
+    "token": "sqp_xxx"
   },
-  "sonarcloud": {
+  "target": {
     "token": "squ_xxx",
-    "organization": "my-org"
+    "default_organization": "my-org"
   }
 }
 ```
 
-Full form with optional `settings` block:
+Full form (pass `--project-key` on the CLI to scope to a single project):
 
 ```json
 {
-  "sonarqube": {
+  "concurrency": 25,
+  "timeout": 60,
+  "export_directory": "./migration-files",
+  "source": {
     "url": "https://sonarqube.example.com",
     "token": "sqp_xxx",
-    "projectKey": "my-project"
+    "pem_file_path": "/path/to/cert.pem",
+    "key_file_path": "/path/to/cert.key",
+    "cert_password": "optional"
   },
-  "sonarcloud": {
+  "target": {
     "url": "https://sonarcloud.io/",
     "token": "squ_xxx",
-    "organization": "my-org",
-    "enterpriseKey": "my-enterprise"
-  },
-  "settings": {
-    "exportDirectory": "./migration-files",
-    "concurrency": 25,
-    "includeScanHistory": false,
-    "debug": false
+    "default_organization": "my-org",
+    "enterprise_key": "my-enterprise"
   }
 }
 ```
@@ -93,19 +91,19 @@ Full form with optional `settings` block:
 ```bash
 # From source
 cd go && go run . transfer \
-  --sq-url https://sonarqube.example.com \
-  --sq-token sqp_xxx \
+  --source-url https://sonarqube.example.com \
+  --source-token sqp_xxx \
   --project-key my-project \
-  --sc-token squ_xxx \
-  --sc-org my-org
+  --target-token squ_xxx \
+  --default_organization my-org
 
 # Built binary
 sonar-migration-tool transfer \
-  --sq-url https://sonarqube.example.com \
-  --sq-token sqp_xxx \
+  --source-url https://sonarqube.example.com \
+  --source-token sqp_xxx \
   --project-key my-project \
-  --sc-token squ_xxx \
-  --sc-org my-org
+  --target-token squ_xxx \
+  --default_organization my-org
 ```
 
 Omit `--project-key` to transfer **every** project visible to the token (in which case the rest of the manual workflow applies — see [MIGRATE.md](MIGRATE.md) for the per-project `organizations.csv` mapping step).
@@ -114,17 +112,23 @@ Omit `--project-key` to transfer **every** project visible to the token (in whic
 
 ## Flags
 
-| Flag | Description |
-|------|-------------|
-| `-c, --config` | Path to a JSON configuration file (see [CONFIG.md](CONFIG.md)) |
-| `--sq-url` | SonarQube Server URL |
-| `--sq-token` | SonarQube Server token |
-| `--project-key` | Project key to transfer. Omit to transfer every project visible to the token. |
-| `--sc-token` | SonarQube Cloud token |
-| `--sc-org` | SonarQube Cloud organization key |
-| `--sc-enterprise-key` | SonarQube Cloud enterprise key (defaults to `--sc-org`) |
-| `--export-dir` | Working directory for intermediate files (default: `./migration-files/`) |
-| `--include-scan-history` | Extract and import full issue/hotspot scan history. Significantly slower and larger. |
+| Flag | Config key | Description |
+|------|------------|-------------|
+| `-c, --config` | — | Path to a JSON configuration file (see [ADVANCED-CONFIG.md](ADVANCED-CONFIG.md)) |
+| `--source-url` | `source.url` | SonarQube Server URL |
+| `--source-token` | `source.token` | SonarQube Server token |
+| `--project-key` | — | Project key to transfer. Omit to transfer every project visible to the token. |
+| `--target-url` | `target.url` | SonarQube Cloud URL (default: `https://sonarcloud.io/`) |
+| `--target-token` | `target.token` | SonarQube Cloud token |
+| `--default_organization` | `target.default_organization` | SonarQube Cloud organization key |
+| `--enterprise_key` | `target.enterprise_key` | SonarQube Cloud enterprise key (defaults to `--default_organization`) |
+| `--export-dir` | `export_directory` | Working directory for intermediate files (default: `./migration-files/`) |
+| `--concurrency` | `concurrency` | Max concurrent HTTP requests (default: `25`) |
+| `--timeout` | `timeout` | HTTP request timeout in seconds |
+| `--pem_file_path` | `source.pem_file_path` | Client mTLS PEM file for the source server |
+| `--key_file_path` | `source.key_file_path` | Client mTLS key file for the source server |
+| `--cert_password` | `source.cert_password` | Password for the source server mTLS client certificate |
+| `--include-scan-history` | `include_scan_history` | Extract and import full issue/hotspot scan history. Significantly slower and larger. |
 
 CLI flags override values from the config file when both are provided.
 
@@ -154,5 +158,5 @@ For more on post-migration steps, see the [After you migrate](MIGRATE.md#after-y
 ## Troubleshooting
 
 - **Token errors** — see the [Token permissions](MIGRATE.md#token-permissions) section in MIGRATE.md.
-- **Org not found** — confirm `--sc-org` matches an existing organization in your SonarQube Cloud enterprise.
+- **Org not found** — confirm `--default_organization` matches an existing organization in your SonarQube Cloud enterprise.
 - **Anything else** — [TROUBLESHOOTING.md](TROUBLESHOOTING.md) has the full list of common errors.

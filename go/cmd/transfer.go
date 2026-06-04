@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,16 +20,20 @@ const (
 	scCloudName  = "SonarQube Cloud"
 
 	flagConfig             = "config"
-	flagSQURL              = "sq-url"
-	flagSQToken            = "sq-token"
+	flagSourceURL          = "source-url"
+	flagSourceToken        = "source-token"
 	flagProjectKey         = "project-key"
-	flagSCURL              = "sc-url"
-	flagSCToken            = "sc-token"
-	flagSCOrg              = "sc-org"
-	flagSCEnterpriseKey    = "sc-enterprise-key"
+	flagTargetURL          = "target-url"
+	flagTargetToken        = "target-token"
+	flagEnterpriseKey      = "enterprise_key"
+	flagDefaultOrg         = "default_organization"
 	flagExportDir          = "export-dir"
 	flagIncludeScanHistory = "include-scan-history"
 	flagConcurrency        = "concurrency"
+	flagTimeout            = "timeout"
+	flagPEMFilePath        = "pem_file_path"
+	flagKeyFilePath        = "key_file_path"
+	flagCertPassword       = "cert_password"
 	flagDebug              = "debug"
 )
 
@@ -44,91 +47,82 @@ the manual CSV-editing step. Credentials for both sides are required.
 
 Example (flags):
   sonar-migration-tool transfer \
-    --sq-url https://sonarqube.example.com \
-    --sq-token sqp_xxx \
+    --source-url https://sonarqube.example.com \
+    --source-token sqp_xxx \
     --project-key my-project \
-    --sc-token squ_xxx \
-    --sc-org my-org
+    --target-token squ_xxx \
+    --default_organization my-org
 
 Example (config file):
   sonar-migration-tool transfer -c config.json
 
-config.json format:
+config.json uses the common unified shape (same loader as extract /
+migrate), so every shared setting carries over — including
+concurrency, timeout, export_directory, pem_file_path, key_file_path,
+and cert_password:
   {
-    "sonarqube": { "url": "...", "token": "...", "projectKey": "..." },
-    "sonarcloud": { "url": "...", "token": "...", "organization": "...", "enterpriseKey": "..." }
+    "export_directory": "./migration-files",
+    "concurrency": 10,
+    "timeout": 60,
+    "source": {
+      "url": "https://sonarqube.example.com",
+      "token": "sqp_xxx",
+      "pem_file_path": "...", "key_file_path": "...", "cert_password": "..."
+    },
+    "target": {
+      "url": "https://sonarcloud.io/",
+      "token": "squ_xxx",
+      "default_organization": "my-org",
+      "enterprise_key": "my-org"
+    }
   }
 
-The sonarcloud.url defaults to https://sonarcloud.io/ when omitted.
+The target.url defaults to https://sonarcloud.io/ when omitted.
 
-The enterpriseKey is required for portfolio migration; for projects/gates/profiles
-it can be omitted and defaults to the organization key.`,
+The target.enterprise_key is required for portfolio migration; for
+projects/gates/profiles it can be omitted and defaults to the
+default_organization value.
+
+CLI flags always take precedence over values from the config file.`,
 	RunE: runTransfer,
 }
 
 func init() {
 	f := transferCmd.Flags()
-	f.StringP(flagConfig, "c", "", "Path to transfer config file")
-	f.String(flagSQURL, "", sqServerName+" URL")
-	f.String(flagSQToken, "", sqServerName+" token")
+	f.StringP(flagConfig, "c", "", "Path to JSON configuration file (common shape with source / target sections)")
+	f.String(flagSourceURL, "", sqServerName+" URL (maps to source.url)")
+	f.String(flagSourceToken, "", sqServerName+" token (maps to source.token)")
 	f.String(flagProjectKey, "", "Project key to transfer (omit to transfer all projects)")
-	f.String(flagSCURL, "", scCloudName+" URL (default: https://sonarcloud.io/)")
-	f.String(flagSCToken, "", scCloudName+" token")
-	f.String(flagSCOrg, "", scCloudName+" organization key")
-	f.String(flagSCEnterpriseKey, "", scCloudName+" enterprise key (defaults to --sc-org)")
-	f.String(flagExportDir, "./migration-files/", "Working directory for intermediate files")
-	f.Bool(flagIncludeScanHistory, false, "Extract and import full issue/hotspot scan history")
-	f.Int(flagConcurrency, 0, "Max concurrent requests (default: 25)")
+	f.String(flagTargetURL, "", scCloudName+" URL (maps to target.url, default: https://sonarcloud.io/)")
+	f.String(flagTargetToken, "", scCloudName+" token (maps to target.token)")
+	f.String(flagDefaultOrg, "", scCloudName+" organization key (maps to target.default_organization)")
+	f.String(flagEnterpriseKey, "", scCloudName+" enterprise key (maps to target.enterprise_key, defaults to --"+flagDefaultOrg+")")
+	f.String(flagExportDir, "./migration-files/", "Working directory for intermediate files (maps to export_directory)")
+	f.Bool(flagIncludeScanHistory, false, "Extract and import full issue/hotspot scan history (maps to include_scan_history)")
+	f.Int(flagConcurrency, 0, "Max concurrent requests (default: 25) (maps to concurrency)")
+	f.Int(flagTimeout, 0, "HTTP request timeout in seconds (maps to timeout)")
+	f.String(flagPEMFilePath, "", "Path to client mTLS PEM file for the source server (maps to source.pem_file_path)")
+	f.String(flagKeyFilePath, "", "Path to client mTLS key file for the source server (maps to source.key_file_path)")
+	f.String(flagCertPassword, "", "Password for the source server mTLS client certificate (maps to source.cert_password)")
 }
 
 // transferConfig holds the resolved configuration after merging file and flag values.
 type transferConfig struct {
-	sqURL              string
-	sqToken            string
-	projectKey         string
-	scURL              string
-	scToken            string
-	scOrg              string
-	scEnterpriseKey    string
-	exportDir          string
-	concurrency        int
-	includeScanHistory bool
-	debug              bool
-}
-
-// transferFileConfig is the transfer-specific config file shape (CloudVoyager-compatible).
-// This is intentionally separate from the existing extract/migrate config shapes to avoid
-// field-name conflicts with the existing side-sectioned parser.
-type transferFileConfig struct {
-	SonarQube struct {
-		URL        string `json:"url"`
-		Token      string `json:"token"`
-		ProjectKey string `json:"projectKey"`
-	} `json:"sonarqube"`
-	SonarCloud struct {
-		URL           string `json:"url"`
-		Token         string `json:"token"`
-		Organization  string `json:"organization"`
-		EnterpriseKey string `json:"enterpriseKey"`
-	} `json:"sonarcloud"`
-	Settings struct {
-		ExportDirectory    string `json:"exportDirectory"`
-		Concurrency        int    `json:"concurrency"`
-		IncludeScanHistory bool   `json:"includeScanHistory"`
-		Debug              bool   `json:"debug"`
-	} `json:"settings"`
-}
-
-func loadTransferConfigFile(path string) (transferFileConfig, error) {
-	var cfg transferFileConfig
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return cfg, fmt.Errorf("reading transfer config %q: %w", path, err)
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return cfg, fmt.Errorf("parsing transfer config %q: %w", path, err)
-	}
-	return cfg, nil
+	sourceURL           string
+	sourceToken         string
+	projectKey          string
+	targetURL           string
+	targetToken         string
+	defaultOrganization string
+	enterpriseKey       string
+	exportDir           string
+	concurrency         int
+	timeout             int
+	pemFilePath         string
+	keyFilePath         string
+	certPassword        string
+	includeScanHistory  bool
+	debug               bool
 }
 
 func applyFlagString(cmd *cobra.Command, name string, target *string) {
@@ -149,60 +143,95 @@ func applyFlagBool(cmd *cobra.Command, name string, target *bool) {
 	}
 }
 
+// loadTransferFileDefaults reads the shared --config file via the same
+// loaders extract / migrate use, so transfer accepts every supported
+// shape (flat, command-sectioned, side-sectioned, and the unified
+// source/target shape — #266). The transfer-specific dedicated shape
+// from earlier releases has been retired (#295).
+func loadTransferFileDefaults(path string) (transferConfig, error) {
+	var cfg transferConfig
+	extractCfg, err := extract.LoadExtractConfigFile(path)
+	if err != nil {
+		return cfg, err
+	}
+	migrateCfg, err := migrate.LoadMigrateConfigFile(path)
+	if err != nil {
+		return cfg, err
+	}
+
+	cfg.sourceURL = extractCfg.URL
+	cfg.sourceToken = extractCfg.Token
+	cfg.targetURL = migrateCfg.URL
+	cfg.targetToken = migrateCfg.Token
+	cfg.enterpriseKey = migrateCfg.EnterpriseKey
+	cfg.defaultOrganization = migrateCfg.DefaultOrganization
+
+	cfg.exportDir = extractCfg.ExportDirectory
+	if cfg.exportDir == "" {
+		cfg.exportDir = migrateCfg.ExportDirectory
+	}
+
+	switch {
+	case extractCfg.Concurrency != 0:
+		cfg.concurrency = extractCfg.Concurrency
+	case migrateCfg.Concurrency != 0:
+		cfg.concurrency = migrateCfg.Concurrency
+	}
+
+	cfg.timeout = extractCfg.Timeout
+	cfg.pemFilePath = extractCfg.PEMFilePath
+	cfg.keyFilePath = extractCfg.KeyFilePath
+	cfg.certPassword = extractCfg.CertPassword
+
+	cfg.includeScanHistory = extractCfg.IncludeScanHistory || migrateCfg.IncludeScanHistory
+	cfg.debug = migrateCfg.Debug
+	return cfg, nil
+}
+
 func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
-	var fileCfg transferFileConfig
+	var cfg transferConfig
 
 	configFile, _ := cmd.Flags().GetString(flagConfig)
 	if configFile != "" {
-		loaded, err := loadTransferConfigFile(configFile)
+		loaded, err := loadTransferFileDefaults(configFile)
 		if err != nil {
 			return transferConfig{}, err
 		}
-		fileCfg = loaded
+		cfg = loaded
 	}
 
-	cfg := transferConfig{
-		sqURL:              fileCfg.SonarQube.URL,
-		sqToken:            fileCfg.SonarQube.Token,
-		projectKey:         fileCfg.SonarQube.ProjectKey,
-		scURL:              fileCfg.SonarCloud.URL,
-		scToken:            fileCfg.SonarCloud.Token,
-		scOrg:              fileCfg.SonarCloud.Organization,
-		scEnterpriseKey:    fileCfg.SonarCloud.EnterpriseKey,
-		exportDir:          fileCfg.Settings.ExportDirectory,
-		concurrency:        fileCfg.Settings.Concurrency,
-		includeScanHistory: fileCfg.Settings.IncludeScanHistory,
-		debug:              fileCfg.Settings.Debug,
-	}
-
-	applyFlagString(cmd, flagSQURL, &cfg.sqURL)
-	applyFlagString(cmd, flagSQToken, &cfg.sqToken)
+	applyFlagString(cmd, flagSourceURL, &cfg.sourceURL)
+	applyFlagString(cmd, flagSourceToken, &cfg.sourceToken)
 	applyFlagString(cmd, flagProjectKey, &cfg.projectKey)
-	applyFlagString(cmd, flagSCURL, &cfg.scURL)
-	applyFlagString(cmd, flagSCToken, &cfg.scToken)
-	applyFlagString(cmd, flagSCOrg, &cfg.scOrg)
-	applyFlagString(cmd, flagSCEnterpriseKey, &cfg.scEnterpriseKey)
+	applyFlagString(cmd, flagTargetURL, &cfg.targetURL)
+	applyFlagString(cmd, flagTargetToken, &cfg.targetToken)
+	applyFlagString(cmd, flagDefaultOrg, &cfg.defaultOrganization)
+	applyFlagString(cmd, flagEnterpriseKey, &cfg.enterpriseKey)
 	applyFlagString(cmd, flagExportDir, &cfg.exportDir)
 	applyFlagInt(cmd, flagConcurrency, &cfg.concurrency)
+	applyFlagInt(cmd, flagTimeout, &cfg.timeout)
+	applyFlagString(cmd, flagPEMFilePath, &cfg.pemFilePath)
+	applyFlagString(cmd, flagKeyFilePath, &cfg.keyFilePath)
+	applyFlagString(cmd, flagCertPassword, &cfg.certPassword)
 	applyFlagBool(cmd, flagIncludeScanHistory, &cfg.includeScanHistory)
 	applyFlagBool(cmd, flagDebug, &cfg.debug)
 
 	if cfg.exportDir == "" {
 		cfg.exportDir = "./migration-files/"
 	}
-	if cfg.scEnterpriseKey == "" {
-		cfg.scEnterpriseKey = cfg.scOrg
+	if cfg.enterpriseKey == "" {
+		cfg.enterpriseKey = cfg.defaultOrganization
 	}
 
 	return cfg, nil
 }
 
 func validateTransferConfig(cfg transferConfig) error {
-	if cfg.sqURL == "" || cfg.sqToken == "" {
-		return fmt.Errorf("%s URL and token are required (--%s / --%s or config file)", sqServerName, flagSQURL, flagSQToken)
+	if cfg.sourceURL == "" || cfg.sourceToken == "" {
+		return fmt.Errorf("%s URL and token are required (--%s / --%s or source.url / source.token in config file)", sqServerName, flagSourceURL, flagSourceToken)
 	}
-	if cfg.scToken == "" || cfg.scOrg == "" {
-		return fmt.Errorf("%s token and organization key are required (--%s / --%s or config file)", scCloudName, flagSCToken, flagSCOrg)
+	if cfg.targetToken == "" || cfg.defaultOrganization == "" {
+		return fmt.Errorf("%s token and organization key are required (--%s / --%s or target.token / target.default_organization in config file)", scCloudName, flagTargetToken, flagDefaultOrg)
 	}
 	return nil
 }
@@ -267,12 +296,17 @@ func runTransferExtract(ctx context.Context, cfg transferConfig) ([]string, erro
 		projectKeys = []string{cfg.projectKey}
 	}
 	skipped, err := extract.RunExtract(ctx, extract.ExtractConfig{
-		URL:                cfg.sqURL,
-		Token:              cfg.sqToken,
+		URL:                cfg.sourceURL,
+		Token:              cfg.sourceToken,
 		ExportDirectory:    cfg.exportDir,
 		ProjectKeys:        projectKeys,
 		Concurrency:        cfg.concurrency,
+		Timeout:            cfg.timeout,
+		PEMFilePath:        cfg.pemFilePath,
+		KeyFilePath:        cfg.keyFilePath,
+		CertPassword:       cfg.certPassword,
 		IncludeScanHistory: cfg.includeScanHistory,
+		Debug:              cfg.debug,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("extract failed: %w", err)
@@ -282,7 +316,7 @@ func runTransferExtract(ctx context.Context, cfg transferConfig) ([]string, erro
 
 func runTransferStructure(cfg transferConfig) error {
 	printPhase(2, 4, "Building organization structure...")
-	if err := structure.RunStructure(cfg.exportDir, cfg.scOrg); err != nil {
+	if err := structure.RunStructure(cfg.exportDir, cfg.defaultOrganization); err != nil {
 		return fmt.Errorf("structure failed: %w", err)
 	}
 	return nil
@@ -298,10 +332,14 @@ func runTransferMappings(cfg transferConfig) error {
 
 func runTransferMigrate(ctx context.Context, cfg transferConfig) (string, error) {
 	printPhase(4, 4, "Migrating to "+scCloudName+"...")
+	// DefaultOrganization is intentionally left unset: structure has
+	// already pre-populated sonarcloud_org_key for every row using
+	// cfg.defaultOrganization, so passing it again would trigger the
+	// "mapping defined, default ignored" WARN in applyOrgMapping.
 	runID, err := migrate.RunMigrate(ctx, migrate.MigrateConfig{
-		URL:                cfg.scURL,
-		Token:              cfg.scToken,
-		EnterpriseKey:      cfg.scEnterpriseKey,
+		URL:                cfg.targetURL,
+		Token:              cfg.targetToken,
+		EnterpriseKey:      cfg.enterpriseKey,
 		ExportDirectory:    cfg.exportDir,
 		Concurrency:        cfg.concurrency,
 		IncludeScanHistory: cfg.includeScanHistory,

@@ -382,7 +382,7 @@ pattern.
 ### ~~FEAT-10: `--url` default silently targets production~~ **[FIXED]**
 <!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
-**Status**: FIXED — `--sc-url` flag was added to the transfer command. The default no longer silently targets production. Users can pass `--sc-url https://sc-staging.io` for staging.
+**Status**: FIXED — `--target-url` flag was added to the transfer command (renamed from `--sc-url` in #295). The default no longer silently targets production. Users can pass `--target-url https://sc-staging.io` for staging.
 
 ~~**File**: [go/internal/migrate/migrate.go:190](../go/internal/migrate/migrate.go#L190)~~
 
@@ -497,7 +497,7 @@ systematic wrong dates for projects with multiple issues of the same rule.~~
 | FEAT-07 | P2 | CLI | No `--only` selective migration flag |
 | FEAT-08 | P3 | CLI | No incremental transfer mode |
 | FEAT-09 | P2 | Issue Sync | `syncIssueMetadata` writes no per-project output file |
-| FEAT-10 | ~~P2~~ **FIXED** | CLI | ~~`--url` default silently targets production~~ Fixed: `--sc-url` flag added to transfer command |
+| FEAT-10 | ~~P2~~ **FIXED** | CLI | ~~`--url` default silently targets production~~ Fixed: `--target-url` flag added to transfer command (renamed from `--sc-url` in #295) |
 | BUG-12 | P1 | Extract | `getActiveProfileRules` missing from scan-history-only extract |
 | BUG-13 | P2 | Scan History | Analysis date is migration time, not extraction timestamp |
 | BUG-14 | P3 | Hotspot Sync | No inter-comment delay for rate-limit protection |
@@ -517,7 +517,7 @@ systematic wrong dates for projects with multiple issues of the same rule.~~
 7. **BUG-06** — Add source-link comments to both issue and hotspot sync
 8. **FEAT-09** — Add per-project output file to `syncIssueMetadata`
 9. **BUG-12** — Add `getActiveProfileRules` to scan-history extract task list
-10. ~~**FEAT-10**~~ — ~~Add URL default warning~~ **DONE** (`--sc-url` flag added to transfer command)
+10. ~~**FEAT-10**~~ — ~~Add URL default warning~~ **DONE** (`--target-url` flag added to transfer command (renamed from `--sc-url` in #295))
 11. **FEAT-05** — Add CE submission retry
 12. **BUG-13** — Use extraction timestamp for analysis date
 13. **FEAT-02** — Extract issue changelog data

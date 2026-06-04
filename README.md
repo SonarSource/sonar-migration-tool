@@ -237,23 +237,23 @@ Use `transfer` when you only need to move **one** project end-to-end in a single
 
 ```bash
 sonar-migration-tool transfer \
-  --sq-url   https://sonarqube.example.com \
-  --sq-token sqp_xxx \
-  --project-key my-project \
-  --sc-token squ_xxx \
-  --sc-org   my-sqc-org
+  --source-url   https://sonarqube.example.com \
+  --source-token sqp_xxx \
+  --project-key  my-project \
+  --target-token squ_xxx \
+  --default_organization my-sqc-org
 ```
 
-Or with a config file:
+Or with a config file (same shape as `extract` / `migrate`):
 
 ```bash
-sonar-migration-tool transfer -c transfer.json
+sonar-migration-tool transfer -c config.json --project-key my-project
 ```
 
 ```jsonc
 {
-  "sonarqube":  { "url": "https://...", "token": "sqp_xxx", "projectKey": "my-project" },
-  "sonarcloud": { "token": "squ_xxx",   "organization": "my-sqc-org" }
+  "source": { "url": "https://...", "token": "sqp_xxx" },
+  "target": { "token": "squ_xxx",  "default_organization": "my-sqc-org" }
 }
 ```
 

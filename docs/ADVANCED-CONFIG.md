@@ -23,7 +23,7 @@ The recommended shape ("unified config") carries one top-level block of defaults
 | `extract` | top-level + `source` |
 | `structure`, `mappings`, `predictive-report` | top-level only |
 | `migrate`, `reset` | top-level + `target` |
-| `transfer` | a dedicated shape (see below) |
+| `transfer` | top-level + `source` + `target` |
 
 Complete annotated example: [`examples/config.unified.example.json`](../examples/config.unified.example.json). Minimal example: [`examples/config.minimal.example.json`](../examples/config.minimal.example.json). JSON Schema for editor autocomplete: [`schemas/config.schema.json`](../schemas/config.schema.json).
 
@@ -147,26 +147,44 @@ Same flag set as `migrate`. Destructive — see the [README's Reset section](../
 
 ### `transfer`
 
-`transfer` takes a different config shape (one source + one project + one target):
+`transfer` reads the same unified shape as `extract` / `migrate` — both
+`source` and `target` blocks plus the shared top-level defaults. The
+project key is supplied on the CLI; everything else (credentials,
+mTLS, timeouts, concurrency, export directory) can live in the config
+file.
 
 ```jsonc
 {
-  "sonarqube":  { "url": "https://...", "token": "sqp_xxx", "projectKey": "my-project" },
-  "sonarcloud": { "token": "squ_xxx",   "organization": "my-sqc-org" }
+  "concurrency": 25,
+  "timeout": 60,
+  "export_directory": "./migration-files",
+  "source": { "url": "https://...", "token": "sqp_xxx",
+              "pem_file_path": "...", "key_file_path": "...", "cert_password": "..." },
+  "target": { "url": "https://sonarcloud.io/", "token": "squ_xxx",
+              "default_organization": "my-sqc-org",
+              "enterprise_key": "my-enterprise" }
 }
 ```
 
-| Flag | Description |
-|---|---|
-| `-c, --config <path>` | Path to JSON configuration file. |
-| `--sq-url <url>` | SonarQube Server URL. |
-| `--sq-token <token>` | SonarQube Server token. |
-| `--project-key <key>` | Project key to transfer (omit to transfer all projects in the source server). |
-| `--sc-token <token>` | SonarQube Cloud token. |
-| `--sc-org <key>` | SonarQube Cloud organization key. |
-| `--sc-enterprise-key <key>` | SonarQube Cloud enterprise key (defaults to `--sc-org`). |
-| `--export-dir <dir>` | Working directory (default `./migration-files/`). |
-| `--include-scan-history` | Extract + import full scan history. |
+| Flag | Config key | Description |
+|---|---|---|
+| `-c, --config <path>` | — | Path to JSON configuration file. |
+| `--source-url <url>` | `source.url` | SonarQube Server URL. |
+| `--source-token <token>` | `source.token` | SonarQube Server token. |
+| `--project-key <key>` | — | Project key to transfer (omit to transfer all projects). |
+| `--target-url <url>` | `target.url` | SonarQube Cloud URL. |
+| `--target-token <token>` | `target.token` | SonarQube Cloud token. |
+| `--default_organization <key>` | `target.default_organization` | SonarQube Cloud organization key. |
+| `--enterprise_key <key>` | `target.enterprise_key` | SonarQube Cloud enterprise key (defaults to `--default_organization`). |
+| `--export-dir <dir>` | `export_directory` | Working directory (default `./migration-files/`). |
+| `--concurrency <n>` | `concurrency` | Max concurrent HTTP requests. |
+| `--timeout <s>` | `timeout` | HTTP request timeout in seconds. |
+| `--pem_file_path <path>` | `source.pem_file_path` | Client mTLS PEM file. |
+| `--key_file_path <path>` | `source.key_file_path` | Client mTLS key file. |
+| `--cert_password <pw>` | `source.cert_password` | Client mTLS password. |
+| `--include-scan-history` | `include_scan_history` | Extract + import full scan history. |
+
+CLI flags always override the corresponding config-file value.
 
 ### `wizard` / `gui`
 
@@ -207,7 +225,7 @@ Three older shapes still parse so existing configs keep working. Prefer the unif
 }
 ```
 
-**Side-sectioned shape (used by `transfer`):**
+**Side-sectioned shape:**
 
 ```jsonc
 {
