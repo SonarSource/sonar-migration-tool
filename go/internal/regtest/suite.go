@@ -188,26 +188,37 @@ func (s *Suite) buildReport(start time.Time) *Report {
 }
 
 // getProjects returns the list of project keys to verify. If cfg.ProjectKeys
-// is empty, it queries SQS for all projects.
+// is empty, it queries SQS for all projects, paginating transparently so
+// instances with more than 500 projects are not silently truncated.
 func (s *Suite) getProjects(ctx context.Context) ([]string, error) {
 	if len(s.cfg.ProjectKeys) > 0 {
 		return s.cfg.ProjectKeys, nil
 	}
-	body, err := s.sqsRaw.Get(ctx, "api/projects/search", urlParams("ps", "500"))
+	items, err := s.sqsRaw.GetPaginated(ctx, common.PaginatedOpts{
+		Path:      "api/projects/search",
+		ResultKey: "components",
+		TotalKey:  "paging.total",
+	})
 	if err != nil {
 		return nil, fmt.Errorf("listing SQS projects: %w", err)
 	}
-	var resp struct {
-		Components []struct {
+	keys := make([]string, 0, len(items))
+	for _, raw := range items {
+		var c struct {
 			Key string `json:"key"`
-		} `json:"components"`
-	}
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, err
-	}
-	keys := make([]string, len(resp.Components))
-	for i, c := range resp.Components {
-		keys[i] = c.Key
+		}
+		if err := json.Unmarshal(raw, &c); err != nil {
+			// A malformed component means a project will be silently absent
+			// from the regression list, so the suite would appear to pass
+			// checks for a project it never examined. Warn loudly so the
+			// caller knows the project list may be incomplete.
+			s.logger.Warn("skipping SQS project with unparseable payload",
+				"err", err, "payload", string(raw))
+			continue
+		}
+		if c.Key != "" {
+			keys = append(keys, c.Key)
+		}
 	}
 	return keys, nil
 }

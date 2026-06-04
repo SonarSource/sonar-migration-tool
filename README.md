@@ -259,6 +259,8 @@ sonar-migration-tool transfer -c transfer.json
 
 `transfer` produces the same `migration_summary.pdf` as the full pipeline, restricted to the single project.
 
+For the full reference — every flag, every config field, the order of operations — see [`docs/TRANSFER.md`](docs/TRANSFER.md).
+
 ---
 
 ## Interactive wizard
@@ -328,7 +330,8 @@ sonar-migration-tool reset --config config.json
 - [`docs/ADVANCED-CONFIG.md`](docs/ADVANCED-CONFIG.md) — every config field and CLI flag in detail.
 - [`docs/BUILD.md`](docs/BUILD.md) — building from source, running with `go run`, contributing.
 - [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) — common errors and how to recover.
-- [`docs/MANUAL-MIGRATION.md`](docs/MANUAL-MIGRATION.md) — pieces of the migration that have no SQC API counterpart and have to be done by hand.
+- [`docs/MIGRATE.md`](docs/MIGRATE.md) — deep dive on the four-phase migration pipeline.
+- [`docs/TRANSFER.md`](docs/TRANSFER.md) — deep dive on the single-command `transfer` workflow.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — internals: packages, task graph, JSONL schemas.
 - [`docs/SECURITY.md`](docs/SECURITY.md) — token handling, mTLS, audit trail.
 

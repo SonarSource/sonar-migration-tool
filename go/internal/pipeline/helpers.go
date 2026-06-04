@@ -150,28 +150,35 @@ func fetchAllMetrics(ctx context.Context, client *sqapi.Client, projectKey strin
 }
 
 // fetchComponentMetrics fetches all leaf-component metrics for the given keys,
-// paging through the response automatically.
+// paging through the response automatically. Components appearing in multiple
+// pages are merged so each component appears once in the result.
 func fetchComponentMetrics(ctx context.Context, client *sqapi.Client, projectKey string, metricKeys []string) ([]ComponentMetrics, error) {
-	var all []ComponentMetrics
-	seen := make(map[string]int)
-	for page := 1; ; page++ {
-		items, total, err := fetchComponentMetricsPage(ctx, client, projectKey, metricKeys, page, defaultPageSize)
-		if err != nil {
-			return nil, err
-		}
-		for _, cm := range items {
-			if idx, ok := seen[cm.Component]; ok {
-				all[idx].Measures = append(all[idx].Measures, cm.Measures...)
-			} else {
-				seen[cm.Component] = len(all)
-				all = append(all, cm)
-			}
-		}
-		if len(items) == 0 || len(all) >= total {
-			break
-		}
+	pages, err := paginateAll(ctx, func(ctx context.Context, page int) ([]ComponentMetrics, int, error) {
+		return fetchComponentMetricsPage(ctx, client, projectKey, metricKeys, page, defaultPageSize)
+	})
+	if err != nil {
+		return nil, err
 	}
-	return all, nil
+	return mergeComponentMetrics(pages), nil
+}
+
+// mergeComponentMetrics folds any duplicate component keys into a single entry
+// whose Measures slice is the concatenation of all occurrences.
+func mergeComponentMetrics(pages []ComponentMetrics) []ComponentMetrics {
+	if len(pages) == 0 {
+		return nil
+	}
+	seen := make(map[string]int, len(pages))
+	out := make([]ComponentMetrics, 0, len(pages))
+	for _, cm := range pages {
+		if idx, ok := seen[cm.Component]; ok {
+			out[idx].Measures = append(out[idx].Measures, cm.Measures...)
+			continue
+		}
+		seen[cm.Component] = len(out)
+		out = append(out, cm)
+	}
+	return out
 }
 
 func fetchComponentMetricsPage(ctx context.Context, client *sqapi.Client, projectKey string, metricKeys []string, page, pageSize int) ([]ComponentMetrics, int, error) {

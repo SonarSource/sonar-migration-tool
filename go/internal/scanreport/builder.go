@@ -195,16 +195,17 @@ func BuildIssues(issues []IssueInput, cr *ComponentRef) map[int32][]*pb.Issue {
 
 // ExternalIssueInput holds extracted data for building ExternalIssue protobuf messages.
 type ExternalIssueInput struct {
-	EngineID  string
-	RuleID    string
-	Message   string
-	Severity  string
-	Type      string // CODE_SMELL, BUG, VULNERABILITY
-	StartLine int32
-	EndLine   int32
-	StartOff  int32
-	EndOff    int32
-	Component string
+	EngineID     string
+	RuleID       string
+	Message      string
+	Severity     string
+	Type         string // CODE_SMELL, BUG, VULNERABILITY
+	StartLine    int32
+	EndLine      int32
+	StartOff     int32
+	EndOff       int32
+	Component    string
+	CreationDate time.Time
 }
 
 // BuildExternalIssues groups external issues by component ref and returns a map of ref->[]ExternalIssue.

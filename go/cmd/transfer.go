@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,6 +15,11 @@ import (
 )
 
 const (
+	// Display names used throughout the transfer command's help text and
+	// error messages. Defining them once keeps user-facing wording in sync.
+	sqServerName = "SonarQube Server"
+	scCloudName  = "SonarQube Cloud"
+
 	flagConfig             = "config"
 	flagSQURL              = "sq-url"
 	flagSQToken            = "sq-token"
@@ -30,8 +36,8 @@ const (
 
 var transferCmd = &cobra.Command{
 	Use:   "transfer",
-	Short: "Transfer a single project from SonarQube Server to SonarQube Cloud",
-	Long: `Transfer migrates a SonarQube Server project to SonarQube Cloud in one command.
+	Short: "Transfer a single project from " + sqServerName + " to " + scCloudName,
+	Long: `Transfer migrates a ` + sqServerName + ` project to ` + scCloudName + ` in one command.
 
 It chains extract → structure → mappings → migrate automatically, eliminating
 the manual CSV-editing step. Credentials for both sides are required.
@@ -63,13 +69,13 @@ it can be omitted and defaults to the organization key.`,
 func init() {
 	f := transferCmd.Flags()
 	f.StringP(flagConfig, "c", "", "Path to transfer config file")
-	f.String(flagSQURL, "", "SonarQube Server URL")
-	f.String(flagSQToken, "", "SonarQube Server token")
+	f.String(flagSQURL, "", sqServerName+" URL")
+	f.String(flagSQToken, "", sqServerName+" token")
 	f.String(flagProjectKey, "", "Project key to transfer (omit to transfer all projects)")
-	f.String(flagSCURL, "", "SonarQube Cloud URL (default: https://sonarcloud.io/)")
-	f.String(flagSCToken, "", "SonarQube Cloud token")
-	f.String(flagSCOrg, "", "SonarQube Cloud organization key")
-	f.String(flagSCEnterpriseKey, "", "SonarQube Cloud enterprise key (defaults to --sc-org)")
+	f.String(flagSCURL, "", scCloudName+" URL (default: https://sonarcloud.io/)")
+	f.String(flagSCToken, "", scCloudName+" token")
+	f.String(flagSCOrg, "", scCloudName+" organization key")
+	f.String(flagSCEnterpriseKey, "", scCloudName+" enterprise key (defaults to --sc-org)")
 	f.String(flagExportDir, "./migration-files/", "Working directory for intermediate files")
 	f.Bool(flagIncludeScanHistory, false, "Extract and import full issue/hotspot scan history")
 	f.Int(flagConcurrency, 0, "Max concurrent requests (default: 25)")
@@ -193,10 +199,10 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 
 func validateTransferConfig(cfg transferConfig) error {
 	if cfg.sqURL == "" || cfg.sqToken == "" {
-		return fmt.Errorf("SonarQube Server URL and token are required (--%s / --%s or config file)", flagSQURL, flagSQToken)
+		return fmt.Errorf("%s URL and token are required (--%s / --%s or config file)", sqServerName, flagSQURL, flagSQToken)
 	}
 	if cfg.scToken == "" || cfg.scOrg == "" {
-		return fmt.Errorf("SonarQube Cloud token and organization key are required (--%s / --%s or config file)", flagSCToken, flagSCOrg)
+		return fmt.Errorf("%s token and organization key are required (--%s / --%s or config file)", scCloudName, flagSCToken, flagSCOrg)
 	}
 	return nil
 }
@@ -212,46 +218,87 @@ func runTransfer(cmd *cobra.Command, _ []string) error {
 
 	ctx := cmd.Context()
 
-	// Phase 1: Extract.
-	fmt.Println("[1/4] Extracting from SonarQube Server...")
+	skipped, err := runTransferExtract(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	warnSkippedProjects(skipped)
+
+	if err := runTransferStructure(cfg); err != nil {
+		return err
+	}
+	if err := runTransferMappings(cfg); err != nil {
+		return err
+	}
+
+	runID, err := runTransferMigrate(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	emitPDFReport(cfg.exportDir, runID)
+
+	fmt.Println("Transfer complete.")
+	return nil
+}
+
+// printPhase writes the "[N/4] <description>" banner used at the start of
+// each transfer phase so the literal strings live in one place.
+func printPhase(step int, total int, description string) {
+	fmt.Printf("[%d/%d] %s\n", step, total, description)
+}
+
+// warnSkippedProjects prints a warning listing project keys that the
+// extract phase reported as skipped (typically due to insufficient
+// permissions) so users notice and can re-run with elevated token.
+func warnSkippedProjects(skipped []string) {
+	if len(skipped) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Warning: %d project(s) skipped (insufficient privileges):\n", len(skipped))
+	for _, k := range skipped {
+		fmt.Fprintf(os.Stderr, "  - %s\n", k)
+	}
+}
+
+func runTransferExtract(ctx context.Context, cfg transferConfig) ([]string, error) {
+	printPhase(1, 4, "Extracting from "+sqServerName+"...")
 	var projectKeys []string
 	if cfg.projectKey != "" {
 		projectKeys = []string{cfg.projectKey}
 	}
-	extractCfg := extract.ExtractConfig{
+	skipped, err := extract.RunExtract(ctx, extract.ExtractConfig{
 		URL:                cfg.sqURL,
 		Token:              cfg.sqToken,
 		ExportDirectory:    cfg.exportDir,
 		ProjectKeys:        projectKeys,
 		Concurrency:        cfg.concurrency,
 		IncludeScanHistory: cfg.includeScanHistory,
-	}
-	skipped, err := extract.RunExtract(ctx, extractCfg)
+	})
 	if err != nil {
-		return fmt.Errorf("extract failed: %w", err)
+		return nil, fmt.Errorf("extract failed: %w", err)
 	}
-	if len(skipped) > 0 {
-		fmt.Fprintf(os.Stderr, "Warning: %d project(s) skipped (insufficient privileges):\n", len(skipped))
-		for _, k := range skipped {
-			fmt.Fprintf(os.Stderr, "  - %s\n", k)
-		}
-	}
+	return skipped, nil
+}
 
-	// Phase 2: Structure.
-	fmt.Println("[2/4] Building organization structure...")
+func runTransferStructure(cfg transferConfig) error {
+	printPhase(2, 4, "Building organization structure...")
 	if err := structure.RunStructure(cfg.exportDir, cfg.scOrg); err != nil {
 		return fmt.Errorf("structure failed: %w", err)
 	}
+	return nil
+}
 
-	// Phase 3: Mappings.
-	fmt.Println("[3/4] Generating entity mappings...")
+func runTransferMappings(cfg transferConfig) error {
+	printPhase(3, 4, "Generating entity mappings...")
 	if err := structure.RunMappings(cfg.exportDir); err != nil {
 		return fmt.Errorf("mappings failed: %w", err)
 	}
+	return nil
+}
 
-	// Phase 4: Migrate.
-	fmt.Println("[4/4] Migrating to SonarQube Cloud...")
-	migrateCfg := migrate.MigrateConfig{
+func runTransferMigrate(ctx context.Context, cfg transferConfig) (string, error) {
+	printPhase(4, 4, "Migrating to "+scCloudName+"...")
+	runID, err := migrate.RunMigrate(ctx, migrate.MigrateConfig{
 		URL:                cfg.scURL,
 		Token:              cfg.scToken,
 		EnterpriseKey:      cfg.scEnterpriseKey,
@@ -259,18 +306,18 @@ func runTransfer(cmd *cobra.Command, _ []string) error {
 		Concurrency:        cfg.concurrency,
 		IncludeScanHistory: cfg.includeScanHistory,
 		Debug:              cfg.debug,
-	}
-	runID, err := migrate.RunMigrate(ctx, migrateCfg)
+	})
 	if err != nil {
-		return fmt.Errorf("migrate failed: %w", err)
+		return "", fmt.Errorf("migrate failed: %w", err)
 	}
+	return runID, nil
+}
 
-	// PDF summary report.
-	runDir := filepath.Join(cfg.exportDir, runID)
-	if pdfPath, pdfErr := summary.GeneratePDFReport(runDir, cfg.exportDir, cfg.exportDir); pdfErr == nil {
-		fmt.Printf("PDF summary report: %s\n", pdfPath)
+func emitPDFReport(exportDir, runID string) {
+	runDir := filepath.Join(exportDir, runID)
+	pdfPath, pdfErr := summary.GeneratePDFReport(runDir, exportDir, exportDir)
+	if pdfErr != nil {
+		return
 	}
-
-	fmt.Println("Transfer complete.")
-	return nil
+	fmt.Printf("PDF summary report: %s\n", pdfPath)
 }

@@ -562,25 +562,42 @@ func checkTemplatePermissions(ctx context.Context, s *Suite) []CheckResult {
 	var results []CheckResult
 	for _, t := range resp.PermissionTemplates {
 		for _, perm := range perms {
-			count, err := queryCount(ctx, s.sqsRaw, "api/permissions/template_groups",
+			// SQS records the baseline group count for manual review. The
+			// corresponding SC permission-template group endpoint does not
+			// expose a directly comparable structure, so this is reported
+			// as SKIPPED rather than unconditionally PASS.
+			sqsCount, err := queryCount(ctx, s.sqsRaw, "api/permissions/template_groups",
 				urlParams("templateId", t.ID, "permission", perm, "ps", "500"), "groups")
 			if err != nil {
 				results = append(results, makeError("Permission Templates",
 					fmt.Sprintf("%s/%s", t.Name, perm), err))
 				continue
 			}
-			results = append(results, CheckResult{
+			r := CheckResult{
 				Category: "Permission Templates",
 				Name:     fmt.Sprintf("%s/%s groups", t.Name, perm),
-				SQSValue: strconv.Itoa(count), SCValue: "recorded", Match: true,
-				Notes: "SQS baseline recorded",
-			})
+				SQSValue: strconv.Itoa(sqsCount),
+				SCValue:  "N/A",
+				Match:    false,
+				Notes:    "SKIPPED",
+			}
+			results = append(results, r)
 		}
 	}
 	return results
 }
 
 // ── Settings ──────────────────────────────────────────────────────────
+
+// isSubsetMatch reports whether scCount represents a valid SC-side subset of
+// the SQS baseline: non-zero (proves something actually migrated) and no
+// larger than the SQS baseline (a count larger than SQS would indicate a
+// misconfiguration worth surfacing as a real failure). Shared by the
+// global-settings and per-project-settings checks so the acceptance rule
+// stays in sync if it ever changes.
+func isSubsetMatch(sqsCount, scCount int) bool {
+	return scCount > 0 && scCount <= sqsCount
+}
 
 func checkGlobalSettings(ctx context.Context, s *Suite) []CheckResult {
 	sqsCount, err := queryCount(ctx, s.sqsRaw, "api/settings/values", nil, "settings")
@@ -594,9 +611,10 @@ func checkGlobalSettings(ctx context.Context, s *Suite) []CheckResult {
 	}
 	r := makeResult("Settings", "Global settings", sqsCount, scCount, "SC-compatible subset")
 	r.Notes = "SC supports subset of SQS settings"
-	if scCount > 0 {
-		r.Match = true
-	}
+	// SC's supported setting set is intentionally a subset of SQS, so a
+	// direct equality is not expected. The check passes when SC has at
+	// least one migrated setting AND that count is no larger than SQS.
+	r.Match = isSubsetMatch(sqsCount, scCount)
 	return []CheckResult{r}
 }
 
@@ -620,9 +638,8 @@ func checkProjectSettings(ctx context.Context, s *Suite) []CheckResult {
 		}
 		r := makeResult("Settings", fmt.Sprintf("Settings: %s", proj), sqsCount, scCount, "SC-compatible subset")
 		r.Notes = "SC-compatible subset"
-		if scCount > 0 {
-			r.Match = true
-		}
+		// Same subset-relationship rule as checkGlobalSettings.
+		r.Match = isSubsetMatch(sqsCount, scCount)
 		results = append(results, r)
 	}
 	return results
@@ -676,7 +693,10 @@ func checkCustomRules(ctx context.Context, s *Suite) []CheckResult {
 	}
 	r := makeResult("Rules", "Rule count", sqsTotal, scTotal, "Rule sets may differ")
 	r.Notes = "Rule sets may differ between SQS and SC"
-	r.Match = true
+	// Match is left to makeResult's sqsCount == scCount comparison: SC's
+	// rule catalogue is a subset of SQS so equality is rare and a mismatch
+	// is informational, not a failure. The Notes field explains the gap
+	// for reviewers.
 	return []CheckResult{r}
 }
 

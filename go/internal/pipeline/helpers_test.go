@@ -234,3 +234,85 @@ func TestFetchAllGroupsNon200(t *testing.T) {
 		t.Errorf("error should mention 'HTTP 403', got: %v", err)
 	}
 }
+
+func TestMergeComponentMetricsEmpty(t *testing.T) {
+	if got := mergeComponentMetrics(nil); got != nil {
+		t.Errorf("mergeComponentMetrics(nil) = %v, want nil", got)
+	}
+}
+
+func TestMergeComponentMetricsNoDuplicates(t *testing.T) {
+	in := []ComponentMetrics{
+		{Component: "a", Measures: []Measure{{Metric: "ncloc", Value: "10"}}},
+		{Component: "b", Measures: []Measure{{Metric: "ncloc", Value: "20"}}},
+	}
+	got := mergeComponentMetrics(in)
+	if len(got) != 2 {
+		t.Fatalf("got %d components, want 2", len(got))
+	}
+	if got[0].Component != "a" || got[1].Component != "b" {
+		t.Errorf("unexpected component order: %+v", got)
+	}
+}
+
+func TestMergeComponentMetricsMergesSameComponent(t *testing.T) {
+	in := []ComponentMetrics{
+		{Component: "a", Measures: []Measure{{Metric: "ncloc", Value: "10"}}},
+		{Component: "a", Measures: []Measure{{Metric: "coverage", Value: "80"}}},
+		{Component: "b", Measures: []Measure{{Metric: "ncloc", Value: "20"}}},
+	}
+	got := mergeComponentMetrics(in)
+	if len(got) != 2 {
+		t.Fatalf("got %d components, want 2", len(got))
+	}
+	if got[0].Component != "a" || len(got[0].Measures) != 2 {
+		t.Errorf("a should have 2 merged measures, got %+v", got[0])
+	}
+	if got[1].Component != "b" || len(got[1].Measures) != 1 {
+		t.Errorf("b should have 1 measure, got %+v", got[1])
+	}
+}
+
+// TestFetchComponentMetricsPaginates verifies that fetchComponentMetrics
+// pages through every page (i.e. does not stop at the first page even when
+// the server reports a total larger than a single page) and merges
+// components that appear across pages.
+func TestFetchComponentMetricsPaginates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("p")
+		w.Header().Set("Content-Type", "application/json")
+		switch page {
+		case "1":
+			json.NewEncoder(w).Encode(map[string]any{
+				"paging": map[string]any{"pageIndex": 1, "pageSize": 1, "total": 2},
+				"components": []map[string]any{
+					{"key": "comp-a", "measures": []map[string]any{{"metric": "ncloc", "value": "10"}}},
+				},
+			})
+		case "2":
+			json.NewEncoder(w).Encode(map[string]any{
+				"paging": map[string]any{"pageIndex": 2, "pageSize": 1, "total": 2},
+				"components": []map[string]any{
+					{"key": "comp-b", "measures": []map[string]any{{"metric": "ncloc", "value": "20"}}},
+				},
+			})
+		default:
+			json.NewEncoder(w).Encode(map[string]any{
+				"paging":     map[string]any{"pageIndex": 0, "pageSize": 1, "total": 2},
+				"components": []map[string]any{},
+			})
+		}
+	}))
+	defer srv.Close()
+
+	pages, err := paginateAll(context.Background(), func(_ context.Context, page int) ([]ComponentMetrics, int, error) {
+		return fetchComponentMetricsPage(context.Background(), newTestClient(t, srv.URL), "proj", []string{"ncloc"}, page, 1)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged := mergeComponentMetrics(pages)
+	if len(merged) != 2 {
+		t.Fatalf("got %d components, want 2 (one per page)", len(merged))
+	}
+}

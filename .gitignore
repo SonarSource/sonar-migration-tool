@@ -21,7 +21,6 @@ go/cmd/cetest/
 
 # Claude Code
 .claude/
-CLAUDE.md
 
 # Environment / secrets
 .env
@@ -67,6 +66,9 @@ project-notes/
 
 # Deprecated artifacts
 README.md.bak
+
+# Regression test output
+regression-test/
 
 # Node (no longer used — frontend is Go templates + HTMX)
 node_modules/
