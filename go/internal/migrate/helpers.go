@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
+	"strings"
 	"sync/atomic"
 
 	sqapi "github.com/sonar-solutions/sq-api-go"
@@ -17,6 +19,84 @@ import (
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 	"golang.org/x/sync/errgroup"
 )
+
+// sortSpec describes how a task's items should be ordered before iteration
+// (#326). orgField names the JSON field used to bucket items by SonarCloud
+// org so each org's objects are processed contiguously — empty means
+// enterprise-wide, no bucketing. sortField names the JSON field used to
+// alphabetize items within each bucket.
+type sortSpec struct {
+	orgField  string
+	sortField string
+}
+
+// taskSortSpecs registers per-task ordering for the centralized iteration
+// helpers. Tasks not listed here keep their input order (no-op sort).
+//
+// Within each entry the chosen sortField is the operator-visible identifier:
+// project key for projects, name for groups / profiles / gates / portfolios
+// / permission templates. Org-scoped objects are bucketed by
+// sonarcloud_org_key first; portfolios are enterprise-wide so they sort
+// purely by name. Extract-driven tasks read records that don't carry the
+// org key, so they sort by projectKey alone — the within-org alphabetical
+// order is preserved as a sub-sequence.
+var taskSortSpecs = map[string]sortSpec{
+	// Migrate-driven (records carry sonarcloud_org_key).
+	"createProjects":            {orgField: "sonarcloud_org_key", sortField: "cloud_project_key"},
+	"setProjectGates":           {orgField: "sonarcloud_org_key", sortField: "cloud_project_key"},
+	"setProjectBinding":         {orgField: "sonarcloud_org_key", sortField: "cloud_project_key"},
+	"createProfiles":            {orgField: "sonarcloud_org_key", sortField: "name"},
+	"createGates":               {orgField: "sonarcloud_org_key", sortField: "name"},
+	"createGroups":              {orgField: "sonarcloud_org_key", sortField: "name"},
+	"createPermissionTemplates": {orgField: "sonarcloud_org_key", sortField: "name"},
+	"setDefaultProfiles":        {orgField: "sonarcloud_org_key", sortField: "name"},
+	"setDefaultGates":           {orgField: "sonarcloud_org_key", sortField: "name"},
+	"setDefaultTemplates":       {orgField: "sonarcloud_org_key", sortField: "name"},
+	"syncIssueMetadata":         {orgField: "sonarcloud_org_key", sortField: "cloud_project_key"},
+	"syncHotspotMetadata":       {orgField: "sonarcloud_org_key", sortField: "cloud_project_key"},
+	"importScanHistory":         {orgField: "sonarcloud_org_key", sortField: "cloud_project_key"},
+	// Enterprise-wide (no org bucketing).
+	"createPortfolios":    {sortField: "name"},
+	"configurePortfolios": {sortField: "name"},
+	// Extract-driven tasks: records carry projectKey but no org key.
+	"setProjectProfiles":         {sortField: "projectKey"},
+	"setProjectGroupPermissions": {sortField: "projectKey"},
+	"setProjectSettings":         {sortField: "projectKey"},
+	"setProjectTags":             {sortField: "projectKey"},
+	"setProjectLinks":            {sortField: "projectKey"},
+	"setProjectWebhooks":         {sortField: "projectKey"},
+	"setNewCodePeriods":          {sortField: "projectKey"},
+}
+
+// sortMigrateItems orders items per the task's sortSpec. Stable, in-place;
+// a no-op for tasks without a spec.
+func sortMigrateItems(taskName string, items []json.RawMessage) {
+	spec, ok := taskSortSpecs[taskName]
+	if !ok {
+		return
+	}
+	slices.SortStableFunc(items, func(a, b json.RawMessage) int {
+		if spec.orgField != "" {
+			if c := strings.Compare(extractField(a, spec.orgField), extractField(b, spec.orgField)); c != 0 {
+				return c
+			}
+		}
+		return strings.Compare(extractField(a, spec.sortField), extractField(b, spec.sortField))
+	})
+}
+
+// sortExtractItems orders extract items per the task's sortSpec. Stable,
+// in-place; a no-op for tasks without a spec. Extract records don't carry
+// the org key, so spec.orgField (when set) is ignored here.
+func sortExtractItems(taskName string, items []structure.ExtractItem) {
+	spec, ok := taskSortSpecs[taskName]
+	if !ok {
+		return
+	}
+	slices.SortStableFunc(items, func(a, b structure.ExtractItem) int {
+		return strings.Compare(extractField(a.Data, spec.sortField), extractField(b.Data, spec.sortField))
+	})
+}
 
 // readExtractItems reads JSONL items from an extract task across all extract runs.
 func readExtractItems(e *Executor, taskKey string) ([]structure.ExtractItem, error) {
@@ -48,6 +128,10 @@ func forEachMigrateItemFiltered(ctx context.Context, e *Executor, taskName, depT
 			filtered = append(filtered, item)
 		}
 	}
+
+	// Order items so the log stream reflects alphabetical progress within
+	// each org (#326). No-op for tasks not in the sort registry.
+	sortMigrateItems(taskName, filtered)
 
 	e.Logger.Info("starting task", "task", taskName, "items", len(filtered))
 	prog := newProgressLogger(e.Logger, taskName, len(filtered))
@@ -82,6 +166,10 @@ func forEachExtractItem(ctx context.Context, e *Executor, taskName, extractKey s
 	if err != nil {
 		return fmt.Errorf("%s: reading %s: %w", taskName, extractKey, err)
 	}
+
+	// Order items so the log stream reflects alphabetical progress (#326).
+	// No-op for tasks not in the sort registry.
+	sortExtractItems(taskName, items)
 
 	e.Logger.Info("starting task", "task", taskName, "items", len(items))
 	prog := newProgressLogger(e.Logger, taskName, len(items))
@@ -256,35 +344,36 @@ type progressLogger struct {
 // should emit an INFO line for a given task. Per-task entries take
 // precedence over the size-based fallback in newProgressLogger.
 //
-// Tuned for operator-visible cadence (issue #202):
-//   - createProjects is one API call per project and the slowest
-//     per-item task on large platforms; surface progress every 10.
-//   - configurePortfolios issues multiple Enterprise-API calls per
-//     portfolio (create + update + project membership); every 10
-//     keeps progress visible at the user's expected cadence.
-//   - setProjectSettings does multiple HTTP calls per record on
-//     average (definition-driven dispatch, fan-out fallback);
-//     every 50 strikes a balance between visibility and noise.
-//   - setProjectGroupPermissions can run into the tens of thousands
-//     of items (projects × groups × permissions); every 100 keeps
-//     the log readable while still ticking visibly.
+// Cadence policy (#326): the default is 20 items (set in
+// newProgressLogger), with a per-task override below for the two cases
+// that need a tighter cadence:
+//   - syncIssueMetadata / syncHotspotMetadata: slowest per-project work
+//     in a migrate run; every 10 projects so an operator tailing the
+//     log can see steady forward motion.
+//
+// Historical overrides retained from #202 where they remain operator-
+// friendly: createProjects and configurePortfolios already tick every
+// 10. setProjectSettings (was 50) and setProjectGroupPermissions (was
+// 100) are now capped at the new 20-item ceiling.
 var progressLogInterval = map[string]int64{
 	"createProjects":             10,
 	"configurePortfolios":        10,
-	"setProjectSettings":         50,
-	"setProjectGroupPermissions": 100,
+	"setProjectSettings":         20,
+	"setProjectGroupPermissions": 20,
+	"importScanHistory":          20,
+	"syncIssueMetadata":          10,
+	"syncHotspotMetadata":        10,
 }
 
 func newProgressLogger(logger *slog.Logger, task string, total int) *progressLogger {
-	interval := int64(1000)
-	if total < 1000 {
-		interval = 100
-	}
-	if total < 100 {
+	// Default cadence is 20 items (#326). Capped at total so a small
+	// batch still emits its single end-of-task line via the
+	// "n == total" branch in Increment.
+	interval := int64(20)
+	if int64(total) < interval {
 		interval = int64(total)
 	}
-	// Per-task override beats the size-based default — operator
-	// cadence trumps "log volume." Capped at total so the very last
+	// Per-task override beats the default. Same cap so the very last
 	// item still emits a line when override > total.
 	if explicit, ok := progressLogInterval[task]; ok && explicit > 0 {
 		interval = explicit
