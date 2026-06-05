@@ -1,0 +1,1 @@
+FULLY and exhaustivele, use claude code dynamic workflow / workflows and agent swarms and subagents to discover how much you can parallelize your work and then use those again to run that maximum parallelization work    

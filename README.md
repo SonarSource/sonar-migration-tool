@@ -8,7 +8,7 @@ The tool ships as a single static binary. No installer, no runtime dependencies.
 ---
 
 ## What gets migrated
-<!-- updated: 2026-06-04_01:13:00.000 by Claude -->
+<!-- updated: 2026-06-05_19:25:00 -->
 
 | ✅ Migrated | ❌ NOT migrated |
 |---|---|
@@ -19,6 +19,7 @@ The tool ships as a single static binary. No installer, no runtime dependencies.
 | **Issues & Hotspots** with status, comments, and tags (project data, on by default) | |
 | **Source Code** and measures (project data, on by default) | |
 | **Issue Creation Dates** preserved via BackdateChangesets (project data, on by default) | |
+| **All branches** — non-main branches migrate as long-lived branches with full issue history (project data, on by default) | |
 
 ---
 
@@ -157,7 +158,7 @@ Once the command finishes:
 1. Log in to [sonarcloud.io](https://sonarcloud.io).
 2. Open the target organization.
 3. Spot-check that your project(s) are listed and the quality gate and quality profile are correct.
-4. Unless you passed `--skip_project_data_migration`, verify that issues, hotspots, and their creation dates match the source. You can also run `./sonar-migration-tool regtest` for automated verification.
+4. Unless you passed `--skip_project_data_migration`, verify that issues, hotspots, and their creation dates match the source — and that non-main branches appear under **Branches** with their issues. You can also run `./sonar-migration-tool regtest` for automated verification.
 5. **Re-scan your projects in CI** to seed ongoing analysis. If you used `--skip_project_data_migration`, this first scan will be the baseline for all issue tracking.
 6. Update your CI/CD pipeline to point at SonarQube Cloud (`SONAR_TOKEN` and `SONAR_HOST_URL`).
 

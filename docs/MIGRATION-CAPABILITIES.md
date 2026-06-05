@@ -228,15 +228,17 @@ Fine-grained control over which entities are included in or excluded from migrat
 - Entity filtering by project key patterns, tags, or custom criteria
 
 #### Branch Migration Strategy (SPEC-020)
+<!-- updated: 2026-06-05_19:20:00 -->
 
 Migration of non-main branches and their associated analysis data.
 
+**Status: Implemented.** Non-main branches migrate as **long-lived branches with full issue history** via SonarQube Cloud's "Create analysis" handshake (`POST {api-host}/analysis/analyses` → `analysisUuid` stamped into report `metadata.analysis_uuid`); see [CLOUDVOYAGER-DELTA.md](CLOUDVOYAGER-DELTA.md) BUG-17. All migrated branches are registered as long-lived so SonarQube Cloud's automatic pruning of short-lived branches (after ~30 days) never discards migrated history.
+
 **What it migrates:**
-- Branch definitions (long-lived branches, short-lived branches, pull requests)
-- Per-branch issues, hotspots, and measures
-- Branch-specific scan history
-- Configurable branch inclusion/exclusion patterns
-- Option to sync main branch only or all branches
+- Per-branch issues, hotspots, and measures (each branch's full scan history)
+- All non-main branches as long-lived branches (short-lived/PR branches are not separately recreated; everything is migrated long-lived to preserve history)
+- Configurable branch inclusion/exclusion patterns (`--exclude-branches`)
+- Branches whose source is no longer retrievable on the server are skipped with a clear message
 
 ### Phase 4: Verification, Reporting & User Experience (P1/P2/P3)
 <!-- updated: 2026-06-04_12:00:00 -->

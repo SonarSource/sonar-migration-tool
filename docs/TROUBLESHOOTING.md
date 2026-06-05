@@ -267,17 +267,21 @@ The CV report ships 143 `measures-{ref}.pb` files (aggregate metrics: `reliabili
 ---
 
 ## Branch Migration Ordering and Failures
-<!-- updated: 2026-06-04_15:00:00 -->
+<!-- updated: 2026-06-05_19:20:00 -->
 
-When `importScanHistory` migrates a project with multiple branches, the ordering of branch uploads matters. SonarCloud's Compute Engine (CE) requires the main branch to be imported and fully processed before any non-main branches can be submitted. If non-main branches are uploaded first, CE will reject them.
+When `importScanHistory` migrates a project with multiple branches, the main branch is imported first (its CE task is awaited) so the project is established, then each **non-main** branch is migrated as a **long-lived branch with its full issue history**. Before uploading a non-main branch's report, the tool performs SonarQube Cloud's "Create analysis" handshake (`POST {api-host}/analysis/analyses`) to register the branch and obtain an analysis id, which it embeds in the report (`metadata.analysis_uuid`) so the CE binds the issues to that branch. Without the handshake the CE accepts the report (task SUCCESS) but never creates the branch.
 
-### Main branch must succeed before non-main branches
+### Main branch first; non-main branches migrate as long-lived
 
-The tool automatically handles this: it sorts branches so the main branch is always first, imports it, and waits for CE to report SUCCESS before proceeding with non-main branches. If the main branch CE task fails, all remaining branches for that project are marked as "skipped" and the tool moves on to the next project.
+The tool sorts branches main-first, imports the main branch and waits for CE SUCCESS, then imports each non-main branch (each preceded by the create-analysis handshake). If the main branch CE task fails, the remaining branches are skipped. Every migrated branch is registered as **long-lived** so SonarQube Cloud's automatic pruning of short-lived branches (after ~30 days) never discards migrated history.
 
-**Symptom**: Non-main branch CE tasks fail with errors like "Invalid branch type" or "Branch 'main' already exists with type 'LONG'".
+**Symptom**: A non-main branch CE task fails with "Invalid branch type 'SHORT'. Branch '\<name\>' already exists with type 'LONG'."
 
-**Solution**: This is now handled automatically. If you see these errors on older runs, re-run the migration — the tool will use per-branch checkpoint/resume to skip already-completed branches and retry the failed ones in the correct order.
+**Cause / fix**: The tool requests `branchType=long` for every migrated branch, so a fresh target avoids this. It can still occur if the **target branch already exists with a conflicting type** from an earlier/partial run — delete that branch on SonarQube Cloud (`POST /api/project_branches/delete?project=<key>&branch=<name>`) and re-run.
+
+**Symptom**: A non-main branch is reported as `skipped: source code not retrievable ...`.
+
+**Cause**: The source server no longer has that branch's source text (purged by housekeeping for an inactive branch — line measures may remain). Re-analyze the branch on the source server to restore its source, then re-run.
 
 ### Excluding branches from migration
 
