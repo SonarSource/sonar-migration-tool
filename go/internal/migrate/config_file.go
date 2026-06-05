@@ -38,9 +38,15 @@ type configFileShape struct {
 	// Defaults to false (sync happens); set to true (or on / yes) to
 	// skip the sync. Pointer + custom unmarshaller so we can
 	// distinguish "absent" from "explicit false".
-	SkipIssueSync   *FlexibleBool `json:"skip-issue-sync"`
-	Debug           bool          `json:"debug"`
-	ExcludeBranches []string      `json:"exclude_branches"`
+	SkipIssueSync *FlexibleBool `json:"skip-issue-sync"`
+	// SkipProjectDataMigration disables the entire project-data import:
+	// importScanHistory plus the trailing issue + hotspot syncs (#303).
+	// Defaults to false (data is migrated). Setting true (or on/yes)
+	// implies SkipIssueSync — there's nothing to sync against. Same
+	// FlexibleBool semantics as skip-issue-sync.
+	SkipProjectDataMigration *FlexibleBool `json:"skip-project-data-migration"`
+	Debug                    bool          `json:"debug"`
+	ExcludeBranches          []string      `json:"exclude_branches"`
 
 	// Shape 2 (command-sectioned).
 	Migrate *configFileShape `json:"migrate"`
@@ -166,11 +172,17 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
 			cfg.SkipIssueSync = s.SkipIssueSync.Value
 		}
+		if s.SkipProjectDataMigration != nil && s.SkipProjectDataMigration.Set {
+			cfg.SkipProjectDataMigration = s.SkipProjectDataMigration.Value
+		}
 		return cfg
 	case s.SonarCloud != nil:
 		cfg := s.SonarCloud.toMigrateConfig(s.Settings)
 		if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
 			cfg.SkipIssueSync = s.SkipIssueSync.Value
+		}
+		if s.SkipProjectDataMigration != nil && s.SkipProjectDataMigration.Set {
+			cfg.SkipProjectDataMigration = s.SkipProjectDataMigration.Value
 		}
 		return cfg
 	case s.Migrate != nil:
@@ -179,6 +191,9 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		// set it (#299). If only outer is set, propagate it down.
 		if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
 			cfg.SkipIssueSync = s.SkipIssueSync.Value
+		}
+		if s.SkipProjectDataMigration != nil && s.SkipProjectDataMigration.Set {
+			cfg.SkipProjectDataMigration = s.SkipProjectDataMigration.Value
 		}
 		return cfg
 	default:
@@ -198,6 +213,9 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		}
 		if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
 			cfg.SkipIssueSync = s.SkipIssueSync.Value
+		}
+		if s.SkipProjectDataMigration != nil && s.SkipProjectDataMigration.Set {
+			cfg.SkipProjectDataMigration = s.SkipProjectDataMigration.Value
 		}
 		return cfg
 	}

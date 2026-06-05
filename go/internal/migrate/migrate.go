@@ -38,10 +38,11 @@ type MigrateConfig struct {
 	// command for project-scoped migration. Takes precedence over TargetTask.
 	TargetTasks []string
 
-	SkipProfiles       bool
-	IncludeScanHistory bool
-	SkipIssueSync      bool // Skip the final issue / hotspot metadata sync (#299).
-	Debug              bool // Enable slog.LevelDebug + verbose request payload logs
+	SkipProfiles             bool
+	IncludeScanHistory       bool
+	SkipIssueSync            bool // Skip the final issue / hotspot metadata sync (#299).
+	SkipProjectDataMigration bool // Skip importScanHistory + the trailing sync tasks (#303).
+	Debug                    bool // Enable slog.LevelDebug + verbose request payload logs
 
 	// DefaultOrganization, when set, is used as the SonarCloud org for
 	// every row in organizations.csv if none have a sonarcloud_org_key.
@@ -147,20 +148,30 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (string, error) {
 	registry := BuildMigrateRegistry(allDefs)
 	registry = FilterByEdition(registry, edition)
 
+	// Project-data migration covers importScanHistory + the trailing
+	// issue/hotspot sync pair. Skipping it necessarily skips the
+	// sync as well — propagate the flag so the existing SkipIssueSync
+	// logging surfaces both halves of the decision. #303.
+	if cfg.SkipProjectDataMigration {
+		cfg.SkipIssueSync = true
+		logger.Info("project data migration disabled: skipping importScanHistory")
+		logger.Info("project data migration disabled: issue + hotspot sync also skipped")
+	}
+
 	// Announce the skipped sync tasks explicitly so an operator who
-	// passed --no-issue-sync (or set issue-sync: false in the config)
-	// sees them named in the log alongside the rest of the plan. The
-	// gating itself happens inside MigrateTargetTasks. Always emitted
-	// when SkipIssueSync is true so the operator gets acknowledgement
-	// of their setting, even when --include_scan_history wasn't set
-	// (in which case the two tasks are also dropped by the scan-
-	// history gate; the log clarifies both paths). #299.
+	// passed --skip-issue-sync (or set skip-issue-sync: true in the
+	// config) sees them named in the log alongside the rest of the
+	// plan. The gating itself happens inside MigrateTargetTasks.
+	// Always emitted when SkipIssueSync is true so the operator gets
+	// acknowledgement of their setting, even when --include_scan_history
+	// wasn't set (in which case the two tasks are also dropped by
+	// the scan-history gate; the log clarifies both paths). #299.
 	if cfg.SkipIssueSync {
 		logger.Info("issue-sync disabled: skipping syncIssueMetadata")
 		logger.Info("issue-sync disabled: skipping syncHotspotMetadata")
 	}
 
-	targets := MigrateTargetTasks(registry, cfg.TargetTask, cfg.SkipProfiles, cfg.IncludeScanHistory, cfg.SkipIssueSync, cfg.TargetTasks)
+	targets := MigrateTargetTasks(registry, cfg.TargetTask, cfg.SkipProfiles, cfg.IncludeScanHistory, cfg.SkipIssueSync, cfg.SkipProjectDataMigration, cfg.TargetTasks)
 	taskSet := ResolveDependencies(targets, registry)
 	if taskSet == nil {
 		return "", fmt.Errorf("cannot resolve dependencies for target tasks")

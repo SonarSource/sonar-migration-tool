@@ -241,7 +241,7 @@ func TestTransferTargetTasksResolveToProjectScopedPlan(t *testing.T) {
 		common.EditionEnterprise,
 	)
 
-	targets := migrate.MigrateTargetTasks(reg, "", false, false, false, transferTargetTasks)
+	targets := migrate.MigrateTargetTasks(reg, "", false, false, false, false, transferTargetTasks)
 	if len(targets) != len(transferTargetTasks) {
 		t.Fatalf("explicit transfer targets not honored verbatim: got %v", targets)
 	}

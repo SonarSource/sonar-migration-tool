@@ -32,6 +32,15 @@
       "default": false,
       "description": "When true (or on / yes / 1), skip the final per-issue and per-hotspot metadata sync after scan history is replayed. Defaults to false so the sync happens. Issue #299."
     },
+    "skip-project-data-migration": {
+      "oneOf": [
+        { "type": "boolean" },
+        { "type": "integer", "enum": [0, 1] },
+        { "type": "string", "pattern": "^(?i)(true|false|on|off|yes|no|0|1)$" }
+      ],
+      "default": false,
+      "description": "When true (or on / yes / 1), skip the entire project-data migration: the scan-history import AND the trailing issue + hotspot sync. Implies skip-issue-sync. Defaults to false so the data is migrated. Issue #303."
+    },
     "source": {
       "$ref": "#/$defs/sourceBlock",
       "description": "SonarQube Server connection + extract-time options. Consumed by `extract` (and ignored by `migrate` / `reset`)."

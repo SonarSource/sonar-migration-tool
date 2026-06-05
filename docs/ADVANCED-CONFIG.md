@@ -39,10 +39,11 @@ All optional.
 | `timeout` | `60` | Default HTTP request timeout in seconds. |
 | `export_directory` | `./migration-files` | Root directory for extract / migrate output. |
 | `skip-issue-sync` | `false` | When `true` (or `"on"` / `"yes"` / `1`), skip the final per-issue and per-hotspot metadata sync that runs after scan history is replayed. Defaults to `false` so the sync happens. Accepted aliases are case-insensitive. Issue #299. |
+| `skip-project-data-migration` | `false` | When `true` (or `"on"` / `"yes"` / `1`), skip the entire project-data migration: the scan-history import AND the trailing issue + hotspot sync. Useful when customers cut over to SonarQube Cloud by re-scanning rather than importing historical state. Implies `skip-issue-sync` — there's nothing to sync against. Same FlexibleBool aliases. Issue #303. |
 
 `concurrency` and `timeout` can also be set inside `source` / `target` — those values override the top-level default for that command only.
 
-The CLI flag `--skip-issue-sync` on `migrate` / `transfer` is the one-way equivalent of the config field — passing the flag forces the trailing sync off, regardless of the config-file value.
+The CLI flags `--skip-issue-sync` and `--skip-project-data-migration` on `migrate` / `transfer` are the one-way equivalents of the config fields — passing a flag forces the matching opt-out on regardless of the config-file value.
 
 ---
 
@@ -140,6 +141,7 @@ sonar-migration-tool migrate [token] [enterprise_key] [flags]
 | `--skip_profiles` | Skip quality profile migration / provisioning. |
 | `--include_scan_history` | Import scan history into SQC projects. |
 | `--skip-issue-sync` | Skip the final per-issue / per-hotspot metadata sync (#299). One-way: setting this on the CLI forces the sync off, overriding the `skip-issue-sync` config field. |
+| `--skip-project-data-migration` | Skip the entire project-data migration: `importScanHistory` plus the trailing sync pair. Implies `--skip-issue-sync`. One-way override of the `skip-project-data-migration` config field. Issue #303. |
 | `--exclude_branches <pattern>` | Glob pattern for non-main branches to skip during scan history import. Repeatable. Main branch is never excluded. |
 | `--default_organization <key>` | SonarCloud org applied to every project when `organizations.csv` has no mapping defined. |
 | `--concurrency <n>` | Max concurrent requests. |
@@ -191,6 +193,7 @@ file.
 | `--cert_password <pw>` | `source.cert_password` | Client mTLS password. |
 | `--include-scan-history` | `include_scan_history` | Extract + import full scan history. |
 | `--skip-issue-sync` | top-level `skip-issue-sync` | Skip the final per-issue / per-hotspot metadata sync (#299). |
+| `--skip-project-data-migration` | top-level `skip-project-data-migration` | Skip the entire project-data migration (importScanHistory + trailing syncs). #303. |
 | `--exclude-branches <pattern>` | `target.exclude_branches` | Glob pattern for non-main branches to skip during scan history import. Repeatable. Main branch is never excluded. |
 
 CLI flags always override the corresponding config-file value.

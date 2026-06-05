@@ -312,3 +312,47 @@ func TestLoadResetConfigFileUnifiedShape(t *testing.T) {
 		t.Errorf("reset cfg: %+v", cfg)
 	}
 }
+
+// Issue #303: top-level `skip-project-data-migration` parses into
+// MigrateConfig.SkipProjectDataMigration one-for-one (no inversion).
+// Defaults to false (data is migrated). Every FlexibleBool alias is
+// accepted, case-insensitive.
+func TestLoadMigrateConfigFile_SkipProjectDataMigration(t *testing.T) {
+	cases := []struct {
+		name      string
+		bodyField string
+		wantSkip  bool
+	}{
+		{"absent (default)", "", false},
+		{"true", `"skip-project-data-migration": true,`, true},
+		{"false", `"skip-project-data-migration": false,`, false},
+		{"string on", `"skip-project-data-migration": "on",`, true},
+		{"string OFF", `"skip-project-data-migration": "OFF",`, false},
+		{"string Yes", `"skip-project-data-migration": "Yes",`, true},
+		{"numeric 1", `"skip-project-data-migration": 1,`, true},
+		{"numeric 0", `"skip-project-data-migration": 0,`, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			body := `{
+  ` + c.bodyField + `
+  "target": {
+    "url": "https://sonarcloud.io/",
+    "token": "t"
+  }
+}`
+			dir := t.TempDir()
+			path := dir + "/skip-project-data.json"
+			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadMigrateConfigFile(path)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if cfg.SkipProjectDataMigration != c.wantSkip {
+				t.Errorf("SkipProjectDataMigration: got %v, want %v", cfg.SkipProjectDataMigration, c.wantSkip)
+			}
+		})
+	}
+}

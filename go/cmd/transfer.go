@@ -33,9 +33,10 @@ const (
 	flagEnterpriseKey      = "enterprise_key"
 	flagDefaultOrg         = "default_organization"
 	flagExportDir          = "export-dir"
-	flagIncludeScanHistory = "include-scan-history"
-	flagSkipIssueSync      = "skip-issue-sync"
-	flagConcurrency        = "concurrency"
+	flagIncludeScanHistory       = "include-scan-history"
+	flagSkipIssueSync            = "skip-issue-sync"
+	flagSkipProjectDataMigration = "skip-project-data-migration"
+	flagConcurrency              = "concurrency"
 	flagTimeout            = "timeout"
 	flagPEMFilePath        = "pem_file_path"
 	flagKeyFilePath        = "key_file_path"
@@ -155,6 +156,7 @@ func init() {
 	f.String(flagExportDir, "./migration-files/", "Working directory for intermediate files (maps to export_directory)")
 	f.Bool(flagIncludeScanHistory, false, "Accepted for compatibility; scan history (issues + hotspots) is always extracted and imported for transfer (maps to include_scan_history)")
 	f.Bool(flagSkipIssueSync, false, "Skip the final per-issue and per-hotspot metadata sync (#299). Same semantics as the skip-issue-sync config-file field — defaults to false (sync happens); pass the flag to skip.")
+	f.Bool(flagSkipProjectDataMigration, false, "Skip the entire project-data migration: importScanHistory and the trailing per-issue/per-hotspot sync (#303). Defaults to false (data is migrated); pass the flag to skip.")
 	f.Int(flagConcurrency, 0, "Max concurrent requests (default: 25) (maps to concurrency)")
 	f.Int(flagTimeout, 0, "HTTP request timeout in seconds (maps to timeout)")
 	f.String(flagPEMFilePath, "", "Path to client mTLS PEM file for the source server (maps to source.pem_file_path)")
@@ -179,7 +181,8 @@ type transferConfig struct {
 	keyFilePath         string
 	certPassword        string
 	includeScanHistory  bool
-	skipIssueSync       bool
+	skipIssueSync            bool
+	skipProjectDataMigration bool
 	debug               bool
 	excludeBranches     []string
 }
@@ -267,6 +270,7 @@ func loadTransferFileDefaults(path string) (transferConfig, error) {
 
 	cfg.includeScanHistory = extractCfg.IncludeScanHistory || migrateCfg.IncludeScanHistory
 	cfg.skipIssueSync = migrateCfg.SkipIssueSync
+	cfg.skipProjectDataMigration = migrateCfg.SkipProjectDataMigration
 	cfg.debug = migrateCfg.Debug
 	cfg.excludeBranches = migrateCfg.ExcludeBranches
 	return cfg, nil
@@ -305,6 +309,14 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 		v, _ := cmd.Flags().GetBool(flagSkipIssueSync)
 		if v {
 			cfg.skipIssueSync = true
+		}
+	}
+	// --skip-project-data-migration is the wider opt-out. Same
+	// one-way semantics as --skip-issue-sync. #303.
+	if cmd.Flags().Changed(flagSkipProjectDataMigration) {
+		v, _ := cmd.Flags().GetBool(flagSkipProjectDataMigration)
+		if v {
+			cfg.skipProjectDataMigration = true
 		}
 	}
 	applyFlagBool(cmd, flagDebug, &cfg.debug)
@@ -445,11 +457,12 @@ func runTransferMigrate(ctx context.Context, cfg transferConfig) (string, error)
 		// Project-scoped migration: run only the leaf tasks for the project,
 		// its quality gate/profiles, permissions, and issue/hotspot history.
 		// Their dependencies are resolved automatically.
-		TargetTasks:        transferTargetTasks,
-		IncludeScanHistory: true,
-		SkipIssueSync:      cfg.skipIssueSync,
-		Debug:              cfg.debug,
-		ExcludeBranches:    cfg.excludeBranches,
+		TargetTasks:              transferTargetTasks,
+		IncludeScanHistory:       true,
+		SkipIssueSync:            cfg.skipIssueSync,
+		SkipProjectDataMigration: cfg.skipProjectDataMigration,
+		Debug:                    cfg.debug,
+		ExcludeBranches:          cfg.excludeBranches,
 	})
 	if err != nil {
 		return "", fmt.Errorf("migrate failed: %w", err)
