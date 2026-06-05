@@ -88,8 +88,8 @@ func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfi
 	overrideInt(cmd, "concurrency", &cfg.Concurrency)
 	overrideInt(cmd, "timeout", &cfg.Timeout)
 	// Project data is extracted by default. The only opt-out is
-	// SkipProjectDataMigration (CLI --skip-project-data-migration or
-	// config "skip-project-data-migration": true). CLI flag wins over
+	// SkipProjectDataMigration (CLI --skip_project_data_migration or
+	// config "skip_project_data_migration": true). CLI flag wins over
 	// config; one-way (passing the flag forces opt-out).
 	if cmd.Flags().Changed(flagSkipProjectDataMigration) {
 		v, _ := cmd.Flags().GetBool(flagSkipProjectDataMigration)

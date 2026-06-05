@@ -38,13 +38,13 @@ type configFileShape struct {
 	// Defaults to false (sync happens); set to true (or on / yes) to
 	// skip the sync. Pointer + custom unmarshaller so we can
 	// distinguish "absent" from "explicit false".
-	SkipIssueSync *FlexibleBool `json:"skip-issue-sync"`
+	SkipIssueSync *FlexibleBool `json:"skip_issue_sync"`
 	// SkipProjectDataMigration disables the entire project-data import:
 	// importScanHistory plus the trailing issue + hotspot syncs (#303).
 	// Defaults to false (data is migrated). Setting true (or on/yes)
 	// implies SkipIssueSync — there's nothing to sync against. Same
-	// FlexibleBool semantics as skip-issue-sync.
-	SkipProjectDataMigration *FlexibleBool `json:"skip-project-data-migration"`
+	// FlexibleBool semantics as skip_issue_sync.
+	SkipProjectDataMigration *FlexibleBool `json:"skip_project_data_migration"`
 	Debug                    bool          `json:"debug"`
 	ExcludeBranches          []string      `json:"exclude_branches"`
 
@@ -166,7 +166,7 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			cfg.Concurrency = s.Concurrency
 		}
 		cfg.ExportDirectory = s.ExportDirectory
-		// Top-level skip-issue-sync applies to every shape (#299).
+		// Top-level skip_issue_sync applies to every shape (#299).
 		// The field name matches the MigrateConfig field one-for-one
 		// so there's no inversion.
 		if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
@@ -187,7 +187,7 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		return cfg
 	case s.Migrate != nil:
 		cfg := s.Migrate.toMigrateConfig()
-		// Outer-level skip-issue-sync wins when both outer and inner
+		// Outer-level skip_issue_sync wins when both outer and inner
 		// set it (#299). If only outer is set, propagate it down.
 		if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
 			cfg.SkipIssueSync = s.SkipIssueSync.Value

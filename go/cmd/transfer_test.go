@@ -125,13 +125,13 @@ func TestResolveTransferConfig_CLIOverridesConfig(t *testing.T) {
 	cmd := newTransferTestCmd()
 	args := []string{
 		"-c", path,
-		"--source-url", "https://cli-source",
-		"--source-token", "cli-source-tok",
-		"--target-url", "https://cli-target",
-		"--target-token", "cli-target-tok",
+		"--source_url", "https://cli-source",
+		"--source_token", "cli-source-tok",
+		"--target_url", "https://cli-target",
+		"--target_token", "cli-target-tok",
 		"--default_organization", "cli-org",
 		"--enterprise_key", "cli-ent",
-		"--export-dir", "/tmp/cli",
+		"--export_dir", "/tmp/cli",
 		"--concurrency", "11",
 		"--timeout", "99",
 		"--pem_file_path", "/cli/pem",
@@ -177,9 +177,9 @@ func TestResolveTransferConfig_CLIOverridesConfig(t *testing.T) {
 func TestResolveTransferConfig_EnterpriseKeyDefaultsToOrg(t *testing.T) {
 	cmd := newTransferTestCmd()
 	if err := cmd.ParseFlags([]string{
-		"--source-url", "https://sq",
-		"--source-token", "tok",
-		"--target-token", "ct",
+		"--source_url", "https://sq",
+		"--source_token", "tok",
+		"--target_token", "ct",
 		"--default_organization", "my-org",
 	}); err != nil {
 		t.Fatal(err)
@@ -194,7 +194,7 @@ func TestResolveTransferConfig_EnterpriseKeyDefaultsToOrg(t *testing.T) {
 }
 
 // Validation must error if either side is missing credentials, with a
-// message that names the new --source-* / --target-* flags so users
+// message that names the new --source_* / --target_* flags so users
 // aren't pointed at the retired --sq-* / --sc-* names.
 func TestValidateTransferConfig_MissingCredentials(t *testing.T) {
 	cases := []struct {

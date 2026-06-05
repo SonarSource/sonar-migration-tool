@@ -76,7 +76,7 @@ func RegisterAll() []TaskDef {
 // per-project data after the configuration migration finishes — the
 // scan-history import plus the trailing issue + hotspot metadata
 // syncs. All three run by default; the operator opts out via
-// --skip-project-data-migration (#303).
+// --skip_project_data_migration (#303).
 var migrateProjectDataTasks = map[string]bool{
 	"importScanHistory":   true,
 	"syncHotspotMetadata": true,
@@ -84,8 +84,8 @@ var migrateProjectDataTasks = map[string]bool{
 }
 
 // migrateIssueSyncTasks lists the final per-issue / per-hotspot
-// metadata sync tasks that --skip-issue-sync (or config skip-issue-
-// sync: true) excludes. importScanHistory itself stays included;
+// metadata sync tasks that --skip_issue_sync (or config skip_issue_sync:
+// true) excludes. importScanHistory itself stays included;
 // only the trailing sync pair is skipped. #299.
 var migrateIssueSyncTasks = map[string]bool{
 	"syncHotspotMetadata": true,
@@ -106,8 +106,8 @@ var migrateIssueSyncTasks = map[string]bool{
 func MigrateTargetTasks(reg map[string]*TaskDef, targetTask string, skipProfiles, includeScanHistory, skipIssueSync, skipProjectDataMigration bool, targetTasks []string) []string {
 	if len(targetTasks) > 0 {
 		// Filter the explicit list against the skip gates so transfer's
-		// project-scoped target list still honors --skip-project-data-
-		// migration / --skip-issue-sync. Without this the transfer
+		// project-scoped target list still honors --skip_project_data_migration
+		// / --skip_issue_sync. Without this the transfer
 		// command would always run importScanHistory + the syncs even
 		// when the operator opted out, because the explicit list
 		// bypassed isExcludedTask. The other gates (--skip_profiles,

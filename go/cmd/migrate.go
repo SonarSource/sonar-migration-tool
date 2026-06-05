@@ -51,7 +51,7 @@ func init() {
 	f.String("export_directory", "", "Root directory containing all SonarQube exports")
 	f.String("target_task", "", "Name of a specific migration task to complete")
 	f.Bool("skip_profiles", false, "Skip quality profile migration/provisioning in SonarQube Cloud")
-	f.Bool("skip-issue-sync", false, "Skip the final per-issue and per-hotspot metadata sync (#299). Same semantics as the skip-issue-sync config-file field — defaults to false (sync happens); pass the flag to skip.")
+	f.Bool(flagSkipIssueSync, false, "Skip the final per-issue and per-hotspot metadata sync (#299). Same semantics as the skip_issue_sync config-file field — defaults to false (sync happens); pass the flag to skip.")
 	f.Bool(flagSkipProjectDataMigration, false, "Skip the entire project-data migration: importScanHistory and the trailing per-issue/per-hotspot sync (#303). Defaults to false (data is migrated); pass the flag to skip.")
 	f.String("default_organization", "", "SonarQube Cloud organization to migrate every project into when organizations.csv has no mapping defined. Ignored if any mapping is present.")
 	f.StringSlice("exclude_branches", nil, "Glob patterns for non-main branches to skip during scan history import (e.g. feature/*,bugfix/*)")
@@ -90,17 +90,17 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	if cmd.Flags().Changed("skip_profiles") {
 		cfg.SkipProfiles, _ = cmd.Flags().GetBool("skip_profiles")
 	}
-	// --skip-issue-sync explicitly turns off the trailing sync. The
-	// flag always wins over the config-file skip-issue-sync field.
-	// One-way: --skip-issue-sync=false on the CLI does NOT undo a
-	// config-file skip-issue-sync: true.
-	if cmd.Flags().Changed("skip-issue-sync") {
-		v, _ := cmd.Flags().GetBool("skip-issue-sync")
+	// --skip_issue_sync explicitly turns off the trailing sync. The
+	// flag always wins over the config-file skip_issue_sync field.
+	// One-way: --skip_issue_sync=false on the CLI does NOT undo a
+	// config-file skip_issue_sync: true.
+	if cmd.Flags().Changed(flagSkipIssueSync) {
+		v, _ := cmd.Flags().GetBool(flagSkipIssueSync)
 		if v {
 			cfg.SkipIssueSync = true
 		}
 	}
-	// --skip-project-data-migration is the wider opt-out: it covers
+	// --skip_project_data_migration is the wider opt-out: it covers
 	// importScanHistory AND the trailing sync pair. Same one-way
 	// override semantics. #303.
 	if cmd.Flags().Changed(flagSkipProjectDataMigration) {

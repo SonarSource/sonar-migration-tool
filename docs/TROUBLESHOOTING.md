@@ -281,11 +281,11 @@ The tool automatically handles this: it sorts branches so the main branch is alw
 
 ### Excluding branches from migration
 
-Use the `--exclude-branches` flag (or `exclude_branches` in the JSON config) to skip specific non-main branches during scan history import. This accepts glob patterns compatible with Go's `filepath.Match`:
+Use the `--exclude_branches` flag (or `exclude_branches` in the JSON config) to skip specific non-main branches during scan history import. This accepts glob patterns compatible with Go's `filepath.Match`:
 
 ```bash
 # Exclude all feature branches and release branches
-sonar-migration-tool migrate ... --exclude-branches "feature/*" --exclude-branches "release/*"
+sonar-migration-tool migrate ... --exclude_branches "feature/*" --exclude_branches "release/*"
 
 # Or in config.json
 {

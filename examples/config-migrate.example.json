@@ -4,6 +4,6 @@
   "url": "https://sonarcloud.io/",
   "export_directory": "./files",
   "concurrency": 10,
-  "skip-issue-sync": false,
-  "skip-project-data-migration": false
+  "skip_issue_sync": false,
+  "skip_project_data_migration": false
 }

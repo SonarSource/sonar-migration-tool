@@ -159,7 +159,7 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (string, error) {
 	}
 
 	// Announce the skipped sync tasks explicitly so an operator who
-	// passed --skip-issue-sync (or set skip-issue-sync: true in the
+	// passed --skip_issue_sync (or set skip_issue_sync: true in the
 	// config) sees them named in the log alongside the rest of the
 	// plan. The gating itself happens inside MigrateTargetTasks. #299.
 	if cfg.SkipIssueSync {

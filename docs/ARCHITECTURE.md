@@ -124,7 +124,7 @@ Organized by category in `go/internal/extract/tasks_*.go`:
 - **Templates** — Permission templates, associated groups/users
 - **Views** — Portfolios, applications (Enterprise+ only)
 - **Issues** — Accepted issues, safe hotspots
-- **Scan History** — `getProjectIssuesFull` (issues with comments/tags/flows), `getProjectHotspotsFull` (hotspots with review details), `getProjectVersions` (current project version per branch via `/api/navigation/component`), component trees (using `FIL,UTS` qualifiers for files and unit test source files), source code, SCM data. External issues (ruff, pylint, flake8, etc.) are extracted alongside native issues. Runs by default; skipped when `--skip-project-data-migration` is set.
+- **Scan History** — `getProjectIssuesFull` (issues with comments/tags/flows), `getProjectHotspotsFull` (hotspots with review details), `getProjectVersions` (current project version per branch via `/api/navigation/component`), component trees (using `FIL,UTS` qualifiers for files and unit test source files), source code, SCM data. External issues (ruff, pylint, flake8, etc.) are extracted alongside native issues. Runs by default; skipped when `--skip_project_data_migration` is set.
 - **Webhooks** — Global and project-level webhooks
 
 ### Migrate Tasks (44+ tasks)
@@ -138,8 +138,8 @@ Organized by category in `go/internal/migrate/tasks_*.go`:
 - **Rules** — Custom rule activation
 - **ALM** — DevOps platform binding detection
 - **Scan History** — Import scan reports via reconstructed protobuf format (native issues, external issues via ExternalIssue protobuf, hotspots mapped to issues). BackdateChangesets mechanism preserves original issue creation dates; external issues are included in changeset backdating alongside native issues. Project version (`sonar.projectVersion`) is migrated from SonarQube Server to SonarQube Cloud: the extracted version is set in both the protobuf metadata and the CE submit form, falling back to `"1.0.0"` if unavailable (matching CloudVoyager behavior). Harvested from CloudVoyager's `resolve-source-project-version.js`. **Multi-branch handling:** Branches are sorted main-first via `sortBranchesMainFirst()`, then imported in two phases — (1) main branch import + CE wait for SUCCESS, (2) parallel non-main branch imports. If the main branch CE task fails, all non-main branches are skipped. Supports `ExcludeBranches` glob patterns to skip non-main branches, and per-branch checkpoint/resume via `loadCompletedBranches()`/`shouldSkipBranch()`. Project-level concurrency uses `errgroup.WithContext` + `SetLimit`.
-- **Issue Metadata Sync** — `syncIssueMetadata`: two-phase task that waits for Cloud indexing, matches source→cloud issues by composite key (rule|filePath|line), then syncs status transitions (with fallback transition paths), comments, and tags per matched pair. Idempotent via `metadata-synchronized` tag. Runs by default; skipped when `--skip-project-data-migration` is set.
-- **Hotspot Metadata Sync** — `syncHotspotMetadata`: same two-phase pattern, matches source→cloud hotspots by composite key, syncs REVIEWED status/resolution and comments. Idempotent. Runs by default; skipped when `--skip-project-data-migration` is set.
+- **Issue Metadata Sync** — `syncIssueMetadata`: two-phase task that waits for Cloud indexing, matches source→cloud issues by composite key (rule|filePath|line), then syncs status transitions (with fallback transition paths), comments, and tags per matched pair. Idempotent via `metadata-synchronized` tag. Runs by default; skipped when `--skip_project_data_migration` is set.
+- **Hotspot Metadata Sync** — `syncHotspotMetadata`: same two-phase pattern, matches source→cloud hotspots by composite key, syncs REVIEWED status/resolution and comments. Idempotent. Runs by default; skipped when `--skip_project_data_migration` is set.
 - **Global Settings** — Migrates only SQS-supported settings; `sonar.dbcleaner.branchesToKeepWhenInactive` is migrated as a regex on SonarQube Cloud
 - **Delete/Reset** — Cleanup tasks for the `reset` command
 
@@ -221,7 +221,7 @@ All four pipelines implement the `Pipeline` interface; compile-time checks (`var
 
 `go/cmd/transfer.go` provides a single-command migration path that chains the four
 manual phases automatically so users never touch a CSV file. Flag names are defined
-as package-level constants (e.g. `flagSourceURL = "source-url"`) to avoid duplicated
+as package-level constants (e.g. `flagSourceURL = "source_url"`) to avoid duplicated
 string literals. Config resolution is handled by `resolveTransferConfig()` — it calls
 `loadTransferFileDefaults()` (which reuses `extract.LoadExtractConfigFile` and
 `migrate.LoadMigrateConfigFile` so transfer accepts the same unified config shape as
@@ -232,12 +232,12 @@ the other actions, issue #295) and then applies CLI overrides via
 ```bash
 # Flags
 sonar-migration-tool transfer \
-  --source-url https://sonarqube.example.com --source-token sqp_xxx \
-  --project-key my-project \
-  --target-token squ_xxx --default_organization my-org
+  --source_url https://sonarqube.example.com --source_token sqp_xxx \
+  --project_key my-project \
+  --target_token squ_xxx --default_organization my-org
 
 # Config file
-sonar-migration-tool transfer -c config.json --project-key my-project
+sonar-migration-tool transfer -c config.json --project_key my-project
 ```
 
 **config.json** (same unified shape as `extract` / `migrate`):
@@ -249,13 +249,13 @@ sonar-migration-tool transfer -c config.json --project-key my-project
 }
 ```
 
-`--project-key` is optional and lives on the CLI only. When provided, the
+`--project_key` is optional and lives on the CLI only. When provided, the
 `/api/projects/search` call is filtered server-side via the `projects=` param, so only
 the target project and its data are extracted. When omitted, all projects on the server
 are migrated.
 
 **Execution sequence:**
-1. `extract.RunExtract` — sets `ExtractConfig.ProjectKeys` when `--project-key` is given
+1. `extract.RunExtract` — sets `ExtractConfig.ProjectKeys` when `--project_key` is given
 2. `structure.RunStructure(dir, defaultOrg)` — pre-populates `sonarcloud_org_key` in organizations.csv
 3. `structure.RunMappings(dir)` — generates gates/profiles/groups/templates CSVs
 4. `migrate.RunMigrate` — pushes everything to SonarQube Cloud
@@ -355,7 +355,7 @@ See [roadmap/README.md](../roadmap/README.md) for the full spec index, dependenc
 ### Issue #102: Project Version Migration
 <!-- updated: 2026-06-04_15:30:00 -->
 
-The migration tool now migrates `sonar.projectVersion` from SonarQube Server to SonarQube Cloud during scan history import. The `getProjectVersions` extract task fetches the current project version per branch via `/api/navigation/component`. During scan history import, the extracted version is passed to both the protobuf metadata and the CE submit form. Falls back to `"1.0.0"` if the version is not available (matching CloudVoyager behavior). This feature was harvested from CloudVoyager's `resolve-source-project-version.js`. Runs by default; skipped when `--skip-project-data-migration` is set.
+The migration tool now migrates `sonar.projectVersion` from SonarQube Server to SonarQube Cloud during scan history import. The `getProjectVersions` extract task fetches the current project version per branch via `/api/navigation/component`. During scan history import, the extracted version is passed to both the protobuf metadata and the CE submit form. Falls back to `"1.0.0"` if the version is not available (matching CloudVoyager behavior). This feature was harvested from CloudVoyager's `resolve-source-project-version.js`. Runs by default; skipped when `--skip_project_data_migration` is set.
 
 ### Issue #104: Migrate All Issues (Implementation Status)
 <!-- updated: 2026-06-04_15:30:00 -->

@@ -25,7 +25,7 @@
     "concurrency": 10,
     "run_id": null,
     "target_task": null,
-    "skip-issue-sync": false,
-    "skip-project-data-migration": false
+    "skip_issue_sync": false,
+    "skip_project_data_migration": false
   }
 }

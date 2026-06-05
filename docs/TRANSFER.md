@@ -128,22 +128,22 @@ Full form:
 ```bash
 # From source
 cd go && go run . transfer \
-  --source-url https://sonarqube.example.com \
-  --source-token sqp_xxx \
-  --project-key my-project \
-  --target-token squ_xxx \
+  --source_url https://sonarqube.example.com \
+  --source_token sqp_xxx \
+  --project_key my-project \
+  --target_token squ_xxx \
   --default_organization my-org
 
 # Built binary
 sonar-migration-tool transfer \
-  --source-url https://sonarqube.example.com \
-  --source-token sqp_xxx \
-  --project-key my-project \
-  --target-token squ_xxx \
+  --source_url https://sonarqube.example.com \
+  --source_token sqp_xxx \
+  --project_key my-project \
+  --target_token squ_xxx \
   --default_organization my-org
 ```
 
-Omit `--project-key` to transfer **every** project visible to the token (in which case the rest of the manual workflow applies — see [MIGRATE.md](MIGRATE.md) for the per-project `organizations.csv` mapping step).
+Omit `--project_key` to transfer **every** project visible to the token (in which case the rest of the manual workflow applies — see [MIGRATE.md](MIGRATE.md) for the per-project `organizations.csv` mapping step).
 
 ---
 
@@ -152,21 +152,21 @@ Omit `--project-key` to transfer **every** project visible to the token (in whic
 | Flag | Config key | Description |
 |------|------------|-------------|
 | `-c, --config` | — | Path to a JSON configuration file (see [ADVANCED-CONFIG.md](ADVANCED-CONFIG.md)) |
-| `--source-url` | `source.url` | SonarQube Server URL |
-| `--source-token` | `source.token` | SonarQube Server token |
-| `--project-key` | `project_key` | Project key to transfer. Omit to transfer every project visible to the token. |
-| `--target-url` | `target.url` | SonarQube Cloud URL (default: `https://sonarcloud.io/`) |
-| `--target-token` | `target.token` | SonarQube Cloud token |
+| `--source_url` | `source.url` | SonarQube Server URL |
+| `--source_token` | `source.token` | SonarQube Server token |
+| `--project_key` | `project_key` | Project key to transfer. Omit to transfer every project visible to the token. |
+| `--target_url` | `target.url` | SonarQube Cloud URL (default: `https://sonarcloud.io/`) |
+| `--target_token` | `target.token` | SonarQube Cloud token |
 | `--default_organization` | `target.default_organization` | SonarQube Cloud organization key |
 | `--enterprise_key` | `target.enterprise_key` | SonarQube Cloud enterprise key (defaults to `--default_organization`) |
-| `--export-dir` | `export_directory` | Working directory for intermediate files (default: `./migration-files/`) |
+| `--export_dir` | `export_directory` | Working directory for intermediate files (default: `./migration-files/`) |
 | `--concurrency` | `concurrency` | Max concurrent HTTP requests (default: `25`) |
 | `--timeout` | `timeout` | HTTP request timeout in seconds |
 | `--pem_file_path` | `source.pem_file_path` | Client mTLS PEM file for the source server |
 | `--key_file_path` | `source.key_file_path` | Client mTLS key file for the source server |
 | `--cert_password` | `source.cert_password` | Password for the source server mTLS client certificate |
-| `--skip-project-data-migration` | top-level `skip-project-data-migration` | Skip the project-data migration (importScanHistory + per-issue / per-hotspot sync). Defaults to off — scan history is migrated by default. Issue #303. |
-| `--exclude-branches` | `target.exclude_branches` | Glob patterns for non-main branches to skip during scan history import. Repeatable. Main branch is never excluded. |
+| `--skip_project_data_migration` | top-level `skip_project_data_migration` | Skip the project-data migration (importScanHistory + per-issue / per-hotspot sync). Defaults to off — scan history is migrated by default. Issue #303. |
+| `--exclude_branches` | `target.exclude_branches` | Glob patterns for non-main branches to skip during scan history import. Repeatable. Main branch is never excluded. |
 
 CLI flags override values from the config file when both are provided.
 
@@ -174,7 +174,7 @@ CLI flags override values from the config file when both are provided.
 
 ## Output
 
-- **Intermediate files** — written to `--export-dir` (default `./migration-files/`). Same files as the manual workflow: `organizations.csv`, `gates.csv`, `profiles.csv`, `groups.csv`, `templates.csv`, `portfolios.csv`.
+- **Intermediate files** — written to `--export_dir` (default `./migration-files/`). Same files as the manual workflow: `organizations.csv`, `gates.csv`, `profiles.csv`, `groups.csv`, `templates.csv`, `portfolios.csv`.
 - **PDF summary** — written to the export directory on successful completion.
 - **Stdout** — every command prints `See sonar-migration-tool output results in <directory>` when it finishes so you always know where to look.
 

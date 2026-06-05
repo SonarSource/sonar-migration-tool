@@ -38,12 +38,12 @@ All optional.
 | `concurrency` | `10` | Default max parallel HTTP calls. |
 | `timeout` | `60` | Default HTTP request timeout in seconds. |
 | `export_directory` | `./migration-files` | Root directory for extract / migrate output. |
-| `skip-issue-sync` | `false` | When `true` (or `"on"` / `"yes"` / `1`), skip the final per-issue and per-hotspot metadata sync that runs after scan history is replayed. Defaults to `false` so the sync happens. Accepted aliases are case-insensitive. Issue #299. |
-| `skip-project-data-migration` | `false` | When `true` (or `"on"` / `"yes"` / `1`), skip the entire project-data migration: the scan-history import AND the trailing issue + hotspot sync. Useful when customers cut over to SonarQube Cloud by re-scanning rather than importing historical state. Implies `skip-issue-sync` — there's nothing to sync against. Same FlexibleBool aliases. Issue #303. |
+| `skip_issue_sync` | `false` | When `true` (or `"on"` / `"yes"` / `1`), skip the final per-issue and per-hotspot metadata sync that runs after scan history is replayed. Defaults to `false` so the sync happens. Accepted aliases are case-insensitive. Issue #299. |
+| `skip_project_data_migration` | `false` | When `true` (or `"on"` / `"yes"` / `1`), skip the entire project-data migration: the scan-history import AND the trailing issue + hotspot sync. Useful when customers cut over to SonarQube Cloud by re-scanning rather than importing historical state. Implies `skip_issue_sync` — there's nothing to sync against. Same FlexibleBool aliases. Issue #303. |
 
 `concurrency` and `timeout` can also be set inside `source` / `target` — those values override the top-level default for that command only.
 
-The CLI flags `--skip-issue-sync` and `--skip-project-data-migration` on `migrate` / `transfer` are the one-way equivalents of the config fields — passing a flag forces the matching opt-out on regardless of the config-file value.
+The CLI flags `--skip_issue_sync` and `--skip_project_data_migration` on `migrate` / `transfer` are the one-way equivalents of the config fields — passing a flag forces the matching opt-out on regardless of the config-file value.
 
 ---
 
@@ -103,7 +103,7 @@ sonar-migration-tool extract [url] [token] [flags]
 | `--target_task <task>` | Run a specific task (with its dependencies). |
 | `--concurrency <n>` | Max concurrent requests. |
 | `--timeout <s>` | Request timeout in seconds. |
-| `--skip-project-data-migration` | Skip the issue / source / SCM-blame extract (extracted by default). |
+| `--skip_project_data_migration` | Skip the issue / source / SCM-blame extract (extracted by default). |
 | `--exclude_branches <pattern>` | Glob pattern for non-main branches to skip during scan history import. Repeatable (pass multiple times for multiple patterns). Main branch is never excluded. |
 | `--pem_file_path <path>` | mTLS PEM file. |
 | `--key_file_path <path>` | mTLS key file. |
@@ -137,8 +137,8 @@ sonar-migration-tool migrate [token] [enterprise_key] [flags]
 | `--run_id <id>` | Resume a failed migration. |
 | `--target_task <task>` | Run a specific migration task (with its dependencies). |
 | `--skip_profiles` | Skip quality profile migration / provisioning. |
-| `--skip-issue-sync` | Skip the final per-issue / per-hotspot metadata sync (#299). One-way: setting this on the CLI forces the sync off, overriding the `skip-issue-sync` config field. |
-| `--skip-project-data-migration` | Skip the entire project-data migration: `importScanHistory` plus the trailing sync pair. Implies `--skip-issue-sync`. One-way override of the `skip-project-data-migration` config field. Issue #303. |
+| `--skip_issue_sync` | Skip the final per-issue / per-hotspot metadata sync (#299). One-way: setting this on the CLI forces the sync off, overriding the `skip_issue_sync` config field. |
+| `--skip_project_data_migration` | Skip the entire project-data migration: `importScanHistory` plus the trailing sync pair. Implies `--skip_issue_sync`. One-way override of the `skip_project_data_migration` config field. Issue #303. |
 | `--exclude_branches <pattern>` | Glob pattern for non-main branches to skip during scan history import. Repeatable. Main branch is never excluded. |
 | `--default_organization <key>` | SonarCloud org applied to every project when `organizations.csv` has no mapping defined. |
 | `--concurrency <n>` | Max concurrent requests. |
@@ -175,22 +175,22 @@ file.
 | Flag | Config key | Description |
 |---|---|---|
 | `-c, --config <path>` | — | Path to JSON configuration file. |
-| `--source-url <url>` | `source.url` | SonarQube Server URL. |
-| `--source-token <token>` | `source.token` | SonarQube Server token. |
-| `--project-key <key>` | — | Project key to transfer (omit to transfer all projects). |
-| `--target-url <url>` | `target.url` | SonarQube Cloud URL. |
-| `--target-token <token>` | `target.token` | SonarQube Cloud token. |
+| `--source_url <url>` | `source.url` | SonarQube Server URL. |
+| `--source_token <token>` | `source.token` | SonarQube Server token. |
+| `--project_key <key>` | — | Project key to transfer (omit to transfer all projects). |
+| `--target_url <url>` | `target.url` | SonarQube Cloud URL. |
+| `--target_token <token>` | `target.token` | SonarQube Cloud token. |
 | `--default_organization <key>` | `target.default_organization` | SonarQube Cloud organization key. |
 | `--enterprise_key <key>` | `target.enterprise_key` | SonarQube Cloud enterprise key (defaults to `--default_organization`). |
-| `--export-dir <dir>` | `export_directory` | Working directory (default `./migration-files/`). |
+| `--export_dir <dir>` | `export_directory` | Working directory (default `./migration-files/`). |
 | `--concurrency <n>` | `concurrency` | Max concurrent HTTP requests. |
 | `--timeout <s>` | `timeout` | HTTP request timeout in seconds. |
 | `--pem_file_path <path>` | `source.pem_file_path` | Client mTLS PEM file. |
 | `--key_file_path <path>` | `source.key_file_path` | Client mTLS key file. |
 | `--cert_password <pw>` | `source.cert_password` | Client mTLS password. |
-| `--skip-issue-sync` | top-level `skip-issue-sync` | Skip the final per-issue / per-hotspot metadata sync (#299). |
-| `--skip-project-data-migration` | top-level `skip-project-data-migration` | Skip the entire project-data migration (importScanHistory + trailing syncs). #303. |
-| `--exclude-branches <pattern>` | `target.exclude_branches` | Glob pattern for non-main branches to skip during scan history import. Repeatable. Main branch is never excluded. |
+| `--skip_issue_sync` | top-level `skip_issue_sync` | Skip the final per-issue / per-hotspot metadata sync (#299). |
+| `--skip_project_data_migration` | top-level `skip_project_data_migration` | Skip the entire project-data migration (importScanHistory + trailing syncs). #303. |
+| `--exclude_branches <pattern>` | `target.exclude_branches` | Glob pattern for non-main branches to skip during scan history import. Repeatable. Main branch is never excluded. |
 
 CLI flags always override the corresponding config-file value.
 

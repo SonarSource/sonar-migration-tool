@@ -2,8 +2,8 @@
   "concurrency": 10,
   "timeout": 60,
   "export_directory": "./migration-files",
-  "skip-issue-sync": false,
-  "skip-project-data-migration": false,
+  "skip_issue_sync": false,
+  "skip_project_data_migration": false,
   "source": {
     "url": "https://sonarqube.example.com",
     "token": "squ_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",

@@ -25,23 +25,23 @@ const (
 	scCloudName  = "SonarQube Cloud"
 
 	flagConfig             = "config"
-	flagSourceURL          = "source-url"
-	flagSourceToken        = "source-token"
-	flagProjectKey         = "project-key"
-	flagTargetURL          = "target-url"
-	flagTargetToken        = "target-token"
+	flagSourceURL          = "source_url"
+	flagSourceToken        = "source_token"
+	flagProjectKey         = "project_key"
+	flagTargetURL          = "target_url"
+	flagTargetToken        = "target_token"
 	flagEnterpriseKey      = "enterprise_key"
 	flagDefaultOrg         = "default_organization"
-	flagExportDir                = "export-dir"
-	flagSkipIssueSync            = "skip-issue-sync"
-	flagSkipProjectDataMigration = "skip-project-data-migration"
+	flagExportDir                = "export_dir"
+	flagSkipIssueSync            = "skip_issue_sync"
+	flagSkipProjectDataMigration = "skip_project_data_migration"
 	flagConcurrency              = "concurrency"
 	flagTimeout            = "timeout"
 	flagPEMFilePath        = "pem_file_path"
 	flagKeyFilePath        = "key_file_path"
 	flagCertPassword       = "cert_password"
 	flagDebug              = "debug"
-	flagExcludeBranches    = "exclude-branches"
+	flagExcludeBranches    = "exclude_branches"
 )
 
 // transferTargetTasks is the explicit set of project-scoped "leaf" migrate
@@ -96,14 +96,14 @@ default gate/profile selection are not modified; use the migrate command for
 a full instance migration.
 
 Issue and hotspot scan history is always extracted and imported for transfer
-unless --skip-project-data-migration is passed.
+unless --skip_project_data_migration is passed.
 
 Example (flags):
   sonar-migration-tool transfer \
-    --source-url https://sonarqube.example.com \
-    --source-token sqp_xxx \
-    --project-key my-project \
-    --target-token squ_xxx \
+    --source_url https://sonarqube.example.com \
+    --source_token sqp_xxx \
+    --project_key my-project \
+    --target_token squ_xxx \
     --default_organization my-org
 
 Example (config file):
@@ -152,7 +152,7 @@ func init() {
 	f.String(flagDefaultOrg, "", scCloudName+" organization key (maps to target.default_organization)")
 	f.String(flagEnterpriseKey, "", scCloudName+" enterprise key (maps to target.enterprise_key, defaults to --"+flagDefaultOrg+")")
 	f.String(flagExportDir, "./migration-files/", "Working directory for intermediate files (maps to export_directory)")
-	f.Bool(flagSkipIssueSync, false, "Skip the final per-issue and per-hotspot metadata sync (#299). Same semantics as the skip-issue-sync config-file field — defaults to false (sync happens); pass the flag to skip.")
+	f.Bool(flagSkipIssueSync, false, "Skip the final per-issue and per-hotspot metadata sync (#299). Same semantics as the skip_issue_sync config-file field — defaults to false (sync happens); pass the flag to skip.")
 	f.Bool(flagSkipProjectDataMigration, false, "Skip the entire project-data migration: importScanHistory and the trailing per-issue/per-hotspot sync (#303). Defaults to false (data is migrated); pass the flag to skip.")
 	f.Int(flagConcurrency, 0, "Max concurrent requests (default: 25) (maps to concurrency)")
 	f.Int(flagTimeout, 0, "HTTP request timeout in seconds (maps to timeout)")
@@ -296,17 +296,17 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 	applyFlagString(cmd, flagPEMFilePath, &cfg.pemFilePath)
 	applyFlagString(cmd, flagKeyFilePath, &cfg.keyFilePath)
 	applyFlagString(cmd, flagCertPassword, &cfg.certPassword)
-	// --skip-issue-sync is one-way: explicit true on the CLI sets
+	// --skip_issue_sync is one-way: explicit true on the CLI sets
 	// skipIssueSync, but the absence of the flag does NOT undo a
-	// config-file skip-issue-sync: true.
+	// config-file skip_issue_sync: true.
 	if cmd.Flags().Changed(flagSkipIssueSync) {
 		v, _ := cmd.Flags().GetBool(flagSkipIssueSync)
 		if v {
 			cfg.skipIssueSync = true
 		}
 	}
-	// --skip-project-data-migration is the wider opt-out. Same
-	// one-way semantics as --skip-issue-sync. #303.
+	// --skip_project_data_migration is the wider opt-out. Same
+	// one-way semantics as --skip_issue_sync. #303.
 	if cmd.Flags().Changed(flagSkipProjectDataMigration) {
 		v, _ := cmd.Flags().GetBool(flagSkipProjectDataMigration)
 		if v {
@@ -410,7 +410,7 @@ func runTransferExtract(ctx context.Context, cfg transferConfig) ([]string, erro
 		// Transfer extracts the project's issues and hotspots so the
 		// downstream migrate phase can replay them. Only skipped when
 		// the operator opts out of project-data migration entirely
-		// via --skip-project-data-migration.
+		// via --skip_project_data_migration.
 		IncludeScanHistory: !cfg.skipProjectDataMigration,
 		Debug:              cfg.debug,
 	})

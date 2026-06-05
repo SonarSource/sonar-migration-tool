@@ -95,7 +95,7 @@ func RegisterAll() []TaskDef {
 
 // scanHistoryTaskNames lists task names that pull issue, source-code,
 // SCM-blame, and version data — extracted by default and dropped only
-// when --skip-project-data-migration is set.
+// when --skip_project_data_migration is set.
 var scanHistoryTaskNames = map[string]bool{
 	"getProjectIssuesFull":    true,
 	"getProjectComponentTree": true,

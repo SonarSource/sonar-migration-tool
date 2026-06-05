@@ -4,7 +4,7 @@
 After any fix or feature, run **both** migration paths against real SonarQube Server and SonarCloud instances, then verify **everything** migrated correctly. "Everything" means: projects, issues (all statuses/severities/types/resolutions), hotspots, quality profiles, quality gates, groups, permission templates, settings, new code periods, custom rules, project permissions, ALM bindings, portfolios, measures, and extract file integrity.
 
 Both paths must be tested because they exercise different code paths:
-- **Transfer** (`transfer`) — single-command, auto-populates CSVs, targets one project via `--project-key`
+- **Transfer** (`transfer`) — single-command, auto-populates CSVs, targets one project via `--project_key`
 - **Full migration** (`extract` → `structure` → `mappings` → `migrate`) — multi-step, manual CSV review, migrates all projects
 
 ---
@@ -42,7 +42,7 @@ Tests the `transfer` command, which chains extract → structure → mappings �
 ### A2. Run transfer
 ```bash
 rm -rf ./migration-files/
-./sonar-migration-tool transfer --config transfer-config.json --project-key <PROJECT_KEY> 2>&1 | tee /tmp/smt-transfer.log
+./sonar-migration-tool transfer --config transfer-config.json --project_key <PROJECT_KEY> 2>&1 | tee /tmp/smt-transfer.log
 ```
 Must exit 0. If not, inspect the log and fix.
 

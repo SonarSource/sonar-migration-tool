@@ -202,7 +202,7 @@ func TestLoadMigrateConfigFileUnifiedShape(t *testing.T) {
 	}
 }
 
-// Issue #299: top-level `skip-issue-sync` parses into
+// Issue #299: top-level `skip_issue_sync` parses into
 // MigrateConfig.SkipIssueSync one-for-one (no inversion). Defaults to
 // false (sync happens). Verifies every accepted alias from the
 // FlexibleBool type plus case variations.
@@ -213,14 +213,14 @@ func TestLoadMigrateConfigFile_SkipIssueSync(t *testing.T) {
 		wantSkip  bool
 	}{
 		{"absent (default)", "", false},
-		{"true", `"skip-issue-sync": true,`, true},
-		{"false", `"skip-issue-sync": false,`, false},
-		{"string on", `"skip-issue-sync": "on",`, true},
-		{"string off", `"skip-issue-sync": "OFF",`, false},
-		{"string yes", `"skip-issue-sync": "Yes",`, true},
-		{"string no", `"skip-issue-sync": "no",`, false},
-		{"numeric 1", `"skip-issue-sync": 1,`, true},
-		{"numeric 0", `"skip-issue-sync": 0,`, false},
+		{"true", `"skip_issue_sync": true,`, true},
+		{"false", `"skip_issue_sync": false,`, false},
+		{"string on", `"skip_issue_sync": "on",`, true},
+		{"string off", `"skip_issue_sync": "OFF",`, false},
+		{"string yes", `"skip_issue_sync": "Yes",`, true},
+		{"string no", `"skip_issue_sync": "no",`, false},
+		{"numeric 1", `"skip_issue_sync": 1,`, true},
+		{"numeric 0", `"skip_issue_sync": 0,`, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -232,7 +232,7 @@ func TestLoadMigrateConfigFile_SkipIssueSync(t *testing.T) {
   }
 }`
 			dir := t.TempDir()
-			path := dir + "/skip-issue-sync.json"
+			path := dir + "/skip_issue_sync.json"
 			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -313,7 +313,7 @@ func TestLoadResetConfigFileUnifiedShape(t *testing.T) {
 	}
 }
 
-// Issue #303: top-level `skip-project-data-migration` parses into
+// Issue #303: top-level `skip_project_data_migration` parses into
 // MigrateConfig.SkipProjectDataMigration one-for-one (no inversion).
 // Defaults to false (data is migrated). Every FlexibleBool alias is
 // accepted, case-insensitive.
@@ -324,13 +324,13 @@ func TestLoadMigrateConfigFile_SkipProjectDataMigration(t *testing.T) {
 		wantSkip  bool
 	}{
 		{"absent (default)", "", false},
-		{"true", `"skip-project-data-migration": true,`, true},
-		{"false", `"skip-project-data-migration": false,`, false},
-		{"string on", `"skip-project-data-migration": "on",`, true},
-		{"string OFF", `"skip-project-data-migration": "OFF",`, false},
-		{"string Yes", `"skip-project-data-migration": "Yes",`, true},
-		{"numeric 1", `"skip-project-data-migration": 1,`, true},
-		{"numeric 0", `"skip-project-data-migration": 0,`, false},
+		{"true", `"skip_project_data_migration": true,`, true},
+		{"false", `"skip_project_data_migration": false,`, false},
+		{"string on", `"skip_project_data_migration": "on",`, true},
+		{"string OFF", `"skip_project_data_migration": "OFF",`, false},
+		{"string Yes", `"skip_project_data_migration": "Yes",`, true},
+		{"numeric 1", `"skip_project_data_migration": 1,`, true},
+		{"numeric 0", `"skip_project_data_migration": 0,`, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -221,7 +221,7 @@ func TestExtractAnyStr(t *testing.T) {
 	}
 }
 
-// --skip-project-data-migration must drop importScanHistory along
+// --skip_project_data_migration must drop importScanHistory along
 // with the two trailing sync tasks. #303.
 func TestMigrateTargetTasksSkipProjectDataMigration(t *testing.T) {
 	reg := BuildMigrateRegistry(RegisterAll())
@@ -234,7 +234,7 @@ func TestMigrateTargetTasksSkipProjectDataMigration(t *testing.T) {
 	}
 }
 
-// Without --skip-project-data-migration, all three project-data
+// Without --skip_project_data_migration, all three project-data
 // tasks should run. Regression guard so the skip gate doesn't
 // accidentally always exclude.
 func TestMigrateTargetTasksProjectDataMigrationEnabledByDefault(t *testing.T) {
@@ -252,7 +252,7 @@ func TestMigrateTargetTasksProjectDataMigrationEnabledByDefault(t *testing.T) {
 }
 
 // Explicit TargetTasks lists (used by transfer for project-scoped
-// migration) must still respect --skip-project-data-migration —
+// migration) must still respect --skip_project_data_migration —
 // otherwise the operator's opt-out is silently bypassed.
 func TestMigrateTargetTasksExplicitListHonorsSkipProjectDataMigration(t *testing.T) {
 	reg := BuildMigrateRegistry(RegisterAll())
@@ -269,7 +269,7 @@ func TestMigrateTargetTasksExplicitListHonorsSkipProjectDataMigration(t *testing
 	}
 }
 
-// Same explicit list with --skip-issue-sync (and project data on)
+// Same explicit list with --skip_issue_sync (and project data on)
 // must drop only the trailing pair; importScanHistory stays.
 func TestMigrateTargetTasksExplicitListHonorsSkipIssueSync(t *testing.T) {
 	reg := BuildMigrateRegistry(RegisterAll())

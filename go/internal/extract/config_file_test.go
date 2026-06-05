@@ -91,7 +91,7 @@ func TestLoadExtractConfigFileSnakeCaseFields(t *testing.T) {
 		"timeout": 90,
 		"extract_id": "resume-me",
 		"target_task": "getRules",
-		"skip-project-data-migration": true
+		"skip_project_data_migration": true
 	}`)
 	f.Close()
 

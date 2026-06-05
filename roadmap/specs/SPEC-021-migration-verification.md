@@ -331,7 +331,7 @@ func ClassifyDifference(checkName string, sqValue, scValue any) string {
 #### Verification Pipeline
 
 ```
-1. Parse CLI flags (--token, --export_directory, --output-dir, --only)
+1. Parse CLI flags (--token, --export_directory, --output_dir, --only)
 2. Load org mapping from export directory (organizations.csv, projects.csv)
 3. Create SQ Server and SC API clients
 4. For each organization:
@@ -444,28 +444,28 @@ Multiple `--only` values can be combined: `--only issues --only measures`
 ```bash
 # Full verification
 sonar-migration-tool verify \
-  --source-url https://sq.example.com \
-  --source-token squ_xxx \
-  --cloud-token sqc_xxx \
-  --export-directory ./files/ \
-  --output-dir ./verify-output/
+  --source_url https://sq.example.com \
+  --source_token squ_xxx \
+  --cloud_token sqc_xxx \
+  --export_directory ./files/ \
+  --output_dir ./verify-output/
 
 # Verify only issues and measures
 sonar-migration-tool verify \
-  --source-url https://sq.example.com \
-  --source-token squ_xxx \
-  --cloud-token sqc_xxx \
-  --export-directory ./files/ \
+  --source_url https://sq.example.com \
+  --source_token squ_xxx \
+  --cloud_token sqc_xxx \
+  --export_directory ./files/ \
   --only issues --only measures
 
 # Verify with custom tolerance
 sonar-migration-tool verify \
-  --source-url https://sq.example.com \
-  --source-token squ_xxx \
-  --cloud-token sqc_xxx \
-  --export-directory ./files/ \
-  --issue-count-tolerance 0.02 \
-  --measure-tolerance 0.01
+  --source_url https://sq.example.com \
+  --source_token squ_xxx \
+  --cloud_token sqc_xxx \
+  --export_directory ./files/ \
+  --issue_count_tolerance 0.02 \
+  --measure_tolerance 0.01
 ```
 
 ## Acceptance Criteria

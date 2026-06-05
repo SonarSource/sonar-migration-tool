@@ -39,7 +39,7 @@ type configFileShape struct {
 	Timeout            int    `json:"timeout"`
 	ExtractID                string `json:"extract_id"`
 	TargetTask               string `json:"target_task"`
-	SkipProjectDataMigration bool   `json:"skip-project-data-migration"`
+	SkipProjectDataMigration bool   `json:"skip_project_data_migration"`
 
 	// Shape 2 (command-sectioned).
 	Extract *configFileShape `json:"extract"`
@@ -148,7 +148,7 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 			cfg.Timeout = s.Timeout
 		}
 		cfg.ExportDirectory = s.ExportDirectory
-		// #303: top-level skip-project-data-migration drives whether
+		// #303: top-level skip_project_data_migration drives whether
 		// the extract pulls issue / source / SCM-blame data.
 		cfg.SkipProjectDataMigration = s.SkipProjectDataMigration
 	case s.SonarQube != nil:
