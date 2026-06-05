@@ -73,7 +73,7 @@ Tests the multi-step flow that migrates every project visible to the token.
 ### B2. Extract
 ```bash
 rm -rf ./migration-files/
-./sonar-migration-tool extract --config config.json --include_scan_history 2>&1 | tee /tmp/smt-extract.log
+./sonar-migration-tool extract --config config.json 2>&1 | tee /tmp/smt-extract.log
 ```
 Must exit 0.
 

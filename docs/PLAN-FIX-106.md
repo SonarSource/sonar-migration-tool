@@ -289,7 +289,7 @@ Step 3 (migrate loader) ───┘
 
 ## Backward Compatibility
 
-- **No config changes** — measures are automatically included when scan history is enabled (`--include-scan-history`)
+- **No config changes** — measures are automatically included as part of the project-data extract (default; opt-out via `--skip-project-data-migration`)
 - **No new CLI flags** — the metric key set is determined by the source SQ version
 - **Graceful with old extracts** — if component tree data lacks measures (extracted before this change), the measures map stays empty (identical to current behavior)
 - **No new extract tasks** — reuses existing `getProjectComponentTree` task, just requests more data

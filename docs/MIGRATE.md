@@ -120,7 +120,7 @@ sonar-migration-tool extract <URL> <TOKEN> --export_directory ./files/ [--concur
 | `--timeout` | Request timeout in seconds |
 | `--extract_type` | Type of extract to run |
 | `--export_directory` | Output directory (default: `./migration-files`) |
-| `--include_scan_history` | Extract full issue data, source code, and SCM blame for scan history import |
+| `--skip-project-data-migration` | Skip the issue / source / SCM-blame extract (project data is extracted by default) |
 | `--pem_file_path` | Client certificate PEM file (mTLS) |
 | `--key_file_path` | Client certificate key file (mTLS) |
 | `--cert_password` | Client certificate password (mTLS) |

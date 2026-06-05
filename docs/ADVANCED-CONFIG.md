@@ -61,7 +61,6 @@ The CLI flags `--skip-issue-sync` and `--skip-project-data-migration` on `migrat
 | `cert_password` | | Client-side mTLS password (optional). |
 | `target_task` | | Stop extract at a specific task (dependencies still run). |
 | `extract_id` | | Reuse an existing extract directory ID instead of generating a new one — resume after a failure. |
-| `include_scan_history` | | When true, pull full issue / source / SCM-blame data so `migrate` can replay history. |
 | `enterprise_key` / `organization_key` / `edition` | | Provisional — accepted but ignored today; reserved for future SQC-to-SQC migration. |
 
 ---
@@ -104,7 +103,7 @@ sonar-migration-tool extract [url] [token] [flags]
 | `--target_task <task>` | Run a specific task (with its dependencies). |
 | `--concurrency <n>` | Max concurrent requests. |
 | `--timeout <s>` | Request timeout in seconds. |
-| `--include_scan_history` | Pull full issue / source / SCM-blame data. |
+| `--skip-project-data-migration` | Skip the issue / source / SCM-blame extract (extracted by default). |
 | `--exclude_branches <pattern>` | Glob pattern for non-main branches to skip during scan history import. Repeatable (pass multiple times for multiple patterns). Main branch is never excluded. |
 | `--pem_file_path <path>` | mTLS PEM file. |
 | `--key_file_path <path>` | mTLS key file. |

@@ -511,8 +511,8 @@ to https://sonarcloud.io/ — pass --url to target a different instance"`.~~
 `getProjectSourceCode`, `getProjectSCMData`, `getProjectHotspotsFull` — but NOT
 `getActiveProfileRules` or `getQualityProfiles`.
 
-`loadExtractedActiveRules()` reads from `getActiveProfileRules`. If a user runs
-`extract --include_scan_history` without also running a full extract first, active rules
+`loadExtractedActiveRules()` reads from `getActiveProfileRules`. If a user runs a
+scan-history-only extract without also running a full extract first, active rules
 data will be absent and all `pbActiveRules` will be empty.
 
 **Impact**: Protobuf reports won't include active rules, causing CE to use default rules
