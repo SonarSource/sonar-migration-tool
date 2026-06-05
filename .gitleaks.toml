@@ -1,0 +1,57 @@
+# gitleaks configuration for sonar-migration-tool
+# Scans commits + staged changes for secrets. Run locally via the pre-commit
+# hook (make install-hooks) and in CI (.github/workflows/gitleaks.yml).
+
+title = "sonar-migration-tool secret scan"
+
+# Inherit gitleaks' built-in rule set (AWS, GCP, GitHub, GitLab, Slack,
+# private keys, generic high-entropy API keys, etc.).
+[extend]
+useDefault = true
+
+# --- Custom rules: SonarQube / SonarCloud tokens ---
+
+[[rules]]
+id = "sonarqube-token"
+description = "SonarQube user/project/analysis token (squ_/sqp_/sqa_ + 40 hex)"
+regex = '''\b(squ|sqp|sqa)_[0-9a-f]{40}\b'''
+keywords = ["squ_", "sqp_", "sqa_"]
+
+[[rules]]
+id = "sonarcloud-token"
+description = "SonarCloud token (sqc_/sqcb_/sqco_)"
+regex = '''\b(sqc|sqcb|sqco)_[A-Za-z0-9]{40,}\b'''
+keywords = ["sqc_", "sqcb_", "sqco_"]
+
+[[rules]]
+id = "sonar-bearer-hex-token"
+description = "40-char hex token in an Authorization/Bearer or token= context"
+regex = '''(?i)(authorization:\s*bearer|\btoken["']?\s*[:=])\s*["']?[0-9a-f]{40}\b'''
+keywords = ["bearer", "token", "authorization"]
+
+# --- Allowlist: placeholders, examples, tests, docs, this config ---
+[allowlist]
+description = "Non-secret placeholders and non-source paths"
+paths = [
+  '''\.gitleaks\.toml''',
+  # CONTINUE.md: a historical handoff doc that leaked 3 tokens (all ROTATED
+  # 2026-06-05) and is now gitignored. Allowlisted so the full-history CI scan
+  # stays green for the already-mitigated leak. REMOVE this line once the file
+  # is purged from git history (git filter-repo --path CONTINUE.md --invert-paths).
+  '''CONTINUE\.md''',
+  '''examples/.*''',
+  '''.*\.example\.json''',
+  '''schemas/.*''',
+  '''docs/.*''',
+  '''tests/.*''',                     # test fixtures (sample/fake credentials)
+  '''.*_test\.go''',
+  '''.*/testdata/.*''',
+  '''.*/mocks/.*''',
+  '''.*/fixtures/.*''',
+]
+regexes = [
+  '''x{20,}''',                       # squ_xxxx… / xxxx… placeholder tokens
+  '''YOUR_[A-Z0-9_]*TOKEN[A-Z0-9_]*''',  # YOUR_SONARQUBE_TOKEN_HERE etc.
+  '''(squ|sqp|sqa|sqc|sqcb|sqco)_YOUR_[A-Z0-9_]+''',  # sqp_YOUR_SONARQUBE_SERVER_TOKEN
+  '''AZ[A-Za-z0-9_\-]{16,}''',        # SonarQube component/issue/analysis keys (NOT secrets)
+]

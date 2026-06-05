@@ -46,6 +46,15 @@ config.json
 *-config.json
 my-*.json
 
+# Handoff / scratch docs — these have leaked plaintext credentials before
+# (CONTINUE.md committed real SonarQube/SonarCloud tokens). Keep scratch handoff
+# notes out of git entirely; permanent documentation lives in docs/.
+CONTINUE.md
+HANDOFF.md
+HANDOFF-*.md
+SESSION-NOTES.md
+*.secrets.md
+
 # sq-api-go: ignore lib/* but keep the library
 lib/*
 !lib/sq-api-go/

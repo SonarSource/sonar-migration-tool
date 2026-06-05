@@ -14,6 +14,17 @@ This tool handles sensitive credentials (admin tokens for both SonarQube Server 
 - Only `.example.json` files (in the `examples/` folder) should be committed.
 - If you accidentally commit a token, rotate it immediately.
 
+## Automated Secret Scanning
+<!-- updated: 2026-06-05_19:40:00 -->
+
+This repo uses [gitleaks](https://github.com/gitleaks/gitleaks) to catch secrets before they are committed or merged:
+
+- **Config:** `.gitleaks.toml` (built-in rules + SonarQube/SonarCloud token rules; placeholders in `examples/`, `tests/`, and `docs/` are allowlisted).
+- **Pre-commit hook:** run `make install-hooks` once. The hook scans staged changes and blocks the commit if a secret is found. (If `gitleaks` isn't installed it skips locally — `brew install gitleaks` — and CI still enforces it.)
+- **CI:** `.github/workflows/gitleaks.yml` scans the **full history** on every push to `main`/`kilo` and on pull requests.
+
+If a real token is ever committed, **rotate it immediately** — scrubbing git history does not un-leak a pushed secret. To remove the file from history afterward, use `git filter-repo --path <file> --invert-paths` on a fresh mirror clone and force-push (coordinate with collaborators).
+
 ## Protect Your Tokens
 <!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 

@@ -1,0 +1,23 @@
+#!/bin/sh
+# Pre-commit secret scan via gitleaks. Install with: make install-hooks
+#
+# If gitleaks is not installed the hook skips (so it never blocks commits for
+# devs who haven't set it up) — CI still enforces the scan. Install gitleaks:
+#   brew install gitleaks   (macOS)   |   https://github.com/gitleaks/gitleaks
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "gitleaks not installed — skipping local secret scan (CI still enforces it)." >&2
+  echo "  install: brew install gitleaks" >&2
+  exit 0
+fi
+
+ROOT="$(git rev-parse --show-toplevel)"
+if gitleaks protect --staged --redact --no-banner --config "${ROOT}/.gitleaks.toml"; then
+  exit 0
+fi
+
+echo "" >&2
+echo "❌ gitleaks found a potential secret in your staged changes — commit aborted." >&2
+echo "   Remove the secret (use a gitignored config file), or, if it is a false" >&2
+echo "   positive, add an allowlist entry to .gitleaks.toml." >&2
+exit 1

@@ -1,0 +1,31 @@
+name: Secret Scan
+
+# Catch committed/staged secrets before they reach the default branch.
+on:
+  push:
+    branches:
+      - main
+      - kilo
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # full history so a re-introduced historical leak is caught
+
+      # Install the gitleaks CLI directly (the gitleaks-action wrapper requires a
+      # paid license for organization-owned repos; the CLI itself is free).
+      - name: Install gitleaks
+        run: |
+          VERSION=8.30.1
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      - name: Scan repository history
+        run: gitleaks detect --source . --config .gitleaks.toml --redact --verbose --no-banner
