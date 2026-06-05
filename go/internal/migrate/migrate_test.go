@@ -251,3 +251,43 @@ func TestMigrateTargetTasksProjectDataMigrationEnabledByDefault(t *testing.T) {
 		}
 	}
 }
+
+// Explicit TargetTasks lists (used by transfer for project-scoped
+// migration) must still respect --skip-project-data-migration —
+// otherwise the operator's opt-out is silently bypassed.
+func TestMigrateTargetTasksExplicitListHonorsSkipProjectDataMigration(t *testing.T) {
+	reg := BuildMigrateRegistry(RegisterAll())
+	explicit := []string{
+		"setProjectGates",
+		"importScanHistory",
+		"syncIssueMetadata",
+		"syncHotspotMetadata",
+	}
+	got := MigrateTargetTasks(reg, "", false, true, false, true /*skipProjectDataMigration*/, explicit)
+	// setProjectGates is kept; the three project-data tasks are dropped.
+	if len(got) != 1 || got[0] != "setProjectGates" {
+		t.Errorf("expected only setProjectGates to survive, got %v", got)
+	}
+}
+
+// Same explicit list with --skip-issue-sync (and project data on)
+// must drop only the trailing pair; importScanHistory stays.
+func TestMigrateTargetTasksExplicitListHonorsSkipIssueSync(t *testing.T) {
+	reg := BuildMigrateRegistry(RegisterAll())
+	explicit := []string{
+		"setProjectGates",
+		"importScanHistory",
+		"syncIssueMetadata",
+		"syncHotspotMetadata",
+	}
+	got := MigrateTargetTasks(reg, "", false, true, true /*skipIssueSync*/, false, explicit)
+	want := map[string]bool{"setProjectGates": true, "importScanHistory": true}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d tasks, got %v", len(want), got)
+	}
+	for _, n := range got {
+		if !want[n] {
+			t.Errorf("unexpected task %q in result", n)
+		}
+	}
+}

@@ -32,8 +32,7 @@ const (
 	flagTargetToken        = "target-token"
 	flagEnterpriseKey      = "enterprise_key"
 	flagDefaultOrg         = "default_organization"
-	flagExportDir          = "export-dir"
-	flagIncludeScanHistory       = "include-scan-history"
+	flagExportDir                = "export-dir"
 	flagSkipIssueSync            = "skip-issue-sync"
 	flagSkipProjectDataMigration = "skip-project-data-migration"
 	flagConcurrency              = "concurrency"
@@ -96,9 +95,8 @@ entities such as portfolios, global settings, permission templates, and
 default gate/profile selection are not modified; use the migrate command for
 a full instance migration.
 
-Issue and hotspot scan history is always extracted and imported for transfer,
-so the --include-scan-history flag is accepted for compatibility but has no
-effect here.
+Issue and hotspot scan history is always extracted and imported for transfer
+unless --skip-project-data-migration is passed.
 
 Example (flags):
   sonar-migration-tool transfer \
@@ -154,7 +152,6 @@ func init() {
 	f.String(flagDefaultOrg, "", scCloudName+" organization key (maps to target.default_organization)")
 	f.String(flagEnterpriseKey, "", scCloudName+" enterprise key (maps to target.enterprise_key, defaults to --"+flagDefaultOrg+")")
 	f.String(flagExportDir, "./migration-files/", "Working directory for intermediate files (maps to export_directory)")
-	f.Bool(flagIncludeScanHistory, false, "Accepted for compatibility; scan history (issues + hotspots) is always extracted and imported for transfer (maps to include_scan_history)")
 	f.Bool(flagSkipIssueSync, false, "Skip the final per-issue and per-hotspot metadata sync (#299). Same semantics as the skip-issue-sync config-file field — defaults to false (sync happens); pass the flag to skip.")
 	f.Bool(flagSkipProjectDataMigration, false, "Skip the entire project-data migration: importScanHistory and the trailing per-issue/per-hotspot sync (#303). Defaults to false (data is migrated); pass the flag to skip.")
 	f.Int(flagConcurrency, 0, "Max concurrent requests (default: 25) (maps to concurrency)")
@@ -175,16 +172,15 @@ type transferConfig struct {
 	defaultOrganization string
 	enterpriseKey       string
 	exportDir           string
-	concurrency         int
-	timeout             int
-	pemFilePath         string
-	keyFilePath         string
-	certPassword        string
-	includeScanHistory  bool
+	concurrency              int
+	timeout                  int
+	pemFilePath              string
+	keyFilePath              string
+	certPassword             string
 	skipIssueSync            bool
 	skipProjectDataMigration bool
-	debug               bool
-	excludeBranches     []string
+	debug                    bool
+	excludeBranches          []string
 }
 
 func applyFlagString(cmd *cobra.Command, name string, target *string) {
@@ -268,7 +264,6 @@ func loadTransferFileDefaults(path string) (transferConfig, error) {
 	cfg.keyFilePath = extractCfg.KeyFilePath
 	cfg.certPassword = extractCfg.CertPassword
 
-	cfg.includeScanHistory = extractCfg.IncludeScanHistory || migrateCfg.IncludeScanHistory
 	cfg.skipIssueSync = migrateCfg.SkipIssueSync
 	cfg.skipProjectDataMigration = migrateCfg.SkipProjectDataMigration
 	cfg.debug = migrateCfg.Debug
@@ -301,7 +296,6 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 	applyFlagString(cmd, flagPEMFilePath, &cfg.pemFilePath)
 	applyFlagString(cmd, flagKeyFilePath, &cfg.keyFilePath)
 	applyFlagString(cmd, flagCertPassword, &cfg.certPassword)
-	applyFlagBool(cmd, flagIncludeScanHistory, &cfg.includeScanHistory)
 	// --skip-issue-sync is one-way: explicit true on the CLI sets
 	// skipIssueSync, but the absence of the flag does NOT undo a
 	// config-file skip-issue-sync: true.
@@ -413,11 +407,11 @@ func runTransferExtract(ctx context.Context, cfg transferConfig) ([]string, erro
 		PEMFilePath:     cfg.pemFilePath,
 		KeyFilePath:     cfg.keyFilePath,
 		CertPassword:    cfg.certPassword,
-		// Transfer always imports the project's issues and hotspots, which
-		// requires the scan-history extractors (getProjectIssuesFull,
-		// getProjectHotspotsFull, source/component data). Force it on
-		// regardless of the user's --include-scan-history flag.
-		IncludeScanHistory: true,
+		// Transfer extracts the project's issues and hotspots so the
+		// downstream migrate phase can replay them. Only skipped when
+		// the operator opts out of project-data migration entirely
+		// via --skip-project-data-migration.
+		IncludeScanHistory: !cfg.skipProjectDataMigration,
 		Debug:              cfg.debug,
 	})
 	if err != nil {
@@ -458,7 +452,7 @@ func runTransferMigrate(ctx context.Context, cfg transferConfig) (string, error)
 		// its quality gate/profiles, permissions, and issue/hotspot history.
 		// Their dependencies are resolved automatically.
 		TargetTasks:              transferTargetTasks,
-		IncludeScanHistory:       true,
+		IncludeScanHistory:       !cfg.skipProjectDataMigration,
 		SkipIssueSync:            cfg.skipIssueSync,
 		SkipProjectDataMigration: cfg.skipProjectDataMigration,
 		Debug:                    cfg.debug,

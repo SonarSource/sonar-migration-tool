@@ -51,7 +51,6 @@ func init() {
 	f.String("export_directory", "", "Root directory containing all SonarQube exports")
 	f.String("target_task", "", "Name of a specific migration task to complete")
 	f.Bool("skip_profiles", false, "Skip quality profile migration/provisioning in SonarQube Cloud")
-	f.Bool("include_scan_history", false, "Import scan history (issues, metrics) into SonarQube Cloud projects")
 	f.Bool("skip-issue-sync", false, "Skip the final per-issue and per-hotspot metadata sync (#299). Same semantics as the skip-issue-sync config-file field — defaults to false (sync happens); pass the flag to skip.")
 	f.Bool("skip-project-data-migration", false, "Skip the entire project-data migration: importScanHistory and the trailing per-issue/per-hotspot sync (#303). Defaults to false (data is migrated); pass the flag to skip.")
 	f.String("default_organization", "", "SonarQube Cloud organization to migrate every project into when organizations.csv has no mapping defined. Ignored if any mapping is present.")
@@ -91,9 +90,6 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	if cmd.Flags().Changed("skip_profiles") {
 		cfg.SkipProfiles, _ = cmd.Flags().GetBool("skip_profiles")
 	}
-	if cmd.Flags().Changed("include_scan_history") {
-		cfg.IncludeScanHistory, _ = cmd.Flags().GetBool("include_scan_history")
-	}
 	// --skip-issue-sync explicitly turns off the trailing sync. The
 	// flag always wins over the config-file skip-issue-sync field.
 	// One-way: --skip-issue-sync=false on the CLI does NOT undo a
@@ -125,6 +121,13 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	if cfg.ExportDirectory == "" {
 		cfg.ExportDirectory = DefaultExportDirectory
 	}
+
+	// Project-data migration is now opt-out via SkipProjectDataMigration
+	// rather than opt-in via the old --include-scan-history flag (which
+	// has been removed). Derive the legacy IncludeScanHistory field
+	// here so the planner's existing scan-history gate keeps working
+	// without forcing every caller to set both fields.
+	cfg.IncludeScanHistory = !cfg.SkipProjectDataMigration
 
 	return cfg, nil
 }

@@ -29,7 +29,6 @@ func newTransferTestCmd() *cobra.Command {
 	f.String(flagDefaultOrg, "", "")
 	f.String(flagEnterpriseKey, "", "")
 	f.String(flagExportDir, "./migration-files/", "")
-	f.Bool(flagIncludeScanHistory, false, "")
 	f.Int(flagConcurrency, 0, "")
 	f.Int(flagTimeout, 0, "")
 	f.String(flagPEMFilePath, "", "")

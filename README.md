@@ -16,9 +16,9 @@ The tool ships as a single static binary. No installer, no runtime dependencies.
 | Groups, Permissions, Permission Templates | CI/CD pipeline configuration (update `SONAR_HOST_URL` manually) |
 | Project Settings, Webhooks, Links | |
 | Portfolios (Enterprise) | |
-| **Issues & Hotspots** with status, comments, and tags (via `--include-scan-history`) | |
-| **Source Code** and measures (via `--include-scan-history`) | |
-| **Issue Creation Dates** preserved via BackdateChangesets (via `--include-scan-history`) | |
+| **Issues & Hotspots** with status, comments, and tags (project data, on by default) | |
+| **Source Code** and measures (project data, on by default) | |
+| **Issue Creation Dates** preserved via BackdateChangesets (project data, on by default) | |
 
 ---
 
@@ -91,8 +91,7 @@ Use `transfer`. It runs the whole migration in a single command — extracting f
   --source-token sqp_xxx \
   --project-key my-project \
   --target-token squ_xxx \
-  --default_organization my-org \
-  --include_scan_history
+  --default_organization my-org
 ```
 
 Or use a **config file** to keep tokens out of your shell history:
@@ -158,8 +157,8 @@ Once the command finishes:
 1. Log in to [sonarcloud.io](https://sonarcloud.io).
 2. Open the target organization.
 3. Spot-check that your project(s) are listed and the quality gate and quality profile are correct.
-4. If you used `--include-scan-history`, verify that issues, hotspots, and their creation dates match the source. You can also run `./sonar-migration-tool regtest` for automated verification.
-5. **Re-scan your projects in CI** to seed ongoing analysis. If you did *not* use `--include-scan-history`, this first scan will be the baseline for all issue tracking.
+4. Unless you passed `--skip-project-data-migration`, verify that issues, hotspots, and their creation dates match the source. You can also run `./sonar-migration-tool regtest` for automated verification.
+5. **Re-scan your projects in CI** to seed ongoing analysis. If you used `--skip-project-data-migration`, this first scan will be the baseline for all issue tracking.
 6. Update your CI/CD pipeline to point at SonarQube Cloud (`SONAR_TOKEN` and `SONAR_HOST_URL`).
 
 For the full post-migration checklist, see [After you migrate](docs/MIGRATE.md#after-you-migrate) in the MIGRATE guide.

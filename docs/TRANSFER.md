@@ -165,7 +165,7 @@ Omit `--project-key` to transfer **every** project visible to the token (in whic
 | `--pem_file_path` | `source.pem_file_path` | Client mTLS PEM file for the source server |
 | `--key_file_path` | `source.key_file_path` | Client mTLS key file for the source server |
 | `--cert_password` | `source.cert_password` | Password for the source server mTLS client certificate |
-| `--include-scan-history` | `include_scan_history` | Accepted for compatibility but has **no effect** for `transfer` — issue/hotspot scan history is **always** extracted and imported. |
+| `--skip-project-data-migration` | top-level `skip-project-data-migration` | Skip the project-data migration (importScanHistory + per-issue / per-hotspot sync). Defaults to off — scan history is migrated by default. Issue #303. |
 | `--exclude-branches` | `target.exclude_branches` | Glob patterns for non-main branches to skip during scan history import. Repeatable. Main branch is never excluded. |
 
 CLI flags override values from the config file when both are provided.

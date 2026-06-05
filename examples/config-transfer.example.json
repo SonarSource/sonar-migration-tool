@@ -16,7 +16,6 @@
     "url": "https://sonarcloud.io/",
     "token": "YOUR_SONARCLOUD_TOKEN",
     "default_organization": "my-org",
-    "enterprise_key": "my-enterprise",
-    "include_scan_history": true
+    "enterprise_key": "my-enterprise"
   }
 }

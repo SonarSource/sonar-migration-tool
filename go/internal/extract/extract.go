@@ -33,9 +33,10 @@ type ExtractConfig struct {
 	Concurrency     int
 	Timeout         int
 	ExtractID       string
-	TargetTask         string
-	IncludeScanHistory bool
-	Debug              bool // Enable HTTP request/response logging via SDK debug transport
+	TargetTask               string
+	IncludeScanHistory       bool
+	SkipProjectDataMigration bool // #303. Set true to skip project-data tasks (issues, source, SCM blame).
+	Debug                    bool // Enable HTTP request/response logging via SDK debug transport
 	// ProjectKeys, when non-empty, limits extraction to these project keys.
 	// The /api/projects/search endpoint filters server-side, so only the
 	// requested projects are fetched and all downstream per-project tasks

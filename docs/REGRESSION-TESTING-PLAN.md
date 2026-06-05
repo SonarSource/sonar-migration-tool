@@ -42,7 +42,7 @@ Tests the `transfer` command, which chains extract → structure → mappings �
 ### A2. Run transfer
 ```bash
 rm -rf ./migration-files/
-./sonar-migration-tool transfer --config transfer-config.json --project-key <PROJECT_KEY> --include-scan-history 2>&1 | tee /tmp/smt-transfer.log
+./sonar-migration-tool transfer --config transfer-config.json --project-key <PROJECT_KEY> 2>&1 | tee /tmp/smt-transfer.log
 ```
 Must exit 0. If not, inspect the log and fix.
 
@@ -73,7 +73,7 @@ Tests the multi-step flow that migrates every project visible to the token.
 ### B2. Extract
 ```bash
 rm -rf ./migration-files/
-./sonar-migration-tool extract --config config.json --include-scan-history 2>&1 | tee /tmp/smt-extract.log
+./sonar-migration-tool extract --config config.json --include_scan_history 2>&1 | tee /tmp/smt-extract.log
 ```
 Must exit 0.
 
@@ -91,7 +91,7 @@ Must exit 0. Spot-check `gates.csv`, `profiles.csv`, `groups.csv`, `templates.cs
 
 ### B5. Migrate
 ```bash
-./sonar-migration-tool migrate --config config.json --include-scan-history 2>&1 | tee /tmp/smt-migrate.log
+./sonar-migration-tool migrate --config config.json 2>&1 | tee /tmp/smt-migrate.log
 ```
 Must exit 0.
 

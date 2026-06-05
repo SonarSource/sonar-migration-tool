@@ -52,7 +52,7 @@ func init() {
 	f.Int("timeout", 0, "Number of seconds before a request will timeout")
 	f.String("extract_id", "", "ID of an extract to resume in case of failures")
 	f.String("target_task", "", "Target task to complete; all dependent tasks will be included")
-	f.Bool("include_scan_history", false, "Extract full issue data, source code, and SCM blame for scan history migration")
+	f.Bool("skip-project-data-migration", false, "Skip extracting project data (issues, hotspots, source code, SCM blame). Defaults to false — project data is extracted by default. #303.")
 }
 
 func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfig, error) {
@@ -87,9 +87,20 @@ func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfi
 	overrideString(cmd, "target_task", &cfg.TargetTask)
 	overrideInt(cmd, "concurrency", &cfg.Concurrency)
 	overrideInt(cmd, "timeout", &cfg.Timeout)
-	if cmd.Flags().Changed("include_scan_history") {
-		cfg.IncludeScanHistory, _ = cmd.Flags().GetBool("include_scan_history")
+	// Project data is extracted by default. The legacy
+	// `include_scan_history` JSON field still parses (so old configs
+	// don't error) but the new model derives IncludeScanHistory from
+	// SkipProjectDataMigration only:
+	//   skip-project-data-migration: false (default)  → IncludeScanHistory = true
+	//   skip-project-data-migration: true             → IncludeScanHistory = false
+	// CLI flag wins over config; one-way (passing the flag forces opt-out).
+	if cmd.Flags().Changed("skip-project-data-migration") {
+		v, _ := cmd.Flags().GetBool("skip-project-data-migration")
+		if v {
+			cfg.SkipProjectDataMigration = true
+		}
 	}
+	cfg.IncludeScanHistory = !cfg.SkipProjectDataMigration
 	// --debug is a persistent flag on rootCmd; pick it up here so the
 	// SDK can install the HTTP request/response logger.
 	if cmd.Flags().Changed("debug") {
