@@ -72,6 +72,36 @@ func TestBuildMetadata(t *testing.T) {
 	}
 }
 
+// TestBuildMetadataReferenceBranch locks in the field-11 (reference/merge
+// branch) behavior that lets the SonarCloud CE accept non-main branch reports.
+// A non-main branch must reference the MAIN branch (so the CE copies issues
+// from it); when no reference is supplied (the main branch's own analysis) the
+// field falls back to the branch's own name, which is harmless because the main
+// branch sends no branch characteristic.
+func TestBuildMetadataReferenceBranch(t *testing.T) {
+	// Non-main branch: reference is the main branch, not itself.
+	nonMain := BuildMetadata(MetadataInput{
+		BranchName:          "develop",
+		BranchType:          pb.Metadata_BRANCH,
+		ReferenceBranchName: "master",
+	}, 1)
+	if nonMain.ReferenceBranchName != "master" {
+		t.Errorf("non-main reference: want master, got %q", nonMain.ReferenceBranchName)
+	}
+	if nonMain.BranchName != "develop" {
+		t.Errorf("non-main branch name must stay develop, got %q", nonMain.BranchName)
+	}
+
+	// Main branch (no reference supplied): falls back to its own name.
+	main := BuildMetadata(MetadataInput{
+		BranchName: "master",
+		BranchType: pb.Metadata_BRANCH,
+	}, 1)
+	if main.ReferenceBranchName != "master" {
+		t.Errorf("unset reference falls back to branch name: want master, got %q", main.ReferenceBranchName)
+	}
+}
+
 func TestBuildComponents(t *testing.T) {
 	files := []ComponentInput{
 		{Key: "proj:src/main.go", Name: "main.go", Path: "src/main.go", Language: "go", Lines: 50},

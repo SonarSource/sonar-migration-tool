@@ -81,6 +81,9 @@ func SubmitReport(ctx context.Context, client *http.Client, cfg SubmitConfig, re
 // state (SUCCESS, FAILED, CANCELED) or the context is canceled.
 func PollCETask(ctx context.Context, client *http.Client, cloudURL, taskID string, logger *slog.Logger) error {
 	activityURL := strings.TrimRight(cloudURL, "/") + "/api/ce/task"
+	// The default response already includes errorType/errorMessage on FAILED.
+	// Do NOT request additionalFields=stacktrace — SonarCloud rejects it (only
+	// scannerContext|warnings are valid) and the 400 would break polling.
 	params := url.Values{"id": {taskID}}
 
 	for {
@@ -114,6 +117,17 @@ func PollCETask(ctx context.Context, client *http.Client, cloudURL, taskID strin
 			return nil
 		case "FAILED":
 			errMsg := extractJSONField(body, "task", "errorMessage")
+			errType := extractJSONField(body, "task", "errorType")
+			errStack := extractJSONField(body, "task", "errorStacktrace")
+			logger.Warn("CE task failed",
+				"taskId", taskID,
+				"errorType", errType,
+				"errorMessage", errMsg,
+				"stacktrace", truncateStr(errStack, 2000),
+			)
+			if errType != "" {
+				return fmt.Errorf("CE task %s failed [%s]: %s", taskID, errType, errMsg)
+			}
 			return fmt.Errorf("CE task %s failed: %s", taskID, errMsg)
 		case "CANCELED":
 			return fmt.Errorf("CE task %s was canceled", taskID)

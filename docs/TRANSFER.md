@@ -66,7 +66,7 @@ On success, a PDF migration summary is written into the export directory.
 
 > **Note on issue counts.** The target issue count is normally lower than the SonarQube Server total because issues that are **CLOSED** or resolved as **FIXED** have no SonarQube Cloud counterpart and are intentionally skipped (the scanner report only recreates active findings). Open issues plus triaged ones (won't-fix / false-positive / accepted) and all externally-imported issues are migrated. Security Hotspots transfer in full.
 
-> **Known limitation — non-main branches.** Scan-history import currently succeeds for the project's **main branch**. Importing **non-main branches** can fail during SonarQube Cloud Compute Engine processing; those branches are skipped (non-fatal) and the transfer still completes. The main-branch issues and hotspots are unaffected.
+> **Known limitation — non-main branches.** Scan-history import reliably lands data only on the project's **main branch**. Non-main branches are submitted (and, after the reference-branch fix, most are now *accepted* by the SonarQube Cloud Compute Engine), but **SonarQube Cloud does not persist non-main branches created this way** — they do not appear under the project's branches and carry no issues. This is a limitation of recreating history by injecting a scanner report via `/api/ce/submit`: branch creation on SonarQube Cloud is driven by the long-lived branch name pattern and the regular scanner's branch orchestration, not by an injected report. The main-branch issues and hotspots are unaffected. See [CLOUDVOYAGER-DELTA.md](CLOUDVOYAGER-DELTA.md) (BUG-17) for the full investigation.
 
 ---
 

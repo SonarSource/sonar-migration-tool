@@ -75,10 +75,10 @@ Reliability, Security) won't reflect the source configuration.
 
 ---
 
-### ~~BUG-03: `ReferenceBranchName` never set in `MetadataInput` inside `importBranch`~~ **[FIXED]**
-<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
+### ~~BUG-03: `ReferenceBranchName` never set in `MetadataInput` inside `importBranch`~~ **[FIXED — main; COMPLETED — non-main]**
+<!-- updated: 2026-06-05_13:45:00 -->
 
-**Status**: FIXED — commit `1eeb9d8`. `MetadataInput` now includes `ReferenceBranchName`; `BuildMetadata` sets it on the protobuf `Metadata` message, defaulting to `BranchName` if not explicitly provided. This matches CloudVoyager's behavior and resolves the CE processing rejection.
+**Status**: FIXED (main) — commit `1eeb9d8` added `ReferenceBranchName` to `MetadataInput`; `BuildMetadata` writes it to protobuf `Metadata` field 11 (`reference_branch_name`, = SonarCloud's `merge_branch_name`), defaulting to `BranchName` when unset. **COMPLETED (non-main)** — branch `fix/issue-104-migrate-multiple-branches`: that 2024 fix only ever set the field for the main branch (which self-references harmlessly because it sends no branch characteristic). Non-main branches kept self-referencing — exactly the `(For non-main branches it should be the main branch name.)` note that was struck through but never implemented. `importBranch` now sets `ReferenceBranchName` = the project's main branch for non-main branches (via `resolveMainTargetName` → `branchImportContext.MainTargetName` → `importBranchInput.ReferenceBranch`). **Verified live against SonarCloud staging**: this flips the CE from hard-rejection ("issue whilst processing the report") to **SUCCESS** for non-main branches whose names match the long-lived branch pattern (e.g. `release-3.x`, `reduce-tech-debt` went FAILED → SUCCESS). The main branch is unchanged (still imports 1292 issues). **See BUG-17** for the remaining branch-persistence limitation that this fix does not overcome.
 
 ~~**File**: [go/internal/migrate/tasks_scanhistory.go:200](../go/internal/migrate/tasks_scanhistory.go#L200)~~
 
@@ -294,6 +294,53 @@ or absent after migration — only live scans will populate them.
 5. **BUG-16f (Medium): Project-level concurrency not properly managed** — Rewrote `runImportScanHistory` to use `errgroup.WithContext` + `g.SetLimit(cap(e.Sem))` for parallel project processing. Individual project failures no longer cancel other projects (settled semantics).
 
 **Files changed**: `tasks_scanhistory.go`, `tasks_scanhistory_test.go` (12 new tests), `migrate.go`, `config_file.go`, `config_file_test.go`, `cmd/migrate.go`, `cmd/transfer.go`, `cmd/transfer_test.go`.
+
+---
+
+### BUG-17: Non-main branches accepted by the CE but not persisted on SonarCloud
+<!-- updated: 2026-06-05_13:45:00 -->
+
+**Status**: OPEN — strongly evidenced to be a **limitation of the report-injection approach on SonarCloud**, not a code bug fixable by tweaking the report alone.
+
+**Symptom**: After the BUG-03 completion, a non-main branch report POSTed to `/api/ce/submit` with `characteristic=branch=<name>` + `characteristic=branchType=LONG` and metadata `reference_branch_name=<main>` returns CE task **SUCCESS**, but the branch never materializes:
+- `/api/project_branches/list` shows only the main branch.
+- `/api/project_analyses/search?branch=<name>` → `Component ... on branch '<name>' not found`.
+- The branch reports 0 issues.
+
+**Live evidence** (project `open-digital-society-1_okorach-oss_sonar-tools`, SC staging, branch `fix/issue-104-migrate-multiple-branches`):
+
+| Branch | Long-lived pattern? | CE result | Persisted? |
+|--------|---------------------|-----------|------------|
+| `master` (main) | yes | SUCCESS | ✅ 1292 issues |
+| `release-3.x` | yes (`release-.*`) | SUCCESS (was FAILED) | ❌ not found |
+| `develop` | yes (`develop`) | **FAILED** | ❌ |
+| `reduce-tech-debt` | no → SHORT | SUCCESS | ❌ (short-lived: PR-like, never persisted) |
+
+**Findings**:
+1. **`branchType=LONG` is correct.** The SC main branch reports `type=LONG` in `/api/project_branches/list`, and a real `sonar-scanner` submitting to sc-staging.io sends `characteristic=branchType=LONG` (Sonar support ticket #14210). Do **not** change it to `BRANCH`.
+2. **Branch classification/persistence is server-side**, governed by the long-lived branch name pattern (`sonar.branch.longLivedBranches.regex`, here `(comma,branch|develop|main|master|release-.*|trunk)`) on first analysis — not by the injected `branchType`. Names that don't match are treated as short-lived (PR-like, auto-deleted, no overall-code branch).
+3. **Raw report injection via `/api/ce/submit` is not a supported branch-creation path** (per Sonar internal guidance + public docs). The real scanner performs additional branch orchestration (fetches branch config from the server, computes the reference branch, ships real SCM/changeset data); a handcrafted report appears to omit whatever the CE needs to materialize the branch entity.
+4. **CloudVoyager also never moved a non-main branch here** (`syncAllBranches:true` notwithstanding), consistent with this being inherent to the injection approach rather than tool-specific.
+
+**Side effect to address**: the tool currently records branches in (2)/(3) as `status=success` in `importScanHistory` results even though no data lands — over-reporting. A post-submit `/api/project_branches/list` verification would make the reported status accurate.
+
+---
+
+### BUG-18: Report-validity hardening (the `develop` hard-failure) — **[FIXED]**
+<!-- updated: 2026-06-05_14:40:00 -->
+
+**Status**: FIXED — branch `fix/issue-104-migrate-multiple-branches`. While BUG-17 covers branches the CE *accepts* but doesn't persist, `develop` on `okorach-oss_sonar-tools` was *hard-rejected* by the CE (~6s, generic error) where the structurally similar `release-3.x` succeeded. Byte/proto-diffing the two built reports (offline, via a temporary `SMT_DUMP_REPORT_DIR` dump — since removed) isolated three problems in `develop`, all absent from `release-3.x`:
+
+1. **Source text purged (root cause).** The `develop` branch has **line measures but no retrievable source text**. Both `/api/sources/raw` and `/api/sources/lines` (the endpoint the SonarQube UI uses to render a file) return **0 lines** for every develop file — e.g. `sonar/projects.py` reports `ncloc=1193` yet `sources/lines=0` — while `release-3.x` returns full source (projects.py: 1717 lines). All 96 of develop's extracted `source-*.txt` were 0 bytes (release-3.x: 942 KB). **Why:** develop was last analyzed **2025-05-01** (13+ months ago) vs release-3.x **2025-10-25** and master **2026-05-11**; SonarQube housekeeping purges source/SCM data for old/inactive branches while retaining aggregate measures and issues. The project's **Code list** in the UI still shows develop's LOC (13,942) because that is a *measure* — but opening any develop file shows an empty source view. This is a **source-side data condition (purged source), not an extraction bug** — confirmed against `/api/sources/lines`, the UI's own endpoint.
+2. **Out-of-range issue lines.** With no source, component line counts fell back to **ncloc** (e.g. `sonar/tasks.py` declared 288 lines) while issues referenced physical lines up to 381 → 29 `range_exceeds_lines` → CE reject.
+3. **Orphan rule.** A native `secrets:S6702` issue referenced a rule never extracted into `activerules.pb` (the `secrets` repo isn't among the project's active-rule repos) → CE reject.
+
+**Fixes (all in `tasks_scanhistory.go`, with tests)** — defensive, so they also harden **main-branch** migration of any project with the same gaps:
+- `fixComponentLineCounts` now raises each component's line count to at least the largest line any issue points at (`maxIssueEndLineByComponent`), never below it.
+- `dropIssuesWithInactiveRules` drops native issues whose `(repo, key)` is not in the active-rule set (an issue on an unactivated rule aborts the whole report and can't be recreated anyway). Hotspots are exempt.
+- **Purged-source skip**: a branch with findings but **zero** retrievable source text (`totalSourceLen == 0`) is now **skipped** with a clear status (`"source code not retrievable for this branch (line measures may remain, but source text is gone — likely purged by SonarQube housekeeping); re-analyze the branch on the source server to migrate it"`) instead of submitting a doomed report. Issues with no source cannot be anchored to lines, and the CE requires source.
+
+**Net for `develop`**: the report is now structurally clean (0 out-of-range, 0 orphan rules — verified by proto-diff), but because its source text has been purged on the server, the tool now **skips it cleanly** with an actionable message rather than hard-failing. To actually migrate develop, re-analyze it on the source server first (which restores its source), then re-run. (Even a structurally valid `develop` report would not persist — see BUG-17.) `importBranch` was also refactored into `importBranch` + `buildBranchReport` + `fixComponentLineCounts` to keep cognitive complexity within the project bar.
 
 ---
 

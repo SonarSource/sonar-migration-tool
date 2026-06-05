@@ -361,6 +361,80 @@ func TestCollectBranchInfo(t *testing.T) {
 	}
 }
 
+func TestResolveMainTargetName(t *testing.T) {
+	master := branchInfo{Name: "master", IsMain: true}
+	cases := []struct {
+		name         string
+		scMainBranch string
+		mainBranch   *branchInfo
+		want         string
+	}{
+		{"prefers SC main branch name", "main", &master, "main"},
+		{"falls back to SQ main when SC unknown", "", &master, "master"},
+		{"empty when no main known", "", nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveMainTargetName(tc.scMainBranch, tc.mainBranch); got != tc.want {
+				t.Errorf("resolveMainTargetName(%q, %v) = %q, want %q", tc.scMainBranch, tc.mainBranch, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMaxIssueEndLineByComponent(t *testing.T) {
+	native := []scanreport.IssueInput{
+		{Component: "a", StartLine: 10, EndLine: 20},
+		{Component: "a", StartLine: 5, EndLine: 8},
+		{Component: "b", StartLine: 30, EndLine: 0}, // end < start -> use start
+	}
+	hotspots := []scanreport.IssueInput{
+		{Component: "a", StartLine: 25, EndLine: 40},
+	}
+	external := []scanreport.ExternalIssueInput{
+		{Component: "c", StartLine: 1, EndLine: 99},
+		{Component: "", StartLine: 1, EndLine: 5}, // empty component ignored
+	}
+	m := maxIssueEndLineByComponent(native, hotspots, external)
+	if m["a"] != 40 {
+		t.Errorf("component a: want 40, got %d", m["a"])
+	}
+	if m["b"] != 30 {
+		t.Errorf("component b (start>end): want 30, got %d", m["b"])
+	}
+	if m["c"] != 99 {
+		t.Errorf("component c: want 99, got %d", m["c"])
+	}
+	if _, ok := m[""]; ok {
+		t.Errorf("empty component key must be ignored")
+	}
+}
+
+func TestDropIssuesWithInactiveRules(t *testing.T) {
+	active := []scanreport.ActiveRuleInput{
+		{RuleRepo: "python", RuleKey: "S100"},
+		{RuleRepo: "python", RuleKey: "S125"},
+	}
+	issues := []scanreport.IssueInput{
+		{RuleRepo: "python", RuleKey: "S100", Component: "a"},
+		{RuleRepo: "secrets", RuleKey: "S6702", Component: "b"}, // orphan -> dropped
+		{RuleRepo: "python", RuleKey: "S125", Component: "c"},
+		{RuleRepo: "secrets", RuleKey: "S6702", Component: "b"}, // orphan -> dropped
+	}
+	kept, dropped := dropIssuesWithInactiveRules(issues, active)
+	if dropped != 2 {
+		t.Errorf("dropped: want 2, got %d", dropped)
+	}
+	if len(kept) != 2 {
+		t.Fatalf("kept: want 2, got %d", len(kept))
+	}
+	for _, k := range kept {
+		if k.RuleRepo == "secrets" {
+			t.Errorf("orphan secrets issue must have been dropped, got %+v", k)
+		}
+	}
+}
+
 func TestCollectBranchInfoNoMatch(t *testing.T) {
 	dir := t.TempDir()
 	setupScanHistoryExtract(t, dir)

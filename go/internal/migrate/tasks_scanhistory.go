@@ -131,6 +131,16 @@ func importProjectBranches(ctx context.Context, e *Executor, proj json.RawMessag
 		}
 	}
 
+	// Non-main (long-lived) branches must point their reference/merge branch
+	// (scanner-report metadata field 11) at the project's MAIN branch — not at
+	// themselves. On a branch's first analysis the SonarCloud CE copies issues
+	// from the reference branch; a self-reference (the previous default) makes
+	// that issue-sync step abort with the opaque "issue whilst processing the
+	// report" error. This mirrors the real scanner, which sets
+	// merge_branch_name = the reference branch. The main branch is unaffected:
+	// it sends no branch characteristic, so the CE ignores its reference field.
+	bctx.MainTargetName = resolveMainTargetName(scMainBranch, mainBranch)
+
 	// Phase 1: import main branch (blocking gate).
 	if mainBranch != nil {
 		if err := importAndRecordBranch(ctx, e, bctx, *mainBranch); err != nil {
@@ -152,14 +162,32 @@ func importProjectBranches(ctx context.Context, e *Executor, proj json.RawMessag
 	return nil
 }
 
+// resolveMainTargetName returns the project's main branch name on the target,
+// used as the reference/merge branch for non-main branch imports. It prefers
+// the SonarCloud main branch name (which may have been renamed during project
+// creation) and falls back to the source main branch name.
+func resolveMainTargetName(scMainBranch string, mainBranch *branchInfo) string {
+	if scMainBranch != "" {
+		return scMainBranch
+	}
+	if mainBranch != nil {
+		return mainBranch.Name
+	}
+	return ""
+}
+
 type branchImportContext struct {
 	CloudKey     string
 	OrgKey       string
 	ServerURL    string
 	ServerKey    string
 	SCMainBranch string
-	Completed    map[string]bool
-	Writer       *common.ChunkWriter
+	// MainTargetName is the project's main branch name on the SonarCloud target
+	// (the SC main branch if known, else the SQ main branch name). Non-main
+	// branches use it as their reference/merge branch on submit.
+	MainTargetName string
+	Completed      map[string]bool
+	Writer         *common.ChunkWriter
 }
 
 func importAndRecordBranch(ctx context.Context, e *Executor, bctx branchImportContext, branch branchInfo) error {
@@ -172,14 +200,22 @@ func importAndRecordBranch(ctx context.Context, e *Executor, bctx branchImportCo
 	if branch.IsMain && bctx.SCMainBranch != "" {
 		targetBranch = bctx.SCMainBranch
 	}
+	// Non-main branches reference the main branch; the main branch references
+	// nothing (BuildMetadata falls back to its own name, preserving the working
+	// main-branch behavior).
+	referenceBranch := ""
+	if !branch.IsMain {
+		referenceBranch = bctx.MainTargetName
+	}
 	result, err := importBranch(ctx, e, importBranchInput{
-		CloudKey:     bctx.CloudKey,
-		OrgKey:       bctx.OrgKey,
-		ServerURL:    bctx.ServerURL,
-		ServerKey:    bctx.ServerKey,
-		Branch:       branch.Name,
-		TargetBranch: targetBranch,
-		IsMain:       branch.IsMain,
+		CloudKey:        bctx.CloudKey,
+		OrgKey:          bctx.OrgKey,
+		ServerURL:       bctx.ServerURL,
+		ServerKey:       bctx.ServerKey,
+		Branch:          branch.Name,
+		TargetBranch:    targetBranch,
+		ReferenceBranch: referenceBranch,
+		IsMain:          branch.IsMain,
 	})
 	if err != nil {
 		logAPIWarn(e.Logger, "scan history import failed", err, "project", bctx.CloudKey, "branch", branch.Name)
@@ -201,13 +237,14 @@ func recordBranchResult(w *common.ChunkWriter, cloudKey, branchName string, resu
 }
 
 type importBranchInput struct {
-	CloudKey     string
-	OrgKey       string
-	ServerURL    string
-	ServerKey    string
-	Branch       string // SQ branch name — used to filter extracted data
-	TargetBranch string // SC branch name — used in protobuf metadata and CE submit
-	IsMain       bool   // main/default branch — suppresses branch characteristics on submit
+	CloudKey        string
+	OrgKey          string
+	ServerURL       string
+	ServerKey       string
+	Branch          string // SQ branch name — used to filter extracted data
+	TargetBranch    string // SC branch name — used in protobuf metadata and CE submit
+	ReferenceBranch string // reference/merge branch (metadata field 11); empty for main
+	IsMain          bool   // main/default branch — suppresses branch characteristics on submit
 }
 
 type importResult struct {
@@ -222,34 +259,79 @@ func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*i
 		targetBranch = input.Branch
 	}
 
+	report, skip, err := buildBranchReport(ctx, e, input, targetBranch)
+	if err != nil {
+		return nil, err
+	}
+	if skip != nil {
+		return skip, nil
+	}
+
+	cfg := scanreport.SubmitConfig{
+		CloudURL:       e.CloudURL,
+		ProjectKey:     input.CloudKey,
+		OrgKey:         input.OrgKey,
+		BranchName:     targetBranch,
+		ProjectVersion: report.ProjectVersion,
+		IsMain:         input.IsMain,
+	}
+
+	result, err := scanreport.SubmitReport(ctx, e.Raw.HTTPClient(), cfg, report.ZIP)
+	if err != nil {
+		return nil, fmt.Errorf("submitting report: %w", err)
+	}
+
+	e.Logger.Info("CE task submitted", "project", input.CloudKey, "targetBranch", targetBranch, "taskId", result.TaskID)
+
+	if err := scanreport.PollCETask(ctx, e.Raw.HTTPClient(), e.CloudURL, result.TaskID, e.Logger); err != nil {
+		return nil, fmt.Errorf("CE task failed: %w", err)
+	}
+
+	return &importResult{Status: "success", TaskID: result.TaskID}, nil
+}
+
+// branchReport is a packaged scanner report for one branch, ready to submit.
+type branchReport struct {
+	ZIP            []byte
+	ProjectVersion string
+}
+
+// buildBranchReport loads the extracted data for one branch, applies the
+// CE-compatibility fixes, and returns the packaged report. A non-nil skip
+// result means the branch must not be submitted (no components, or no source
+// to anchor its issues).
+func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput, targetBranch string) (*branchReport, *importResult, error) {
 	issues := loadExtractedIssues(e, input.ServerURL, input.ServerKey, input.Branch)
 	hotspotIssues := loadExtractedHotspots(e, input.ServerURL, input.ServerKey, input.Branch)
 	extIssues, adHocRules := loadExtractedExternalIssues(e, input.ServerURL, input.ServerKey, input.Branch)
-	allComponents := loadExtractedComponents(e, input.ServerURL, input.ServerKey, input.Branch)
+	// Include ALL FIL components, not just those with source code; external
+	// issues can reference files without source. CloudVoyager does the same.
+	components := loadExtractedComponents(e, input.ServerURL, input.ServerKey, input.Branch)
 	sources := loadExtractedSources(e, input.ServerURL, input.ServerKey, input.Branch)
 	activeRules := loadExtractedActiveRules(e, input.ServerURL, input.ServerKey)
 
-	// Combine native issues with hotspot issues for the regular Issue protobuf.
-	issues = append(issues, hotspotIssues...)
-
-	// Include ALL FIL components, not just those with source code.
-	// External issues can reference files without source; filtering by
-	// source drops those issues. CloudVoyager includes all FIL components.
-	components := allComponents
-
 	if len(components) == 0 {
-		return &importResult{Status: "skipped"}, nil
+		return nil, &importResult{Status: "skipped"}, nil
 	}
 
-	// Fix component line counts: use actual source line count instead of ncloc.
-	// The extract provides ncloc (code lines only), but the CE expects total
-	// source lines (including comments/blanks) for changeset consistency.
-	sourceLinesByKey := buildSourceLineCountMap(sources)
-	for i := range components {
-		if sl, ok := sourceLinesByKey[components[i].Key]; ok && sl > 0 {
-			components[i].Lines = int32(sl)
-		}
+	// The source server returns no source TEXT for this branch even though line
+	// measures may still exist (SonarQube housekeeping purges source/SCM data
+	// for old or inactive branches while keeping aggregate measures and issues;
+	// /api/sources/{raw,lines} then return empty). Without source, issues cannot
+	// be anchored to real lines: the report would declare N-line files with
+	// empty source, and the SonarCloud CE rejects that inconsistency. Skip
+	// rather than submit a doomed report. (The main branch is actively analyzed
+	// and always carries source, so it is unaffected.)
+	if (len(issues)+len(hotspotIssues)+len(extIssues)) > 0 && totalSourceLen(sources) == 0 {
+		e.Logger.Warn("skipping branch: source code not retrievable (line measures may remain, but source text is gone — likely purged by housekeeping for an inactive branch; re-analyze the branch to restore it)",
+			"project", input.CloudKey, "branch", input.Branch,
+			"findings", len(issues)+len(hotspotIssues)+len(extIssues))
+		return nil, &importResult{Status: "skipped", Error: "source code not retrievable for this branch (line measures may remain, but source text is gone — likely purged by SonarQube housekeeping); re-analyze the branch on the source server to migrate it"}, nil
 	}
+
+	// Fix component line counts (see fixComponentLineCounts).
+	fixComponentLineCounts(components, buildSourceLineCountMap(sources),
+		maxIssueEndLineByComponent(issues, hotspotIssues, extIssues))
 
 	// Fetch SC quality profiles (CloudVoyager uses SC profile keys, not SQ keys).
 	// The CE validates that qprofile keys in the metadata exist in the SC instance.
@@ -269,14 +351,22 @@ func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*i
 	// here — exactly once per rule, mirroring CloudVoyager's output.
 	activeRules = dedupActiveRules(activeRules)
 
+	// Drop native issues whose rule is not among the active rules. The CE
+	// requires every native issue's rule to be activated in the analysis; an
+	// orphan rule (e.g. a "secrets" finding when secrets rules were never
+	// extracted as active rules) aborts the entire report. Such issues cannot
+	// be recreated on the target regardless. Hotspots are appended afterward —
+	// they are validated against hotspot rules, not the active-rule set.
+	issues, droppedOrphanIssues := dropIssuesWithInactiveRules(issues, activeRules)
+	if droppedOrphanIssues > 0 {
+		e.Logger.Warn("dropped native issues referencing inactive rules",
+			"project", input.CloudKey, "branch", input.Branch, "dropped", droppedOrphanIssues)
+	}
+	issues = append(issues, hotspotIssues...)
+
 	now := time.Now()
 
 	root, fileComps, cr := scanreport.BuildComponents(input.CloudKey, components)
-	pbIssues := scanreport.BuildIssues(issues, cr)
-	pbExtIssues := scanreport.BuildExternalIssues(extIssues, cr)
-	pbAdHocRules := scanreport.BuildAdHocRules(adHocRules)
-	pbActiveRules := scanreport.BuildActiveRules(activeRules, now.UnixMilli())
-
 	pbSources := make(map[int32]string)
 	for _, s := range sources {
 		if ref, ok := cr.Refs()[s.Component]; ok {
@@ -300,33 +390,32 @@ func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*i
 
 	projectVersion := resolveProjectVersion(e, input.ServerURL, input.ServerKey, input.Branch)
 
-	metadata := scanreport.BuildMetadata(scanreport.MetadataInput{
-		AnalysisDate:   now,
-		OrgKey:         input.OrgKey,
-		ProjectKey:     input.CloudKey,
-		BranchName:     targetBranch,
-		BranchType:     pb.Metadata_BRANCH,
-		ProjectVersion: projectVersion,
-		QProfiles:      qprofiles,
-		FileCountByExt: countFilesByExt(components),
-	}, root.Ref)
-
 	reportData := &scanreport.ReportData{
-		Metadata:       metadata,
+		Metadata: scanreport.BuildMetadata(scanreport.MetadataInput{
+			AnalysisDate:        now,
+			OrgKey:              input.OrgKey,
+			ProjectKey:          input.CloudKey,
+			BranchName:          targetBranch,
+			BranchType:          pb.Metadata_BRANCH,
+			ReferenceBranchName: input.ReferenceBranch,
+			ProjectVersion:      projectVersion,
+			QProfiles:           qprofiles,
+			FileCountByExt:      countFilesByExt(components),
+		}, root.Ref),
 		RootComponent:  root,
 		FileComponents: fileComps,
-		Issues:         pbIssues,
-		ExternalIssues: pbExtIssues,
+		Issues:         scanreport.BuildIssues(issues, cr),
+		ExternalIssues: scanreport.BuildExternalIssues(extIssues, cr),
 		Measures:       make(map[int32][]*pb.Measure),
 		Changesets:     changesets,
-		ActiveRules:    pbActiveRules,
-		AdHocRules:     pbAdHocRules,
+		ActiveRules:    scanreport.BuildActiveRules(activeRules, now.UnixMilli()),
+		AdHocRules:     scanreport.BuildAdHocRules(adHocRules),
 		Sources:        pbSources,
 	}
 
 	zipBytes, err := scanreport.PackageReport(reportData)
 	if err != nil {
-		return nil, fmt.Errorf("packaging report: %w", err)
+		return nil, nil, fmt.Errorf("packaging report: %w", err)
 	}
 
 	e.Logger.Info("report packaged",
@@ -341,27 +430,26 @@ func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*i
 		"activeRules", len(activeRules),
 	)
 
-	cfg := scanreport.SubmitConfig{
-		CloudURL:       e.CloudURL,
-		ProjectKey:     input.CloudKey,
-		OrgKey:         input.OrgKey,
-		BranchName:     targetBranch,
-		ProjectVersion: projectVersion,
-		IsMain:         input.IsMain,
+	return &branchReport{ZIP: zipBytes, ProjectVersion: projectVersion}, nil, nil
+}
+
+// fixComponentLineCounts sets each component's line count to the best available
+// value: the real source line count when known, otherwise the extracted ncloc —
+// but never below the largest line any issue points at. The extract provides
+// ncloc (code lines only) while the CE expects total source lines; when source
+// is unavailable for a branch the count would fall back to ncloc and the CE
+// would reject out-of-range issue lines.
+func fixComponentLineCounts(components []scanreport.ComponentInput, sourceLinesByKey map[string]int, maxEndLineByKey map[string]int32) {
+	for i := range components {
+		lines := components[i].Lines
+		if sl, ok := sourceLinesByKey[components[i].Key]; ok && sl > 0 {
+			lines = int32(sl)
+		}
+		if me := maxEndLineByKey[components[i].Key]; me > lines {
+			lines = me
+		}
+		components[i].Lines = lines
 	}
-
-	result, err := scanreport.SubmitReport(ctx, e.Raw.HTTPClient(), cfg, zipBytes)
-	if err != nil {
-		return nil, fmt.Errorf("submitting report: %w", err)
-	}
-
-	e.Logger.Info("CE task submitted", "project", input.CloudKey, "targetBranch", targetBranch, "taskId", result.TaskID)
-
-	if err := scanreport.PollCETask(ctx, e.Raw.HTTPClient(), e.CloudURL, result.TaskID, e.Logger); err != nil {
-		return nil, fmt.Errorf("CE task failed: %w", err)
-	}
-
-	return &importResult{Status: "success", TaskID: result.TaskID}, nil
 }
 
 type branchInfo struct {
@@ -961,6 +1049,54 @@ func dedupActiveRules(rules []scanreport.ActiveRuleInput) []scanreport.ActiveRul
 	return out
 }
 
+// maxIssueEndLineByComponent returns, per component key, the largest text-range
+// end line referenced by any issue across the given groups. A component's
+// declared line count must never be smaller than this, or the CE rejects the
+// report with an out-of-range line error — which happens when source (and thus
+// the real line count) is unavailable for a branch and the count falls back to
+// ncloc.
+func maxIssueEndLineByComponent(native, hotspots []scanreport.IssueInput, external []scanreport.ExternalIssueInput) map[string]int32 {
+	m := make(map[string]int32)
+	bump := func(comp string, start, end int32) {
+		if start > end {
+			end = start
+		}
+		if comp != "" && end > m[comp] {
+			m[comp] = end
+		}
+	}
+	for _, iss := range native {
+		bump(iss.Component, iss.StartLine, iss.EndLine)
+	}
+	for _, iss := range hotspots {
+		bump(iss.Component, iss.StartLine, iss.EndLine)
+	}
+	for _, iss := range external {
+		bump(iss.Component, iss.StartLine, iss.EndLine)
+	}
+	return m
+}
+
+// dropIssuesWithInactiveRules removes native issues whose (repo, key) is not in
+// the active-rule set, returning the kept issues and the dropped count. An issue
+// on a rule the analysis doesn't activate makes the CE abort the whole report,
+// and could not be recreated on the target anyway.
+func dropIssuesWithInactiveRules(issues []scanreport.IssueInput, activeRules []scanreport.ActiveRuleInput) (kept []scanreport.IssueInput, dropped int) {
+	active := make(map[string]struct{}, len(activeRules))
+	for _, r := range activeRules {
+		active[r.RuleRepo+":"+r.RuleKey] = struct{}{}
+	}
+	kept = make([]scanreport.IssueInput, 0, len(issues))
+	for _, iss := range issues {
+		if _, ok := active[iss.RuleRepo+":"+iss.RuleKey]; ok {
+			kept = append(kept, iss)
+		} else {
+			dropped++
+		}
+	}
+	return kept, dropped
+}
+
 func buildChangesetMap(cr *scanreport.ComponentRef, components []scanreport.ComponentInput, pbSources map[int32]string, date time.Time) map[int32]*pb.Changesets {
 	changesets := make(map[int32]*pb.Changesets)
 	for _, comp := range components {
@@ -1007,6 +1143,16 @@ func extIssuesToExtracted(extIssues []scanreport.ExternalIssueInput) []scanrepor
 		})
 	}
 	return result
+}
+
+// totalSourceLen returns the combined byte length of all extracted source. Zero
+// means the source server returned no source for any component on this branch.
+func totalSourceLen(sources []sourceRecord) int {
+	total := 0
+	for _, s := range sources {
+		total += len(s.Source)
+	}
+	return total
 }
 
 func buildSourceLineCountMap(sources []sourceRecord) map[string]int {
