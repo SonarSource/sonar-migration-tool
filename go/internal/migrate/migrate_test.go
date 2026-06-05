@@ -117,15 +117,15 @@ func TestMigrateTargetTasksSkipIssueSync(t *testing.T) {
 	}
 }
 
-// SkipIssueSync without --include_scan_history is a no-op for the two
-// sync tasks — they were already excluded by the scan-history gate.
+// SkipIssueSync when IncludeScanHistory is false is a no-op for the
+// two sync tasks — they were already excluded by the scan-history gate.
 // The flag must not accidentally let them through.
 func TestMigrateTargetTasksSkipIssueSyncWithoutScanHistory(t *testing.T) {
 	reg := BuildMigrateRegistry(RegisterAll())
 	targets := MigrateTargetTasks(reg, "", false, false, true, false, nil)
 	for _, name := range targets {
 		if name == "syncIssueMetadata" || name == "syncHotspotMetadata" {
-			t.Errorf("scan-history-gated task %q must stay excluded without --include_scan_history", name)
+			t.Errorf("scan-history-gated task %q must stay excluded when scan history is off", name)
 		}
 	}
 }
@@ -222,8 +222,7 @@ func TestExtractAnyStr(t *testing.T) {
 }
 
 // --skip-project-data-migration must drop importScanHistory along
-// with the two trailing sync tasks, even when --include-scan-history
-// is explicitly set. #303.
+// with the two trailing sync tasks. #303.
 func TestMigrateTargetTasksSkipProjectDataMigration(t *testing.T) {
 	reg := BuildMigrateRegistry(RegisterAll())
 	targets := MigrateTargetTasks(reg, "", false, true /*includeScanHistory*/, false /*skipIssueSync*/, true /*skipProjectDataMigration*/, nil)
@@ -235,9 +234,9 @@ func TestMigrateTargetTasksSkipProjectDataMigration(t *testing.T) {
 	}
 }
 
-// Without --skip-project-data-migration but with --include-scan-history,
-// all three project-data tasks should run. Regression guard so the
-// new gate doesn't accidentally always exclude.
+// Without --skip-project-data-migration, all three project-data
+// tasks should run. Regression guard so the skip gate doesn't
+// accidentally always exclude.
 func TestMigrateTargetTasksProjectDataMigrationEnabledByDefault(t *testing.T) {
 	reg := BuildMigrateRegistry(RegisterAll())
 	targets := MigrateTargetTasks(reg, "", false, true /*includeScanHistory*/, false /*skipIssueSync*/, false /*skipProjectDataMigration*/, nil)

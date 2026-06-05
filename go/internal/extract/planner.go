@@ -93,7 +93,9 @@ func RegisterAll() []TaskDef {
 	return all
 }
 
-// scanHistoryTaskNames lists task names that require the --include-scan-history flag.
+// scanHistoryTaskNames lists task names that pull issue, source-code,
+// SCM-blame, and version data — extracted by default and dropped only
+// when --skip-project-data-migration is set.
 var scanHistoryTaskNames = map[string]bool{
 	"getProjectIssuesFull":    true,
 	"getProjectComponentTree": true,

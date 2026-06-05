@@ -122,10 +122,9 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 		cfg.ExportDirectory = DefaultExportDirectory
 	}
 
-	// Project-data migration is now opt-out via SkipProjectDataMigration
-	// rather than opt-in via the old --include-scan-history flag (which
-	// has been removed). Derive the legacy IncludeScanHistory field
-	// here so the planner's existing scan-history gate keeps working
+	// Project-data migration is on by default; the only opt-out is
+	// SkipProjectDataMigration. Derive the internal IncludeScanHistory
+	// field so the planner's existing scan-history gate keeps working
 	// without forcing every caller to set both fields.
 	cfg.IncludeScanHistory = !cfg.SkipProjectDataMigration
 

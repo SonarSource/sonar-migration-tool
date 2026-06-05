@@ -87,13 +87,10 @@ func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfi
 	overrideString(cmd, "target_task", &cfg.TargetTask)
 	overrideInt(cmd, "concurrency", &cfg.Concurrency)
 	overrideInt(cmd, "timeout", &cfg.Timeout)
-	// Project data is extracted by default. The legacy
-	// `include_scan_history` JSON field still parses (so old configs
-	// don't error) but the new model derives IncludeScanHistory from
-	// SkipProjectDataMigration only:
-	//   skip-project-data-migration: false (default)  → IncludeScanHistory = true
-	//   skip-project-data-migration: true             → IncludeScanHistory = false
-	// CLI flag wins over config; one-way (passing the flag forces opt-out).
+	// Project data is extracted by default. The only opt-out is
+	// SkipProjectDataMigration (CLI --skip-project-data-migration or
+	// config "skip-project-data-migration": true). CLI flag wins over
+	// config; one-way (passing the flag forces opt-out).
 	if cmd.Flags().Changed("skip-project-data-migration") {
 		v, _ := cmd.Flags().GetBool("skip-project-data-migration")
 		if v {

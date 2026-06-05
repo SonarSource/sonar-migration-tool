@@ -51,12 +51,6 @@ func phaseExtract(ctx context.Context, p Prompter, state *WizardState, exportDir
 		return err
 	}
 
-	includeScan, err := p.Confirm("Include scan history? (extracts issues, source code, and SCM data for import to SonarQube Cloud)", false)
-	if err != nil {
-		return err
-	}
-	state.IncludeScanHistory = includeScan
-
 	certCfg, err := runExtractWithRetry(ctx, p, state, exportDir, sourceURL, token)
 	if err != nil {
 		return err
@@ -108,7 +102,7 @@ func runExtractWithRetry(ctx context.Context, p Prompter, state *WizardState, ex
 			PEMFilePath:        cert.pemFile,
 			KeyFilePath:        cert.keyFile,
 			CertPassword:       cert.password,
-			IncludeScanHistory: state.IncludeScanHistory,
+			IncludeScanHistory: true,
 		}
 
 		skipped, err := runExtractFn(ctx, cfg)
@@ -431,7 +425,7 @@ func runMigrateWithRetry(ctx context.Context, p Prompter, state *WizardState, ex
 			EnterpriseKey:      ptrStr(state.EnterpriseKey),
 			URL:                ptrStr(state.TargetURL),
 			ExportDirectory:    exportDir,
-			IncludeScanHistory: state.IncludeScanHistory,
+			IncludeScanHistory: true,
 		}
 
 		resultID, err := runMigrateFn(ctx, cfg)

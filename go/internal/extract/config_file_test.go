@@ -91,7 +91,7 @@ func TestLoadExtractConfigFileSnakeCaseFields(t *testing.T) {
 		"timeout": 90,
 		"extract_id": "resume-me",
 		"target_task": "getRules",
-		"include_scan_history": true
+		"skip-project-data-migration": true
 	}`)
 	f.Close()
 
@@ -101,18 +101,18 @@ func TestLoadExtractConfigFileSnakeCaseFields(t *testing.T) {
 	}
 
 	want := ExtractConfig{
-		URL:                "http://sq.example.com:9000",
-		Token:              "tok",
-		ExportDirectory:    "/data/files",
-		ExtractType:        "all",
-		PEMFilePath:        "/certs/client.pem",
-		KeyFilePath:        "/certs/client.key",
-		CertPassword:       "secret",
-		Concurrency:        25,
-		Timeout:            90,
-		ExtractID:          "resume-me",
-		TargetTask:         "getRules",
-		IncludeScanHistory: true,
+		URL:                      "http://sq.example.com:9000",
+		Token:                    "tok",
+		ExportDirectory:          "/data/files",
+		ExtractType:              "all",
+		PEMFilePath:              "/certs/client.pem",
+		KeyFilePath:              "/certs/client.key",
+		CertPassword:             "secret",
+		Concurrency:              25,
+		Timeout:                  90,
+		ExtractID:                "resume-me",
+		TargetTask:               "getRules",
+		SkipProjectDataMigration: true,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("snake_case round-trip mismatch\n got=%+v\nwant=%+v", got, want)

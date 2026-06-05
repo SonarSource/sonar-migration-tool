@@ -39,7 +39,6 @@ type configFileShape struct {
 	Timeout            int    `json:"timeout"`
 	ExtractID                string `json:"extract_id"`
 	TargetTask               string `json:"target_task"`
-	IncludeScanHistory       bool   `json:"include_scan_history"` // legacy; honored when present but no longer the canonical knob (#303).
 	SkipProjectDataMigration bool   `json:"skip-project-data-migration"`
 
 	// Shape 2 (command-sectioned).
@@ -152,11 +151,6 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		// #303: top-level skip-project-data-migration drives whether
 		// the extract pulls issue / source / SCM-blame data.
 		cfg.SkipProjectDataMigration = s.SkipProjectDataMigration
-		// Legacy: honor include_scan_history if explicitly set (back-
-		// compat for configs that haven't migrated to the new key).
-		if s.IncludeScanHistory {
-			cfg.IncludeScanHistory = true
-		}
 	case s.SonarQube != nil:
 		cfg.URL = s.SonarQube.URL
 		cfg.Token = s.SonarQube.Token
@@ -180,7 +174,6 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		cfg.Timeout = s.Timeout
 		cfg.ExtractID = s.ExtractID
 		cfg.TargetTask = s.TargetTask
-		cfg.IncludeScanHistory = s.IncludeScanHistory
 		cfg.SkipProjectDataMigration = s.SkipProjectDataMigration
 	}
 	return cfg

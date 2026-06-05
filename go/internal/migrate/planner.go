@@ -75,9 +75,8 @@ func RegisterAll() []TaskDef {
 // migrateProjectDataTasks lists every task that imports or syncs
 // per-project data after the configuration migration finishes — the
 // scan-history import plus the trailing issue + hotspot metadata
-// syncs. All three are gated by --include-scan-history (only run
-// when extracted data is available) AND by --skip-project-data-
-// migration (operator opt-out, #303).
+// syncs. All three run by default; the operator opts out via
+// --skip-project-data-migration (#303).
 var migrateProjectDataTasks = map[string]bool{
 	"importScanHistory":   true,
 	"syncHotspotMetadata": true,

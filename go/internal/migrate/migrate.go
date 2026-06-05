@@ -161,11 +161,7 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (string, error) {
 	// Announce the skipped sync tasks explicitly so an operator who
 	// passed --skip-issue-sync (or set skip-issue-sync: true in the
 	// config) sees them named in the log alongside the rest of the
-	// plan. The gating itself happens inside MigrateTargetTasks.
-	// Always emitted when SkipIssueSync is true so the operator gets
-	// acknowledgement of their setting, even when --include_scan_history
-	// wasn't set (in which case the two tasks are also dropped by
-	// the scan-history gate; the log clarifies both paths). #299.
+	// plan. The gating itself happens inside MigrateTargetTasks. #299.
 	if cfg.SkipIssueSync {
 		logger.Info("issue-sync disabled: skipping syncIssueMetadata")
 		logger.Info("issue-sync disabled: skipping syncHotspotMetadata")
