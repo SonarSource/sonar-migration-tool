@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCollectSummaryEmpty(t *testing.T) {
@@ -1425,5 +1426,266 @@ func writeTaskJSONL(t *testing.T, dir, taskName string, items []map[string]any) 
 		b, _ := json.Marshal(item)
 		f.Write(b)
 		f.Write([]byte("\n"))
+	}
+}
+
+// writeRunMeta marshals the run_meta.json object (shared contract A) into
+// runDir with the two-space indentation the migrate engine uses.
+func writeRunMeta(t *testing.T, runDir string, meta map[string]any) {
+	t.Helper()
+	b, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal run_meta: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "run_meta.json"), b, 0o644); err != nil {
+		t.Fatalf("write run_meta.json: %v", err)
+	}
+}
+
+// writeRunEvents writes one JSON object per line to run_events.jsonl
+// (shared contract A) in runDir.
+func writeRunEvents(t *testing.T, runDir string, events []map[string]any) {
+	t.Helper()
+	f, err := os.Create(filepath.Join(runDir, "run_events.jsonl"))
+	if err != nil {
+		t.Fatalf("create run_events.jsonl: %v", err)
+	}
+	defer f.Close()
+	for _, ev := range events {
+		b, _ := json.Marshal(ev)
+		f.Write(b)
+		f.Write([]byte("\n"))
+	}
+}
+
+// writeRequestsLog writes one request_completed JSON object per line to
+// requests.log in runDir, matching the shape parseLogFile expects.
+func writeRequestsLog(t *testing.T, runDir string, entries []map[string]any) {
+	t.Helper()
+	f, err := os.Create(filepath.Join(runDir, "requests.log"))
+	if err != nil {
+		t.Fatalf("create requests.log: %v", err)
+	}
+	defer f.Close()
+	for _, e := range entries {
+		b, _ := json.Marshal(e)
+		f.Write(b)
+		f.Write([]byte("\n"))
+	}
+}
+
+// TestCollectSummaryRuntimeTelemetry seeds a run directory with the full set
+// of migrate-engine telemetry files (run_meta.json + run_events.jsonl +
+// requests.log) and asserts CollectSummary harvests every runtime field:
+// OverallStatus, Phases (slowest-first), Tasks, Failures, the retry and
+// branch-skip ledgers, and the per-branch Branches list.
+func TestCollectSummaryRuntimeTelemetry(t *testing.T) {
+	runDir := t.TempDir()
+
+	// run_meta.json: two phases (phase 1 is slower so it must sort first),
+	// three tasks one of which failed.
+	writeRunMeta(t, runDir, map[string]any{
+		"started_at":     "2026-06-05T12:00:00Z",
+		"completed_at":   "2026-06-05T12:01:30Z",
+		"overall_status": "partial",
+		"phases": []map[string]any{
+			{"index": 0, "tasks": 2, "duration_seconds": 10.0},
+			{"index": 1, "tasks": 3, "duration_seconds": 80.0},
+		},
+		"tasks": []map[string]any{
+			{"phase": 0, "name": "createProjects", "duration_seconds": 8.0, "ok": true},
+			{"phase": 1, "name": "importScanHistory", "duration_seconds": 70.0, "ok": false, "err": "CE task failed"},
+			{"phase": 1, "name": "addGateConditions", "duration_seconds": 5.0, "ok": true},
+		},
+	})
+
+	// run_events.jsonl: a retry, a packaged report, a branch skip, and a
+	// CE-task submission (one event per recognised message string).
+	writeRunEvents(t, runDir, []map[string]any{
+		{
+			"time": "2026-06-05T12:00:05Z", "level": "WARN", "message": "retrying request",
+			"attrs": map[string]any{"method": "POST", "endpoint": "/api/ce/submit",
+				"status": "503", "attempt": 2, "maxAttempts": 5},
+		},
+		{
+			"time": "2026-06-05T12:00:20Z", "level": "INFO", "message": "report packaged",
+			"attrs": map[string]any{"project": "projA", "sourceBranch": "main", "targetBranch": "main",
+				"projectVersion": "1.0", "zipSizeBytes": 2048, "components": 30, "issues": 100,
+				"externalIssues": 4, "sources": 25, "activeRules": 250},
+		},
+		{
+			"time": "2026-06-05T12:00:40Z", "level": "WARN",
+			"message": "skipping branch: source code not retrievable",
+			"attrs":   map[string]any{"project": "projA", "branch": "feature-x", "findings": 12},
+		},
+		{
+			"time": "2026-06-05T12:00:55Z", "level": "INFO", "message": "CE task submitted",
+			"attrs": map[string]any{"project": "projA", "targetBranch": "main", "taskId": "AY-task-1"},
+		},
+	})
+
+	// requests.log: one POST failure row.
+	writeRequestsLog(t, runDir, []map[string]any{
+		{
+			"process_type": "request_completed",
+			"status":       "failure",
+			"payload": map[string]any{
+				"method": "POST",
+				"url":    "/api/projects/create",
+				"status": float64(400),
+				"data":   map[string]any{"name": "FailProj", "organization": "org1"},
+				"response": `{"errors":[{"msg":"already exists"}]}`,
+			},
+		},
+	})
+
+	summary, err := CollectSummary(runDir, "")
+	if err != nil {
+		t.Fatalf("CollectSummary: %v", err)
+	}
+
+	assertRuntimeMeta(t, summary)
+	assertRuntimeFailures(t, summary)
+	assertRuntimeWarnings(t, summary)
+	assertRuntimeBranches(t, summary)
+}
+
+// assertRuntimeMeta checks the run-level status, elapsed time, and the
+// slowest-first ordering of Phases and Tasks parsed from run_meta.json.
+func assertRuntimeMeta(t *testing.T, summary *MigrationSummary) {
+	t.Helper()
+	if summary.OverallStatus != "partial" {
+		t.Errorf("OverallStatus: want %q, got %q", "partial", summary.OverallStatus)
+	}
+	if summary.TotalElapsed != 90*time.Second {
+		t.Errorf("TotalElapsed: want 90s, got %s", summary.TotalElapsed)
+	}
+
+	// Phases: slowest-first. Phase 1 (80s) must precede Phase 0 (10s).
+	if len(summary.Phases) != 2 {
+		t.Fatalf("Phases: want 2, got %d", len(summary.Phases))
+	}
+	if summary.Phases[0].Phase != "Phase 1" || summary.Phases[0].Duration < summary.Phases[1].Duration {
+		t.Errorf("Phases must be slowest-first ('Phase 1' leads), got %+v", summary.Phases)
+	}
+
+	// Tasks: slowest-first; importScanHistory (70s, ok=false) leads.
+	if len(summary.Tasks) != 3 {
+		t.Fatalf("Tasks: want 3, got %d", len(summary.Tasks))
+	}
+	if summary.Tasks[0].Task != "importScanHistory" {
+		t.Errorf("Tasks must be slowest-first; want 'importScanHistory' first, got %q", summary.Tasks[0].Task)
+	}
+	if summary.Tasks[0].OK {
+		t.Errorf("importScanHistory task should carry OK=false")
+	}
+}
+
+// assertRuntimeFailures checks the single requests.log failure row surfaced
+// in summary.Failures.
+func assertRuntimeFailures(t *testing.T, summary *MigrationSummary) {
+	t.Helper()
+	if len(summary.Failures) != 1 {
+		t.Fatalf("Failures: want 1, got %d (%+v)", len(summary.Failures), summary.Failures)
+	}
+	fr := summary.Failures[0]
+	if fr.EntityType != "Project" || fr.EntityName != "FailProj" {
+		t.Errorf("Failure row: want Project/FailProj, got %s/%s", fr.EntityType, fr.EntityName)
+	}
+	if !strings.Contains(fr.ErrorMessage, "already exists") {
+		t.Errorf("Failure ErrorMessage: want 'already exists', got %q", fr.ErrorMessage)
+	}
+}
+
+// assertRuntimeWarnings checks the retry and branch-skip ledgers built from
+// run_events.jsonl.
+func assertRuntimeWarnings(t *testing.T, summary *MigrationSummary) {
+	t.Helper()
+	if len(summary.Warnings.Retries) != 1 {
+		t.Fatalf("Warnings.Retries: want 1, got %d", len(summary.Warnings.Retries))
+	}
+	retry := summary.Warnings.Retries[0]
+	if retry.Method != "POST" || retry.Endpoint != "/api/ce/submit" {
+		t.Errorf("Retry row: want POST /api/ce/submit, got %s %s", retry.Method, retry.Endpoint)
+	}
+	if retry.MaxAttempt != 2 || retry.LastStatus != "503" {
+		t.Errorf("Retry row: want maxAttempt=2 lastStatus=503, got %d %q", retry.MaxAttempt, retry.LastStatus)
+	}
+
+	if len(summary.Warnings.BranchSkips) != 1 {
+		t.Fatalf("Warnings.BranchSkips: want 1, got %d", len(summary.Warnings.BranchSkips))
+	}
+	skip := summary.Warnings.BranchSkips[0]
+	if skip.Branch != "feature-x" || skip.Findings != 12 {
+		t.Errorf("BranchSkip: want feature-x/12, got %s/%d", skip.Branch, skip.Findings)
+	}
+}
+
+// assertRuntimeBranches checks the per-branch Branches list: feature-x
+// (skipped) and main (packaged, with the CE task id).
+func assertRuntimeBranches(t *testing.T, summary *MigrationSummary) {
+	t.Helper()
+	if len(summary.Branches) != 2 {
+		t.Fatalf("Branches: want 2, got %d (%+v)", len(summary.Branches), summary.Branches)
+	}
+	byName := map[string]BranchStat{}
+	for _, b := range summary.Branches {
+		byName[b.Branch] = b
+	}
+	if feature := byName["feature-x"]; feature.Status != "skipped" {
+		t.Errorf("feature-x branch: want status 'skipped', got %+v", feature)
+	}
+	main, ok := byName["main"]
+	if !ok {
+		t.Fatalf("main branch missing from Branches: %+v", summary.Branches)
+	}
+	if main.Status != "packaged" {
+		t.Errorf("main branch: want status 'packaged' (report packaged wins over submitted), got %q", main.Status)
+	}
+	if main.Issues != 100 || main.TaskID != "AY-task-1" {
+		t.Errorf("main branch: want issues=100 taskId=AY-task-1, got issues=%d taskId=%q", main.Issues, main.TaskID)
+	}
+}
+
+// TestCollectSummaryRuntimeAbsent is the predictive-safety guard: when the run
+// directory has NO run_meta.json / run_events.jsonl / requests.log,
+// CollectSummary must still return a non-nil summary with zero-valued runtime
+// fields (no panic, no error) so the predictive pipeline degrades cleanly.
+func TestCollectSummaryRuntimeAbsent(t *testing.T) {
+	runDir := t.TempDir()
+
+	summary, err := CollectSummary(runDir, "")
+	if err != nil {
+		t.Fatalf("CollectSummary: %v", err)
+	}
+	if summary == nil {
+		t.Fatal("expected non-nil summary even with no telemetry files")
+	}
+
+	if summary.OverallStatus != "" {
+		t.Errorf("OverallStatus: want empty, got %q", summary.OverallStatus)
+	}
+	if !summary.StartedAt.IsZero() || !summary.CompletedAt.IsZero() {
+		t.Errorf("timestamps must be zero with no run_meta.json, got start=%v end=%v",
+			summary.StartedAt, summary.CompletedAt)
+	}
+	if summary.TotalElapsed != 0 {
+		t.Errorf("TotalElapsed: want 0, got %s", summary.TotalElapsed)
+	}
+	if len(summary.Phases) != 0 || len(summary.Tasks) != 0 {
+		t.Errorf("Phases/Tasks must be empty, got %d/%d", len(summary.Phases), len(summary.Tasks))
+	}
+	if len(summary.Failures) != 0 {
+		t.Errorf("Failures: want 0, got %d", len(summary.Failures))
+	}
+	if len(summary.Branches) != 0 {
+		t.Errorf("Branches: want 0, got %d", len(summary.Branches))
+	}
+	if len(summary.Warnings.Retries) != 0 || len(summary.Warnings.BranchSkips) != 0 ||
+		len(summary.Warnings.GateConditions) != 0 || len(summary.Warnings.MetricRemaps) != 0 {
+		t.Errorf("WarningLedger must be empty, got %+v", summary.Warnings)
+	}
+	if summary.Throughput != (ThroughputStats{}) {
+		t.Errorf("Throughput must be zero-valued, got %+v", summary.Throughput)
 	}
 }

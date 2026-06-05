@@ -66,12 +66,32 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 	}
 
 	runID := extractRunID(runDir)
-	return &MigrationSummary{
+	sum := &MigrationSummary{
 		RunID:       runID,
 		GeneratedAt: time.Now(),
 		Sections:    sections,
 		Limitations: collectLimitations(runDir, exportDir, extractMapping),
-	}, nil
+	}
+
+	// Fold in migrate-engine runtime telemetry (run_meta.json /
+	// run_events.jsonl / requests.log). collectRuntime never returns a
+	// hard error for absent files, so predictive reports — which have
+	// none of these — simply leave the runtime fields at their zero
+	// values and the runtime sections omit themselves.
+	if rt, err := collectRuntime(runDir); err == nil {
+		sum.StartedAt = rt.StartedAt
+		sum.CompletedAt = rt.CompletedAt
+		sum.TotalElapsed = rt.TotalElapsed
+		sum.OverallStatus = rt.OverallStatus
+		sum.Phases = rt.Phases
+		sum.Tasks = rt.Tasks
+		sum.Failures = rt.Failures
+		sum.Warnings = rt.Warnings
+		sum.Branches = rt.Branches
+		sum.Throughput = rt.Throughput
+	}
+
+	return sum, nil
 }
 
 // collectLimitations builds the free-text bullet list rendered in the

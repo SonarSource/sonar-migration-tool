@@ -29,12 +29,18 @@ organization keys to organizations.csv.`,
 			return fmt.Errorf("TOKEN and ENTERPRISE_KEY are required (either as arguments or in config file)")
 		}
 		runID, err := migrate.RunMigrate(cmd.Context(), cfg)
+		// Attempt the summary report whenever a run directory exists, even
+		// if RunMigrate returned an error — a partial/failed run still has
+		// useful timings, failures, and warnings to surface.
+		if runID != "" {
+			runDir := filepath.Join(cfg.ExportDirectory, runID)
+			if pdfPath, mdPath, reportErr := summary.GenerateReports(runDir, cfg.ExportDirectory, cfg.ExportDirectory); reportErr == nil {
+				fmt.Printf("PDF summary report: %s\n", pdfPath)
+				fmt.Printf("Markdown summary report: %s\n", mdPath)
+			}
+		}
 		if err != nil {
 			return err
-		}
-		runDir := filepath.Join(cfg.ExportDirectory, runID)
-		if pdfPath, pdfErr := summary.GeneratePDFReport(runDir, cfg.ExportDirectory, cfg.ExportDirectory); pdfErr == nil {
-			fmt.Printf("PDF summary report: %s\n", pdfPath)
 		}
 		printExportDirNotice(cfg.ExportDirectory)
 		return nil

@@ -366,7 +366,7 @@ func runTransfer(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	emitPDFReport(cfg.exportDir, runID)
+	emitReports(cfg.exportDir, runID)
 
 	fmt.Println("Transfer complete.")
 	return nil
@@ -464,11 +464,12 @@ func runTransferMigrate(ctx context.Context, cfg transferConfig) (string, error)
 	return runID, nil
 }
 
-func emitPDFReport(exportDir, runID string) {
+func emitReports(exportDir, runID string) {
 	runDir := filepath.Join(exportDir, runID)
-	pdfPath, pdfErr := summary.GeneratePDFReport(runDir, exportDir, exportDir)
-	if pdfErr != nil {
+	pdfPath, mdPath, err := summary.GenerateReports(runDir, exportDir, exportDir)
+	if err != nil {
 		return
 	}
 	fmt.Printf("PDF summary report: %s\n", pdfPath)
+	fmt.Printf("Markdown summary report: %s\n", mdPath)
 }

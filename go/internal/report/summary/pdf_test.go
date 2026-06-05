@@ -436,6 +436,36 @@ func TestSuccessDetailsLabelProjectKey(t *testing.T) {
 	}
 }
 
+func TestPartialDetailsSplitsScanMarker(t *testing.T) {
+	// Regression: a Partial / NearPerfect project carrying a |scan: marker
+	// in its Detail must have the marker split off onto its own
+	// "scan history:" line (like Succeeded rows) so the inline-bold span
+	// around the cloud key stays balanced and the issue lines are kept.
+	// Previously the raw marker was embedded inside the bold key, which a
+	// downstream re-split (the Markdown renderer) truncated — dropping the
+	// closing bold marker and the issue text.
+	got := partialDetails(
+		EntityItem{Detail: "proj1|scan:success", Issues: []string{"per-branch NCD dropped"}},
+		false, false, true,
+	)
+	if strings.Contains(got, "|scan:") {
+		t.Errorf("raw scan marker leaked into details: %q", got)
+	}
+	// Cloud key bold span must be balanced (one open, one close).
+	if strings.Count(got, inlineBoldStart) != 1 || strings.Count(got, inlineBoldEnd) != 1 {
+		t.Errorf("unbalanced inline-bold markers: %q", got)
+	}
+	if !strings.Contains(got, "New Project Key: "+inlineBoldStart+"proj1"+inlineBoldEnd) {
+		t.Errorf("expected labeled+bold cloud key, got %q", got)
+	}
+	if !strings.Contains(got, "scan history:") {
+		t.Errorf("expected scan-history line, got %q", got)
+	}
+	if !strings.Contains(got, "per-branch NCD dropped") {
+		t.Errorf("expected issue line preserved, got %q", got)
+	}
+}
+
 func TestToPredictiveTense(t *testing.T) {
 	cases := []struct {
 		in         string

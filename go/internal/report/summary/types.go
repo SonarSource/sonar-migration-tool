@@ -32,6 +32,115 @@ type MigrationSummary struct {
 	Limitations  []string
 	OmitSections map[string]bool
 	Predictive   bool
+
+	// Runtime execution fields (issue #240+ migrate engine telemetry).
+	// These are populated only for real migration runs from the run
+	// directory's run_meta.json / run_events.jsonl. Under predictive
+	// reports they are absent and carry zero values, so the sections
+	// that render them omit themselves entirely.
+	StartedAt     time.Time
+	CompletedAt   time.Time
+	TotalElapsed  time.Duration
+	OverallStatus string
+	Phases        []PhaseTiming
+	Tasks         []TaskTiming
+	Failures      []FailureRow
+	Warnings      WarningLedger
+	Branches      []BranchStat
+	Throughput    ThroughputStats
+}
+
+// PhaseTiming captures the wall-clock duration of one migration phase.
+type PhaseTiming struct {
+	Phase    string
+	Tasks    int
+	Duration time.Duration
+}
+
+// TaskTiming captures the outcome and duration of a single task within a phase.
+type TaskTiming struct {
+	Phase    int
+	Task     string
+	Duration time.Duration
+	OK       bool
+	Err      string
+}
+
+// FailureRow describes a single entity-level failure for the failures table.
+type FailureRow struct {
+	EntityType   string
+	EntityName   string
+	Organization string
+	URL          string
+	HTTPStatus   string
+	ErrorMessage string
+}
+
+// RetryStat aggregates retried requests by method+endpoint.
+type RetryStat struct {
+	Method     string
+	Endpoint   string
+	Count      int
+	MaxAttempt int
+	LastStatus string
+}
+
+// BranchSkip records a branch whose source code could not be retrieved.
+type BranchSkip struct {
+	Branch   string
+	Findings int
+	Reason   string
+}
+
+// GateConditionSkip records a quality-gate condition that was skipped or
+// remapped. Action is "skipped" or "remapped".
+type GateConditionSkip struct {
+	Gate   string
+	Metric string
+	Action string
+	Note   string
+}
+
+// MetricRemap records a source metric remapped to a SonarQube Cloud equivalent.
+type MetricRemap struct {
+	Gate         string
+	SourceMetric string
+	TargetMetric string
+}
+
+// WarningLedger collects the non-fatal advisories surfaced during a run.
+type WarningLedger struct {
+	Retries        []RetryStat
+	BranchSkips    []BranchSkip
+	GateConditions []GateConditionSkip
+	MetricRemaps   []MetricRemap
+}
+
+// BranchStat captures per-branch packaging/submission stats.
+// Status is one of packaged|submitted|skipped.
+type BranchStat struct {
+	Branch         string
+	Type           string
+	Issues         int
+	ExternalIssues int
+	Components     int
+	ActiveRules    int
+	ZipBytes       int64
+	TaskID         string
+	Status         string
+	SkipReason     string
+}
+
+// ThroughputStats aggregates totals across all branches for the run.
+type ThroughputStats struct {
+	TotalIssues         int
+	TotalExternalIssues int
+	TotalComponents     int
+	TotalZipBytes       int64
+	BranchesPackaged    int
+	BranchesSkipped     int
+	TasksSubmitted      int
+	TotalRetries        int
 }
 
 // Section represents a category of migrated entities (e.g., Projects, Quality Gates).

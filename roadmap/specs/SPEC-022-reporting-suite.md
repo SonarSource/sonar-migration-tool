@@ -10,7 +10,25 @@ cloudvoyager_ref: "src/shared/reports/"
 ---
 
 # SPEC-022: Comprehensive Reporting Suite
-<!-- updated: 2026-05-26_01:00:00 -->
+<!-- updated: 2026-06-05_14:00:00 -->
+
+## Implementation Status
+<!-- updated: 2026-06-05_14:00:00 -->
+
+**Partially implemented.** FR-2 (Executive Summary), FR-3 (Performance Report), and FR-5
+(Markdown output) are partially fulfilled by a single consolidated
+`migration_summary.{pdf,md}` artifact — **not** the separate per-report files described in
+the Technical Design (`executive-summary.*`, `performance-report.*`). The migrate engine now
+writes `migration_summary.pdf` and `migration_summary.md` (via `summary.GenerateReports`),
+backed by machine-readable run instrumentation: `run_meta.json` (per-phase / per-task timing
+and `overall_status`) and `run_events.jsonl`. These are produced on completion even when the
+run fails (`overall_status=failed`), satisfying NFR-6 (graceful degradation) for this slice.
+
+The **tee slog handler** described in the Log Management Data Flow is now implemented — it
+fans every log record out to `run_events.jsonl` alongside the normal console/`requests.log`
+output. The four level-segregated per-run log files (FR-11), the dedicated per-report
+formats (FR-1/FR-4/FR-6/FR-7 across all three report types), the Quality Profile Diff Report
+(FR-8), and the Server Info Reference Export (FR-9) remain unshipped.
 
 ## Overview
 

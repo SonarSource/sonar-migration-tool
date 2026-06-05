@@ -462,11 +462,12 @@ func generateAnalysisReport(p Prompter, exportDir, runID string) {
 		p.DisplayMessage(fmt.Sprintf("Analysis report: %d entries written to %s/final_analysis_report.csv", len(rows), runID))
 	}
 
-	pdfPath, pdfErr := summary.GeneratePDFReport(runDir, exportDir, exportDir)
-	if pdfErr != nil {
-		p.DisplayWarning("Could not generate PDF summary: " + pdfErr.Error())
+	pdfPath, mdPath, err := summary.GenerateReports(runDir, exportDir, exportDir)
+	if err != nil {
+		p.DisplayWarning("Could not generate summary reports: " + err.Error())
 		return
 	}
 	p.DisplayMessage(fmt.Sprintf("PDF summary report: %s", pdfPath))
+	p.DisplayMessage(fmt.Sprintf("Markdown summary report: %s", mdPath))
 }
 

@@ -76,14 +76,18 @@ type Executor struct {
 
 // RunMigrate is the main entry point for the migrate command.
 // Returns the run ID on success.
-func RunMigrate(ctx context.Context, cfg MigrateConfig) (string, error) {
+func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr error) {
 	cfg.applyDefaults()
+
+	tm := &RunTimings{StartedAt: time.Now()}
 
 	level := slog.LevelInfo
 	if cfg.Debug {
 		level = slog.LevelDebug
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	collector := &eventCollector{}
+	base := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})
+	logger := slog.New(newEventHandler(base, collector))
 
 	// Validate the SQC org mapping and apply --default_organization
 	// fallback if requested (issues #279 + #281). Done before any API
@@ -142,6 +146,26 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (string, error) {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		return "", fmt.Errorf("creating run dir: %w", err)
 	}
+	runIDOut = runID
+
+	// Best-effort run artifacts: written on every exit path (success or
+	// error) without altering retErr or panicking.
+	defer func() {
+		tm.CompletedAt = time.Now()
+		meta := RunMeta{
+			StartedAt:     tm.StartedAt,
+			CompletedAt:   tm.CompletedAt,
+			OverallStatus: computeStatus(retErr, tm),
+			Phases:        tm.phasesSnapshot(),
+			Tasks:         tm.tasksSnapshot(),
+		}
+		if b, err := json.MarshalIndent(meta, "", "  "); err == nil {
+			_ = os.WriteFile(filepath.Join(runDir, "run_meta.json"), b, 0o644)
+		}
+		if err := writeRunEvents(runDir, collector); err != nil {
+			logger.Warn("writing run events", "err", err)
+		}
+	}()
 
 	// Build task registry and plan.
 	allDefs := RegisterAll()
@@ -210,8 +234,8 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (string, error) {
 	// Execute phases.
 	for i, phase := range plan {
 		logger.Info("starting phase", "phase", i+1, "tasks", len(phase))
-		if err := runPhase(ctx, executor, phase, registry); err != nil {
-			return "", fmt.Errorf("phase %d: %w", i+1, err)
+		if err := runPhase(ctx, executor, phase, registry, i+1, tm); err != nil {
+			return runIDOut, fmt.Errorf("phase %d: %w", i+1, err)
 		}
 		for _, taskName := range phase {
 			store.MarkComplete(taskName)
@@ -222,20 +246,32 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (string, error) {
 	return runID, nil
 }
 
-func runPhase(ctx context.Context, e *Executor, taskNames []string, registry map[string]*TaskDef) error {
+func runPhase(ctx context.Context, e *Executor, taskNames []string, registry map[string]*TaskDef, phaseIdx int, tm *RunTimings) error {
+	phaseStart := time.Now()
 	g, ctx := errgroup.WithContext(ctx)
 	for _, name := range taskNames {
 		def := registry[name]
 		e.Logger.Info("running task", "task", name)
 		g.Go(func() error {
-			if err := def.Run(ctx, e); err != nil {
-				e.Logger.Error("task failed", "task", name, "err", err)
-				return fmt.Errorf("task %s: %w", name, err)
+			taskStart := time.Now()
+			runErr := def.Run(ctx, e)
+			tm.addTask(TaskTiming{
+				Phase:    phaseIdx,
+				Name:     name,
+				Duration: time.Since(taskStart).Seconds(),
+				OK:       runErr == nil,
+				Err:      errString(runErr),
+			})
+			if runErr != nil {
+				e.Logger.Error("task failed", "task", name, "err", runErr)
+				return fmt.Errorf("task %s: %w", name, runErr)
 			}
 			return nil
 		})
 	}
-	return g.Wait()
+	err := g.Wait()
+	tm.addPhase(PhaseTiming{Index: phaseIdx, Tasks: len(taskNames), Duration: time.Since(phaseStart).Seconds()})
+	return err
 }
 
 func (cfg *MigrateConfig) applyDefaults() {
