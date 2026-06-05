@@ -38,8 +38,9 @@ type configFileShape struct {
 	// Defaults to false (sync happens); set to true (or on / yes) to
 	// skip the sync. Pointer + custom unmarshaller so we can
 	// distinguish "absent" from "explicit false".
-	SkipIssueSync *FlexibleBool `json:"skip-issue-sync"`
-	Debug         bool          `json:"debug"`
+	SkipIssueSync   *FlexibleBool `json:"skip-issue-sync"`
+	Debug           bool          `json:"debug"`
+	ExcludeBranches []string      `json:"exclude_branches"`
 
 	// Shape 2 (command-sectioned).
 	Migrate *configFileShape `json:"migrate"`
@@ -79,16 +80,17 @@ type unifiedSourceBlock struct {
 // the unified config shape (#266). organization_key is provisional
 // for future SQC-org-to-SQC-org migration and is ignored for now.
 type unifiedTargetBlock struct {
-	URL                 string `json:"url"`
-	Token               string `json:"token"`
-	EnterpriseKey       string `json:"enterprise_key"`
-	Edition             string `json:"edition"`
-	Concurrency         int    `json:"concurrency"`
-	Timeout             int    `json:"timeout"`
-	RunID               string `json:"run_id"`
-	TargetTask          string `json:"target_task"`
-	OrganizationKey     string `json:"organization_key"`     // provisional, ignored
-	DefaultOrganization string `json:"default_organization"` // #281
+	URL                 string   `json:"url"`
+	Token               string   `json:"token"`
+	EnterpriseKey       string   `json:"enterprise_key"`
+	Edition             string   `json:"edition"`
+	Concurrency         int      `json:"concurrency"`
+	Timeout             int      `json:"timeout"`
+	RunID               string   `json:"run_id"`
+	TargetTask          string   `json:"target_task"`
+	OrganizationKey     string   `json:"organization_key"`     // provisional, ignored
+	DefaultOrganization string   `json:"default_organization"` // #281
+	ExcludeBranches     []string `json:"exclude_branches"`
 }
 
 type sonarCloudBlock struct {
@@ -152,6 +154,7 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			cfg.TargetTask = s.Target.TargetTask
 			cfg.Concurrency = s.Target.Concurrency
 			cfg.DefaultOrganization = s.Target.DefaultOrganization
+			cfg.ExcludeBranches = s.Target.ExcludeBranches
 		}
 		if cfg.Concurrency == 0 {
 			cfg.Concurrency = s.Concurrency
@@ -191,6 +194,7 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			SkipProfiles:       s.SkipProfiles,
 			IncludeScanHistory: s.IncludeScanHistory,
 			Debug:              s.Debug,
+			ExcludeBranches:    s.ExcludeBranches,
 		}
 		if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
 			cfg.SkipIssueSync = s.SkipIssueSync.Value

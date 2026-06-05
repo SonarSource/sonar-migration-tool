@@ -6,6 +6,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -40,7 +41,43 @@ const (
 	flagKeyFilePath        = "key_file_path"
 	flagCertPassword       = "cert_password"
 	flagDebug              = "debug"
+	flagExcludeBranches    = "exclude-branches"
 )
+
+// transferTargetTasks is the explicit set of project-scoped "leaf" migrate
+// tasks the transfer command runs. Their transitive dependencies — creating
+// the project, its quality gate and quality profiles, the groups its
+// permissions reference, and granting the migration user access — are
+// resolved automatically by the migrate planner, so only the leaves are
+// listed here.
+//
+// Global entities the full `migrate` command would otherwise touch are
+// intentionally omitted so a transfer only affects the specified project:
+// portfolios, global settings/webhooks/new-code-period, permission
+// templates, org-level and profile-level group permissions, default
+// gate/profile selection, rule tag/description updates, ALM bindings, and
+// migration-group provisioning.
+//
+// Scan history import plus issue and hotspot metadata sync are always
+// included so every SonarQube issue (native and externally imported) and
+// every Security Hotspot is carried over with its triage state. restoreProfiles
+// and addGateConditions run before importScanHistory (the planner orders them
+// in an earlier phase) so the quality profiles and gate are fully configured
+// before the scan report is replayed and issues are reproduced.
+var transferTargetTasks = []string{
+	// Project configuration (each is scoped to the migrated project).
+	"setProjectProfiles", "setProjectGates", "setProjectGroupPermissions",
+	"setProjectSettings", "setProjectTags", "setProjectLinks",
+	"setProjectWebhooks", "setNewCodePeriods",
+	// Quality profile rules + quality gate conditions.
+	"restoreProfiles", "addGateConditions",
+	// Local quality-profile rule analysis (no API calls); feeds the PDF
+	// summary so profiles with rule-level caveats are reported accurately.
+	"analyzeProfileRules",
+	// Scan history import + issue/hotspot metadata (status, resolution,
+	// assignee, comments, tags) sync.
+	"importScanHistory", "syncIssueMetadata", "syncHotspotMetadata",
+}
 
 var transferCmd = &cobra.Command{
 	Use:   "transfer",
@@ -49,6 +86,18 @@ var transferCmd = &cobra.Command{
 
 It chains extract → structure → mappings → migrate automatically, eliminating
 the manual CSV-editing step. Credentials for both sides are required.
+
+Transfer is project-scoped. It migrates the specified project together with
+the quality gate and quality profiles it uses, its permissions and project
+settings, and the project's full issue and Security Hotspot history —
+including externally imported issues — with triage state preserved. Global
+entities such as portfolios, global settings, permission templates, and
+default gate/profile selection are not modified; use the migrate command for
+a full instance migration.
+
+Issue and hotspot scan history is always extracted and imported for transfer,
+so the --include-scan-history flag is accepted for compatibility but has no
+effect here.
 
 Example (flags):
   sonar-migration-tool transfer \
@@ -69,6 +118,7 @@ and cert_password:
     "export_directory": "./migration-files",
     "concurrency": 10,
     "timeout": 60,
+    "project_key": "my-project",
     "source": {
       "url": "https://sonarqube.example.com",
       "token": "sqp_xxx",
@@ -103,13 +153,14 @@ func init() {
 	f.String(flagDefaultOrg, "", scCloudName+" organization key (maps to target.default_organization)")
 	f.String(flagEnterpriseKey, "", scCloudName+" enterprise key (maps to target.enterprise_key, defaults to --"+flagDefaultOrg+")")
 	f.String(flagExportDir, "./migration-files/", "Working directory for intermediate files (maps to export_directory)")
-	f.Bool(flagIncludeScanHistory, false, "Extract and import full issue/hotspot scan history (maps to include_scan_history)")
+	f.Bool(flagIncludeScanHistory, false, "Accepted for compatibility; scan history (issues + hotspots) is always extracted and imported for transfer (maps to include_scan_history)")
 	f.Bool(flagSkipIssueSync, false, "Skip the final per-issue and per-hotspot metadata sync (#299). Same semantics as the skip-issue-sync config-file field — defaults to false (sync happens); pass the flag to skip.")
 	f.Int(flagConcurrency, 0, "Max concurrent requests (default: 25) (maps to concurrency)")
 	f.Int(flagTimeout, 0, "HTTP request timeout in seconds (maps to timeout)")
 	f.String(flagPEMFilePath, "", "Path to client mTLS PEM file for the source server (maps to source.pem_file_path)")
 	f.String(flagKeyFilePath, "", "Path to client mTLS key file for the source server (maps to source.key_file_path)")
 	f.String(flagCertPassword, "", "Password for the source server mTLS client certificate (maps to source.cert_password)")
+	f.StringSlice(flagExcludeBranches, nil, "Glob patterns for non-main branches to skip during scan history import (e.g. feature/*,bugfix/*)")
 }
 
 // transferConfig holds the resolved configuration after merging file and flag values.
@@ -130,6 +181,7 @@ type transferConfig struct {
 	includeScanHistory  bool
 	skipIssueSync       bool
 	debug               bool
+	excludeBranches     []string
 }
 
 func applyFlagString(cmd *cobra.Command, name string, target *string) {
@@ -150,6 +202,24 @@ func applyFlagBool(cmd *cobra.Command, name string, target *bool) {
 	}
 }
 
+// transferConfigOverlay holds transfer-specific fields that only live
+// in the config file and are not part of extract or migrate configs.
+type transferConfigOverlay struct {
+	ProjectKey string `json:"project_key"`
+}
+
+func loadTransferOverlay(path string) (transferConfigOverlay, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return transferConfigOverlay{}, err
+	}
+	var overlay transferConfigOverlay
+	if err := json.Unmarshal(data, &overlay); err != nil {
+		return transferConfigOverlay{}, err
+	}
+	return overlay, nil
+}
+
 // loadTransferFileDefaults reads the shared --config file via the same
 // loaders extract / migrate use, so transfer accepts every supported
 // shape (flat, command-sectioned, side-sectioned, and the unified
@@ -165,9 +235,14 @@ func loadTransferFileDefaults(path string) (transferConfig, error) {
 	if err != nil {
 		return cfg, err
 	}
+	overlay, err := loadTransferOverlay(path)
+	if err != nil {
+		return cfg, err
+	}
 
 	cfg.sourceURL = extractCfg.URL
 	cfg.sourceToken = extractCfg.Token
+	cfg.projectKey = overlay.ProjectKey
 	cfg.targetURL = migrateCfg.URL
 	cfg.targetToken = migrateCfg.Token
 	cfg.enterpriseKey = migrateCfg.EnterpriseKey
@@ -193,6 +268,7 @@ func loadTransferFileDefaults(path string) (transferConfig, error) {
 	cfg.includeScanHistory = extractCfg.IncludeScanHistory || migrateCfg.IncludeScanHistory
 	cfg.skipIssueSync = migrateCfg.SkipIssueSync
 	cfg.debug = migrateCfg.Debug
+	cfg.excludeBranches = migrateCfg.ExcludeBranches
 	return cfg, nil
 }
 
@@ -232,6 +308,9 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 		}
 	}
 	applyFlagBool(cmd, flagDebug, &cfg.debug)
+	if cmd.Flags().Changed(flagExcludeBranches) {
+		cfg.excludeBranches, _ = cmd.Flags().GetStringSlice(flagExcludeBranches)
+	}
 
 	if cfg.exportDir == "" {
 		cfg.exportDir = "./migration-files/"
@@ -313,16 +392,20 @@ func runTransferExtract(ctx context.Context, cfg transferConfig) ([]string, erro
 		projectKeys = []string{cfg.projectKey}
 	}
 	skipped, err := extract.RunExtract(ctx, extract.ExtractConfig{
-		URL:                cfg.sourceURL,
-		Token:              cfg.sourceToken,
-		ExportDirectory:    cfg.exportDir,
-		ProjectKeys:        projectKeys,
-		Concurrency:        cfg.concurrency,
-		Timeout:            cfg.timeout,
-		PEMFilePath:        cfg.pemFilePath,
-		KeyFilePath:        cfg.keyFilePath,
-		CertPassword:       cfg.certPassword,
-		IncludeScanHistory: cfg.includeScanHistory,
+		URL:             cfg.sourceURL,
+		Token:           cfg.sourceToken,
+		ExportDirectory: cfg.exportDir,
+		ProjectKeys:     projectKeys,
+		Concurrency:     cfg.concurrency,
+		Timeout:         cfg.timeout,
+		PEMFilePath:     cfg.pemFilePath,
+		KeyFilePath:     cfg.keyFilePath,
+		CertPassword:    cfg.certPassword,
+		// Transfer always imports the project's issues and hotspots, which
+		// requires the scan-history extractors (getProjectIssuesFull,
+		// getProjectHotspotsFull, source/component data). Force it on
+		// regardless of the user's --include-scan-history flag.
+		IncludeScanHistory: true,
 		Debug:              cfg.debug,
 	})
 	if err != nil {
@@ -354,14 +437,19 @@ func runTransferMigrate(ctx context.Context, cfg transferConfig) (string, error)
 	// cfg.defaultOrganization, so passing it again would trigger the
 	// "mapping defined, default ignored" WARN in applyOrgMapping.
 	runID, err := migrate.RunMigrate(ctx, migrate.MigrateConfig{
-		URL:                cfg.targetURL,
-		Token:              cfg.targetToken,
-		EnterpriseKey:      cfg.enterpriseKey,
-		ExportDirectory:    cfg.exportDir,
-		Concurrency:        cfg.concurrency,
-		IncludeScanHistory: cfg.includeScanHistory,
+		URL:             cfg.targetURL,
+		Token:           cfg.targetToken,
+		EnterpriseKey:   cfg.enterpriseKey,
+		ExportDirectory: cfg.exportDir,
+		Concurrency:     cfg.concurrency,
+		// Project-scoped migration: run only the leaf tasks for the project,
+		// its quality gate/profiles, permissions, and issue/hotspot history.
+		// Their dependencies are resolved automatically.
+		TargetTasks:        transferTargetTasks,
+		IncludeScanHistory: true,
 		SkipIssueSync:      cfg.skipIssueSync,
 		Debug:              cfg.debug,
+		ExcludeBranches:    cfg.excludeBranches,
 	})
 	if err != nil {
 		return "", fmt.Errorf("migrate failed: %w", err)

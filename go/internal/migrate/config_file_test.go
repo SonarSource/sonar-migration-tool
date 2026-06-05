@@ -7,6 +7,7 @@ package migrate
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -60,7 +61,7 @@ func TestLoadMigrateConfigFileShapes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("LoadMigrateConfigFile(%s): %v", tc.file, err)
 			}
-			if got != tc.want {
+			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("MigrateConfig mismatch\n got=%+v\nwant=%+v", got, tc.want)
 			}
 		})

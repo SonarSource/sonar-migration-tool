@@ -3,6 +3,7 @@
   "timeout": 60,
   "export_directory": "./migration-files",
   "skip-issue-sync": false,
+  "project_key": "my-project-key",
   "source": {
     "url": "https://sonarqube.example.com",
     "token": "sqp_YOUR_SONARQUBE_SERVER_TOKEN",

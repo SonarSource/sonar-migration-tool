@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -392,7 +393,14 @@ func checkGateConditions(ctx context.Context, s *Suite) []CheckResult {
 	}
 	var results []CheckResult
 	for _, sq := range sqsResp.QualityGates {
-		sqDetail, err := queryJSON(ctx, s.sqsRaw, "api/qualitygates/show", urlParams("id", string(sq.ID)))
+		sqIDStr := strings.Trim(string(sq.ID), "\"")
+		var sqParams url.Values
+		if sqIDStr == "" || sqIDStr == "null" {
+			sqParams = urlParams("name", sq.Name)
+		} else {
+			sqParams = urlParams("id", sqIDStr)
+		}
+		sqDetail, err := queryJSON(ctx, s.sqsRaw, "api/qualitygates/show", sqParams)
 		if err != nil {
 			results = append(results, makeError("Quality Gates", fmt.Sprintf("Conditions: %s", sq.Name), err))
 			continue
@@ -484,12 +492,12 @@ func checkGateAssociations(ctx context.Context, s *Suite) []CheckResult {
 // ── Groups ────────────────────────────────────────────────────────────
 
 func checkGroupCount(ctx context.Context, s *Suite) []CheckResult {
-	sqsCount, err := queryCount(ctx, s.sqsRaw, "api/user_groups/search", urlParams("ps", "500"), "groups")
+	sqsCount, err := queryCount(ctx, s.sqsRaw, "api/user_groups/search", urlParams("ps", "100"), "groups")
 	if err != nil {
 		return []CheckResult{makeError("Groups", "Group count", err)}
 	}
 	scCount, err := queryCount(ctx, s.scRaw, "api/user_groups/search",
-		urlParams("organization", s.cfg.SCOrg, "ps", "500"), "groups")
+		urlParams("organization", s.cfg.SCOrg, "ps", "100"), "groups")
 	if err != nil {
 		return []CheckResult{makeError("Groups", "Group count", err)}
 	}
@@ -497,7 +505,7 @@ func checkGroupCount(ctx context.Context, s *Suite) []CheckResult {
 }
 
 func checkGroupMembership(ctx context.Context, s *Suite) []CheckResult {
-	sqsBody, err := queryJSON(ctx, s.sqsRaw, "api/user_groups/search", urlParams("ps", "500"))
+	sqsBody, err := queryJSON(ctx, s.sqsRaw, "api/user_groups/search", urlParams("ps", "100"))
 	if err != nil {
 		return []CheckResult{makeError("Groups", "Membership", err)}
 	}
@@ -515,7 +523,7 @@ func checkGroupMembership(ctx context.Context, s *Suite) []CheckResult {
 			continue
 		}
 		scBody, err := queryJSON(ctx, s.scRaw, "api/user_groups/search",
-			urlParams("organization", s.cfg.SCOrg, "q", g.Name, "ps", "500"))
+			urlParams("organization", s.cfg.SCOrg, "q", g.Name, "ps", "100"))
 		if err != nil {
 			results = append(results, makeError("Groups", fmt.Sprintf("Members: %s", g.Name), err))
 			continue
@@ -571,7 +579,7 @@ func checkTemplatePermissions(ctx context.Context, s *Suite) []CheckResult {
 			// expose a directly comparable structure, so this is reported
 			// as SKIPPED rather than unconditionally PASS.
 			sqsCount, err := queryCount(ctx, s.sqsRaw, "api/permissions/template_groups",
-				urlParams("templateId", t.ID, "permission", perm, "ps", "500"), "groups")
+				urlParams("templateId", t.ID, "permission", perm, "ps", "100"), "groups")
 			if err != nil {
 				results = append(results, makeError("Permission Templates",
 					fmt.Sprintf("%s/%s", t.Name, perm), err))
@@ -716,14 +724,14 @@ func checkProjectPermissions(ctx context.Context, s *Suite) []CheckResult {
 	for _, proj := range projects {
 		for _, perm := range perms {
 			sqsBody, err := queryJSON(ctx, s.sqsRaw, "api/permissions/groups",
-				urlParams("projectKey", proj, "permission", perm, "ps", "500"))
+				urlParams("projectKey", proj, "permission", perm, "ps", "100"))
 			if err != nil {
 				results = append(results, makeError("Permissions", fmt.Sprintf("%s/%s", proj, perm), err))
 				continue
 			}
 			scBody, err := queryJSON(ctx, s.scRaw, "api/permissions/groups",
 				urlParams("projectKey", s.scProjectKey(proj), "permission", perm,
-					"organization", s.cfg.SCOrg, "ps", "500"))
+					"organization", s.cfg.SCOrg, "ps", "100"))
 			if err != nil {
 				results = append(results, makeError("Permissions", fmt.Sprintf("%s/%s", proj, perm), err))
 				continue
@@ -778,7 +786,7 @@ func checkALMBindings(ctx context.Context, s *Suite) []CheckResult {
 // ── Portfolios ────────────────────────────────────────────────────────
 
 func checkPortfolios(ctx context.Context, s *Suite) []CheckResult {
-	sqsBody, err := queryJSON(ctx, s.sqsRaw, "api/views/search", urlParams("ps", "500"))
+	sqsBody, err := queryJSON(ctx, s.sqsRaw, "api/views/search", urlParams("ps", "100"))
 	if err != nil {
 		return []CheckResult{makeSkipped("Portfolios", "Portfolio count", "Enterprise API unavailable")}
 	}
@@ -787,7 +795,7 @@ func checkPortfolios(ctx context.Context, s *Suite) []CheckResult {
 		return []CheckResult{makeSkipped("Portfolios", "Portfolio count", "0 portfolios on SQS")}
 	}
 	scBody, err := queryJSON(ctx, s.scRaw, "api/views/search",
-		urlParams("organization", s.cfg.SCOrg, "ps", "500"))
+		urlParams("organization", s.cfg.SCOrg, "ps", "100"))
 	if err != nil {
 		r := makeResult("Portfolios", "Portfolio count", len(sqsResp.Views), 0, "Enterprise only")
 		r.Notes = "SC enterprise API may require elevated token"

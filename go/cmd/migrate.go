@@ -54,6 +54,7 @@ func init() {
 	f.Bool("include_scan_history", false, "Import scan history (issues, metrics) into SonarQube Cloud projects")
 	f.Bool("skip-issue-sync", false, "Skip the final per-issue and per-hotspot metadata sync (#299). Same semantics as the skip-issue-sync config-file field — defaults to false (sync happens); pass the flag to skip.")
 	f.String("default_organization", "", "SonarQube Cloud organization to migrate every project into when organizations.csv has no mapping defined. Ignored if any mapping is present.")
+	f.StringSlice("exclude_branches", nil, "Glob patterns for non-main branches to skip during scan history import (e.g. feature/*,bugfix/*)")
 }
 
 func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfig, error) {
@@ -104,6 +105,9 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	}
 	if cmd.Flags().Changed("debug") {
 		cfg.Debug, _ = cmd.Flags().GetBool("debug")
+	}
+	if cmd.Flags().Changed("exclude_branches") {
+		cfg.ExcludeBranches, _ = cmd.Flags().GetStringSlice("exclude_branches")
 	}
 
 	// Default the export directory when neither config nor flag supplied

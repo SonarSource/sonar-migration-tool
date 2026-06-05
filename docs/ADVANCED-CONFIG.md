@@ -80,6 +80,7 @@ The CLI flag `--skip-issue-sync` on `migrate` / `transfer` is the one-way equiva
 | `default_organization` | | SonarCloud org applied to every project when `organizations.csv` has no per-row mapping. Ignored (with a WARN) when any row already carries a `sonarcloud_org_key`. CLI `--default_organization` wins. |
 | `skip_profiles` | | Skip quality profile migration. |
 | `include_scan_history` | | Import scan history into the destination projects. |
+| `exclude_branches` | | Array of glob patterns (Go `filepath.Match` syntax) for non-main branches to skip during scan history import. The main branch is never excluded regardless of patterns. Example: `["feature/*", "release/*"]`. |
 | `organization_key` | | Provisional — accepted but ignored today. |
 
 ---
@@ -104,6 +105,7 @@ sonar-migration-tool extract [url] [token] [flags]
 | `--concurrency <n>` | Max concurrent requests. |
 | `--timeout <s>` | Request timeout in seconds. |
 | `--include_scan_history` | Pull full issue / source / SCM-blame data. |
+| `--exclude_branches <pattern>` | Glob pattern for non-main branches to skip during scan history import. Repeatable (pass multiple times for multiple patterns). Main branch is never excluded. |
 | `--pem_file_path <path>` | mTLS PEM file. |
 | `--key_file_path <path>` | mTLS key file. |
 | `--cert_password <pw>` | mTLS password. |
@@ -138,6 +140,7 @@ sonar-migration-tool migrate [token] [enterprise_key] [flags]
 | `--skip_profiles` | Skip quality profile migration / provisioning. |
 | `--include_scan_history` | Import scan history into SQC projects. |
 | `--skip-issue-sync` | Skip the final per-issue / per-hotspot metadata sync (#299). One-way: setting this on the CLI forces the sync off, overriding the `skip-issue-sync` config field. |
+| `--exclude_branches <pattern>` | Glob pattern for non-main branches to skip during scan history import. Repeatable. Main branch is never excluded. |
 | `--default_organization <key>` | SonarCloud org applied to every project when `organizations.csv` has no mapping defined. |
 | `--concurrency <n>` | Max concurrent requests. |
 
@@ -188,6 +191,7 @@ file.
 | `--cert_password <pw>` | `source.cert_password` | Client mTLS password. |
 | `--include-scan-history` | `include_scan_history` | Extract + import full scan history. |
 | `--skip-issue-sync` | top-level `skip-issue-sync` | Skip the final per-issue / per-hotspot metadata sync (#299). |
+| `--exclude-branches <pattern>` | `target.exclude_branches` | Glob pattern for non-main branches to skip during scan history import. Repeatable. Main branch is never excluded. |
 
 CLI flags always override the corresponding config-file value.
 

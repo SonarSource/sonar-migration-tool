@@ -181,7 +181,8 @@ func TestBuildActiveRules(t *testing.T) {
 		{RuleRepo: "java", RuleKey: "S5678", Severity: "BLOCKER", QProfileKey: "qp2"},
 	}
 
-	result := BuildActiveRules(rules)
+	const ts = int64(1700000000000)
+	result := BuildActiveRules(rules, ts)
 	if len(result) != 2 {
 		t.Fatalf("expected 2 rules, got %d", len(result))
 	}
@@ -190,6 +191,14 @@ func TestBuildActiveRules(t *testing.T) {
 	}
 	if result[1].Severity != pb.Severity_BLOCKER {
 		t.Errorf("expected BLOCKER severity, got %v", result[1].Severity)
+	}
+	// The reference scanner always sets a non-nil params map and non-zero
+	// timestamps; verify our mirror does too.
+	if result[0].ParamsByKey == nil {
+		t.Error("expected non-nil ParamsByKey")
+	}
+	if result[0].CreatedAt != ts || result[0].UpdatedAt != ts {
+		t.Errorf("expected createdAt/updatedAt to default to %d, got %d/%d", ts, result[0].CreatedAt, result[0].UpdatedAt)
 	}
 }
 

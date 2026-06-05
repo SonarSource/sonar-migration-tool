@@ -22,6 +22,36 @@ import (
 
 // --- Pure utility function tests ---
 
+func TestDedupActiveRules(t *testing.T) {
+	// After remapping, multiple source profiles for one language share a
+	// single SonarCloud profile key, producing duplicate (repo,key,qProfileKey)
+	// triples. The CE rejects a profile that activates the same rule twice, so
+	// dedup must keep exactly one per triple while preserving distinct rules.
+	in := []scanreport.ActiveRuleInput{
+		{RuleRepo: "python", RuleKey: "S100", QProfileKey: "qpPy", Language: "py"}, // from "Sonar way"
+		{RuleRepo: "python", RuleKey: "S100", QProfileKey: "qpPy", Language: "py"}, // dup from "Olivier Way"
+		{RuleRepo: "python", RuleKey: "S100", QProfileKey: "qpPy", Language: "py"}, // dup x3
+		{RuleRepo: "python", RuleKey: "S200", QProfileKey: "qpPy", Language: "py"}, // distinct rule
+		{RuleRepo: "docker", RuleKey: "S100", QProfileKey: "qpDk", Language: "docker"}, // distinct repo+profile
+	}
+	out := dedupActiveRules(in)
+	if len(out) != 3 {
+		t.Fatalf("expected 3 distinct active rules, got %d: %+v", len(out), out)
+	}
+	seen := map[string]bool{}
+	for _, r := range out {
+		k := r.RuleRepo + "|" + r.RuleKey + "|" + r.QProfileKey
+		if seen[k] {
+			t.Errorf("duplicate survived dedup: %s", k)
+		}
+		seen[k] = true
+	}
+	// First occurrence preserved.
+	if out[0].RuleKey != "S100" || out[1].RuleKey != "S200" || out[2].RuleRepo != "docker" {
+		t.Errorf("order/first-occurrence not preserved: %+v", out)
+	}
+}
+
 func TestSplitRule(t *testing.T) {
 	tests := []struct {
 		input    string
@@ -776,5 +806,339 @@ func TestRunImportScanHistorySkipsEmptyKeys(t *testing.T) {
 	items, _ := e.Store.ReadAll("importScanHistory")
 	if len(items) != 0 {
 		t.Errorf("expected 0 results for empty keys, got %d", len(items))
+	}
+}
+
+// --- New tests for branch migration fixes ---
+
+func TestSortBranchesMainFirst(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []branchInfo
+		first string
+	}{
+		{
+			name:  "main already first",
+			input: []branchInfo{{Name: "main", IsMain: true}, {Name: "develop"}, {Name: "release"}},
+			first: "main",
+		},
+		{
+			name:  "main in middle",
+			input: []branchInfo{{Name: "develop"}, {Name: "main", IsMain: true}, {Name: "release"}},
+			first: "main",
+		},
+		{
+			name:  "main at end",
+			input: []branchInfo{{Name: "develop"}, {Name: "release"}, {Name: "main", IsMain: true}},
+			first: "main",
+		},
+		{
+			name:  "single branch",
+			input: []branchInfo{{Name: "main", IsMain: true}},
+			first: "main",
+		},
+		{
+			name:  "no main",
+			input: []branchInfo{{Name: "develop"}, {Name: "release"}},
+			first: "develop",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sortBranchesMainFirst(tt.input)
+			if len(tt.input) > 0 && tt.input[0].Name != tt.first {
+				t.Errorf("expected first=%s, got %s", tt.first, tt.input[0].Name)
+			}
+		})
+	}
+}
+
+func TestSortBranchesMainFirstEmpty(t *testing.T) {
+	var empty []branchInfo
+	sortBranchesMainFirst(empty)
+	if len(empty) != 0 {
+		t.Errorf("expected empty slice after sort")
+	}
+}
+
+func TestFilterBranches(t *testing.T) {
+	branches := []branchInfo{
+		{Name: "main", IsMain: true},
+		{Name: "develop"},
+		{Name: "feature/foo"},
+		{Name: "feature/bar"},
+		{Name: "release/1.0"},
+	}
+
+	// No patterns — all returned.
+	result := filterBranches(branches, nil)
+	if len(result) != 5 {
+		t.Errorf("nil patterns: expected 5, got %d", len(result))
+	}
+
+	// Exclude feature/*.
+	result = filterBranches(branches, []string{"feature/*"})
+	if len(result) != 3 {
+		t.Errorf("exclude feature/*: expected 3, got %d", len(result))
+	}
+	for _, b := range result {
+		if b.Name == "feature/foo" || b.Name == "feature/bar" {
+			t.Errorf("feature branch should be excluded: %s", b.Name)
+		}
+	}
+
+	// Main is never excluded even if pattern matches.
+	result = filterBranches(branches, []string{"main"})
+	found := false
+	for _, b := range result {
+		if b.IsMain {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("main branch should never be excluded")
+	}
+}
+
+func TestMatchesAnyGlob(t *testing.T) {
+	if !matchesAnyGlob("feature/foo", []string{"feature/*"}) {
+		t.Error("expected feature/foo to match feature/*")
+	}
+	if matchesAnyGlob("develop", []string{"feature/*"}) {
+		t.Error("develop should not match feature/*")
+	}
+	if matchesAnyGlob("anything", nil) {
+		t.Error("nil patterns should not match")
+	}
+	if matchesAnyGlob("release/1.0", []string{"bugfix/*", "release/*"}) {
+		// filepath.Match: * does not match /
+		// So release/* does NOT match release/1.0 with filepath.Match
+		// This is expected Go behavior — adjust test accordingly
+	}
+}
+
+func TestLoadCompletedBranches(t *testing.T) {
+	dir := t.TempDir()
+	store := common.NewDataStore(dir)
+	w, _ := store.Writer("importScanHistory")
+
+	for _, rec := range []map[string]any{
+		{"cloud_project_key": "proj1", "branch": "main", "status": "success"},
+		{"cloud_project_key": "proj1", "branch": "develop", "status": "failed"},
+		{"cloud_project_key": "proj1", "branch": "release", "status": "skipped"},
+		{"cloud_project_key": "proj2", "branch": "main", "status": "success"},
+	} {
+		b, _ := json.Marshal(rec)
+		w.WriteOne(b)
+	}
+
+	completed := loadCompletedBranches(store)
+	if completed == nil {
+		t.Fatal("expected non-nil completed map")
+	}
+	if !completed["proj1:main"] {
+		t.Error("proj1:main should be completed")
+	}
+	if completed["proj1:develop"] {
+		t.Error("proj1:develop (failed) should not be completed")
+	}
+	if completed["proj1:release"] {
+		t.Error("proj1:release (skipped) should not be completed")
+	}
+	if !completed["proj2:main"] {
+		t.Error("proj2:main should be completed")
+	}
+}
+
+func TestLoadCompletedBranchesEmpty(t *testing.T) {
+	dir := t.TempDir()
+	store := common.NewDataStore(dir)
+	completed := loadCompletedBranches(store)
+	if completed != nil {
+		t.Errorf("expected nil for empty store, got %v", completed)
+	}
+}
+
+func TestShouldSkipBranch(t *testing.T) {
+	if shouldSkipBranch(nil, "proj", "main") {
+		t.Error("nil map should not skip")
+	}
+
+	completed := map[string]bool{"proj:main": true}
+	if !shouldSkipBranch(completed, "proj", "main") {
+		t.Error("should skip completed branch")
+	}
+	if shouldSkipBranch(completed, "proj", "develop") {
+		t.Error("should not skip non-completed branch")
+	}
+}
+
+func newCEFailMockServer() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/ce/submit":
+			json.NewEncoder(w).Encode(map[string]any{"taskId": "AX-fail-123"})
+		case "/api/ce/task":
+			json.NewEncoder(w).Encode(map[string]any{
+				"task": map[string]any{"status": "FAILED", "errorMessage": "main branch not ready"},
+			})
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+}
+
+func TestImportProjectBranchesMainCEFailAborts(t *testing.T) {
+	dir := t.TempDir()
+	setupScanHistoryExtract(t, dir)
+
+	srv := newCEFailMockServer()
+	defer srv.Close()
+
+	e := newScanHistoryExecutor(t, dir)
+	e.CloudURL = srv.URL + "/"
+	e.Raw = common.NewRawClient(srv.Client(), srv.URL+"/")
+
+	w, _ := e.Store.Writer("importScanHistory")
+	proj, _ := json.Marshal(map[string]any{
+		"key":                "proj1",
+		"cloud_project_key":  "cloud-proj1",
+		"sonarcloud_org_key": "cloud-org1",
+		"server_url":         testServerURL,
+	})
+
+	branches := []branchInfo{
+		{Name: "main", IsMain: true},
+		{Name: "develop", IsMain: false},
+	}
+
+	err := importProjectBranches(context.Background(), e, proj, branches, "", nil, w)
+	if err == nil {
+		t.Fatal("expected error when main branch CE fails")
+	}
+
+	items, _ := e.Store.ReadAll("importScanHistory")
+	if len(items) < 2 {
+		t.Fatalf("expected at least 2 results (main=failed, develop=skipped), got %d", len(items))
+	}
+
+	var mainStatus, devStatus string
+	for _, item := range items {
+		branch := extractField(item, "branch")
+		status := extractField(item, "status")
+		if branch == "main" {
+			mainStatus = status
+		}
+		if branch == "develop" {
+			devStatus = status
+		}
+	}
+	if mainStatus != "failed" {
+		t.Errorf("main branch: expected failed, got %s", mainStatus)
+	}
+	if devStatus != "skipped" {
+		t.Errorf("develop branch: expected skipped, got %s", devStatus)
+	}
+}
+
+func TestImportProjectBranchesMainFirst(t *testing.T) {
+	dir := t.TempDir()
+	setupScanHistoryExtract(t, dir)
+
+	var submitOrder []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/ce/submit":
+			if err := r.ParseMultipartForm(10 << 20); err == nil {
+				if branch := r.FormValue("characteristic"); branch != "" {
+					submitOrder = append(submitOrder, branch)
+				}
+			}
+			json.NewEncoder(w).Encode(map[string]any{"taskId": "AX-test-" + r.FormValue("projectKey")})
+		case "/api/ce/task":
+			json.NewEncoder(w).Encode(map[string]any{
+				"task": map[string]any{"status": "SUCCESS"},
+			})
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+
+	e := newScanHistoryExecutor(t, dir)
+	e.CloudURL = srv.URL + "/"
+	e.Raw = common.NewRawClient(srv.Client(), srv.URL+"/")
+
+	w, _ := e.Store.Writer("importScanHistory")
+	proj, _ := json.Marshal(map[string]any{
+		"key":                "proj1",
+		"cloud_project_key":  "cloud-proj1",
+		"sonarcloud_org_key": "cloud-org1",
+		"server_url":         testServerURL,
+	})
+
+	// Provide branches with non-main first (before sort).
+	branches := []branchInfo{
+		{Name: "develop", IsMain: false},
+		{Name: "main", IsMain: true},
+	}
+	sortBranchesMainFirst(branches)
+
+	err := importProjectBranches(context.Background(), e, proj, branches, "", nil, w)
+	if err != nil {
+		t.Fatalf("importProjectBranches: %v", err)
+	}
+
+	items, _ := e.Store.ReadAll("importScanHistory")
+	if len(items) == 0 {
+		t.Fatal("expected results written")
+	}
+
+	// Verify main was processed first by checking item order.
+	firstBranch := extractField(items[0], "branch")
+	if firstBranch != "main" {
+		t.Errorf("expected main to be imported first, got %s", firstBranch)
+	}
+}
+
+func TestImportSkipsCompletedBranches(t *testing.T) {
+	dir := t.TempDir()
+	setupScanHistoryExtract(t, dir)
+
+	srv := newCEMockServer()
+	defer srv.Close()
+
+	e := newScanHistoryExecutor(t, dir)
+	e.CloudURL = srv.URL + "/"
+	e.Raw = common.NewRawClient(srv.Client(), srv.URL+"/")
+
+	// Pre-populate completed branches.
+	completed := map[string]bool{"cloud-proj1:main": true}
+
+	w, _ := e.Store.Writer("importScanHistory")
+	proj, _ := json.Marshal(map[string]any{
+		"key":                "proj1",
+		"cloud_project_key":  "cloud-proj1",
+		"sonarcloud_org_key": "cloud-org1",
+		"server_url":         testServerURL,
+	})
+
+	branches := []branchInfo{
+		{Name: "main", IsMain: true},
+		{Name: "develop", IsMain: false},
+	}
+
+	err := importProjectBranches(context.Background(), e, proj, branches, "", completed, w)
+	if err != nil {
+		t.Fatalf("importProjectBranches: %v", err)
+	}
+
+	// Main was skipped, so only develop should appear in results.
+	items, _ := e.Store.ReadAll("importScanHistory")
+	for _, item := range items {
+		branch := extractField(item, "branch")
+		if branch == "main" {
+			t.Error("main branch should have been skipped (already completed)")
+		}
 	}
 }

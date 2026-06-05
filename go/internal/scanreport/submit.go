@@ -26,6 +26,13 @@ type SubmitConfig struct {
 	OrgKey         string
 	BranchName     string
 	ProjectVersion string
+	// IsMain marks the project's main/default branch. For the main branch we
+	// must NOT send branch characteristics — the first analysis establishes
+	// the main branch. Sending branch=<name>&branchType=LONG for a brand-new
+	// project (which has no main analysis to anchor to) makes the CE reject
+	// the report. Mirrors CloudVoyager, which omits the characteristic for
+	// the main branch.
+	IsMain bool
 }
 
 // SubmitResult holds the response from a CE submission.
@@ -141,7 +148,10 @@ func buildMultipartForm(cfg SubmitConfig, reportZIP []byte) (*bytes.Buffer, stri
 		}
 	}
 
-	if cfg.BranchName != "" {
+	// Omit branch characteristics for the main branch (mirrors CloudVoyager).
+	// The first analysis of a new project must register as its main branch;
+	// declaring it as a named LONG branch makes the CE reject the report.
+	if !cfg.IsMain && cfg.BranchName != "" {
 		if err := w.WriteField("characteristic", "branch="+cfg.BranchName); err != nil {
 			return nil, "", err
 		}

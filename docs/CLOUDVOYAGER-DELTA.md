@@ -278,8 +278,27 @@ or absent after migration — only live scans will populate them.
 
 ---
 
+### BUG-16: Multi-branch migration ordering and reliability (6 sub-bugs)
+<!-- updated: 2026-06-04_15:00:00 -->
+
+**Status**: **FIXED** — branch `fix/issue-104-migrate-multiple-branches`. Six bugs related to multi-branch scan history import were identified and fixed in `tasks_scanhistory.go`:
+
+1. **BUG-16a (Critical): Main branch not guaranteed first** — `sortBranchesMainFirst()` now ensures the main branch is always uploaded before non-main branches. Previously, branch ordering was non-deterministic, which could cause CE to reject non-main branch uploads if the main branch hadn't been imported yet.
+
+2. **BUG-16b+c (Critical/High): No CE gate between main and non-main branches** — `importProjectBranches` was restructured into two phases: (1) import the main branch first and wait for CE SUCCESS, (2) only then import non-main branches. If the main branch CE task fails, all non-main branches are marked "skipped" and the project is aborted. This matches CloudVoyager's sequencing behavior.
+
+3. **BUG-16d (Medium): No branch filtering** — Added `ExcludeBranches` config option (glob patterns via `filepath.Match`) to skip non-main branches during scan history import. Available as `--exclude-branches` CLI flag and `exclude_branches` JSON config key. The main branch is never excluded regardless of patterns.
+
+4. **BUG-16e (Medium): No per-branch checkpoint/resume** — Added `loadCompletedBranches()` and `shouldSkipBranch()` to read existing `importScanHistory` results and skip branches that already succeeded on resume. Previously, resuming a failed run would re-import branches that had already completed successfully.
+
+5. **BUG-16f (Medium): Project-level concurrency not properly managed** — Rewrote `runImportScanHistory` to use `errgroup.WithContext` + `g.SetLimit(cap(e.Sem))` for parallel project processing. Individual project failures no longer cancel other projects (settled semantics).
+
+**Files changed**: `tasks_scanhistory.go`, `tasks_scanhistory_test.go` (12 new tests), `migrate.go`, `config_file.go`, `config_file_test.go`, `cmd/migrate.go`, `cmd/transfer.go`, `cmd/transfer_test.go`.
+
+---
+
 ## P2 — Missing Features (Present in CloudVoyager, Absent Here)
-<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
+<!-- updated: 2026-06-04_15:00:00 -->
 
 ### FEAT-01: No user-mappings.csv support
 <!-- updated: 2026-06-04_01:14:00.000 by Claude -->
@@ -497,7 +516,7 @@ systematic wrong dates for projects with multiple issues of the same rule.~~
 ---
 
 ## Summary Table
-<!-- updated: 2026-06-04_15:30:00 -->
+<!-- updated: 2026-06-04_15:00:00 -->
 
 | ID | Severity | Area | Description |
 |----|----------|------|-------------|
@@ -527,6 +546,11 @@ systematic wrong dates for projects with multiple issues of the same rule.~~
 | BUG-13 | P2 | Scan History | Analysis date is migration time, not extraction timestamp |
 | BUG-14 | P3 | Hotspot Sync | No inter-comment delay for rate-limit protection |
 | BUG-15 | ~~P1~~ **FIXED** | Scan History | ~~`toExtractedIssues` date map uses wrong key~~ Fixed in commits `e769b95`/`21d74e8` (PR #291) |
+| BUG-16a | ~~P0~~ **FIXED** | Scan History | ~~Main branch not guaranteed first in multi-branch import~~ Fixed: `sortBranchesMainFirst()` |
+| BUG-16b+c | ~~P0~~ **FIXED** | Scan History | ~~No CE gate between main and non-main branch imports~~ Fixed: two-phase import with CE wait |
+| BUG-16d | ~~P1~~ **FIXED** | Scan History | ~~No branch filtering support~~ Fixed: `--exclude-branches` glob patterns |
+| BUG-16e | ~~P1~~ **FIXED** | Scan History | ~~No per-branch checkpoint/resume~~ Fixed: `loadCompletedBranches()` + `shouldSkipBranch()` |
+| BUG-16f | ~~P1~~ **FIXED** | Scan History | ~~Project-level concurrency not properly managed~~ Fixed: `errgroup.WithContext` + `SetLimit` |
 
 ---
 

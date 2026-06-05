@@ -91,9 +91,19 @@ var migrateIssueSyncTasks = map[string]bool{
 	"syncIssueMetadata":   true,
 }
 
-// MigrateTargetTasks determines which tasks to run.
-// Default: all tasks NOT starting with "get", "delete", or "reset".
-func MigrateTargetTasks(reg map[string]*TaskDef, targetTask string, skipProfiles, includeScanHistory, skipIssueSync bool) []string {
+// MigrateTargetTasks determines which tasks to run. Precedence:
+//  1. targetTasks — an explicit leaf list (used by the transfer command for
+//     project-scoped migration); returned as-is, dependencies are resolved
+//     transitively by ResolveDependencies.
+//  2. targetTask — a single named task.
+//  3. Default: all tasks NOT starting with "get", "delete", or "reset".
+//
+// skipIssueSync (#299) drops the trailing per-issue / per-hotspot metadata
+// sync tasks from the default set while keeping importScanHistory itself.
+func MigrateTargetTasks(reg map[string]*TaskDef, targetTask string, skipProfiles, includeScanHistory, skipIssueSync bool, targetTasks []string) []string {
+	if len(targetTasks) > 0 {
+		return slices.Clone(targetTasks)
+	}
 	if targetTask != "" {
 		return []string{targetTask}
 	}

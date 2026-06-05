@@ -256,6 +256,54 @@ These differences have been investigated. They do NOT cause CE processing failur
 - **Auth method**: `sqco_` tokens require Bearer auth (not Basic). Our `authTransport` correctly uses Bearer.
 - **Metadata fields**: Comprehensive comparison against CloudVoyager's `build-metadata.js` shows all fields match: analysisDate (epoch ms), organizationKey, projectKey, rootComponentRef, branchName, branchType (BRANCH=1), referenceBranchName, scmRevisionId (random 40-char hex), projectVersion ("1.0.0"), qprofilesPerLanguage, analyzedIndexedFileCountPerType.
 - **Protobuf content**: Issue, ExternalIssue, AdHocRule, ActiveRule, Component, and Changesets messages all use correct field numbers per the proto schema. Length-delimited encoding (varint prefix) matches the Java CE parser expectations.
+- **TextRange zero-offset encoding (NOT a rejection cause)**: A decode-diff of `/tmp/reportdiff/cv` (accepted) vs `/tmp/reportdiff/ours` (rejected) showed CV serializes `start_offset=0` explicitly (`18 00`) for 193 external issues, while ours omits field 3 (implicit-presence default). This is **byte-difference only, decode-equivalent, and harmless**. SonarSource's canonical `scanner_report.proto` (verified on `SonarSource/sonarqube` branches 10.6/10.7) is `syntax = "proto3"` with `message TextRange { int32 start_offset = 3; ... }` — plain `int32`, NOT proto2 `optional`. Our `scanner-report.proto:289-294` matches it exactly. Under proto3 implicit presence, the CE's reader cannot distinguish "field absent" from "field present == 0"; `TextRange.getStartOffset()` returns `0` in both cases. Changing our proto to `optional int32` would diverge from the canonical SonarSource schema and change nothing the CE observes. The same-issue side-by-side (ruff/D104) confirmed every other field is byte-identical.
+
+### Measures Files Absent (data-fidelity gap, NOT a rejection cause)
+<!-- updated: 2026-06-05_12:30:00 by Claude -->
+
+The CV report ships 143 `measures-{ref}.pb` files (aggregate metrics: `reliability_rating`, `security_rating`, `sqale_rating`, `ncloc`, `complexity`, `coverage`, `line_coverage`, `cognitive_complexity`, `branch_coverage`, `code_smells`, `sqale_index`, `violations`, plus a few `bugs`/`security_hotspots`/`vulnerabilities`). Our report ships **zero** because `tasks_scanhistory.go:310` sets `Measures: make(map[int32][]*pb.Measure)` and never calls `scanreport.BuildMeasures` (the builder exists at `builder.go:306-320` but is unwired). This does **NOT** cause the CE rejection: `ScannerReportReader.readComponentMeasures` guards with `if (fileExists(file))` and returns `emptyCloseableIterator()` when a `measures-N.pb` is missing — missing measures are explicitly tolerated and the CE recomputes aggregates server-side. This is tracked separately as issue #106 / PLAN-FIX-106 (measure fidelity), and is the correct place to wire `BuildMeasures` using the CV `buildMeasures` logic (per-FIL-qualifier component, typed value via int/long/double/string detection).
+- **CV redundant filenames (`externalissues-N.pb` no-dash, `adhoerules.pb` typo)**: CV's known-good zip contains BOTH naming conventions because two CV uploader code paths run (`add-protobuf-files.js` emits the no-dash/typo names; `add-source-and-ext-files.js`/`add-optional-files.js` emit the canonical `external-issues-N.pb`/`adhocrules.pb`). The SonarQube CE `FileStructure.Domain` reads only the canonical hyphenated `external-issues-` and the `adHocRules()` standalone `adhocrules.pb`. The no-dash/typo files are dead weight the CE ignores; ours correctly omits them. Not a difference that matters.
+
+---
+
+## Branch Migration Ordering and Failures
+<!-- updated: 2026-06-04_15:00:00 -->
+
+When `importScanHistory` migrates a project with multiple branches, the ordering of branch uploads matters. SonarCloud's Compute Engine (CE) requires the main branch to be imported and fully processed before any non-main branches can be submitted. If non-main branches are uploaded first, CE will reject them.
+
+### Main branch must succeed before non-main branches
+
+The tool automatically handles this: it sorts branches so the main branch is always first, imports it, and waits for CE to report SUCCESS before proceeding with non-main branches. If the main branch CE task fails, all remaining branches for that project are marked as "skipped" and the tool moves on to the next project.
+
+**Symptom**: Non-main branch CE tasks fail with errors like "Invalid branch type" or "Branch 'main' already exists with type 'LONG'".
+
+**Solution**: This is now handled automatically. If you see these errors on older runs, re-run the migration — the tool will use per-branch checkpoint/resume to skip already-completed branches and retry the failed ones in the correct order.
+
+### Excluding branches from migration
+
+Use the `--exclude-branches` flag (or `exclude_branches` in the JSON config) to skip specific non-main branches during scan history import. This accepts glob patterns compatible with Go's `filepath.Match`:
+
+```bash
+# Exclude all feature branches and release branches
+sonar-migration-tool migrate ... --exclude-branches "feature/*" --exclude-branches "release/*"
+
+# Or in config.json
+{
+  "target": {
+    "exclude_branches": ["feature/*", "release/*"]
+  }
+}
+```
+
+The main branch is **never** excluded, regardless of patterns. See [ADVANCED-CONFIG.md](ADVANCED-CONFIG.md) for the full config reference.
+
+### Resuming after a branch failure
+
+The tool tracks per-branch completion status. When resuming a failed migration with `--run_id`, branches that already succeeded are automatically skipped. Only failed or not-yet-attempted branches are retried.
+
+### Project-level parallelism
+
+Multiple projects are imported in parallel (bounded by concurrency). A failure in one project does not cancel or affect other projects — each project's branches are processed independently.
 
 ---
 

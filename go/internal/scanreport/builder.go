@@ -210,6 +210,13 @@ type ExternalIssueInput struct {
 	EndOff       int32
 	Component    string
 	CreationDate time.Time
+	// MQR (clean-code) fields. SonarCloud's CE requires every external issue
+	// to carry at least one impact and a clean-code attribute. Effort is the
+	// raw SonarQube effort/debt string (e.g. "5min"); Impacts/CleanCodeAttribute
+	// are honored when extracted and otherwise derived from Type+Severity.
+	Effort             string
+	CleanCodeAttribute string
+	Impacts            []ImpactInput
 }
 
 // BuildExternalIssues groups external issues by component ref and returns a map of ref->[]ExternalIssue.
@@ -220,10 +227,17 @@ func BuildExternalIssues(issues []ExternalIssueInput, cr *ComponentRef) map[int3
 		if !ok {
 			continue
 		}
+		// Mirror CloudVoyager build-one-external-issue.js: always set
+		// severity, effort, type, cleanCodeAttribute, and >=1 impact so the
+		// CE can register the issue in the MQR model.
+		cca := resolveCleanCodeAttr(iss.CleanCodeAttribute, iss.Type)
 		pbIss := &pb.ExternalIssue{
-			EngineId: iss.EngineID,
-			RuleId:   iss.RuleID,
-			Msg:      iss.Message,
+			EngineId:           iss.EngineID,
+			RuleId:             iss.RuleID,
+			Msg:                iss.Message,
+			Effort:             parseEffortToMinutes(iss.Effort),
+			Impacts:            resolveImpacts(iss.Impacts, iss.Type, iss.Severity),
+			CleanCodeAttribute: &cca,
 		}
 		if sev := mapSeverity(iss.Severity); sev != pb.Severity_UNSET_SEVERITY {
 			pbIss.Severity = &sev
@@ -252,17 +266,28 @@ type AdHocRuleInput struct {
 	Description string
 	Severity    string
 	Type        string
+	// MQR (clean-code) fields, derived identically to the external issue that
+	// references this ad-hoc rule. An ad-hoc rule with no impacts and an
+	// unspecified clean-code attribute fails CE rule registration.
+	CleanCodeAttribute string
+	Impacts            []ImpactInput
 }
 
 // BuildAdHocRules creates AdHocRule protobuf messages from the input slice.
 func BuildAdHocRules(rules []AdHocRuleInput) []*pb.AdHocRule {
 	result := make([]*pb.AdHocRule, 0, len(rules))
 	for _, r := range rules {
+		// Mirror CloudVoyager collect-ad-hoc-rule.js: always set
+		// cleanCodeAttribute and >=1 defaultImpact (same values as the
+		// external issue), so the CE can register the ad-hoc rule.
+		cca := resolveCleanCodeAttr(r.CleanCodeAttribute, r.Type)
 		pbr := &pb.AdHocRule{
-			EngineId:    r.EngineID,
-			RuleId:      r.RuleID,
-			Name:        r.Name,
-			Description: r.Description,
+			EngineId:           r.EngineID,
+			RuleId:             r.RuleID,
+			Name:               r.Name,
+			Description:        r.Description,
+			CleanCodeAttribute: &cca,
+			DefaultImpacts:     resolveImpacts(r.Impacts, r.Type, r.Severity),
 		}
 		if sev := mapSeverity(r.Severity); sev != pb.Severity_UNSET_SEVERITY {
 			pbr.Severity = &sev
@@ -305,17 +330,47 @@ type ActiveRuleInput struct {
 	Severity    string
 	QProfileKey string
 	Language    string
+	// Params/CreatedAt/UpdatedAt mirror the fields the SonarCloud reference
+	// scanner (ActiveRulesPublisher) always sets. CreatedAt/UpdatedAt are
+	// epoch milliseconds; zero values fall back to the analysis date.
+	Params    map[string]string
+	CreatedAt int64
+	UpdatedAt int64
 }
 
 // BuildActiveRules creates ActiveRule protobuf messages from the input slice.
-func BuildActiveRules(rules []ActiveRuleInput) []*pb.ActiveRule {
+// defaultTSMillis is used for createdAt/updatedAt when the rule carries none,
+// matching the reference scanner which always sets non-zero timestamps.
+func BuildActiveRules(rules []ActiveRuleInput, defaultTSMillis int64) []*pb.ActiveRule {
 	result := make([]*pb.ActiveRule, 0, len(rules))
 	for _, r := range rules {
+		// Mirror the SonarCloud reference scanner ActiveRulesPublisher:
+		// severity defaults to MAJOR, params is always a (non-nil) map, and
+		// createdAt/updatedAt are always set.
+		sev := mapSeverity(r.Severity)
+		if sev == pb.Severity_UNSET_SEVERITY {
+			sev = pb.Severity_MAJOR
+		}
+		params := r.Params
+		if params == nil {
+			params = map[string]string{}
+		}
+		createdAt := r.CreatedAt
+		if createdAt <= 0 {
+			createdAt = defaultTSMillis
+		}
+		updatedAt := r.UpdatedAt
+		if updatedAt <= 0 {
+			updatedAt = defaultTSMillis
+		}
 		result = append(result, &pb.ActiveRule{
 			RuleRepository: r.RuleRepo,
 			RuleKey:        r.RuleKey,
-			Severity:       mapSeverity(r.Severity),
+			Severity:       sev,
 			QProfileKey:    r.QProfileKey,
+			ParamsByKey:    params,
+			CreatedAt:      createdAt,
+			UpdatedAt:      updatedAt,
 		})
 	}
 	return result

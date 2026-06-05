@@ -7,8 +7,11 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/migrate"
 	"github.com/spf13/cobra"
 )
 
@@ -92,7 +95,7 @@ func TestResolveTransferConfig_UnifiedConfigShape(t *testing.T) {
 		keyFilePath:         "/cert/key",
 		certPassword:        "p4ss",
 	}
-	if cfg != want {
+	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("got %+v\nwant %+v", cfg, want)
 	}
 }
@@ -221,6 +224,93 @@ func TestValidateTransferConfig_MissingCredentials(t *testing.T) {
 				t.Errorf("error %q does not mention %q", err.Error(), c.errSub)
 			}
 		})
+	}
+}
+
+// TestTransferTargetTasksResolveToProjectScopedPlan locks in the contract of
+// the project-scoped transfer task list: (a) every name is a real task,
+// (b) the leaves resolve to an acyclic plan, (c) the quality profiles' rules
+// and the gate's conditions are configured before scan history is imported
+// (so reproduced issues match) and metadata sync runs after the import, and
+// (d) dependency resolution does not drag in the global / instance-wide
+// entities transfer deliberately leaves untouched.
+func TestTransferTargetTasksResolveToProjectScopedPlan(t *testing.T) {
+	// transfer migrates with the default (enterprise) edition.
+	reg := migrate.FilterByEdition(
+		migrate.BuildMigrateRegistry(migrate.RegisterAll()),
+		common.EditionEnterprise,
+	)
+
+	targets := migrate.MigrateTargetTasks(reg, "", false, false, false, transferTargetTasks)
+	if len(targets) != len(transferTargetTasks) {
+		t.Fatalf("explicit transfer targets not honored verbatim: got %v", targets)
+	}
+
+	taskSet := migrate.ResolveDependencies(targets, reg)
+	if taskSet == nil {
+		t.Fatal("transferTargetTasks failed to resolve dependencies — an unknown task name?")
+	}
+
+	plan, err := migrate.PlanPhases(taskSet, reg)
+	if err != nil {
+		t.Fatalf("PlanPhases: %v", err)
+	}
+
+	phaseOf := map[string]int{}
+	for i, phase := range plan {
+		for _, name := range phase {
+			phaseOf[name] = i
+		}
+	}
+
+	// Issues/hotspots are reproduced by replaying the scan report, so the
+	// quality profiles' rules and the gate's conditions must be in place
+	// first; metadata sync needs the issues to already exist in Cloud.
+	assertRunsBefore(t, phaseOf, "restoreProfiles", "importScanHistory")
+	assertRunsBefore(t, phaseOf, "addGateConditions", "importScanHistory")
+	assertRunsBefore(t, phaseOf, "importScanHistory", "syncIssueMetadata")
+	assertRunsBefore(t, phaseOf, "importScanHistory", "syncHotspotMetadata")
+
+	// The project, its gate, its profiles, and its issue/hotspot history are
+	// all present.
+	assertAllInSet(t, taskSet, true, []string{
+		"createProjects", "createGates", "createProfiles",
+		"setProjectGates", "setProjectProfiles",
+		"importScanHistory", "syncIssueMetadata", "syncHotspotMetadata",
+	})
+
+	// Project-scoped: these global / instance-wide tasks must NOT be pulled
+	// in by dependency resolution.
+	assertAllInSet(t, taskSet, false, []string{
+		"createPortfolios", "setPortfolioProjects", "configurePortfolios",
+		"setGlobalSettings", "setGlobalWebhooks", "setGlobalNewCodePeriod",
+		"createPermissionTemplates", "setTemplateGroupPermissions", "setDefaultTemplates",
+		"setOrgGroupPermissions", "setProfileGroupPermissions",
+		"setDefaultProfiles", "setDefaultGates",
+		"updateRuleTags", "updateRuleDescriptions",
+		"matchProjectRepos", "setProjectBinding",
+		"createMigrationGroups",
+	})
+}
+
+// assertRunsBefore fails the test unless task early is scheduled in an
+// earlier phase than task late.
+func assertRunsBefore(t *testing.T, phaseOf map[string]int, early, late string) {
+	t.Helper()
+	if phaseOf[early] >= phaseOf[late] {
+		t.Errorf("%s (phase %d) must run before %s (phase %d)",
+			early, phaseOf[early], late, phaseOf[late])
+	}
+}
+
+// assertAllInSet fails the test for any name whose membership in set does not
+// match want.
+func assertAllInSet(t *testing.T, set map[string]bool, want bool, names []string) {
+	t.Helper()
+	for _, name := range names {
+		if set[name] != want {
+			t.Errorf("task %q: in resolved set = %v, want %v", name, set[name], want)
+		}
 	}
 }
 

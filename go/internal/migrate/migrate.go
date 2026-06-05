@@ -14,11 +14,11 @@ import (
 	"strings"
 	"time"
 
-	sqapi "github.com/sonar-solutions/sq-api-go"
-	"github.com/sonar-solutions/sq-api-go/cloud"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/version"
+	sqapi "github.com/sonar-solutions/sq-api-go"
+	"github.com/sonar-solutions/sq-api-go/cloud"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -32,6 +32,12 @@ type MigrateConfig struct {
 	Concurrency     int
 	ExportDirectory string
 	TargetTask      string
+
+	// TargetTasks, when non-empty, is an explicit list of leaf tasks to run;
+	// their dependencies are resolved automatically. Used by the transfer
+	// command for project-scoped migration. Takes precedence over TargetTask.
+	TargetTasks []string
+
 	SkipProfiles       bool
 	IncludeScanHistory bool
 	SkipIssueSync      bool // Skip the final issue / hotspot metadata sync (#299).
@@ -42,24 +48,29 @@ type MigrateConfig struct {
 	// If at least one mapping is defined, this is ignored with a Warn
 	// log. Issue #281.
 	DefaultOrganization string
+
+	// ExcludeBranches holds glob patterns for non-main branches to skip
+	// during scan history import. Main branch is never excluded.
+	ExcludeBranches []string
 }
 
 // Executor is the runtime context passed to every migrate task function.
 type Executor struct {
-	Cloud     *cloud.Client      // Standard Cloud API (sonarcloud.io)
-	CloudAPI  *cloud.Client      // Enterprise API (api.sonarcloud.io)
-	Raw       *common.RawClient  // For reading from Cloud standard API
-	RawAPI    *common.RawClient  // For reading from Cloud enterprise API
-	Extract   *common.DataStore  // Reads extract data (across all extract runs)
-	Store     *common.DataStore  // Writes migrate output to run directory
-	CloudURL  string             // e.g. "https://sonarcloud.io/"
-	APIURL    string             // e.g. "https://api.sonarcloud.io/"
-	EntKey    string             // Enterprise key
-	Edition   common.Edition
-	ExportDir string             // Root export directory
-	Mapping   structure.ExtractMapping
-	Sem       chan struct{}
-	Logger    *slog.Logger
+	Cloud           *cloud.Client     // Standard Cloud API (sonarcloud.io)
+	CloudAPI        *cloud.Client     // Enterprise API (api.sonarcloud.io)
+	Raw             *common.RawClient // For reading from Cloud standard API
+	RawAPI          *common.RawClient // For reading from Cloud enterprise API
+	Extract         *common.DataStore // Reads extract data (across all extract runs)
+	Store           *common.DataStore // Writes migrate output to run directory
+	CloudURL        string            // e.g. "https://sonarcloud.io/"
+	APIURL          string            // e.g. "https://api.sonarcloud.io/"
+	EntKey          string            // Enterprise key
+	Edition         common.Edition
+	ExportDir       string // Root export directory
+	Mapping         structure.ExtractMapping
+	Sem             chan struct{}
+	Logger          *slog.Logger
+	ExcludeBranches []string
 }
 
 // RunMigrate is the main entry point for the migrate command.
@@ -149,7 +160,7 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (string, error) {
 		logger.Info("issue-sync disabled: skipping syncHotspotMetadata")
 	}
 
-	targets := MigrateTargetTasks(registry, cfg.TargetTask, cfg.SkipProfiles, cfg.IncludeScanHistory, cfg.SkipIssueSync)
+	targets := MigrateTargetTasks(registry, cfg.TargetTask, cfg.SkipProfiles, cfg.IncludeScanHistory, cfg.SkipIssueSync, cfg.TargetTasks)
 	taskSet := ResolveDependencies(targets, registry)
 	if taskSet == nil {
 		return "", fmt.Errorf("cannot resolve dependencies for target tasks")
@@ -172,20 +183,21 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (string, error) {
 	plan = filterCompleted(plan, store)
 
 	executor := &Executor{
-		Cloud:     cc,
-		CloudAPI:  apiCC,
-		Raw:       raw,
-		RawAPI:    rawAPI,
-		Extract:   nil, // Will be set per-task based on extract mapping
-		Store:     store,
-		CloudURL:  cloudClient.BaseURL(),
-		APIURL:    apiClient.BaseURL(),
-		EntKey:    cfg.EnterpriseKey,
-		Edition:   edition,
-		ExportDir: cfg.ExportDirectory,
-		Mapping:   mapping,
-		Sem:       make(chan struct{}, cfg.Concurrency),
-		Logger:    logger,
+		Cloud:           cc,
+		CloudAPI:        apiCC,
+		Raw:             raw,
+		RawAPI:          rawAPI,
+		Extract:         nil, // Will be set per-task based on extract mapping
+		Store:           store,
+		CloudURL:        cloudClient.BaseURL(),
+		APIURL:          apiClient.BaseURL(),
+		EntKey:          cfg.EnterpriseKey,
+		Edition:         edition,
+		ExportDir:       cfg.ExportDirectory,
+		Mapping:         mapping,
+		Sem:             make(chan struct{}, cfg.Concurrency),
+		ExcludeBranches: cfg.ExcludeBranches,
+		Logger:          logger,
 	}
 
 	// Execute phases.

@@ -29,7 +29,7 @@ func TestRegisterAllCountsAndDependencies(t *testing.T) {
 func TestMigrateTargetTasks(t *testing.T) {
 	reg := BuildMigrateRegistry(RegisterAll())
 
-	targets := MigrateTargetTasks(reg, "", false, false, false)
+	targets := MigrateTargetTasks(reg, "", false, false, false, nil)
 	// Should exclude get*, delete*, reset* tasks.
 	for _, name := range targets {
 		if name[:3] == "get" || name[:6] == "delete" || name[:5] == "reset" {
@@ -43,15 +43,42 @@ func TestMigrateTargetTasks(t *testing.T) {
 
 func TestMigrateTargetTasksSingle(t *testing.T) {
 	reg := BuildMigrateRegistry(RegisterAll())
-	targets := MigrateTargetTasks(reg, "createProjects", false, false, false)
+	targets := MigrateTargetTasks(reg, "createProjects", false, false, false, nil)
 	if len(targets) != 1 || targets[0] != "createProjects" {
 		t.Errorf("expected [createProjects], got %v", targets)
 	}
 }
 
+func TestMigrateTargetTasksExplicitList(t *testing.T) {
+	reg := BuildMigrateRegistry(RegisterAll())
+	// An explicit list takes precedence over the single targetTask and the
+	// default-all behavior, and is returned verbatim (dependencies are
+	// resolved later by ResolveDependencies). This is how the transfer
+	// command requests a project-scoped migration.
+	explicit := []string{"setProjectGates", "importScanHistory", "syncIssueMetadata"}
+	targets := MigrateTargetTasks(reg, "createProjects", false, false, false, explicit)
+	if len(targets) != len(explicit) {
+		t.Fatalf("expected %d explicit targets, got %v", len(explicit), targets)
+	}
+	for i, name := range explicit {
+		if targets[i] != name {
+			t.Errorf("target %d: expected %q, got %q", i, name, targets[i])
+		}
+	}
+
+	// The explicit list must resolve to a valid, acyclic plan.
+	taskSet := ResolveDependencies(targets, reg)
+	if taskSet == nil {
+		t.Fatal("explicit target tasks failed to resolve dependencies")
+	}
+	if _, err := PlanPhases(taskSet, reg); err != nil {
+		t.Fatalf("PlanPhases failed for explicit list: %v", err)
+	}
+}
+
 func TestMigrateTargetTasksSkipProfiles(t *testing.T) {
 	reg := BuildMigrateRegistry(RegisterAll())
-	targets := MigrateTargetTasks(reg, "", true, false, false)
+	targets := MigrateTargetTasks(reg, "", true, false, false, nil)
 	for _, name := range targets {
 		if name == "createProfiles" || name == "setProfileParent" || name == "restoreProfiles" ||
 			name == "setDefaultProfiles" || name == "setProjectProfiles" || name == "setProfileGroupPermissions" {
@@ -66,7 +93,7 @@ func TestMigrateTargetTasksSkipProfiles(t *testing.T) {
 // touch-up. #299.
 func TestMigrateTargetTasksSkipIssueSync(t *testing.T) {
 	reg := BuildMigrateRegistry(RegisterAll())
-	targets := MigrateTargetTasks(reg, "", false, true /*includeScanHistory*/, true /*skipIssueSync*/)
+	targets := MigrateTargetTasks(reg, "", false, true /*includeScanHistory*/, true /*skipIssueSync*/, nil)
 
 	var sawImport, sawIssue, sawHotspot bool
 	for _, name := range targets {
@@ -95,7 +122,7 @@ func TestMigrateTargetTasksSkipIssueSync(t *testing.T) {
 // The flag must not accidentally let them through.
 func TestMigrateTargetTasksSkipIssueSyncWithoutScanHistory(t *testing.T) {
 	reg := BuildMigrateRegistry(RegisterAll())
-	targets := MigrateTargetTasks(reg, "", false, false, true)
+	targets := MigrateTargetTasks(reg, "", false, false, true, nil)
 	for _, name := range targets {
 		if name == "syncIssueMetadata" || name == "syncHotspotMetadata" {
 			t.Errorf("scan-history-gated task %q must stay excluded without --include_scan_history", name)
@@ -106,7 +133,7 @@ func TestMigrateTargetTasksSkipIssueSyncWithoutScanHistory(t *testing.T) {
 func TestPlanPhasesNoCycles(t *testing.T) {
 	all := RegisterAll()
 	reg := BuildMigrateRegistry(all)
-	targets := MigrateTargetTasks(reg, "", false, false, false)
+	targets := MigrateTargetTasks(reg, "", false, false, false, nil)
 	taskSet := ResolveDependencies(targets, reg)
 	if taskSet == nil {
 		t.Fatal("cannot resolve dependencies")
