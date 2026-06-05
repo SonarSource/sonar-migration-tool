@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,7 +64,15 @@ func (ds *DataStore) ReadAll(taskName string) ([]json.RawMessage, error) {
 	return all, nil
 }
 
-// ReadJSONLFile reads a single JSONL file into a slice of raw JSON messages.
+// ReadJSONLFile reads a single JSONL file into a slice of raw JSON
+// messages. Lines are unbounded in length: scan-history extract
+// records embed full source files as a JSON string, and large
+// generated / minified sources routinely exceed the bufio.Scanner
+// default ceiling (and even the bumped 10 MB ceiling we used to
+// carry). We use bufio.Reader.ReadBytes('\n') so the only effective
+// limit is available memory. A single oversize line previously
+// caused readTaskDir to abort the entire task — which silently
+// dropped every source record across the migration.
 func ReadJSONLFile(path string) ([]json.RawMessage, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -71,16 +80,22 @@ func ReadJSONLFile(path string) ([]json.RawMessage, error) {
 	}
 	defer f.Close()
 	var items []json.RawMessage
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024) // 10 MB max line
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
+	r := bufio.NewReader(f)
+	for {
+		line, err := r.ReadBytes('\n')
+		if len(line) > 0 {
+			trimmed := strings.TrimSpace(string(line))
+			if trimmed != "" {
+				items = append(items, json.RawMessage(trimmed))
+			}
 		}
-		items = append(items, json.RawMessage(line))
+		if err != nil {
+			if err == io.EOF {
+				return items, nil
+			}
+			return items, err
+		}
 	}
-	return items, scanner.Err()
 }
 
 // MarkComplete marks a task as finished.
