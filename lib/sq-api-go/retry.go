@@ -219,7 +219,7 @@ func (t *retryTransport) nextWait(rl rateLimitInfo, attempt int) (time.Duration,
 		return 0, total, false
 	}
 	base := schedule[attempt]
-	if rl.is429 && rl.retryAfter > 0 {
+	if rl.isSonarRateLimit() && rl.retryAfter > 0 {
 		base = clampRetryAfter(rl.retryAfter, base)
 	}
 	return base, total, true
