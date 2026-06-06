@@ -49,7 +49,7 @@ func runImportScanHistory(ctx context.Context, e *Executor) error {
 	completed := loadCompletedBranches(e.Store)
 
 	e.Logger.Info("starting task", "task", "importScanHistory", "items", len(projects))
-	prog := newProgressLogger(e.Logger, "importScanHistory", len(projects))
+	prog := common.NewProgressLogger(e.Logger, "importScanHistory", len(projects))
 
 	g, gCtx := errgroup.WithContext(ctx)
 	g.SetLimit(cap(e.Sem))

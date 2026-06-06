@@ -65,18 +65,29 @@ func forEachDepFiltered(ctx context.Context, e *Executor, taskName, depTask stri
 		return fmt.Errorf("%s: reading dependency %s: %w", taskName, depTask, err)
 	}
 
+	// Pre-filter to get accurate count for progress logging (#340).
+	var filtered []json.RawMessage
+	for _, item := range items {
+		if filterFn != nil && !filterFn(item) {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+
+	e.Logger.Info("starting task", "task", taskName, "items", len(filtered))
+	prog := common.NewProgressLogger(e.Logger, taskName, len(filtered))
+
 	w, err := e.Store.Writer(taskName)
 	if err != nil {
 		return err
 	}
 
 	g, ctx := errgroup.WithContext(ctx)
-	for _, item := range items {
-		if filterFn != nil && !filterFn(item) {
-			continue
-		}
+	for _, item := range filtered {
 		g.Go(func() error {
-			return runWithSem(ctx, e, taskName, item, w, fn)
+			err := runWithSem(ctx, e, taskName, item, w, fn)
+			prog.Increment()
+			return err
 		})
 	}
 	return g.Wait()

@@ -135,7 +135,7 @@ func forEachMigrateItemFiltered(ctx context.Context, e *Executor, taskName, depT
 	sortMigrateItems(taskName, filtered)
 
 	e.Logger.Info("starting task", "task", taskName, "items", len(filtered))
-	prog := newProgressLogger(e.Logger, taskName, len(filtered))
+	prog := common.NewProgressLogger(e.Logger, taskName, len(filtered))
 
 	w, err := e.Store.Writer(taskName)
 	if err != nil {
@@ -173,7 +173,7 @@ func forEachExtractItem(ctx context.Context, e *Executor, taskName, extractKey s
 	sortExtractItems(taskName, items)
 
 	e.Logger.Info("starting task", "task", taskName, "items", len(items))
-	prog := newProgressLogger(e.Logger, taskName, len(items))
+	prog := common.NewProgressLogger(e.Logger, taskName, len(items))
 
 	w, err := e.Store.Writer(taskName)
 	if err != nil {
@@ -361,73 +361,9 @@ func (c *TaskCounter) LogSummary(logger *slog.Logger, duration time.Duration) {
 	)
 }
 
-// progressLogger logs progress at regular intervals. Safe for concurrent use.
-type progressLogger struct {
-	task     string
-	total    int
-	done     atomic.Int64
-	logger   *slog.Logger
-	interval int64
-}
-
-// progressLogInterval names how often (in items) the progress logger
-// should emit an INFO line for a given task. Per-task entries take
-// precedence over the size-based fallback in newProgressLogger.
-//
-// Cadence policy (#326): the default is 20 items (set in
-// newProgressLogger), with a per-task override below for the two cases
-// that need a tighter cadence:
-//   - syncIssueMetadata / syncHotspotMetadata: slowest per-project work
-//     in a migrate run; every 10 projects so an operator tailing the
-//     log can see steady forward motion.
-//
-// Historical overrides retained from #202 where they remain operator-
-// friendly: createProjects and configurePortfolios already tick every
-// 10. setProjectSettings (was 50) and setProjectGroupPermissions (was
-// 100) are now capped at the new 20-item ceiling.
-var progressLogInterval = map[string]int64{
-	"createProjects":             10,
-	"configurePortfolios":        10,
-	"setProjectSettings":         20,
-	"setProjectGroupPermissions": 20,
-	"importScanHistory":          20,
-	"syncIssueMetadata":          10,
-	"syncHotspotMetadata":        10,
-}
-
-func newProgressLogger(logger *slog.Logger, task string, total int) *progressLogger {
-	// Default cadence is 20 items (#326). Capped at total so a small
-	// batch still emits its single end-of-task line via the
-	// "n == total" branch in Increment.
-	interval := int64(20)
-	if int64(total) < interval {
-		interval = int64(total)
-	}
-	// Per-task override beats the default. Same cap so the very last
-	// item still emits a line when override > total.
-	if explicit, ok := progressLogInterval[task]; ok && explicit > 0 {
-		interval = explicit
-		if int64(total) < interval {
-			interval = int64(total)
-		}
-	}
-	return &progressLogger{task: task, total: total, logger: logger, interval: interval}
-}
-
-// newProgressLoggerWithInterval creates a progressLogger with an
-// explicit per-call interval, bypassing the global progressLogInterval
-// map. Used by inner-loop progress tracking (e.g., per-issue / per-
-// hotspot sync, #300) where the label is human-facing and shared by
-// many call sites, but the interval differs per metric.
-func newProgressLoggerWithInterval(logger *slog.Logger, task string, total int, interval int64) *progressLogger {
-	if interval <= 0 {
-		interval = 1
-	}
-	if int64(total) < interval {
-		interval = int64(total)
-	}
-	return &progressLogger{task: task, total: total, logger: logger, interval: interval}
-}
+// Progress logging is shared with the extract package via
+// common.ProgressLogger (moved out of this file in #340 so the same
+// helper covers both extract and migrate tasks).
 
 // runProjectSyncLoop applies fn concurrently to every item in items,
 // bounded by e.Sem, emitting a "<label> n/total - x%" progress line
@@ -440,7 +376,7 @@ func runProjectSyncLoop[T any](
 	items []T, label string, interval int64,
 	apply func(ctx context.Context, item T),
 ) {
-	prog := newProgressLoggerWithInterval(e.Logger, label, len(items), interval)
+	prog := common.NewProgressLoggerWithInterval(e.Logger, label, len(items), interval)
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(cap(e.Sem))
 	for _, item := range items {
@@ -454,23 +390,6 @@ func runProjectSyncLoop[T any](
 		})
 	}
 	_ = g.Wait()
-}
-
-func (p *progressLogger) Increment() {
-	if p.interval <= 0 {
-		return
-	}
-	n := p.done.Add(1)
-	if n%p.interval == 0 || int(n) == p.total {
-		percent := 0
-		if p.total > 0 {
-			percent = int(n * 100 / int64(p.total))
-		}
-		// One-line human-readable message per the issue #202 spec
-		// — "task N/M - X%" — so operators tailing the log can read
-		// progress at a glance.
-		p.logger.Info(fmt.Sprintf("%s %d/%d - %d%%", p.task, n, p.total, percent))
-	}
 }
 
 // extractField is a convenience alias.
