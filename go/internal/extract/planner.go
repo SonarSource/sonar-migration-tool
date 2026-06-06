@@ -89,14 +89,14 @@ func RegisterAll() []TaskDef {
 	all = append(all, viewTasks()...)
 	all = append(all, webhookTasks()...)
 	all = append(all, miscTasks()...)
-	all = append(all, scanHistoryTasks()...)
+	all = append(all, projectDataTasks()...)
 	return all
 }
 
-// scanHistoryTaskNames lists task names that pull issue, source-code,
+// projectDataTaskNames lists task names that pull issue, source-code,
 // SCM-blame, and version data — extracted by default and dropped only
 // when --skip_project_data_migration is set.
-var scanHistoryTaskNames = map[string]bool{
+var projectDataTaskNames = map[string]bool{
 	"getProjectIssuesFull":    true,
 	"getProjectComponentTree": true,
 	"getProjectSourceCode":    true,
@@ -110,12 +110,12 @@ func TargetTasks(reg map[string]*TaskDef, targetTask, extractType string) []stri
 	return targetTasks(reg, targetTask, extractType, false)
 }
 
-// TargetTasksWithScanHistory is like TargetTasks but includes scan history tasks.
-func TargetTasksWithScanHistory(reg map[string]*TaskDef, targetTask, extractType string) []string {
+// TargetTasksWithProjectData is like TargetTasks but includes project data tasks.
+func TargetTasksWithProjectData(reg map[string]*TaskDef, targetTask, extractType string) []string {
 	return targetTasks(reg, targetTask, extractType, true)
 }
 
-func targetTasks(reg map[string]*TaskDef, targetTask, extractType string, includeScanHistory bool) []string {
+func targetTasks(reg map[string]*TaskDef, targetTask, extractType string, includeProjectData bool) []string {
 	if targetTask != "" {
 		return []string{targetTask}
 	}
@@ -123,7 +123,7 @@ func targetTasks(reg map[string]*TaskDef, targetTask, extractType string, includ
 	var tasks []string
 	for name := range reg {
 		if len(name) > 3 && name[:3] == "get" {
-			if scanHistoryTaskNames[name] && !includeScanHistory {
+			if projectDataTaskNames[name] && !includeProjectData {
 				continue
 			}
 			tasks = append(tasks, name)

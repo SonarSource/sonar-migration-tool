@@ -22,13 +22,13 @@ import (
 // issue metadata (status transitions, comments, tags) from the extracted
 // SonarQube Server data to the newly-created SonarQube Cloud issues.
 //
-// The task depends on importScanHistory because Cloud issues only exist
+// The task depends on importProjectData because Cloud issues only exist
 // after the scan report has been processed by the CE.
 func issueMetadataSyncTasks() []TaskDef {
 	return []TaskDef{{
 		Name:         "syncIssueMetadata",
 		Editions:     common.AllEditions,
-		Dependencies: []string{"importScanHistory"},
+		Dependencies: []string{"importProjectData"},
 		Run:          runSyncIssueMetadata,
 	}}
 }
@@ -328,12 +328,12 @@ func syncProjectIssues(ctx context.Context, e *Executor, cloudKey, orgKey, serve
 	}
 	if len(cloudIssues) == 0 {
 		// Source had issues worth syncing, but Cloud has nothing to
-		// match against. Most common cause: the scan-history CE task
+		// match against. Most common cause: the project-data CE task
 		// for this project failed (or was skipped), so the report was
 		// never indexed and Cloud has no issues yet. Promote to INFO
 		// so the operator can correlate the skip with the upstream
 		// failure log instead of wondering why nothing happened. #299.
-		e.Logger.Info("syncIssueMetadata: skipping project — no Cloud issues to match (scan-history CE task likely failed or was skipped)",
+		e.Logger.Info("syncIssueMetadata: skipping project — no Cloud issues to match (project-data CE task likely failed or was skipped)",
 			"project", cloudKey, "source_issues", len(sourceIssues))
 		return nil
 	}

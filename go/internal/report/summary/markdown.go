@@ -18,7 +18,7 @@ import (
 // returns the bytes. It mirrors RenderPDF's content exactly: the same
 // title/metadata, executive-summary table, per-entity 5-status tables (via
 // the shared buildUnifiedRows ordering), and the runtime sections
-// (bottlenecks, failure ledger, warnings/retries/skips, branch scan history,
+// (bottlenecks, failure ledger, warnings/retries/skips, branch project data,
 // limitations).
 //
 // The output is deterministic: every map-derived collection is sorted before
@@ -40,7 +40,7 @@ func RenderMarkdown(summary *MigrationSummary) ([]byte, error) {
 	renderMarkdownBottlenecks(&sb, summary)
 	renderMarkdownFailureLedger(&sb, summary)
 	renderMarkdownWarnings(&sb, summary)
-	renderMarkdownBranchScanHistory(&sb, summary)
+	renderMarkdownBranchProjectData(&sb, summary)
 	renderMarkdownLimitations(&sb, summary)
 
 	return []byte(sb.String()), nil
@@ -404,9 +404,9 @@ func renderMarkdownWarnings(sb *strings.Builder, summary *MigrationSummary) {
 	}
 }
 
-// renderMarkdownBranchScanHistory writes the "## Branch Scan History" table.
+// renderMarkdownBranchProjectData writes the "## Branch Project Data" table.
 // No-op when there are no branches.
-func renderMarkdownBranchScanHistory(sb *strings.Builder, summary *MigrationSummary) {
+func renderMarkdownBranchProjectData(sb *strings.Builder, summary *MigrationSummary) {
 	if len(summary.Branches) == 0 {
 		return
 	}
@@ -439,7 +439,7 @@ func renderMarkdownBranchScanHistory(sb *strings.Builder, summary *MigrationSumm
 		})
 	}
 	sb.WriteString(report.GenerateSection(columns, rows,
-		report.WithTitle("Branch Scan History", 2)))
+		report.WithTitle("Branch Project Data", 2)))
 	sb.WriteString("\n")
 }
 

@@ -34,7 +34,7 @@ type ExtractConfig struct {
 	Timeout         int
 	ExtractID       string
 	TargetTask               string
-	IncludeScanHistory       bool
+	IncludeProjectData       bool
 	SkipProjectDataMigration bool // #303. Set true to skip project-data tasks (issues, source, SCM blame).
 	Debug                    bool // Enable HTTP request/response logging via SDK debug transport
 	// ProjectKeys, when non-empty, limits extraction to these project keys.
@@ -177,8 +177,8 @@ func buildPlan(cfg ExtractConfig, edition Edition) (map[string]*TaskDef, [][]str
 	registry = FilterByEdition(registry, edition)
 
 	var targets []string
-	if cfg.IncludeScanHistory {
-		targets = TargetTasksWithScanHistory(registry, cfg.TargetTask, cfg.ExtractType)
+	if cfg.IncludeProjectData {
+		targets = TargetTasksWithProjectData(registry, cfg.TargetTask, cfg.ExtractType)
 	} else {
 		targets = TargetTasks(registry, cfg.TargetTask, cfg.ExtractType)
 	}

@@ -23,7 +23,7 @@ func hotspotMetadataSyncTasks() []TaskDef {
 	return []TaskDef{{
 		Name:         "syncHotspotMetadata",
 		Editions:     common.AllEditions,
-		Dependencies: []string{"importScanHistory"},
+		Dependencies: []string{"importProjectData"},
 		Run:          runSyncHotspotMetadata,
 	}}
 }
@@ -276,12 +276,12 @@ func buildHotspotPairs(ctx context.Context, e *Executor, input syncHotspotInput)
 	cloudHotspots := loadCloudMatchableHotspots(cloudAPIHotspots)
 
 	// Source had hotspots worth syncing, but Cloud has none. Most
-	// common cause: the scan-history CE task for this project failed
+	// common cause: the project-data CE task for this project failed
 	// (or was skipped), so the report was never indexed and Cloud
 	// has no hotspots yet. Surface that explicitly at INFO so the
 	// operator can correlate the skip with the upstream failure. #299.
 	if len(cloudHotspots) == 0 {
-		e.Logger.Info("syncHotspotMetadata: skipping project — no Cloud hotspots to match (scan-history CE task likely failed or was skipped)",
+		e.Logger.Info("syncHotspotMetadata: skipping project — no Cloud hotspots to match (project-data CE task likely failed or was skipped)",
 			"project", input.CloudKey, "source_hotspots", len(sourceHotspots))
 		return nil, 0, nil
 	}

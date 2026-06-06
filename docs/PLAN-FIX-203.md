@@ -12,7 +12,7 @@
 
 Every imported scan currently defaults to project version `"1.0.0"` because the migration never passes the real version through to the protobuf metadata or CE submission form. The plumbing already exists (`MetadataInput.ProjectVersion`, `SubmitConfig.ProjectVersion`) — it's just never populated.
 
-The extraction phase already fetches project analyses via `/api/project_analyses/search` (which includes `ProjectVersion`), but this data is never loaded or used during scan history import.
+The extraction phase already fetches project analyses via `/api/project_analyses/search` (which includes `ProjectVersion`), but this data is never loaded or used during project data import.
 
 ---
 
@@ -49,7 +49,7 @@ Project version is **per-analysis metadata**, not a project setting. It's transm
 | **Extract** (`getProjectAnalyses`) | Yes — `Analysis.ProjectVersion` | Extracted but never loaded during migration | `/api/project_analyses/search` returns `projectVersion` per analysis |
 | **`MetadataInput`** (`builder.go:58`) | Yes — `ProjectVersion string` | Never set | Falls back to `"1.0.0"` at `builder.go:67` |
 | **`SubmitConfig`** (`submit.go:24`) | Yes — `ProjectVersion string` | Never set | Falls back to `"1.0.0"` at `submit.go:151` |
-| **`importBranchInput`** (`tasks_scanhistory.go`) | No field | N/A | No way to carry version into `importBranch()` |
+| **`importBranchInput`** (`tasks_projectdata.go`) | No field | N/A | No way to carry version into `importBranch()` |
 
 ### Data flow gap
 ```
@@ -73,7 +73,7 @@ SubmitConfig.ProjectVersion = "" → defaults to "1.0.0"
 
 ### Approach: Add `/api/navigation/component` extraction + pass-through
 
-Follow CloudVoyager's pattern — add a new extract task that fetches the **current** project version per branch via `/api/navigation/component`, then thread that version through the scan history import pipeline.
+Follow CloudVoyager's pattern — add a new extract task that fetches the **current** project version per branch via `/api/navigation/component`, then thread that version through the project data import pipeline.
 
 **Why this over using existing `getProjectAnalyses` data:**
 - `/api/project_analyses/search` returns analyses at the **project level** (not per-branch), making it unreliable for per-branch version resolution
@@ -104,9 +104,9 @@ type NavigationComponent struct {
 - **Store:** `{ projectKey, branch, version }` records to the extract data store
 - **Error handling:** If the endpoint returns no version or errors, log a warning and continue (version will fall back to `"1.0.0"`)
 
-#### 3. Add loader function in scan history import
+#### 3. Add loader function in project data import
 
-**File:** `go/internal/migrate/tasks_scanhistory.go`
+**File:** `go/internal/migrate/tasks_projectdata.go`
 
 Add a `loadExtractedBranchVersions()` function (similar to existing `loadExtractedQProfiles()`) that reads the extracted version data and returns a lookup map:
 
@@ -117,13 +117,13 @@ func loadExtractedBranchVersions(e *Executor, serverKey string) map[string]strin
 
 #### 4. Thread version through `importBranchInput`
 
-**File:** `go/internal/migrate/tasks_scanhistory.go`
+**File:** `go/internal/migrate/tasks_projectdata.go`
 
-Add `ProjectVersion string` to the `importBranchInput` struct and populate it from the version lookup when constructing inputs in `importScanHistory()`.
+Add `ProjectVersion string` to the `importBranchInput` struct and populate it from the version lookup when constructing inputs in `importProjectData()`.
 
 #### 5. Pass version to `BuildMetadata` and `SubmitConfig`
 
-**File:** `go/internal/migrate/tasks_scanhistory.go`
+**File:** `go/internal/migrate/tasks_projectdata.go`
 
 In `importBranch()`, set both:
 
@@ -156,7 +156,7 @@ Ensure `getProjectBranchVersions` is registered in all relevant version pipeline
 |------|--------|:---:|
 | `lib/sq-api-go/types/` (new or existing) | Add `NavigationComponent` type | Low |
 | `go/internal/extract/tasks_misc.go` | Add `getProjectBranchVersions` extract task | Medium |
-| `go/internal/migrate/tasks_scanhistory.go` | Add loader, add field to `importBranchInput`, pass version through | Medium |
+| `go/internal/migrate/tasks_projectdata.go` | Add loader, add field to `importBranchInput`, pass version through | Medium |
 | Pipeline registration files | Register new task in version pipelines | Low |
 
 **Estimated scope:** ~100-150 lines of new code across 3-4 files. No changes to protobuf, builder, or submit logic — just populating existing fields.
@@ -196,5 +196,5 @@ Ensure `getProjectBranchVersions` is registered in all relevant version pipeline
 <!-- updated: 2026-06-04_01:53:47 -->
 
 - [CLOUDVOYAGER-DELTA.md](docs/CLOUDVOYAGER-DELTA.md) — should be updated to mark this feature as addressed
-- [ARCHITECTURE.md](docs/ARCHITECTURE.md) — scan history section should document version propagation
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md) — project data section should document version propagation
 - [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — line 257 documents the hardcoded `"1.0.0"` default; update after fix

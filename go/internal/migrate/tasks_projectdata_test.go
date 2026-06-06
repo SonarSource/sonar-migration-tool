@@ -209,13 +209,13 @@ func TestCountFilesByExtEmpty(t *testing.T) {
 	}
 }
 
-func TestScanHistoryTasksDef(t *testing.T) {
-	tasks := scanHistoryTasks()
+func TestProjectDataTasksDef(t *testing.T) {
+	tasks := projectDataTasks()
 	if len(tasks) != 1 {
 		t.Fatalf("expected 1 task, got %d", len(tasks))
 	}
-	if tasks[0].Name != "importScanHistory" {
-		t.Errorf("expected importScanHistory, got %s", tasks[0].Name)
+	if tasks[0].Name != "importProjectData" {
+		t.Errorf("expected importProjectData, got %s", tasks[0].Name)
 	}
 }
 
@@ -252,7 +252,7 @@ func TestBuildChangesetMap(t *testing.T) {
 
 // --- Data loading function tests (require extract dir setup) ---
 
-func setupScanHistoryExtract(t *testing.T, dir string) {
+func setupProjectDataExtract(t *testing.T, dir string) {
 	t.Helper()
 	extractDir := filepath.Join(dir, "extract-01")
 
@@ -331,7 +331,7 @@ func setupScanHistoryExtract(t *testing.T, dir string) {
 	})
 }
 
-func newScanHistoryExecutor(t *testing.T, dir string) *Executor {
+func newProjectDataExecutor(t *testing.T, dir string) *Executor {
 	t.Helper()
 	runDir := filepath.Join(dir, "run-test")
 	os.MkdirAll(runDir, 0o755)
@@ -346,8 +346,8 @@ func newScanHistoryExecutor(t *testing.T, dir string) *Executor {
 
 func TestCollectBranchInfo(t *testing.T) {
 	dir := t.TempDir()
-	setupScanHistoryExtract(t, dir)
-	e := newScanHistoryExecutor(t, dir)
+	setupProjectDataExtract(t, dir)
+	e := newProjectDataExecutor(t, dir)
 
 	branches := collectBranchInfo(e, testServerURL, "proj1")
 	if len(branches) != 2 {
@@ -437,8 +437,8 @@ func TestDropIssuesWithInactiveRules(t *testing.T) {
 
 func TestCollectBranchInfoNoMatch(t *testing.T) {
 	dir := t.TempDir()
-	setupScanHistoryExtract(t, dir)
-	e := newScanHistoryExecutor(t, dir)
+	setupProjectDataExtract(t, dir)
+	e := newProjectDataExecutor(t, dir)
 
 	branches := collectBranchInfo(e, testServerURL, "nonexistent")
 	if len(branches) != 0 {
@@ -448,8 +448,8 @@ func TestCollectBranchInfoNoMatch(t *testing.T) {
 
 func TestCollectBranchInfoWrongServer(t *testing.T) {
 	dir := t.TempDir()
-	setupScanHistoryExtract(t, dir)
-	e := newScanHistoryExecutor(t, dir)
+	setupProjectDataExtract(t, dir)
+	e := newProjectDataExecutor(t, dir)
 
 	branches := collectBranchInfo(e, "https://other.server/", "proj1")
 	if len(branches) != 0 {
@@ -459,8 +459,8 @@ func TestCollectBranchInfoWrongServer(t *testing.T) {
 
 func TestLoadExtractedSources(t *testing.T) {
 	dir := t.TempDir()
-	setupScanHistoryExtract(t, dir)
-	e := newScanHistoryExecutor(t, dir)
+	setupProjectDataExtract(t, dir)
+	e := newProjectDataExecutor(t, dir)
 
 	sources := loadExtractedSources(e, testServerURL, "proj1", "main")
 	if len(sources) != 2 {
@@ -476,8 +476,8 @@ func TestLoadExtractedSources(t *testing.T) {
 
 func TestLoadExtractedSourcesWrongBranch(t *testing.T) {
 	dir := t.TempDir()
-	setupScanHistoryExtract(t, dir)
-	e := newScanHistoryExecutor(t, dir)
+	setupProjectDataExtract(t, dir)
+	e := newProjectDataExecutor(t, dir)
 
 	sources := loadExtractedSources(e, testServerURL, "proj1", "nonexistent")
 	if len(sources) != 0 {
@@ -487,8 +487,8 @@ func TestLoadExtractedSourcesWrongBranch(t *testing.T) {
 
 func TestLoadExtractedIssues(t *testing.T) {
 	dir := t.TempDir()
-	setupScanHistoryExtract(t, dir)
-	e := newScanHistoryExecutor(t, dir)
+	setupProjectDataExtract(t, dir)
+	e := newProjectDataExecutor(t, dir)
 
 	issues := loadExtractedIssues(e, testServerURL, "proj1", "main")
 	if len(issues) != 1 {
@@ -507,8 +507,8 @@ func TestLoadExtractedIssues(t *testing.T) {
 
 func TestLoadExtractedIssuesWrongProject(t *testing.T) {
 	dir := t.TempDir()
-	setupScanHistoryExtract(t, dir)
-	e := newScanHistoryExecutor(t, dir)
+	setupProjectDataExtract(t, dir)
+	e := newProjectDataExecutor(t, dir)
 
 	issues := loadExtractedIssues(e, testServerURL, "other-proj", "main")
 	if len(issues) != 0 {
@@ -518,8 +518,8 @@ func TestLoadExtractedIssuesWrongProject(t *testing.T) {
 
 func TestLoadExtractedComponents(t *testing.T) {
 	dir := t.TempDir()
-	setupScanHistoryExtract(t, dir)
-	e := newScanHistoryExecutor(t, dir)
+	setupProjectDataExtract(t, dir)
+	e := newProjectDataExecutor(t, dir)
 
 	components := loadExtractedComponents(e, testServerURL, "proj1", "main")
 	if len(components) != 2 {
@@ -539,8 +539,8 @@ func TestLoadExtractedComponents(t *testing.T) {
 
 func TestLoadExtractedActiveRules(t *testing.T) {
 	dir := t.TempDir()
-	setupScanHistoryExtract(t, dir)
-	e := newScanHistoryExecutor(t, dir)
+	setupProjectDataExtract(t, dir)
+	e := newProjectDataExecutor(t, dir)
 
 	rules := loadExtractedActiveRules(e, testServerURL, "proj1")
 	if len(rules) != 1 {
@@ -553,8 +553,8 @@ func TestLoadExtractedActiveRules(t *testing.T) {
 
 func TestLoadExtractedQProfiles(t *testing.T) {
 	dir := t.TempDir()
-	setupScanHistoryExtract(t, dir)
-	e := newScanHistoryExecutor(t, dir)
+	setupProjectDataExtract(t, dir)
+	e := newProjectDataExecutor(t, dir)
 
 	profiles := loadExtractedQProfiles(e, testServerURL, "proj1")
 	if len(profiles) != 1 {
@@ -629,8 +629,8 @@ func TestParseISODate(t *testing.T) {
 
 func TestLoadExtractedHotspots(t *testing.T) {
 	dir := t.TempDir()
-	setupScanHistoryExtract(t, dir)
-	e := newScanHistoryExecutor(t, dir)
+	setupProjectDataExtract(t, dir)
+	e := newProjectDataExecutor(t, dir)
 
 	hotspots := loadExtractedHotspots(e, testServerURL, "proj1", "main")
 	if len(hotspots) != 1 {
@@ -652,8 +652,8 @@ func TestLoadExtractedHotspots(t *testing.T) {
 
 func TestLoadExtractedHotspotsWrongProject(t *testing.T) {
 	dir := t.TempDir()
-	setupScanHistoryExtract(t, dir)
-	e := newScanHistoryExecutor(t, dir)
+	setupProjectDataExtract(t, dir)
+	e := newProjectDataExecutor(t, dir)
 
 	hotspots := loadExtractedHotspots(e, testServerURL, "other-proj", "main")
 	if len(hotspots) != 0 {
@@ -734,14 +734,14 @@ func TestBuildSCProfileMap(t *testing.T) {
 
 func TestBuildSCProfileMapNoCloud(t *testing.T) {
 	dir := t.TempDir()
-	e := newScanHistoryExecutor(t, dir)
+	e := newProjectDataExecutor(t, dir)
 	profiles := buildSCProfileMap(context.Background(), e, testCloudOrg)
 	if len(profiles) != 0 {
 		t.Errorf("expected empty map when Cloud is nil, got %v", profiles)
 	}
 }
 
-// --- Integration tests for importBranch and runImportScanHistory ---
+// --- Integration tests for importBranch and runImportProjectData ---
 
 func newCEMockServer() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -766,12 +766,12 @@ func newCEMockServer() *httptest.Server {
 
 func TestImportBranch(t *testing.T) {
 	dir := t.TempDir()
-	setupScanHistoryExtract(t, dir)
+	setupProjectDataExtract(t, dir)
 
 	srv := newCEMockServer()
 	defer srv.Close()
 
-	e := newScanHistoryExecutor(t, dir)
+	e := newProjectDataExecutor(t, dir)
 	e.CloudURL = srv.URL + "/"
 	e.Raw = common.NewRawClient(srv.Client(), srv.URL+"/")
 	// Non-main branch import now performs the create-analysis handshake against
@@ -813,7 +813,7 @@ func TestImportBranchSkipsNoComponents(t *testing.T) {
 	writeJSONL(filepath.Join(extractDir, "getActiveProfileRules"), nil)
 	writeJSONL(filepath.Join(extractDir, "getProfiles"), nil)
 
-	e := newScanHistoryExecutor(t, dir)
+	e := newProjectDataExecutor(t, dir)
 
 	input := importBranchInput{
 		CloudKey:  "cloud-proj1",
@@ -832,14 +832,14 @@ func TestImportBranchSkipsNoComponents(t *testing.T) {
 	}
 }
 
-func TestRunImportScanHistory(t *testing.T) {
+func TestRunImportProjectData(t *testing.T) {
 	dir := t.TempDir()
-	setupScanHistoryExtract(t, dir)
+	setupProjectDataExtract(t, dir)
 
 	srv := newCEMockServer()
 	defer srv.Close()
 
-	e := newScanHistoryExecutor(t, dir)
+	e := newProjectDataExecutor(t, dir)
 	e.CloudURL = srv.URL + "/"
 	e.Raw = common.NewRawClient(srv.Client(), srv.URL+"/")
 
@@ -853,12 +853,12 @@ func TestRunImportScanHistory(t *testing.T) {
 	})
 	w.WriteOne(b)
 
-	err := runImportScanHistory(context.Background(), e)
+	err := runImportProjectData(context.Background(), e)
 	if err != nil {
-		t.Fatalf("runImportScanHistory: %v", err)
+		t.Fatalf("runImportProjectData: %v", err)
 	}
 
-	items, _ := e.Store.ReadAll("importScanHistory")
+	items, _ := e.Store.ReadAll("importProjectData")
 	if len(items) == 0 {
 		t.Fatal("expected import results written")
 	}
@@ -868,10 +868,10 @@ func TestRunImportScanHistory(t *testing.T) {
 	}
 }
 
-func TestRunImportScanHistorySkipsEmptyKeys(t *testing.T) {
+func TestRunImportProjectDataSkipsEmptyKeys(t *testing.T) {
 	dir := t.TempDir()
-	setupScanHistoryExtract(t, dir)
-	e := newScanHistoryExecutor(t, dir)
+	setupProjectDataExtract(t, dir)
+	e := newProjectDataExecutor(t, dir)
 
 	// Write project with empty cloud key — should be skipped.
 	w, _ := e.Store.Writer("createProjects")
@@ -883,12 +883,12 @@ func TestRunImportScanHistorySkipsEmptyKeys(t *testing.T) {
 	})
 	w.WriteOne(b)
 
-	err := runImportScanHistory(context.Background(), e)
+	err := runImportProjectData(context.Background(), e)
 	if err != nil {
-		t.Fatalf("runImportScanHistory: %v", err)
+		t.Fatalf("runImportProjectData: %v", err)
 	}
 
-	items, _ := e.Store.ReadAll("importScanHistory")
+	items, _ := e.Store.ReadAll("importProjectData")
 	if len(items) != 0 {
 		t.Errorf("expected 0 results for empty keys, got %d", len(items))
 	}
@@ -1005,7 +1005,7 @@ func TestMatchesAnyGlob(t *testing.T) {
 func TestLoadCompletedBranches(t *testing.T) {
 	dir := t.TempDir()
 	store := common.NewDataStore(dir)
-	w, _ := store.Writer("importScanHistory")
+	w, _ := store.Writer("importProjectData")
 
 	for _, rec := range []map[string]any{
 		{"cloud_project_key": "proj1", "branch": "main", "status": "success"},
@@ -1075,16 +1075,16 @@ func newCEFailMockServer() *httptest.Server {
 
 func TestImportProjectBranchesMainCEFailAborts(t *testing.T) {
 	dir := t.TempDir()
-	setupScanHistoryExtract(t, dir)
+	setupProjectDataExtract(t, dir)
 
 	srv := newCEFailMockServer()
 	defer srv.Close()
 
-	e := newScanHistoryExecutor(t, dir)
+	e := newProjectDataExecutor(t, dir)
 	e.CloudURL = srv.URL + "/"
 	e.Raw = common.NewRawClient(srv.Client(), srv.URL+"/")
 
-	w, _ := e.Store.Writer("importScanHistory")
+	w, _ := e.Store.Writer("importProjectData")
 	proj, _ := json.Marshal(map[string]any{
 		"key":                "proj1",
 		"cloud_project_key":  "cloud-proj1",
@@ -1102,7 +1102,7 @@ func TestImportProjectBranchesMainCEFailAborts(t *testing.T) {
 		t.Fatal("expected error when main branch CE fails")
 	}
 
-	items, _ := e.Store.ReadAll("importScanHistory")
+	items, _ := e.Store.ReadAll("importProjectData")
 	if len(items) < 2 {
 		t.Fatalf("expected at least 2 results (main=failed, develop=skipped), got %d", len(items))
 	}
@@ -1128,7 +1128,7 @@ func TestImportProjectBranchesMainCEFailAborts(t *testing.T) {
 
 func TestImportProjectBranchesMainFirst(t *testing.T) {
 	dir := t.TempDir()
-	setupScanHistoryExtract(t, dir)
+	setupProjectDataExtract(t, dir)
 
 	var submitOrder []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1150,11 +1150,11 @@ func TestImportProjectBranchesMainFirst(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	e := newScanHistoryExecutor(t, dir)
+	e := newProjectDataExecutor(t, dir)
 	e.CloudURL = srv.URL + "/"
 	e.Raw = common.NewRawClient(srv.Client(), srv.URL+"/")
 
-	w, _ := e.Store.Writer("importScanHistory")
+	w, _ := e.Store.Writer("importProjectData")
 	proj, _ := json.Marshal(map[string]any{
 		"key":                "proj1",
 		"cloud_project_key":  "cloud-proj1",
@@ -1174,7 +1174,7 @@ func TestImportProjectBranchesMainFirst(t *testing.T) {
 		t.Fatalf("importProjectBranches: %v", err)
 	}
 
-	items, _ := e.Store.ReadAll("importScanHistory")
+	items, _ := e.Store.ReadAll("importProjectData")
 	if len(items) == 0 {
 		t.Fatal("expected results written")
 	}
@@ -1188,19 +1188,19 @@ func TestImportProjectBranchesMainFirst(t *testing.T) {
 
 func TestImportSkipsCompletedBranches(t *testing.T) {
 	dir := t.TempDir()
-	setupScanHistoryExtract(t, dir)
+	setupProjectDataExtract(t, dir)
 
 	srv := newCEMockServer()
 	defer srv.Close()
 
-	e := newScanHistoryExecutor(t, dir)
+	e := newProjectDataExecutor(t, dir)
 	e.CloudURL = srv.URL + "/"
 	e.Raw = common.NewRawClient(srv.Client(), srv.URL+"/")
 
 	// Pre-populate completed branches.
 	completed := map[string]bool{"cloud-proj1:main": true}
 
-	w, _ := e.Store.Writer("importScanHistory")
+	w, _ := e.Store.Writer("importProjectData")
 	proj, _ := json.Marshal(map[string]any{
 		"key":                "proj1",
 		"cloud_project_key":  "cloud-proj1",
@@ -1219,7 +1219,7 @@ func TestImportSkipsCompletedBranches(t *testing.T) {
 	}
 
 	// Main was skipped, so only develop should appear in results.
-	items, _ := e.Store.ReadAll("importScanHistory")
+	items, _ := e.Store.ReadAll("importProjectData")
 	for _, item := range items {
 		branch := extractField(item, "branch")
 		if branch == "main" {

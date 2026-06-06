@@ -349,7 +349,7 @@ func TestRunFreshStartFailsOnExtract(t *testing.T) {
 		URLResponses:      []string{testServerURLSlash},
 		PasswordResponses: []string{"token123"},
 		ReviewResponses:   []bool{true},
-		ConfirmResponses:  []bool{false, false, false}, // scan history: no, retry: no, restart: no
+		ConfirmResponses:  []bool{false, false, false}, // project data: no, retry: no, restart: no
 	}
 
 	err := Run(context.Background(), p, dir)

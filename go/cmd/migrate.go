@@ -58,9 +58,9 @@ func init() {
 	f.String("target_task", "", "Name of a specific migration task to complete")
 	f.Bool("skip_profiles", false, "Skip quality profile migration/provisioning in SonarQube Cloud")
 	f.Bool(flagSkipIssueSync, false, "Skip the final per-issue and per-hotspot metadata sync (#299). Same semantics as the skip_issue_sync config-file field — defaults to false (sync happens); pass the flag to skip.")
-	f.Bool(flagSkipProjectDataMigration, false, "Skip the entire project-data migration: importScanHistory and the trailing per-issue/per-hotspot sync (#303). Defaults to false (data is migrated); pass the flag to skip.")
+	f.Bool(flagSkipProjectDataMigration, false, "Skip the entire project-data migration: importProjectData and the trailing per-issue/per-hotspot sync (#303). Defaults to false (data is migrated); pass the flag to skip.")
 	f.String("default_organization", "", "SonarQube Cloud organization to migrate every project into when organizations.csv has no mapping defined. Ignored if any mapping is present.")
-	f.StringSlice("exclude_branches", nil, "Glob patterns for non-main branches to skip during scan history import (e.g. feature/*,bugfix/*)")
+	f.StringSlice("exclude_branches", nil, "Glob patterns for non-main branches to skip during project data import (e.g. feature/*,bugfix/*)")
 }
 
 func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfig, error) {
@@ -107,7 +107,7 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 		}
 	}
 	// --skip_project_data_migration is the wider opt-out: it covers
-	// importScanHistory AND the trailing sync pair. Same one-way
+	// importProjectData AND the trailing sync pair. Same one-way
 	// override semantics. #303.
 	if cmd.Flags().Changed(flagSkipProjectDataMigration) {
 		v, _ := cmd.Flags().GetBool(flagSkipProjectDataMigration)
@@ -129,10 +129,10 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	}
 
 	// Project-data migration is on by default; the only opt-out is
-	// SkipProjectDataMigration. Derive the internal IncludeScanHistory
-	// field so the planner's existing scan-history gate keeps working
+	// SkipProjectDataMigration. Derive the internal IncludeProjectData
+	// field so the planner's existing project-data gate keeps working
 	// without forcing every caller to set both fields.
-	cfg.IncludeScanHistory = !cfg.SkipProjectDataMigration
+	cfg.IncludeProjectData = !cfg.SkipProjectDataMigration
 
 	return cfg, nil
 }

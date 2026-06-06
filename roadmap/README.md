@@ -24,7 +24,7 @@ The end state: a single Go binary that performs **complete, lossless migration**
 | **Source Code** | **NOT migrated** | **Migrated via scanner protocol** |
 | **Measures/Metrics** | **NOT migrated** | **Full metric preservation** |
 | **SCM/Blame Data** | **NOT migrated** | **Full changeset migration** |
-| Scan History | Optional | Full protobuf report injection |
+| Project Data | Optional | Full protobuf report injection |
 | Issue Creation Dates | N/A | Accurate via changeset backdating |
 | >10K Issue Handling | N/A | Date-window bisection |
 | Multi-version Support | Single pipeline | 4 version-specific pipelines |

@@ -3,7 +3,7 @@
 // mailto:info AT sonarsource DOT com
 
 // Package scanreport builds and submits SonarScanner-compatible reports
-// to SonarCloud's Compute Engine for scan history migration.
+// to SonarCloud's Compute Engine for project data migration.
 package scanreport
 
 import (

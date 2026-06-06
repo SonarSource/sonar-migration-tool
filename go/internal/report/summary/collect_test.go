@@ -126,7 +126,7 @@ func TestCollectSummaryDedupesDuplicateCreates(t *testing.T) {
 	}
 }
 
-func TestCollectSummaryWithScanHistory(t *testing.T) {
+func TestCollectSummaryWithProjectData(t *testing.T) {
 	dir := t.TempDir()
 
 	writeTaskJSONL(t, dir, "createProjects", []map[string]any{
@@ -134,7 +134,7 @@ func TestCollectSummaryWithScanHistory(t *testing.T) {
 		{"name": "Proj2", "sonarcloud_org_key": "org1", "cloud_project_key": "org1_proj2"},
 	})
 
-	writeTaskJSONL(t, dir, "importScanHistory", []map[string]any{
+	writeTaskJSONL(t, dir, "importProjectData", []map[string]any{
 		{"cloud_project_key": "org1_proj1", "status": "success", "branch": "main"},
 		{"cloud_project_key": "org1_proj2", "status": "failed", "branch": "main", "error": "CE failed"},
 	})
@@ -149,7 +149,7 @@ func TestCollectSummaryWithScanHistory(t *testing.T) {
 		t.Fatal("missing Projects section")
 	}
 
-	// Check scan history is attached
+	// Check project data is attached
 	for _, item := range projSection.Succeeded {
 		if item.Name == "Proj1" {
 			if item.Detail != "org1_proj1|scan:success" {
@@ -216,13 +216,13 @@ func TestExtractRunID(t *testing.T) {
 	}
 }
 
-func TestParseScanHistory(t *testing.T) {
-	detail, status := parseScanHistory("org1_proj|scan:success")
+func TestParseProjectData(t *testing.T) {
+	detail, status := parseProjectData("org1_proj|scan:success")
 	if detail != "org1_proj" || status != "success" {
 		t.Errorf("got detail=%q status=%q", detail, status)
 	}
 
-	detail2, status2 := parseScanHistory("org1_proj")
+	detail2, status2 := parseProjectData("org1_proj")
 	if detail2 != "org1_proj" || status2 != "" {
 		t.Errorf("no scan: got detail=%q status=%q", detail2, status2)
 	}
@@ -1494,7 +1494,7 @@ func TestCollectSummaryRuntimeTelemetry(t *testing.T) {
 		},
 		"tasks": []map[string]any{
 			{"phase": 0, "name": "createProjects", "duration_seconds": 8.0, "ok": true},
-			{"phase": 1, "name": "importScanHistory", "duration_seconds": 70.0, "ok": false, "err": "CE task failed"},
+			{"phase": 1, "name": "importProjectData", "duration_seconds": 70.0, "ok": false, "err": "CE task failed"},
 			{"phase": 1, "name": "addGateConditions", "duration_seconds": 5.0, "ok": true},
 		},
 	})
@@ -1569,15 +1569,15 @@ func assertRuntimeMeta(t *testing.T, summary *MigrationSummary) {
 		t.Errorf("Phases must be slowest-first ('Phase 1' leads), got %+v", summary.Phases)
 	}
 
-	// Tasks: slowest-first; importScanHistory (70s, ok=false) leads.
+	// Tasks: slowest-first; importProjectData (70s, ok=false) leads.
 	if len(summary.Tasks) != 3 {
 		t.Fatalf("Tasks: want 3, got %d", len(summary.Tasks))
 	}
-	if summary.Tasks[0].Task != "importScanHistory" {
-		t.Errorf("Tasks must be slowest-first; want 'importScanHistory' first, got %q", summary.Tasks[0].Task)
+	if summary.Tasks[0].Task != "importProjectData" {
+		t.Errorf("Tasks must be slowest-first; want 'importProjectData' first, got %q", summary.Tasks[0].Task)
 	}
 	if summary.Tasks[0].OK {
-		t.Errorf("importScanHistory task should carry OK=false")
+		t.Errorf("importProjectData task should carry OK=false")
 	}
 }
 

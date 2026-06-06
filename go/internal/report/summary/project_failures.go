@@ -287,7 +287,7 @@ func applyProjectFailures(succeeded, nearPerfect, partial []EntityItem,
 // by the data-migration tasks and returns a synthetic []projectFailure
 // covering #228's orange criteria:
 //
-//   - importScanHistory rows with status != "success" → "Project data
+//   - importProjectData rows with status != "success" → "Project data
 //     migration was skipped" (one per affected branch is collapsed
 //     into a single row per project, listing the failed branches).
 //   - syncHotspotMetadata rows with skipped>0 / failed>0 / error!=""
@@ -297,8 +297,8 @@ func applyProjectFailures(succeeded, nearPerfect, partial []EntityItem,
 func collectProjectSyncSkips(store *common.DataStore) []projectFailure {
 	var out []projectFailure
 
-	// importScanHistory — one row per branch per project.
-	historyItems, _ := store.ReadAll("importScanHistory")
+	// importProjectData — one row per branch per project.
+	historyItems, _ := store.ReadAll("importProjectData")
 	byProject := make(map[string][]string)
 	for _, raw := range historyItems {
 		key := jsonStr(raw, "cloud_project_key")

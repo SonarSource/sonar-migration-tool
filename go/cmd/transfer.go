@@ -61,10 +61,10 @@ const (
 // gate/profile selection, rule tag/description updates, ALM bindings, and
 // migration-group provisioning.
 //
-// Scan history import plus issue and hotspot metadata sync are always
+// Project data import plus issue and hotspot metadata sync are always
 // included so every SonarQube issue (native and externally imported) and
 // every Security Hotspot is carried over with its triage state. restoreProfiles
-// and addGateConditions run before importScanHistory (the planner orders them
+// and addGateConditions run before importProjectData (the planner orders them
 // in an earlier phase) so the quality profiles and gate are fully configured
 // before the scan report is replayed and issues are reproduced.
 var transferTargetTasks = []string{
@@ -77,9 +77,9 @@ var transferTargetTasks = []string{
 	// Local quality-profile rule analysis (no API calls); feeds the PDF
 	// summary so profiles with rule-level caveats are reported accurately.
 	"analyzeProfileRules",
-	// Scan history import + issue/hotspot metadata (status, resolution,
+	// Project data import + issue/hotspot metadata (status, resolution,
 	// assignee, comments, tags) sync.
-	"importScanHistory", "syncIssueMetadata", "syncHotspotMetadata",
+	"importProjectData", "syncIssueMetadata", "syncHotspotMetadata",
 }
 
 var transferCmd = &cobra.Command{
@@ -98,7 +98,7 @@ entities such as portfolios, global settings, permission templates, and
 default gate/profile selection are not modified; use the migrate command for
 a full instance migration.
 
-Issue and hotspot scan history is always extracted and imported for transfer
+Issue and hotspot project data is always extracted and imported for transfer
 unless --skip_project_data_migration is passed.
 
 Example (flags):
@@ -156,13 +156,13 @@ func init() {
 	f.String(flagEnterpriseKey, "", scCloudName+" enterprise key (maps to target.enterprise_key, defaults to --"+flagDefaultOrg+")")
 	f.String(flagExportDir, "./migration-files/", "Working directory for intermediate files (maps to export_directory)")
 	f.Bool(flagSkipIssueSync, false, "Skip the final per-issue and per-hotspot metadata sync (#299). Same semantics as the skip_issue_sync config-file field — defaults to false (sync happens); pass the flag to skip.")
-	f.Bool(flagSkipProjectDataMigration, false, "Skip the entire project-data migration: importScanHistory and the trailing per-issue/per-hotspot sync (#303). Defaults to false (data is migrated); pass the flag to skip.")
+	f.Bool(flagSkipProjectDataMigration, false, "Skip the entire project-data migration: importProjectData and the trailing per-issue/per-hotspot sync (#303). Defaults to false (data is migrated); pass the flag to skip.")
 	f.Int(flagConcurrency, 0, "Max concurrent requests (default: 25) (maps to concurrency)")
 	f.Int(flagTimeout, 0, "HTTP request timeout in seconds (maps to timeout)")
 	f.String(flagPEMFilePath, "", "Path to client mTLS PEM file for the source server (maps to source.pem_file_path)")
 	f.String(flagKeyFilePath, "", "Path to client mTLS key file for the source server (maps to source.key_file_path)")
 	f.String(flagCertPassword, "", "Password for the source server mTLS client certificate (maps to source.cert_password)")
-	f.StringSlice(flagExcludeBranches, nil, "Glob patterns for non-main branches to skip during scan history import (e.g. feature/*,bugfix/*)")
+	f.StringSlice(flagExcludeBranches, nil, "Glob patterns for non-main branches to skip during project data import (e.g. feature/*,bugfix/*)")
 }
 
 // transferConfig holds the resolved configuration after merging file and flag values.
@@ -419,7 +419,7 @@ func runTransferExtract(ctx context.Context, cfg transferConfig) ([]string, erro
 		// downstream migrate phase can replay them. Only skipped when
 		// the operator opts out of project-data migration entirely
 		// via --skip_project_data_migration.
-		IncludeScanHistory: !cfg.skipProjectDataMigration,
+		IncludeProjectData: !cfg.skipProjectDataMigration,
 		Debug:              cfg.debug,
 	})
 	if err != nil {
@@ -460,7 +460,7 @@ func runTransferMigrate(ctx context.Context, cfg transferConfig) (string, error)
 		// its quality gate/profiles, permissions, and issue/hotspot history.
 		// Their dependencies are resolved automatically.
 		TargetTasks:              transferTargetTasks,
-		IncludeScanHistory:       !cfg.skipProjectDataMigration,
+		IncludeProjectData:       !cfg.skipProjectDataMigration,
 		SkipIssueSync:            cfg.skipIssueSync,
 		SkipProjectDataMigration: cfg.skipProjectDataMigration,
 		Debug:                    cfg.debug,

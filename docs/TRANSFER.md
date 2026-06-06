@@ -29,7 +29,7 @@ If any of these sound like you, jump to [MIGRATE.md](MIGRATE.md) instead:
 
 Behind the scenes, `transfer` runs the same four phases as the manual workflow, in order:
 
-1. **Extract** — connects to SonarQube Server and pulls the project's configuration **and its full issue/hotspot scan history** (scan history is always included for `transfer`).
+1. **Extract** — connects to SonarQube Server and pulls the project's configuration **and its full issue/hotspot project data** (project data is always included for `transfer`).
 2. **Structure** — assembles the extracted data into the project + org structure.
 3. **Mappings** — generates the per-entity mapping CSVs (gates, profiles, groups, templates, portfolios).
 4. **Migrate** — applies the **project-scoped** subset to SonarQube Cloud: it runs only the tasks needed for the project, its quality gate and profiles, its permissions, and its issue/hotspot history. Their dependencies are resolved automatically; global/instance-wide tasks are skipped.
@@ -49,7 +49,7 @@ On completion, a migration summary is written into the export directory as both 
 - The **quality gate** the project uses, with its conditions.
 - The **quality profiles** the project uses, with their rules restored (and any parent relationships).
 - The project's **permissions** (group permissions), **settings**, **tags**, **links**, **webhooks**, and **new code period**.
-- The project's complete **issue history** — both native SonarQube issues and **externally imported issues** (from third-party analyzers) — replayed via scan-history import, with triage state (status, resolution, assignee, comments, tags) synced afterward.
+- The project's complete **issue history** — both native SonarQube issues and **externally imported issues** (from third-party analyzers) — replayed via project-data import, with triage state (status, resolution, assignee, comments, tags) synced afterward.
 - The project's **Security Hotspots**, with their review status and comments synced.
 
 **Not modified** (use the full [`migrate`](MIGRATE.md) command for these):
@@ -66,7 +66,7 @@ On completion, a migration summary is written into the export directory as both 
 
 > **Note on issue counts.** The target issue count is normally lower than the SonarQube Server total because issues that are **CLOSED** or resolved as **FIXED** have no SonarQube Cloud counterpart and are intentionally skipped (the scanner report only recreates active findings). Open issues plus triaged ones (won't-fix / false-positive / accepted) and all externally-imported issues are migrated. Security Hotspots transfer in full.
 
-> **Non-main branches.** Scan-history import now migrates the project's **non-main branches too** — each is created on SonarQube Cloud as a **long-lived branch with its full issue history**. Before submitting a non-main branch's report, the tool performs SonarQube Cloud's **"Create analysis" handshake** (`POST {api-host}/analysis/analyses`) to register the branch and obtain an analysis id, which it embeds in the report so the Compute Engine binds the issues to the branch. All migrated branches are registered as **long-lived** so SonarQube Cloud's automatic pruning of short-lived branches (after ~30 days) never discards migrated history. A non-main branch is **skipped** only when the source server no longer has its source code (e.g. purged by housekeeping for an inactive branch) — re-analyze that branch on the source first to restore it. See [CLOUDVOYAGER-DELTA.md](CLOUDVOYAGER-DELTA.md) (BUG-17) for the investigation.
+> **Non-main branches.** Project-data import now migrates the project's **non-main branches too** — each is created on SonarQube Cloud as a **long-lived branch with its full issue history**. Before submitting a non-main branch's report, the tool performs SonarQube Cloud's **"Create analysis" handshake** (`POST {api-host}/analysis/analyses`) to register the branch and obtain an analysis id, which it embeds in the report so the Compute Engine binds the issues to the branch. All migrated branches are registered as **long-lived** so SonarQube Cloud's automatic pruning of short-lived branches (after ~30 days) never discards migrated history. A non-main branch is **skipped** only when the source server no longer has its source code (e.g. purged by housekeeping for an inactive branch) — re-analyze that branch on the source first to restore it. See [CLOUDVOYAGER-DELTA.md](CLOUDVOYAGER-DELTA.md) (BUG-17) for the investigation.
 
 ---
 
@@ -165,8 +165,8 @@ Omit `--project_key` to transfer **every** project visible to the token (in whic
 | `--pem_file_path` | `source.pem_file_path` | Client mTLS PEM file for the source server |
 | `--key_file_path` | `source.key_file_path` | Client mTLS key file for the source server |
 | `--cert_password` | `source.cert_password` | Password for the source server mTLS client certificate |
-| `--skip_project_data_migration` | top-level `skip_project_data_migration` | Skip the project-data migration (importScanHistory + per-issue / per-hotspot sync). Defaults to off — scan history is migrated by default. Issue #303. |
-| `--exclude_branches` | `target.exclude_branches` | Glob patterns for non-main branches to skip during scan history import. Repeatable. Main branch is never excluded. |
+| `--skip_project_data_migration` | top-level `skip_project_data_migration` | Skip the project-data migration (importProjectData + per-issue / per-hotspot sync). Defaults to off — project data is migrated by default. Issue #303. |
+| `--exclude_branches` | `target.exclude_branches` | Glob patterns for non-main branches to skip during project data import. Repeatable. Main branch is never excluded. |
 
 CLI flags override values from the config file when both are provided.
 
@@ -191,7 +191,7 @@ For a full description of every output file, see the [Output Files Reference](MI
 
 1. Log in to SonarQube Cloud and confirm the project appears under the target organization.
 2. Spot-check that the quality gate and quality profile are present.
-3. Spot-check that issues and hotspots came across (compare counts against the source). Scan history is always imported, so a fresh re-scan is not required to seed historical data — though you should still run a normal analysis once your pipeline is repointed.
+3. Spot-check that issues and hotspots came across (compare counts against the source). Project data is always imported, so a fresh re-scan is not required to seed historical data — though you should still run a normal analysis once your pipeline is repointed.
 4. Update your CI/CD pipeline to point at SonarQube Cloud (`SONAR_TOKEN`, `SONAR_HOST_URL`).
 
 For more on post-migration steps, see the [After you migrate](MIGRATE.md#after-you-migrate) section in MIGRATE.md.

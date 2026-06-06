@@ -19,10 +19,10 @@ import (
 // ACCEPTED value.
 var issueStatusesRename = common.MustParseVersion("10.4")
 
-// scanHistoryTasks returns extract tasks needed for scan history migration.
+// projectDataTasks returns extract tasks needed for project data migration.
 // These tasks extract full issue data, component trees, source code, and SCM
 // blame data — all per-project, per-branch.
-func scanHistoryTasks() []TaskDef {
+func projectDataTasks() []TaskDef {
 	return []TaskDef{
 		{
 			Name:         "getProjectIssuesFull",

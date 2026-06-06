@@ -39,9 +39,9 @@ type MigrateConfig struct {
 	TargetTasks []string
 
 	SkipProfiles             bool
-	IncludeScanHistory       bool
+	IncludeProjectData       bool
 	SkipIssueSync            bool // Skip the final issue / hotspot metadata sync (#299).
-	SkipProjectDataMigration bool // Skip importScanHistory + the trailing sync tasks (#303).
+	SkipProjectDataMigration bool // Skip importProjectData + the trailing sync tasks (#303).
 	Debug                    bool // Enable slog.LevelDebug + verbose request payload logs
 
 	// DefaultOrganization, when set, is used as the SonarCloud org for
@@ -51,7 +51,7 @@ type MigrateConfig struct {
 	DefaultOrganization string
 
 	// ExcludeBranches holds glob patterns for non-main branches to skip
-	// during scan history import. Main branch is never excluded.
+	// during project data import. Main branch is never excluded.
 	ExcludeBranches []string
 }
 
@@ -194,13 +194,13 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 	registry := BuildMigrateRegistry(allDefs)
 	registry = FilterByEdition(registry, edition)
 
-	// Project-data migration covers importScanHistory + the trailing
+	// Project-data migration covers importProjectData + the trailing
 	// issue/hotspot sync pair. Skipping it necessarily skips the
 	// sync as well — propagate the flag so the existing SkipIssueSync
 	// logging surfaces both halves of the decision. #303.
 	if cfg.SkipProjectDataMigration {
 		cfg.SkipIssueSync = true
-		logger.Info("project data migration disabled: skipping importScanHistory")
+		logger.Info("project data migration disabled: skipping importProjectData")
 		logger.Info("project data migration disabled: issue + hotspot sync also skipped")
 	}
 
@@ -213,7 +213,7 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 		logger.Info("issue-sync disabled: skipping syncHotspotMetadata")
 	}
 
-	targets := MigrateTargetTasks(registry, cfg.TargetTask, cfg.SkipProfiles, cfg.IncludeScanHistory, cfg.SkipIssueSync, cfg.SkipProjectDataMigration, cfg.TargetTasks)
+	targets := MigrateTargetTasks(registry, cfg.TargetTask, cfg.SkipProfiles, cfg.IncludeProjectData, cfg.SkipIssueSync, cfg.SkipProjectDataMigration, cfg.TargetTasks)
 	taskSet := ResolveDependencies(targets, registry)
 	if taskSet == nil {
 		return "", fmt.Errorf("cannot resolve dependencies for target tasks")

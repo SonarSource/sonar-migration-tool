@@ -136,7 +136,7 @@ func RenderPDF(summary *MigrationSummary) ([]byte, error) {
 	renderBottlenecks(pdf, summary)
 	renderFailureLedger(pdf, summary)
 	renderWarningsLedger(pdf, summary)
-	renderBranchScanHistory(pdf, summary)
+	renderBranchProjectData(pdf, summary)
 
 	var buf bytes.Buffer
 	if err := pdf.Output(&buf); err != nil {
@@ -1139,7 +1139,7 @@ const (
 //   - |ncdFallback:<sqs_type> — issue #135, the SQS NCD type wasn't
 //     supported at SonarCloud project scope; the project fell back
 //     to the org default.
-//   - |scan:<status> — issue #208 era, scan-history import outcome.
+//   - |scan:<status> — issue #208 era, project-data import outcome.
 //
 // Both markers are split off and rendered on separate lines after
 // the cloud key. When predictive is true (#240) the SYNTHETIC
@@ -1171,7 +1171,7 @@ func successDetails(item EntityItem, predictive, hideCloudKey, labelProjectKey b
 			ncdFallback))
 	}
 	if scan != "" {
-		parts = append(parts, fmt.Sprintf("scan history: %s", scanStatusLabel(scan)))
+		parts = append(parts, fmt.Sprintf("project data: %s", scanStatusLabel(scan)))
 	}
 	return strings.Join(parts, "\n")
 }
@@ -1187,7 +1187,7 @@ func successDetails(item EntityItem, predictive, hideCloudKey, labelProjectKey b
 // project cloud key is rendered as "New Project Key: <key>" with the
 // key bold.
 func partialDetails(item EntityItem, predictive, hideCloudKey, labelProjectKey bool) string {
-	// Reuse successDetails for the cloud-key / NCD-fallback / scan-history
+	// Reuse successDetails for the cloud-key / NCD-fallback / project-data
 	// header so the |scan: and |ncdFallback: markers are split off and
 	// rendered on their own lines (exactly like Succeeded rows), instead
 	// of leaving the raw marker embedded inside the bolded project key.
@@ -1288,7 +1288,7 @@ func renderTableHeader(pdf *fpdf.Fpdf, headers []string, widths []float64) {
 	pdf.Ln(-1)
 }
 
-func parseScanHistory(detail string) (string, string) {
+func parseProjectData(detail string) (string, string) {
 	idx := strings.Index(detail, "|scan:")
 	if idx < 0 {
 		return detail, ""
@@ -1297,7 +1297,7 @@ func parseScanHistory(detail string) (string, string) {
 }
 
 // parseProjectDetailMarkers splits a project's Detail string into its
-// three parts: the cloud key, the scan-history status (or empty),
+// three parts: the cloud key, the project-data status (or empty),
 // and the NCD fallback source type (or empty). Marker ordering set
 // by attachNCDFallback puts the NCD marker BEFORE the scan marker.
 func parseProjectDetailMarkers(detail string) (cloudKey, scan, ncdFallback string) {
@@ -1756,15 +1756,15 @@ func renderWarningsLedger(pdf *fpdf.Fpdf, summary *MigrationSummary) {
 		remapRows)
 }
 
-// renderBranchScanHistory renders the "Branch scan history" section: one
+// renderBranchProjectData renders the "Branch project data" section: one
 // table summarising every branch's packaging / submission stats. The Skip
 // Reason column is the only wide column and wraps. No-op when there are no
 // branches.
-func renderBranchScanHistory(pdf *fpdf.Fpdf, summary *MigrationSummary) {
+func renderBranchProjectData(pdf *fpdf.Fpdf, summary *MigrationSummary) {
 	if len(summary.Branches) == 0 {
 		return
 	}
-	renderSectionHeading(pdf, "Branch scan history")
+	renderSectionHeading(pdf, "Branch project data")
 
 	rows := make([][]string, 0, len(summary.Branches))
 	for _, b := range summary.Branches {

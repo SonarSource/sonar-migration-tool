@@ -91,7 +91,7 @@ func TestProgressLoggerHonoursPerTaskInterval(t *testing.T) {
 		{"createGroups", 620, 200, 200, "createGroups 200/620 - 32%"},
 		{"getProfileBackups", 3800, 500, 500, "getProfileBackups 500/3800 - 13%"},
 		{"updateRuleTags", 79910, 1000, 1000, "updateRuleTags 1000/79910 - 1%"},
-		{"importScanHistory", 500, 20, 20, "importScanHistory 20/500 - 4%"},
+		{"importProjectData", 500, 20, 20, "importProjectData 20/500 - 4%"},
 		{"syncIssueMetadata", 123, 10, 10, "syncIssueMetadata 10/123 - 8%"},
 		{"syncHotspotMetadata", 42, 10, 10, "syncHotspotMetadata 10/42 - 23%"},
 	}

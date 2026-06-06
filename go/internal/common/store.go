@@ -65,7 +65,7 @@ func (ds *DataStore) ReadAll(taskName string) ([]json.RawMessage, error) {
 }
 
 // ReadJSONLFile reads a single JSONL file into a slice of raw JSON
-// messages. Lines are unbounded in length: scan-history extract
+// messages. Lines are unbounded in length: project-data extract
 // records embed full source files as a JSON string, and large
 // generated / minified sources routinely exceed the bufio.Scanner
 // default ceiling (and even the bumped 10 MB ceiling we used to

@@ -55,7 +55,7 @@ var taskSortSpecs = map[string]sortSpec{
 	"setDefaultTemplates":       {orgField: "sonarcloud_org_key", sortField: "name"},
 	"syncIssueMetadata":         {orgField: "sonarcloud_org_key", sortField: "cloud_project_key"},
 	"syncHotspotMetadata":       {orgField: "sonarcloud_org_key", sortField: "cloud_project_key"},
-	"importScanHistory":         {orgField: "sonarcloud_org_key", sortField: "cloud_project_key"},
+	"importProjectData":         {orgField: "sonarcloud_org_key", sortField: "cloud_project_key"},
 	// Enterprise-wide (no org bucketing).
 	"createPortfolios":    {sortField: "name"},
 	"configurePortfolios": {sortField: "name"},

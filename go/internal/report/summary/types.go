@@ -198,7 +198,7 @@ type EntityItem struct {
 	Name         string
 	Language     string // populated for Quality Profiles only; empty otherwise
 	Organization string
-	Detail       string   // cloud key for successes, scan history status, skip reason
+	Detail       string   // cloud key for successes, project data status, skip reason
 	ErrorMessage string   // failures only
 	SkipReason   string   // for skipped items: SkipReason* constants below
 	Issues       []string // for partial migrations: human-readable list of issues

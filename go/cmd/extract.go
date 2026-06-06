@@ -97,7 +97,7 @@ func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfi
 			cfg.SkipProjectDataMigration = true
 		}
 	}
-	cfg.IncludeScanHistory = !cfg.SkipProjectDataMigration
+	cfg.IncludeProjectData = !cfg.SkipProjectDataMigration
 	// --debug is a persistent flag on rootCmd; pick it up here so the
 	// SDK can install the HTTP request/response logger.
 	if cmd.Flags().Changed("debug") {

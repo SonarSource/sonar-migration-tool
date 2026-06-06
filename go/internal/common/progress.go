@@ -55,7 +55,7 @@ type ProgressLogger struct {
 // migrate, 6.0/s reset): 50 gives 8.4 s in reset versus 3.8 s in
 // migrate, the right trade.
 //
-// importScanHistory / syncIssueMetadata / syncHotspotMetadata were
+// importProjectData / syncIssueMetadata / syncHotspotMetadata were
 // not exercised by any reference run (project-data migration was
 // off). Their tunings are preserved from #311 / #326 / #300 where
 // per-project work was measured separately and known to be slow.
@@ -142,7 +142,7 @@ var ProgressLogInterval = map[string]int64{
 	"deleteProfiles":             10,
 	"deleteGroups":               10,
 	// Project-data migration tasks (see #311 / #326 / #300).
-	"importScanHistory":   20,
+	"importProjectData":   20,
 	"syncIssueMetadata":   10,
 	"syncHotspotMetadata": 10,
 }

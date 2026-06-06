@@ -32,15 +32,15 @@ type configFileShape struct {
 	RunID              string `json:"run_id"`
 	TargetTask         string `json:"target_task"`
 	SkipProfiles       bool   `json:"skip_profiles"`
-	IncludeScanHistory bool   `json:"include_scan_history"`
+	IncludeProjectData bool   `json:"include_project_data"`
 	// SkipIssueSync controls whether the final per-issue / per-hotspot
-	// metadata sync runs after scan-history is replayed (#299).
+	// metadata sync runs after project-data is replayed (#299).
 	// Defaults to false (sync happens); set to true (or on / yes) to
 	// skip the sync. Pointer + custom unmarshaller so we can
 	// distinguish "absent" from "explicit false".
 	SkipIssueSync *FlexibleBool `json:"skip_issue_sync"`
 	// SkipProjectDataMigration disables the entire project-data import:
-	// importScanHistory plus the trailing issue + hotspot syncs (#303).
+	// importProjectData plus the trailing issue + hotspot syncs (#303).
 	// Defaults to false (data is migrated). Setting true (or on/yes)
 	// implies SkipIssueSync — there's nothing to sync against. Same
 	// FlexibleBool semantics as skip_issue_sync.
@@ -207,7 +207,7 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			RunID:              s.RunID,
 			TargetTask:         s.TargetTask,
 			SkipProfiles:       s.SkipProfiles,
-			IncludeScanHistory: s.IncludeScanHistory,
+			IncludeProjectData: s.IncludeProjectData,
 			Debug:              s.Debug,
 			ExcludeBranches:    s.ExcludeBranches,
 		}

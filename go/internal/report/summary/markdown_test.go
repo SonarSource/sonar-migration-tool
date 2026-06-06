@@ -70,7 +70,7 @@ func fullySeededSummary() *MigrationSummary {
 		},
 		Tasks: []TaskTiming{
 			{Phase: 0, Task: "createProjects", Duration: 45 * time.Second, OK: true},
-			{Phase: 0, Task: "importScanHistory", Duration: 15 * time.Second, OK: false,
+			{Phase: 0, Task: "importProjectData", Duration: 15 * time.Second, OK: false,
 				Err: "CE task failed"},
 		},
 		Failures: []FailureRow{
@@ -159,14 +159,14 @@ func TestRenderMarkdownStructuralContract(t *testing.T) {
 
 	// Expected H2 headers — every major runtime/section header must be
 	// present given the fully-seeded summary above. ("## Warnings, Retries &
-	// Skips" is the Warnings H2; "## Branch Scan History" and "## Migration
+	// Skips" is the Warnings H2; "## Branch Project Data" and "## Migration
 	// Limitations" round out the runtime sections.)
 	wantHeaders := []string{
 		"## Executive Summary",
 		"## Bottlenecks",
 		"## Failure Ledger",
 		"## Warnings, Retries & Skips",
-		"## Branch Scan History",
+		"## Branch Project Data",
 	}
 	for _, h := range wantHeaders {
 		if !strings.Contains(got, h) {
@@ -191,7 +191,7 @@ func TestRenderMarkdownStructuralContract(t *testing.T) {
 	}
 
 	// Branch-skip reason must surface (in the Warnings branch-skip table and
-	// the Branch Scan History table).
+	// the Branch Project Data table).
 	if !strings.Contains(got, "source code not retrievable") {
 		t.Errorf("expected branch-skip reason in markdown output")
 	}

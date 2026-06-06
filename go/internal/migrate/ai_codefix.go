@@ -45,7 +45,7 @@ const (
 // aiCodeFixNearPerfectMarker is appended to outcome.Detail when the row
 // should land in the NearPerfect bucket rather than Succeeded. The
 // report collector strips it before display. Mirrors the existing
-// scan-history / NCD-fallback marker convention used for projects.
+// project-data / NCD-fallback marker convention used for projects.
 const aiCodeFixNearPerfectMarker = "|nearperfect"
 
 // AiCodeFixNearPerfectMarker is the exported alias so the predict and

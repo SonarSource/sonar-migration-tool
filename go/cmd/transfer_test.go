@@ -229,7 +229,7 @@ func TestValidateTransferConfig_MissingCredentials(t *testing.T) {
 // TestTransferTargetTasksResolveToProjectScopedPlan locks in the contract of
 // the project-scoped transfer task list: (a) every name is a real task,
 // (b) the leaves resolve to an acyclic plan, (c) the quality profiles' rules
-// and the gate's conditions are configured before scan history is imported
+// and the gate's conditions are configured before project data is imported
 // (so reproduced issues match) and metadata sync runs after the import, and
 // (d) dependency resolution does not drag in the global / instance-wide
 // entities transfer deliberately leaves untouched.
@@ -265,17 +265,17 @@ func TestTransferTargetTasksResolveToProjectScopedPlan(t *testing.T) {
 	// Issues/hotspots are reproduced by replaying the scan report, so the
 	// quality profiles' rules and the gate's conditions must be in place
 	// first; metadata sync needs the issues to already exist in Cloud.
-	assertRunsBefore(t, phaseOf, "restoreProfiles", "importScanHistory")
-	assertRunsBefore(t, phaseOf, "addGateConditions", "importScanHistory")
-	assertRunsBefore(t, phaseOf, "importScanHistory", "syncIssueMetadata")
-	assertRunsBefore(t, phaseOf, "importScanHistory", "syncHotspotMetadata")
+	assertRunsBefore(t, phaseOf, "restoreProfiles", "importProjectData")
+	assertRunsBefore(t, phaseOf, "addGateConditions", "importProjectData")
+	assertRunsBefore(t, phaseOf, "importProjectData", "syncIssueMetadata")
+	assertRunsBefore(t, phaseOf, "importProjectData", "syncHotspotMetadata")
 
 	// The project, its gate, its profiles, and its issue/hotspot history are
 	// all present.
 	assertAllInSet(t, taskSet, true, []string{
 		"createProjects", "createGates", "createProfiles",
 		"setProjectGates", "setProjectProfiles",
-		"importScanHistory", "syncIssueMetadata", "syncHotspotMetadata",
+		"importProjectData", "syncIssueMetadata", "syncHotspotMetadata",
 	})
 
 	// Project-scoped: these global / instance-wide tasks must NOT be pulled

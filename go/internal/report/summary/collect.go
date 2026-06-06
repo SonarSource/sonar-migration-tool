@@ -38,7 +38,7 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 		return nil, err
 	}
 
-	scanHistoryMap := collectScanHistory(store)
+	projectDataMap := collectProjectData(store)
 	ncdFallbackMap := collectNCDFallback(store)
 	ncdBranchOverrideSet := collectNCDBranchOverrides(store)
 	extractMapping, _ := structure.GetUniqueExtracts(exportDir)
@@ -47,7 +47,7 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 	for _, def := range sectionDefs {
 		section := collectSection(store, def, failuresByType, configFailures, exportDir, extractMapping)
 		if def.Name == "Projects" {
-			attachScanHistory(section.Succeeded, scanHistoryMap)
+			attachProjectData(section.Succeeded, projectDataMap)
 			section.Succeeded, section.Partial = applyNCDFallbackPartials(section.Succeeded, section.Partial, ncdFallbackMap)
 			section.Succeeded, section.Partial = applyNCDBranchOverridePartials(section.Succeeded, section.Partial, ncdBranchOverrideSet)
 			// #228 — per-project follow-up operations (tags, settings,
@@ -700,10 +700,10 @@ func collectFailed(failuresByType map[string][]analysis.ReportRow, def sectionDe
 	return result
 }
 
-// collectScanHistory reads importScanHistory JSONL and returns a map of
+// collectProjectData reads importProjectData JSONL and returns a map of
 // cloud_project_key -> status ("success", "failed", "skipped").
-func collectScanHistory(store *common.DataStore) map[string]string {
-	items, err := store.ReadAll("importScanHistory")
+func collectProjectData(store *common.DataStore) map[string]string {
+	items, err := store.ReadAll("importProjectData")
 	if err != nil || len(items) == 0 {
 		return nil
 	}
@@ -718,8 +718,8 @@ func collectScanHistory(store *common.DataStore) map[string]string {
 	return result
 }
 
-// attachScanHistory adds scan history status to project EntityItems.
-func attachScanHistory(projects []EntityItem, scanMap map[string]string) {
+// attachProjectData adds project data status to project EntityItems.
+func attachProjectData(projects []EntityItem, scanMap map[string]string) {
 	if scanMap == nil {
 		return
 	}

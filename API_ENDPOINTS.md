@@ -22,7 +22,7 @@ All SonarQube Server and SonarQube Cloud API endpoints used by this tool.
 |----------|---------------|-----------------|-------------------|--------|
 | `api/issues/search` | `types` | 25 Aug, 2023 | Deprecated. Use `impactSoftwareQualities` instead | USED in extract tasks |
 | `api/issues/search` | `severities` | 25 Aug, 2023 | Deprecated. Use `impactSeverities` instead | USED in extract tasks |
-| `api/issues/search` | `statuses` | 03 Jul, 2024 | Deprecated. Use `issueStatuses` instead | USED in scan history extract |
+| `api/issues/search` | `statuses` | 03 Jul, 2024 | Deprecated. Use `issueStatuses` instead | USED in project data extract |
 | `api/issues/search` | `resolutions` | 03 Jul, 2024 | Deprecated. Use `issueStatuses` instead | USED in extract tasks |
 | `api/user_tokens/search` | `login` | 2026-02-24 | Deprecated and ignored. Tokens are always listed for the authenticated user | USED in server/tokens.go |
 
@@ -245,9 +245,9 @@ Endpoints on `api.sonarcloud.io` for enterprise features. Implemented in `lib/sq
 
 ---
 
-## Scan History Import (Submit)
+## Project Data Import (Submit)
 
-Direct HTTP calls in `go/internal/scanreport/submit.go` for importing scan history.
+Direct HTTP calls in `go/internal/scanreport/submit.go` for importing project data.
 
 | Endpoint | Purpose | Parameters |
 |----------|---------|------------|

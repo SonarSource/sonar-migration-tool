@@ -412,10 +412,10 @@ func TestUnifiedRowDisplayNameWithLanguage(t *testing.T) {
 	}
 }
 
-func TestSuccessDetailsScanHistory(t *testing.T) {
+func TestSuccessDetailsProjectData(t *testing.T) {
 	got := successDetails(EntityItem{Detail: "proj1|scan:failed"}, false, false, false)
 	if !strings.Contains(got, "proj1") || !strings.Contains(got, "Failed") {
-		t.Errorf("expected scan history in details, got %q", got)
+		t.Errorf("expected project data in details, got %q", got)
 	}
 }
 
@@ -439,7 +439,7 @@ func TestSuccessDetailsLabelProjectKey(t *testing.T) {
 func TestPartialDetailsSplitsScanMarker(t *testing.T) {
 	// Regression: a Partial / NearPerfect project carrying a |scan: marker
 	// in its Detail must have the marker split off onto its own
-	// "scan history:" line (like Succeeded rows) so the inline-bold span
+	// "project data:" line (like Succeeded rows) so the inline-bold span
 	// around the cloud key stays balanced and the issue lines are kept.
 	// Previously the raw marker was embedded inside the bold key, which a
 	// downstream re-split (the Markdown renderer) truncated — dropping the
@@ -458,8 +458,8 @@ func TestPartialDetailsSplitsScanMarker(t *testing.T) {
 	if !strings.Contains(got, "New Project Key: "+inlineBoldStart+"proj1"+inlineBoldEnd) {
 		t.Errorf("expected labeled+bold cloud key, got %q", got)
 	}
-	if !strings.Contains(got, "scan history:") {
-		t.Errorf("expected scan-history line, got %q", got)
+	if !strings.Contains(got, "project data:") {
+		t.Errorf("expected project-data line, got %q", got)
 	}
 	if !strings.Contains(got, "per-branch NCD dropped") {
 		t.Errorf("expected issue line preserved, got %q", got)

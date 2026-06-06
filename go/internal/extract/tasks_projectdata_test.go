@@ -60,10 +60,10 @@ func TestBuildBranchMapShortFiltered(t *testing.T) {
 	}
 }
 
-func TestScanHistoryTasks(t *testing.T) {
-	tasks := scanHistoryTasks()
+func TestProjectDataTasks(t *testing.T) {
+	tasks := projectDataTasks()
 	if len(tasks) != 6 {
-		t.Fatalf("expected 6 scan history tasks, got %d", len(tasks))
+		t.Fatalf("expected 6 project data tasks, got %d", len(tasks))
 	}
 
 	names := map[string]bool{}

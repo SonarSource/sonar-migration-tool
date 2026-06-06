@@ -6,7 +6,7 @@
 
 ## Problem
 
-Scanner reports submitted to SonarQube Cloud contain **no measures data**. In `importBranch()` ([tasks_scanhistory.go:224](go/internal/migrate/tasks_scanhistory.go#L224)), the `Measures` field is always set to `make(map[int32][]*pb.Measure)` — an empty map. As a result, SonarQube Cloud has no file-level metric data from which to compute project-level aggregates (violations, complexity, ratings, etc.).
+Scanner reports submitted to SonarQube Cloud contain **no measures data**. In `importBranch()` ([tasks_projectdata.go:224](go/internal/migrate/tasks_projectdata.go#L224)), the `Measures` field is always set to `make(map[int32][]*pb.Measure)` — an empty map. As a result, SonarQube Cloud has no file-level metric data from which to compute project-level aggregates (violations, complexity, ratings, etc.).
 
 The full protobuf infrastructure is already built and tested — it just isn't wired up.
 
@@ -24,7 +24,7 @@ The full protobuf infrastructure is already built and tested — it just isn't w
 | ZIP packager | [packager.go:115-128](go/internal/scanreport/packager.go#L115-L128) | `addMeasures()` writes `measures-{ref}.pb` files, length-delimited |
 | ReportData struct | [packager.go:14-25](go/internal/scanreport/packager.go#L14-L25) | `Measures map[int32][]*pb.Measure` field exists |
 | Extract (project-level) | [tasks_projects.go:158-171](go/internal/extract/tasks_projects.go#L158-L171) | `projectMeasuresTask()` — fetches project-level measures (used for reporting only) |
-| Extract (component tree) | [extract/tasks_scanhistory.go:192-225](go/internal/extract/tasks_scanhistory.go#L192-L225) | `projectComponentTreeTask()` — fetches per-file components, but only requests `ncloc` |
+| Extract (component tree) | [extract/tasks_projectdata.go:192-225](go/internal/extract/tasks_projectdata.go#L192-L225) | `projectComponentTreeTask()` — fetches per-file components, but only requests `ncloc` |
 | Builder tests | [builder_test.go:135-172](go/internal/scanreport/builder_test.go#L135-L172) | Tests for `BuildMeasures` covering int/double/string/bool |
 
 ### The Gap
@@ -106,7 +106,7 @@ alert_status, quality_gate_details, executable_lines_data, ncloc_data, ncloc_lan
 
 ### Step 1: Expand extract metric keys
 
-**File:** [go/internal/extract/tasks_scanhistory.go](go/internal/extract/tasks_scanhistory.go)
+**File:** [go/internal/extract/tasks_projectdata.go](go/internal/extract/tasks_projectdata.go)
 
 Add a `componentMeasureMetricKeysFor(version common.Version) string` function (similar to the existing `measureMetricKeysFor()` in [tasks_projects.go:16-29](go/internal/extract/tasks_projects.go#L16-L29)) that returns the full metric key list above. Uses the same `acceptedIssuesRename` version boundary for `accepted_issues` vs `wont_fix_issues`.
 
@@ -171,9 +171,9 @@ func buildMeasureValue(metricKey, value string) *pb.Measure {
 
 ### Step 3: Add measures loader in migrate phase
 
-**File:** [go/internal/migrate/tasks_scanhistory.go](go/internal/migrate/tasks_scanhistory.go)
+**File:** [go/internal/migrate/tasks_projectdata.go](go/internal/migrate/tasks_projectdata.go)
 
-**3a.** Add `measureKeyValue` struct and `extractAllMeasures()` helper (mirrors the existing `extractMeasureInt32()` at [line 874](go/internal/migrate/tasks_scanhistory.go#L874) but returns ALL key-value pairs):
+**3a.** Add `measureKeyValue` struct and `extractAllMeasures()` helper (mirrors the existing `extractMeasureInt32()` at [line 874](go/internal/migrate/tasks_projectdata.go#L874) but returns ALL key-value pairs):
 
 ```go
 type measureKeyValue struct {
@@ -184,7 +184,7 @@ type measureKeyValue struct {
 func extractAllMeasures(data json.RawMessage) []measureKeyValue { ... }
 ```
 
-**3b.** Add `loadExtractedComponentMeasures()` — follows the exact pattern of `loadExtractedComponents()` at [line 542](go/internal/migrate/tasks_scanhistory.go#L542):
+**3b.** Add `loadExtractedComponentMeasures()` — follows the exact pattern of `loadExtractedComponents()` at [line 542](go/internal/migrate/tasks_projectdata.go#L542):
 
 ```go
 func loadExtractedComponentMeasures(e *Executor, serverURL, serverKey, branch string) []scanreport.MeasureInput {
@@ -200,7 +200,7 @@ This reads from the **same** extract store as `loadExtractedComponents()` — no
 
 ### Step 4: Wire measures into `importBranch()`
 
-**File:** [go/internal/migrate/tasks_scanhistory.go](go/internal/migrate/tasks_scanhistory.go)
+**File:** [go/internal/migrate/tasks_projectdata.go](go/internal/migrate/tasks_projectdata.go)
 
 Four surgical changes in `importBranch()`:
 
@@ -235,12 +235,12 @@ Measures: pbMeasures,
 - `LongValue` (integer outside int32 range, e.g. `"3000000000"`)
 - `isStringMetric()` (e.g. `ncloc_data` with value `"123"` → still StringValue)
 
-**5b. `tasks_scanhistory_test.go`** (migrate) — Add:
+**5b. `tasks_projectdata_test.go`** (migrate) — Add:
 - `TestExtractAllMeasures()` — JSON parsing of measures array
 - `TestLoadExtractedComponentMeasures()` — filtering by server/project/branch, conversion to `MeasureInput`
-- Update `setupScanHistoryExtract()` fixture to include measures in component tree records
+- Update `setupProjectDataExtract()` fixture to include measures in component tree records
 
-**5c. `tasks_scanhistory_test.go`** (extract) — Update:
+**5c. `tasks_projectdata_test.go`** (extract) — Update:
 - `TestProjectComponentTreeTask()` — verify expanded metric keys in mock HTTP request
 
 **5d. `tasks_projects_test.go`** or new test file — Add:
@@ -252,12 +252,12 @@ Measures: pbMeasures,
 
 | File | Change |
 |------|--------|
-| `go/internal/extract/tasks_scanhistory.go` | Add `componentMeasureMetricKeysFor()`, expand `projectComponentTreeTask()` metric keys |
+| `go/internal/extract/tasks_projectdata.go` | Add `componentMeasureMetricKeysFor()`, expand `projectComponentTreeTask()` metric keys |
 | `go/internal/scanreport/builder.go` | Add `isStringMetric()`, fix `buildMeasureValue()` for LongValue + string metrics |
-| `go/internal/migrate/tasks_scanhistory.go` | Add `measureKeyValue`, `extractAllMeasures()`, `loadExtractedComponentMeasures()`, wire into `importBranch()` |
+| `go/internal/migrate/tasks_projectdata.go` | Add `measureKeyValue`, `extractAllMeasures()`, `loadExtractedComponentMeasures()`, wire into `importBranch()` |
 | `go/internal/scanreport/builder_test.go` | Add LongValue and string metric test cases |
-| `go/internal/migrate/tasks_scanhistory_test.go` | Add measure loader tests, update fixtures |
-| `go/internal/extract/tasks_scanhistory_test.go` | Update component tree task test for expanded metric keys |
+| `go/internal/migrate/tasks_projectdata_test.go` | Add measure loader tests, update fixtures |
+| `go/internal/extract/tasks_projectdata_test.go` | Update component tree task test for expanded metric keys |
 
 ---
 
@@ -299,7 +299,7 @@ Step 3 (migrate loader) ───┘
 ## Verification
 
 1. Run `go test ./internal/scanreport/...` — builder tests pass including new LongValue/string metric cases
-2. Run `go test ./internal/migrate/...` — scan history tests pass including new measure loader tests
+2. Run `go test ./internal/migrate/...` — project data tests pass including new measure loader tests
 3. Run `go test ./internal/extract/...` — extract tests pass with expanded metric keys
 4. End-to-end: Run a full extract + migrate against a test SQ instance, verify the scanner report ZIP contains `measures-*.pb` files
 5. Verify on SonarQube Cloud: after migration, project dashboard shows correct metric values matching the source SQ instance

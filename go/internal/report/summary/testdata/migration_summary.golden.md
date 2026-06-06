@@ -35,7 +35,7 @@
 | Task | Phase | Duration | OK |
 |:---|:---|:---|:---|
 | createProjects | 0 | 45s | Yes |
-| importScanHistory | 0 | 15s | No |
+| importProjectData | 0 | 15s | No |
 
 ### Per-Branch CE
 | Branch | Type | Status | Task Id |
@@ -71,7 +71,7 @@
 |:---|:---|:---|
 | Backend QG | new_security_rating_with_aica | new_security_rating |
 
-## Branch Scan History
+## Branch Project Data
 | Branch | Type | Status | Issues | External Issues | Components | Active Rules | Zip Bytes | Task Id | Skip Reason |
 |:---|:---|:---|:---|:---|:---|:---|:---|:---|:---|
 | feature-x | LONG | skipped | 0 | 0 | 0 | 0 | 0 |  | skipping branch: source code not retrievable |

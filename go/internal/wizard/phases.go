@@ -102,7 +102,7 @@ func runExtractWithRetry(ctx context.Context, p Prompter, state *WizardState, ex
 			PEMFilePath:        cert.pemFile,
 			KeyFilePath:        cert.keyFile,
 			CertPassword:       cert.password,
-			IncludeScanHistory: true,
+			IncludeProjectData: true,
 		}
 
 		skipped, err := runExtractFn(ctx, cfg)
@@ -425,7 +425,7 @@ func runMigrateWithRetry(ctx context.Context, p Prompter, state *WizardState, ex
 			EnterpriseKey:      ptrStr(state.EnterpriseKey),
 			URL:                ptrStr(state.TargetURL),
 			ExportDirectory:    exportDir,
-			IncludeScanHistory: true,
+			IncludeProjectData: true,
 		}
 
 		resultID, err := runMigrateFn(ctx, cfg)

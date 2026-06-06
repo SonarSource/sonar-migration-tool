@@ -308,7 +308,7 @@ sonar-migration-tool reset <TOKEN> <ENTERPRISE_KEY> --export_directory ./files/
 
 1. Verify projects appear in SonarQube Cloud and are linked to repositories.
 2. Verify quality gates and profiles are correct.
-3. Re-scan all projects — unless scan history was imported, historical data does not transfer.
+3. Re-scan all projects — unless project data was imported, historical data does not transfer.
 4. Update CI/CD pipelines to point to SonarQube Cloud (`SONAR_TOKEN` and `SONAR_HOST_URL`).
 5. Generate a final report for the records:
    ```bash

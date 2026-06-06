@@ -20,36 +20,36 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-func scanHistoryTasks() []TaskDef {
+func projectDataTasks() []TaskDef {
 	return []TaskDef{
 		{
-			Name:         "importScanHistory",
+			Name:         "importProjectData",
 			Editions:     common.AllEditions,
 			Dependencies: []string{"createProjects", "setProjectProfiles"},
-			Run:          runImportScanHistory,
+			Run:          runImportProjectData,
 		},
 	}
 }
 
-func runImportScanHistory(ctx context.Context, e *Executor) error {
+func runImportProjectData(ctx context.Context, e *Executor) error {
 	projects, err := e.Store.ReadAll("createProjects")
 	if err != nil {
-		return fmt.Errorf("importScanHistory: reading createProjects: %w", err)
+		return fmt.Errorf("importProjectData: reading createProjects: %w", err)
 	}
 
 	// Process projects org-by-org, alphabetical within each org (#326),
 	// so the per-project log stream reflects predictable progress.
-	sortMigrateItems("importScanHistory", projects)
+	sortMigrateItems("importProjectData", projects)
 
-	w, err := e.Store.Writer("importScanHistory")
+	w, err := e.Store.Writer("importProjectData")
 	if err != nil {
 		return err
 	}
 
 	completed := loadCompletedBranches(e.Store)
 
-	e.Logger.Info("starting task", "task", "importScanHistory", "items", len(projects))
-	prog := common.NewProgressLogger(e.Logger, "importScanHistory", len(projects))
+	e.Logger.Info("starting task", "task", "importProjectData", "items", len(projects))
+	prog := common.NewProgressLogger(e.Logger, "importProjectData", len(projects))
 
 	g, gCtx := errgroup.WithContext(ctx)
 	g.SetLimit(cap(e.Sem))
@@ -64,7 +64,7 @@ func runImportScanHistory(ctx context.Context, e *Executor) error {
 			continue
 		}
 
-		e.Logger.Debug("importing scan history", "project", cloudKey)
+		e.Logger.Debug("importing project data", "project", cloudKey)
 
 		g.Go(func() error {
 			if gCtx.Err() != nil {
@@ -81,7 +81,7 @@ func runImportScanHistory(ctx context.Context, e *Executor) error {
 			scMainBranch := fetchSCMainBranch(gCtx, e, cloudKey)
 
 			if err := importProjectBranches(gCtx, e, proj, sqBranches, scMainBranch, completed, w); err != nil {
-				e.Logger.Warn("project scan history failed", "project", cloudKey, "err", err)
+				e.Logger.Warn("project project data failed", "project", cloudKey, "err", err)
 			}
 			prog.Increment()
 			return nil
@@ -109,7 +109,7 @@ func fetchSCMainBranch(ctx context.Context, e *Executor, cloudKey string) string
 	return ""
 }
 
-// importProjectBranches imports scan history for every branch of one project.
+// importProjectBranches imports project data for every branch of one project.
 // Main branch is imported first; if it fails, remaining branches are skipped.
 func importProjectBranches(ctx context.Context, e *Executor, proj json.RawMessage,
 	sqBranches []branchInfo, scMainBranch string, completed map[string]bool, w *common.ChunkWriter) error {
@@ -226,7 +226,7 @@ func importAndRecordBranch(ctx context.Context, e *Executor, bctx branchImportCo
 		IsMain:          branch.IsMain,
 	})
 	if err != nil {
-		logAPIWarn(e.Logger, "scan history import failed", err, "project", bctx.CloudKey, "branch", branch.Name)
+		logAPIWarn(e.Logger, "project data import failed", err, "project", bctx.CloudKey, "branch", branch.Name)
 		result = &importResult{Status: "failed", Error: err.Error()}
 	}
 	recordBranchResult(bctx.Writer, bctx.CloudKey, branch.Name, result)
@@ -566,7 +566,7 @@ func matchesAnyGlob(name string, patterns []string) bool {
 }
 
 func loadCompletedBranches(store *common.DataStore) map[string]bool {
-	items, err := store.ReadAll("importScanHistory")
+	items, err := store.ReadAll("importProjectData")
 	if err != nil || len(items) == 0 {
 		return nil
 	}
