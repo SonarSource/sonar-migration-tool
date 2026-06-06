@@ -188,11 +188,11 @@ func runDeleteProfiles(ctx context.Context, e *Executor) error {
 				logAPIWarn(e.Logger, "deleteProfiles: listing profiles failed", err, "org", orgKey)
 				return nil
 			}
-			e.Logger.Info("deleteProfiles: listed profiles",
+			e.Logger.Debug("deleteProfiles: listed profiles",
 				"org", orgKey, "count", len(profiles), "summary", summariseProfiles(profiles))
 			for _, p := range profiles {
 				if isBuiltInProfile(p) {
-					e.Logger.Info("deleteProfiles: keeping built-in profile",
+					e.Logger.Debug("deleteProfiles: keeping built-in profile",
 						"org", orgKey, "profile", p.Name, "language", p.Language)
 					continue
 				}
@@ -232,11 +232,11 @@ func runDeleteGates(ctx context.Context, e *Executor) error {
 				logAPIWarn(e.Logger, "deleteGates: listing gates failed", err, "org", orgKey)
 				return nil
 			}
-			e.Logger.Info("deleteGates: listed gates",
+			e.Logger.Debug("deleteGates: listed gates",
 				"org", orgKey, "count", len(gates), "summary", summariseGates(gates))
 			for _, g := range gates {
 				if isBuiltInGate(g) {
-					e.Logger.Info("deleteGates: keeping built-in gate",
+					e.Logger.Debug("deleteGates: keeping built-in gate",
 						"org", orgKey, "gate", g.Name, "gate_id", g.ID)
 					continue
 				}
@@ -420,7 +420,7 @@ func runResetDefaultProfiles(ctx context.Context, e *Executor) error {
 				logAPIWarn(e.Logger, "resetDefaultProfiles: listing profiles failed", err, "org", orgKey)
 				return nil
 			}
-			e.Logger.Info("resetDefaultProfiles: listed profiles",
+			e.Logger.Debug("resetDefaultProfiles: listed profiles",
 				"org", orgKey, "count", len(profiles), "summary", summariseProfiles(profiles))
 
 			// Languages whose current default is non-built-in.
@@ -496,7 +496,7 @@ func runResetDefaultGates(ctx context.Context, e *Executor) error {
 				logAPIWarn(e.Logger, "resetDefaultGates: listing gates failed", err, "org", orgKey)
 				return nil
 			}
-			e.Logger.Info("resetDefaultGates: listed gates",
+			e.Logger.Debug("resetDefaultGates: listed gates",
 				"org", orgKey, "count", len(gates), "summary", summariseGates(gates))
 
 			var builtIn *int

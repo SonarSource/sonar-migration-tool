@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -106,6 +107,70 @@ func TestForEachMigrateItem(t *testing.T) {
 	}
 	if count.Load() != 2 {
 		t.Errorf("expected 2 iterations, got %d", count.Load())
+	}
+}
+
+// Issue #338: forEachMigrateItemSerial must process items one at a
+// time. A barrier inside the per-item callback counts concurrent
+// callers and would record >1 if the helper accidentally fell back
+// to fan-out concurrency.
+func TestForEachMigrateItemSerial(t *testing.T) {
+	dir := t.TempDir()
+	store := common.NewDataStore(dir)
+
+	w, _ := store.Writer("dep")
+	w.WriteChunk([]json.RawMessage{
+		json.RawMessage(`{"key":"a"}`),
+		json.RawMessage(`{"key":"b"}`),
+		json.RawMessage(`{"key":"c"}`),
+		json.RawMessage(`{"key":"d"}`),
+		json.RawMessage(`{"key":"e"}`),
+	})
+
+	e := &Executor{
+		Store:  store,
+		Sem:    make(chan struct{}, 8),
+		Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+	}
+
+	var (
+		inFlight    atomic.Int32
+		maxInFlight atomic.Int32
+		order       []string
+		orderMu     sync.Mutex
+	)
+	err := forEachMigrateItemSerial(context.Background(), e, "test", "dep", nil,
+		func(_ context.Context, item json.RawMessage, _ *common.ChunkWriter) error {
+			n := inFlight.Add(1)
+			for {
+				cur := maxInFlight.Load()
+				if n <= cur || maxInFlight.CompareAndSwap(cur, n) {
+					break
+				}
+			}
+			// Hold long enough that any accidental concurrency would
+			// pile up in the gauge.
+			time.Sleep(5 * time.Millisecond)
+			orderMu.Lock()
+			order = append(order, extractField(item, "key"))
+			orderMu.Unlock()
+			inFlight.Add(-1)
+			return nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if maxInFlight.Load() != 1 {
+		t.Errorf("expected max in-flight = 1 (serial), got %d", maxInFlight.Load())
+	}
+	wantOrder := []string{"a", "b", "c", "d", "e"}
+	if len(order) != len(wantOrder) {
+		t.Fatalf("expected %d items processed, got %d (%v)", len(wantOrder), len(order), order)
+	}
+	for i, k := range wantOrder {
+		if order[i] != k {
+			t.Errorf("order[%d]: want %s, got %s (full: %v)", i, k, order[i], order)
+		}
 	}
 }
 

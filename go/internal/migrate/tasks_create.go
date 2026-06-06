@@ -124,7 +124,15 @@ func runCreateProjects(ctx context.Context, e *Executor) error {
 
 func runCreateProfiles(ctx context.Context, e *Executor) error {
 	counter := TaskCounterFromContext(ctx)
-	err := forEachMigrateItemFiltered(ctx, e, "createProfiles", "generateProfileMappings",
+	// Serial creation: SonarCloud QP creation is async at the API
+	// layer but enforces (org, name, language) uniqueness at the DB
+	// layer, so two concurrent POSTs racing on the same name can both
+	// succeed at the API and then crash the index. Profile counts are
+	// small (typically <30, 99% of runs <100) so the wall-clock cost
+	// of running serially is negligible. Issue #338.
+	e.Logger.Info("createProfiles: provisioning quality profiles one at a time " +
+		"(SonarCloud requires (org, name, language) uniqueness — see #338)")
+	err := forEachMigrateItemSerial(ctx, e, "createProfiles", "generateProfileMappings",
 		func(item json.RawMessage) bool {
 			lang := extractField(item, "language")
 			return !unsupportedLanguages[lang]
@@ -138,6 +146,7 @@ func runCreateProfiles(ctx context.Context, e *Executor) error {
 			lang := extractField(item, "language")
 
 			var profileKey string
+			var reusedExisting bool
 			prof, err := e.Cloud.QualityProfiles.Create(ctx, cloud.CreateProfileParams{
 				Name: name, Language: lang, Organization: orgKey,
 			})
@@ -155,10 +164,18 @@ func runCreateProfiles(ctx context.Context, e *Executor) error {
 					return nil
 				}
 				counter.Success()
+				reusedExisting = true
 			} else {
 				counter.Success()
 				profileKey = prof.Key
 			}
+
+			// Per-profile completion line — one per provisioned QP
+			// (#338). Helpful when the serial loop is slow enough to
+			// make the overall task's progress logger feel sparse.
+			e.Logger.Info("createProfiles: provisioned",
+				"name", name, "language", lang, "org", orgKey,
+				"cloud_profile_key", profileKey, "reused_existing", reusedExisting)
 
 			result := common.EnrichRaw(item, map[string]any{
 				"cloud_profile_key":  profileKey,

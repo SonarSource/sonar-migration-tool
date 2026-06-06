@@ -117,6 +117,31 @@ func forEachMigrateItemFiltered(ctx context.Context, e *Executor, taskName, depT
 	filterFn func(json.RawMessage) bool,
 	fn func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error) error {
 
+	return forEachMigrateItemImpl(ctx, e, taskName, depTask, filterFn, cap(e.Sem), fn)
+}
+
+// forEachMigrateItemSerial is forEachMigrateItemFiltered with concurrency
+// pinned to 1, so each item is fully processed before the next starts.
+// Used by createProfiles (#338): SonarCloud quality-profile creation is
+// asynchronous but the name must be unique, so two parallel POSTs for
+// the same (name, language) can both succeed at the API layer and then
+// fail the uniqueness check at the database layer. Serial processing
+// is cheap — typical migrations create <30 profiles.
+func forEachMigrateItemSerial(ctx context.Context, e *Executor, taskName, depTask string,
+	filterFn func(json.RawMessage) bool,
+	fn func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error) error {
+
+	return forEachMigrateItemImpl(ctx, e, taskName, depTask, filterFn, 1, fn)
+}
+
+// forEachMigrateItemImpl is the shared body that backs the concurrent
+// and serial migrate iterators. `concurrency` is the errgroup limit
+// (pass 1 to serialize, or cap(e.Sem) for the default fan-out).
+func forEachMigrateItemImpl(ctx context.Context, e *Executor, taskName, depTask string,
+	filterFn func(json.RawMessage) bool,
+	concurrency int,
+	fn func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error) error {
+
 	items, err := e.Store.ReadAll(depTask)
 	if err != nil {
 		return fmt.Errorf("%s: reading %s: %w", taskName, depTask, err)
@@ -143,7 +168,7 @@ func forEachMigrateItemFiltered(ctx context.Context, e *Executor, taskName, depT
 	}
 
 	g, ctx := errgroup.WithContext(ctx)
-	g.SetLimit(cap(e.Sem))
+	g.SetLimit(concurrency)
 	for _, item := range filtered {
 		g.Go(func() error {
 			if ctx.Err() != nil {

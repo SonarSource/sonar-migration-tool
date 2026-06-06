@@ -393,7 +393,10 @@ func TestRunSetGlobalSettingsFallsBackToProjectsOnOrgLevelRejection(t *testing.T
 	dir := t.TempDir()
 	e := newTestExecutor(cloudSrv, apiSrv, dir)
 	var logBuf bytes.Buffer
-	e.Logger = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// LevelDebug because the "key not settable at org level" log was
+	// demoted to Debug in this PR (per-key-per-org fires too often
+	// at normal verbosity).
+	e.Logger = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettings", []map[string]any{
 		{"key": "sonar.coverage.jacoco.xmlReportPaths", "values": []string{"**/jacoco*.xml"}},
@@ -438,7 +441,7 @@ func TestRunSetGlobalSettingsFallsBackToProjectsOnOrgLevelRejection(t *testing.T
 	}
 	logs := logBuf.String()
 	if !strings.Contains(logs, "key not settable at org level despite list_definitions claim") {
-		t.Errorf("expected Info log noting the SQC inconsistency, got:\n%s", logs)
+		t.Errorf("expected Debug log noting the SQC inconsistency, got:\n%s", logs)
 	}
 
 	// Output Outcome's Detail must use the new fan-out wording —
