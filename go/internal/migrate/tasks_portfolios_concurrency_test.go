@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
-	"sync/atomic"
 	"testing"
 )
 
@@ -23,14 +22,12 @@ import (
 // Guard the cache and the test passes.
 func TestResolveProjectBranchRefsConcurrent(t *testing.T) {
 	// Mock cloud endpoint that returns a deterministic branch UUID per
-	// project. Counts hits so we can verify the cache deduplicates
-	// (most) repeated lookups across goroutines.
-	var hits atomic.Int64
+	// project so the goroutines can validate they got back the right
+	// value end-to-end (the test of cache integrity under contention).
 	cloudMux := http.NewServeMux()
 	cloudMux.HandleFunc("GET /api/project_branches/list", func(w http.ResponseWriter, r *http.Request) {
-		hits.Add(1)
 		project := r.URL.Query().Get("project")
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 			"branches": []map[string]any{
 				{"name": "main", "isMain": true, "branchId": "uuid-" + project},
 			},
