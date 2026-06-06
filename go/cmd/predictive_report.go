@@ -6,7 +6,10 @@ package cmd
 
 import (
 	"fmt"
+	"log/slog"
+	"time"
 
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/extract"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/predict"
 	"github.com/spf13/cobra"
@@ -37,6 +40,8 @@ func init() {
 }
 
 func runPredictiveReport(cmd *cobra.Command, args []string) error {
+	defer common.LogCommandDuration(slog.Default(), "predictive-report", time.Now())
+
 	exportDir, err := resolvePredictiveReportExportDir(cmd)
 	if err != nil {
 		return err

@@ -6,8 +6,11 @@ package cmd
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
+	"time"
 
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/regtest"
 	"github.com/spf13/cobra"
 )
@@ -25,6 +28,8 @@ This is the automated equivalent of Phase 4 in the regression testing protocol.
 The stop condition is not "the tool ran without errors" — it is "EVERY piece of
 data from SonarQube Server exists and is correct in SonarCloud."`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		defer common.LogCommandDuration(slog.Default(), "regtest", time.Now())
+
 		cfg, err := buildRegtestConfig(cmd)
 		if err != nil {
 			return err

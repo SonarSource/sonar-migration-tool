@@ -6,7 +6,10 @@ package cmd
 
 import (
 	"fmt"
+	"log/slog"
+	"time"
 
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/extract"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/migrate"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
@@ -23,6 +26,8 @@ read from the same JSON config file the extract / migrate commands use
 via --config (issue #275). When --config defines exactly one SonarCloud
 organization, its key is pre-populated as sonarcloud_org_key.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		defer common.LogCommandDuration(slog.Default(), "structure", time.Now())
+
 		exportDir, err := resolveStructureExportDir(cmd)
 		if err != nil {
 			return err

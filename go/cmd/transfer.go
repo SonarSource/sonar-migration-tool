@@ -8,9 +8,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/extract"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/migrate"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/report/summary"
@@ -339,6 +342,11 @@ func validateTransferConfig(cfg transferConfig) error {
 }
 
 func runTransfer(cmd *cobra.Command, _ []string) error {
+	// End-of-command timing line (#311). The four wrapped sub-calls
+	// (extract / structure / mappings / migrate) each log their own
+	// "Command X" line; this one bookends the whole transfer.
+	defer common.LogCommandDuration(slog.Default(), "transfer", time.Now())
+
 	cfg, err := resolveTransferConfig(cmd)
 	if err != nil {
 		return err
