@@ -37,6 +37,10 @@ func runImportScanHistory(ctx context.Context, e *Executor) error {
 		return fmt.Errorf("importScanHistory: reading createProjects: %w", err)
 	}
 
+	// Process projects org-by-org, alphabetical within each org (#326),
+	// so the per-project log stream reflects predictable progress.
+	sortMigrateItems("importScanHistory", projects)
+
 	w, err := e.Store.Writer("importScanHistory")
 	if err != nil {
 		return err
@@ -44,10 +48,13 @@ func runImportScanHistory(ctx context.Context, e *Executor) error {
 
 	completed := loadCompletedBranches(e.Store)
 
+	e.Logger.Info("starting task", "task", "importScanHistory", "items", len(projects))
+	prog := newProgressLogger(e.Logger, "importScanHistory", len(projects))
+
 	g, gCtx := errgroup.WithContext(ctx)
 	g.SetLimit(cap(e.Sem))
 
-	for i, proj := range projects {
+	for _, proj := range projects {
 		cloudKey := extractField(proj, "cloud_project_key")
 		orgKey := extractField(proj, "sonarcloud_org_key")
 		serverURL := extractField(proj, "server_url")
@@ -57,7 +64,7 @@ func runImportScanHistory(ctx context.Context, e *Executor) error {
 			continue
 		}
 
-		e.Logger.Info("importing scan history", "project", cloudKey, "progress", fmt.Sprintf("%d/%d", i+1, len(projects)))
+		e.Logger.Debug("importing scan history", "project", cloudKey)
 
 		g.Go(func() error {
 			if gCtx.Err() != nil {
@@ -76,6 +83,7 @@ func runImportScanHistory(ctx context.Context, e *Executor) error {
 			if err := importProjectBranches(gCtx, e, proj, sqBranches, scMainBranch, completed, w); err != nil {
 				e.Logger.Warn("project scan history failed", "project", cloudKey, "err", err)
 			}
+			prog.Increment()
 			return nil
 		})
 	}
