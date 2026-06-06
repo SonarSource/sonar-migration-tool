@@ -494,7 +494,11 @@ func propagateGlobalsToProjects(ctx context.Context, e *Executor,
 				}
 				e.Logger.Debug("setProjectSettings: propagating SQS global to project",
 					"project", pm.CloudKey, "key", entry.key, "org", pm.OrgKey)
-				err := applySettingByDef(gctx, e, pm.CloudKey, pm.OrgKey, entry.raw, entry.key, entry.def, true)
+				// Retry through the SQC project-indexing window
+				// (#334). Same hazard as setGlobalSettings fan-out.
+				err := retryOnProjectNotFound(gctx, e.Logger, func() error {
+					return applySettingByDef(gctx, e, pm.CloudKey, pm.OrgKey, entry.raw, entry.key, entry.def, true)
+				}, "endpoint", "/api/settings/set", "project", pm.CloudKey, "org", pm.OrgKey, "setting_key", entry.key)
 				switch {
 				case errors.Is(err, errSettingEmpty):
 					return nil

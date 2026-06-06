@@ -75,7 +75,17 @@ func loadProjectScopedSettingDefinitionsForOrgs(ctx context.Context, e *Executor
 	}
 	out := make(map[string]map[string]types.SettingDefinition, len(probeByOrg))
 	for org, probe := range probeByOrg {
-		defs, err := e.Cloud.Settings.ListDefinitions(ctx, org, probe)
+		// SQC's project-scope list_definitions can 404 with "Project
+		// doesn't exist" for several seconds after createProjects
+		// returns — independent indexing lag (#334). Retry through
+		// that window so the probe succeeds on the freshly-created
+		// project.
+		var defs []types.SettingDefinition
+		err := retryOnProjectNotFound(ctx, e.Logger, func() error {
+			var inner error
+			defs, inner = e.Cloud.Settings.ListDefinitions(ctx, org, probe)
+			return inner
+		}, "endpoint", "/api/settings/list_definitions", "org", org, "probe_project", probe)
 		if err != nil {
 			logAPIWarn(e.Logger, taskName+": project-scope list_definitions failed", err, "org", org, "probe_project", probe)
 			out[org] = map[string]types.SettingDefinition{}

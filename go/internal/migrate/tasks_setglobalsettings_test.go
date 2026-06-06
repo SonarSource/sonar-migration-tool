@@ -646,6 +646,105 @@ func TestRunSetGlobalSettingsFanOutSkipsPerProjectOverrides(t *testing.T) {
 	}
 }
 
+// Issue #334: when SQC's settings endpoint hasn't finished indexing a
+// freshly-created project, POST /api/settings/set returns 404
+// "Project doesn't exist". The fan-out must retry through that
+// window and succeed instead of marking the project as failed.
+func TestRunSetGlobalSettingsFanOutRetriesIndexingNotFound(t *testing.T) {
+	shortenIndexingRetryTiming(t)
+
+	cloudMux := http.NewServeMux()
+
+	// Per-project state: each cloud_project_key gets `notFoundAttempts`
+	// 404s before its first 204. Tracks the total attempts seen so the
+	// test can assert "we retried, then succeeded".
+	const notFoundAttempts = 3
+	var (
+		mu              sync.Mutex
+		attemptsByProj  = map[string]int{}
+		successByProj   = map[string]int{}
+	)
+	cloudMux.HandleFunc("POST /api/settings/set", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		project := r.FormValue("component")
+		mu.Lock()
+		defer mu.Unlock()
+		if project == "" {
+			// Org-scope attempt — reject so the code falls back to
+			// per-project fan-out (the path under test).
+			http.Error(w, `{"errors":[{"msg":"Provided property can't be set at organization level: `+r.FormValue("key")+`"}]}`, http.StatusBadRequest)
+			return
+		}
+		attemptsByProj[project]++
+		if attemptsByProj[project] <= notFoundAttempts {
+			http.Error(w, `{"errors":[{"msg":"Project doesn't exist"}]}`, http.StatusNotFound)
+			return
+		}
+		successByProj[project]++
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mountSettingsDefinitionsScoped(cloudMux,
+		[]map[string]any{{"key": "sonar.coverage.jacoco.xmlReportPaths", "type": "STRING", "multiValues": true}},
+		[]map[string]any{{"key": "sonar.coverage.jacoco.xmlReportPaths", "type": "STRING", "multiValues": true}},
+	)
+	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	})
+	cloudSrv := httptest.NewServer(cloudMux)
+	defer cloudSrv.Close()
+
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+
+	dir := t.TempDir()
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	var logBuf bytes.Buffer
+	e.Logger = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettings", []map[string]any{
+		{"key": "sonar.coverage.jacoco.xmlReportPaths", "values": []string{"**/jacoco*.xml"}},
+	})
+	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
+		{"key": "sonar.coverage.jacoco.xmlReportPaths", "type": "STRING", "multiValues": true, "defaultValue": ""},
+	})
+	writeExtractMetaJSON(t, dir, "extract-01", testServerURL)
+	writeTaskJSONL(t, e, "generateOrganizationMappings", []map[string]any{
+		{"sonarcloud_org_key": "org1"},
+	})
+	pw, _ := e.Store.Writer("createProjects")
+	for _, key := range []string{"projA", "projB"} {
+		b, _ := json.Marshal(map[string]any{
+			"key": key, "server_url": testServerURL,
+			"sonarcloud_org_key": "org1", "cloud_project_key": "org1_" + key,
+		})
+		pw.WriteOne(b)
+	}
+
+	if err := runSetGlobalSettings(context.Background(), e); err != nil {
+		t.Fatalf("runSetGlobalSettings: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	// Both projects must end up succeeded after retries.
+	for _, proj := range []string{"org1_projA", "org1_projB"} {
+		if successByProj[proj] != 1 {
+			t.Errorf("project %s: expected exactly one final success, got %d (attempts=%d)",
+				proj, successByProj[proj], attemptsByProj[proj])
+		}
+		// Each project should have hit the endpoint notFoundAttempts+1 times
+		// (the 404 burst plus the successful 204).
+		if attemptsByProj[proj] != notFoundAttempts+1 {
+			t.Errorf("project %s: expected %d total attempts, got %d", proj, notFoundAttempts+1, attemptsByProj[proj])
+		}
+	}
+	// The retry must be silent — no "project fan-out failed" warn line
+	// should appear, since the eventual outcome was success.
+	if strings.Contains(logBuf.String(), "setGlobalSettings: project fan-out failed") {
+		t.Errorf("expected no fan-out failure warning after retry success, got:\n%s", logBuf.String())
+	}
+}
+
 // Customized PROPERTY_SET setting → sent via fieldValues= shape.
 func TestRunSetGlobalSettingsPropertySet(t *testing.T) {
 	hits, _ := runGlobalSettingsTest(t,
@@ -857,6 +956,12 @@ func TestRenderValueSummary(t *testing.T) {
 // to "failed" and the wording reflects what actually happened so the
 // operator isn't misled.
 func TestRunSetGlobalSettingsFanOutAllFailedRendersAsFailed(t *testing.T) {
+	// #334 retry treats "Project doesn't exist" as a transient
+	// indexing-lag signal and burns the full retry budget before
+	// surfacing the failure. Shorten it here — this test wants the
+	// permanent-failure path, not the retry path.
+	shortenIndexingRetryTiming(t)
+
 	cloudMux := http.NewServeMux()
 	cloudMux.HandleFunc("POST /api/settings/set", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
@@ -937,6 +1042,10 @@ func TestRunSetGlobalSettingsFanOutAllFailedRendersAsFailed(t *testing.T) {
 // bucket, and the Detail wording reflects the actual N/M counts
 // instead of falsely claiming "all projects".
 func TestRunSetGlobalSettingsFanOutPartialRendersAsPartial(t *testing.T) {
+	// See TestRunSetGlobalSettingsFanOutAllFailedRendersAsFailed for
+	// why the indexing-retry timing is shortened here (#334).
+	shortenIndexingRetryTiming(t)
+
 	cloudMux := http.NewServeMux()
 	var failProject = "org1_projA"
 	cloudMux.HandleFunc("POST /api/settings/set", func(w http.ResponseWriter, r *http.Request) {
