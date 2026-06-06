@@ -349,14 +349,30 @@ func forEachProjectBranch(ctx context.Context, e *Executor, taskName string,
 		return err
 	}
 
+	// Filter once to know how many projects we'll actually process —
+	// projects with no key or marked skipped (e.g. permissions denied
+	// earlier in the extract) don't count toward the progress total.
+	var keys []string
 	for _, proj := range projects {
 		projectKey := extractField(proj, "key")
 		if projectKey == "" || e.IsSkipped(projectKey) {
 			continue
 		}
+		keys = append(keys, projectKey)
+	}
+
+	// Progress is counted in projects, not project×branch pairs —
+	// branches per project are sequential (see iterateBranches) and
+	// typically singular, so projects is the right operator-visible
+	// denominator (#340).
+	e.Logger.Info("starting task", "task", taskName, "items", len(keys))
+	prog := common.NewProgressLogger(e.Logger, taskName, len(keys))
+
+	for _, projectKey := range keys {
 		if err := iterateBranches(ctx, e, w, taskName, projectKey, branchMap[projectKey], fn); err != nil {
 			return err
 		}
+		prog.Increment()
 	}
 	return nil
 }
