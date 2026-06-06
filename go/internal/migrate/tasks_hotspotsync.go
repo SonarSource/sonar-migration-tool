@@ -214,15 +214,19 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 	}
 
 	// Sync pairs concurrently with bounded parallelism, emitting a
-	// per-project "Hotspot sync: N/M - X%" line every 10 completions
-	// (#300). buildHotspotPairs already filters to the actionable
-	// set, so len(matchedPairs) is the right denominator. The shared
-	// runProjectSyncLoop handles the errgroup, the semaphore bound,
-	// and the progress logger.
+	// per-project "Project key <key> hotspot sync: N/M - X%" line
+	// every 10 completions (#300 / #348). The label includes the
+	// cloud project key so an operator tailing the log can
+	// disentangle the lines coming from concurrent projects' inner
+	// loops (#348). buildHotspotPairs already filters to the
+	// actionable set, so len(matchedPairs) is the right
+	// denominator. runProjectSyncLoop handles the errgroup, the
+	// semaphore bound, and the progress logger.
 	//
 	// matchedPairs is fully built BEFORE launching goroutines. Each goroutine
 	// operates on exactly ONE pair -- no cross-pair sharing, no race conditions.
-	runProjectSyncLoop(ctx, e, matchedPairs, "Hotspot sync:", 10,
+	label := "Project key " + input.CloudKey + " hotspot sync:"
+	runProjectSyncLoop(ctx, e, matchedPairs, label, 10,
 		func(gctx context.Context, pair hotspotPair) {
 			if err := syncOneHotspot(gctx, e, pair); err != nil {
 				counter.Fail()

@@ -92,8 +92,12 @@ func TestProgressLoggerHonoursPerTaskInterval(t *testing.T) {
 		{"getProfileBackups", 3800, 500, 500, "getProfileBackups 500/3800 - 13%"},
 		{"updateRuleTags", 79910, 1000, 1000, "updateRuleTags 1000/79910 - 1%"},
 		{"importProjectData", 500, 20, 20, "importProjectData 20/500 - 4%"},
-		{"syncIssueMetadata", 123, 10, 10, "syncIssueMetadata 10/123 - 8%"},
-		{"syncHotspotMetadata", 42, 10, 10, "syncHotspotMetadata 10/42 - 23%"},
+		// syncIssueMetadata / syncHotspotMetadata use a ProgressLogLabel
+		// override (#348) so the operator-visible log reads "Projects
+		// issue sync:" / "Projects hotspot sync:" instead of the
+		// camelCase task name.
+		{"syncIssueMetadata", 123, 10, 10, "Projects issue sync: 10/123 - 8%"},
+		{"syncHotspotMetadata", 42, 10, 10, "Projects hotspot sync: 10/42 - 23%"},
 	}
 	for _, c := range cases {
 		t.Run(c.task, func(t *testing.T) {
@@ -114,6 +118,34 @@ func TestProgressLoggerHonoursPerTaskInterval(t *testing.T) {
 				t.Errorf("want first log to contain %q, got: %s", c.wantFirstLine, buf.String())
 			}
 		})
+	}
+}
+
+// #348: NewProgressLogger uses ProgressLogLabel when the task name has
+// an override there, falling back to the raw task name otherwise. Verify
+// both branches at once: a task with an override (syncIssueMetadata),
+// and an unregistered task name (raw passthrough).
+func TestProgressLoggerHonoursLabelOverride(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	// Task with override.
+	prog := NewProgressLogger(logger, "syncIssueMetadata", 100)
+	for i := 0; i < 10; i++ {
+		prog.Increment()
+	}
+	if !strings.Contains(buf.String(), "Projects issue sync: 10/100 - 10%") {
+		t.Errorf("expected override label in log, got: %s", buf.String())
+	}
+
+	// Task without override — raw name comes through.
+	buf.Reset()
+	prog = NewProgressLogger(logger, "unregisteredTask", 100)
+	for i := 0; i < 20; i++ {
+		prog.Increment()
+	}
+	if !strings.Contains(buf.String(), "unregisteredTask 20/100 - 20%") {
+		t.Errorf("expected raw task name in log, got: %s", buf.String())
 	}
 }
 

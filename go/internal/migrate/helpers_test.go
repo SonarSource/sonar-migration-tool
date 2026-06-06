@@ -398,6 +398,28 @@ func TestRunProjectSyncLoop(t *testing.T) {
 		}
 	})
 
+	// Issue #348: the production caller (syncProjectIssues) builds
+	// the label as "Project key <cloudKey> issue sync:" so the
+	// operator can disentangle interleaved per-project lines when
+	// several projects sync in parallel.
+	t.Run("issue sync label carries project key (#348)", func(t *testing.T) {
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		e := &Executor{Sem: make(chan struct{}, 4), Logger: logger}
+
+		const cloudKey = "myorg_some_project_key"
+		label := "Project key " + cloudKey + " issue sync:"
+		items := make([]int, 20)
+		runProjectSyncLoop(context.Background(), e, items, label, 20,
+			func(_ context.Context, _ int) {})
+
+		out := buf.String()
+		want := "Project key myorg_some_project_key issue sync: 20/20 - 100%"
+		if !strings.Contains(out, want) {
+			t.Errorf("want log line %q, got:\n%s", want, out)
+		}
+	})
+
 	t.Run("hotspot sync cadence at every 10", func(t *testing.T) {
 		var buf bytes.Buffer
 		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))

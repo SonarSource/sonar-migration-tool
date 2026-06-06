@@ -147,18 +147,36 @@ var ProgressLogInterval = map[string]int64{
 	"syncHotspotMetadata": 10,
 }
 
+// ProgressLogLabel optionally renames the message label used by
+// NewProgressLogger. Tasks not in the map fall back to using the
+// task name as the label (no behaviour change for them). Lets the
+// log stream show ergonomic sentence-case labels instead of camelCase
+// task names — e.g. the syncIssueMetadata task progress reads
+// "Projects issue sync:" so operators tailing a busy run can tell
+// it apart from the per-project per-issue lines that include the
+// project key (#348).
+var ProgressLogLabel = map[string]string{
+	"syncIssueMetadata":   "Projects issue sync:",
+	"syncHotspotMetadata": "Projects hotspot sync:",
+}
+
 // NewProgressLogger creates a progress logger for the given task and
 // expected total. Uses the per-task entry in ProgressLogInterval when
 // present, else the 20-item default. Always caps interval at total so
 // the very last item still emits a "100%" line via the n==total
-// branch in Increment.
+// branch in Increment. The message label is the per-task entry in
+// ProgressLogLabel when present, else the raw task name (#348).
 func NewProgressLogger(logger *slog.Logger, task string, total int) *ProgressLogger {
 	// Default cadence is 20 items (#326 / #340).
 	interval := int64(20)
 	if explicit, ok := ProgressLogInterval[task]; ok && explicit > 0 {
 		interval = explicit
 	}
-	return &ProgressLogger{task: task, total: total, logger: logger, interval: capAtTotal(interval, total)}
+	label := task
+	if l, ok := ProgressLogLabel[task]; ok {
+		label = l
+	}
+	return &ProgressLogger{task: label, total: total, logger: logger, interval: capAtTotal(interval, total)}
 }
 
 // NewProgressLoggerWithInterval creates a ProgressLogger with an

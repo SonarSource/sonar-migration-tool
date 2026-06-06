@@ -364,16 +364,20 @@ func syncProjectIssues(ctx context.Context, e *Executor, cloudKey, orgKey, serve
 	)
 
 	// 6. Sync pairs with bounded concurrency, emitting a per-
-	// project "Issue sync: N/M - X%" line every 20 completions
-	// (#300). The shared runProjectSyncLoop handles the errgroup,
-	// the semaphore bound, and the progress logger.
+	// project "Project key <key> issue sync: N/M - X%" line every
+	// 20 completions (#300 / #348). The label includes the cloud
+	// project key so an operator tailing the log can disentangle
+	// the lines coming from concurrent projects' inner loops
+	// (issue #348). runProjectSyncLoop handles the errgroup, the
+	// semaphore bound, and the progress logger.
 	//
 	// RACE-CONDITION SAFETY:
 	//   - actionable slice is read-only during this phase.
 	//   - Each goroutine receives exactly ONE issuePair by value.
 	//   - counter uses atomic operations (existing pattern).
 	//   - No shared mutable state is accessed.
-	runProjectSyncLoop(ctx, e, actionable, "Issue sync:", 20,
+	label := "Project key " + cloudKey + " issue sync:"
+	runProjectSyncLoop(ctx, e, actionable, label, 20,
 		func(gctx context.Context, pair issuePair) {
 			syncOnePair(gctx, e, pair, counter)
 		})
