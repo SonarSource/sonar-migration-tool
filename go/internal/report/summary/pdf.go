@@ -602,19 +602,13 @@ func renderUnifiedTable(pdf *fpdf.Fpdf, section Section, predictive bool) {
 		// the real-migrate and predictive reports.
 		detailsFontSize := multiLineFontSize
 		pdf.SetFont(pdfFontFamilyBody, "", detailsFontSize)
-		// When the details carry inline bold markers (#167) the
-		// drawDetailsCell renderer does its own width-aware wrap that
-		// accounts for the regular-vs-bold glyph width difference.
-		// Use the same wrap here for the line count so the row height
-		// matches what gets drawn — pdf.SplitLines treats the markers
-		// as opaque glyphs and miscounts on long bold values (#302).
+		// Use the same width-aware wrap that drawDetailsCell uses at
+		// render time, so the row height matches the actual line
+		// count. wrapInlineBoldLines handles plain text and inline-
+		// bold spans uniformly, and crucially hard-breaks tokens
+		// wider than the cell (long SonarCloud project keys, #345).
 		const detailsCellPad = 1.0
-		var detailsLineCount int
-		if strings.Contains(detailsText, inlineBoldStart) {
-			detailsLineCount = len(wrapInlineBoldLines(pdf, detailsText, widths[detailsCol]-detailsCellPad, detailsFontSize))
-		} else {
-			detailsLineCount = len(pdf.SplitLines([]byte(detailsText), widths[detailsCol]))
-		}
+		detailsLineCount := len(wrapInlineBoldLines(pdf, detailsText, widths[detailsCol]-detailsCellPad, detailsFontSize))
 		pdf.SetFont(pdfFontFamilyBody, "", bodyFontSize)
 		if detailsLineCount < 1 {
 			detailsLineCount = 1
@@ -716,12 +710,13 @@ func renderUnifiedTable(pdf *fpdf.Fpdf, section Section, predictive bool) {
 }
 
 // drawDetailsCell renders the Details column for a unified-table row.
-// It supports inline bold markers (inlineBoldStart / inlineBoldEnd) by
-// drawing the cell border + fill manually via pdf.Rect and rendering
-// the text with width-aware wrapping (#302). When the text contains
-// no markers the function delegates to the regular drawWrappedCell,
-// preserving the existing wrap semantics for every section that
-// doesn't need inline bold.
+// It always wraps via wrapInlineBoldLines — that path's width-aware
+// wrap (#302) handles both inline-bold spans AND the hard-break-at-
+// runes fallback that long tokens need to stay inside the cell.
+// The previous no-marker shortcut delegated to gofpdf's
+// pdf.SplitLines, which only wraps at whitespace and let long
+// SonarCloud project keys in Failed / Skipped rows overflow into
+// the next row's first column (#345).
 //
 // Width-aware wrap matters because pdf.Write — the only fpdf helper
 // that lets us flip font style mid-line — wraps at the *page* right
@@ -729,10 +724,6 @@ func renderUnifiedTable(pdf *fpdf.Fpdf, section Section, predictive bool) {
 // otherwise overflow and "wrap" by continuing at the page's LEFT
 // margin, splashing into the next row's leftmost column (#302).
 func drawDetailsCell(pdf *fpdf.Fpdf, w, lineH float64, lineCount int, text string, fontSize float64) {
-	if !strings.Contains(text, inlineBoldStart) {
-		drawWrappedCell(pdf, w, lineH, lineCount, pdf.SplitLines([]byte(text), w))
-		return
-	}
 	x, y := pdf.GetXY()
 	rowH := lineH * float64(lineCount)
 	// Fill background + draw outer border in one Rect call. SetFillColor
@@ -899,9 +890,18 @@ func wrapOneLogicalLine(pdf *fpdf.Fpdf, segs []styledSeg, cellWidth, fontSize fl
 
 // writeInlineBoldLine renders one physical line's styled segments at
 // the cursor's current (x, y). Caller is responsible for positioning
-// the cursor (drawDetailsCell does this per line). The line is
-// guaranteed by wrapInlineBoldLines to fit within the cell, so
-// pdf.Write won't trigger its own (page-margin-based) wrap.
+// the cursor (drawDetailsCell does this per line).
+//
+// Each segment is drawn via pdf.CellFormat with its measured width.
+// Earlier versions used pdf.Write, which wraps at the *page* right
+// margin: on the Details column (the rightmost, whose right edge
+// hugs the page-right margin) a sub-millimetre rounding drift was
+// enough to trip Write's wrap and continue the bold key at the
+// page's *left* margin, splashing into the Name / Organization
+// columns of the same visual row (#345). CellFormat takes an
+// explicit width and never wraps, so the rendered glyphs stay
+// inside the cell even when the line lands flush against the
+// cellWidth that wrapInlineBoldLines measured.
 func writeInlineBoldLine(pdf *fpdf.Fpdf, segs []styledSeg, lineH, fontSize float64) {
 	for _, s := range segs {
 		if s.bold {
@@ -909,9 +909,11 @@ func writeInlineBoldLine(pdf *fpdf.Fpdf, segs []styledSeg, lineH, fontSize float
 		} else {
 			pdf.SetFont(pdfFontFamilyBody, "", fontSize)
 		}
-		if s.text != "" {
-			pdf.Write(lineH, s.text)
+		if s.text == "" {
+			continue
 		}
+		w := pdf.GetStringWidth(s.text)
+		pdf.CellFormat(w, lineH, s.text, "", 0, "L", false, 0, "")
 	}
 }
 
