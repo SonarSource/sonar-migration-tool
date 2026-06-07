@@ -244,14 +244,20 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 	}, nil
 }
 
-// filterActionableHotspotPairs returns pairs that need any work: REVIEWED status
-// sync, or any TO_REVIEW/REVIEWED pair that has source comments to migrate.
+// filterActionableHotspotPairs returns pairs that need any work (#350):
+// REVIEWED with a real review resolution (SAFE / ACKNOWLEDGED / FIXED),
+// OR any hotspot with source comments to migrate.
+//
+// Previously every REVIEWED hotspot was actionable, but a REVIEWED
+// status with no resolution carries no payload to sync — narrowing on
+// resolution drops those zero-work pairs before the per-pair fetch.
 func filterActionableHotspotPairs(pairs []hotspotPair) []hotspotPair {
 	var actionable []hotspotPair
 	for _, p := range pairs {
-		needsStatusSync := strings.ToUpper(p.source.Status) == "REVIEWED"
-		needsCommentSync := len(p.source.Comments) > 0
-		if needsStatusSync || needsCommentSync {
+		status := strings.ToUpper(p.source.Status)
+		resolution := strings.ToUpper(p.source.Resolution)
+		reviewed := status == "REVIEWED" && (resolution == "SAFE" || resolution == "ACKNOWLEDGED" || resolution == "FIXED")
+		if reviewed || len(p.source.Comments) > 0 {
 			actionable = append(actionable, p)
 		}
 	}

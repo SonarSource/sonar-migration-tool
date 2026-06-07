@@ -182,23 +182,34 @@ const metadataSyncTag = "metadata-synchronized"
 // hasManualChanges returns true when the source issue carries metadata
 // that should be propagated to Cloud — i.e. the issue was manually
 // triaged on the source server. Issues that have never been touched
-// (OPEN, no comments, no tags, no assignee) are skipped to avoid
-// unnecessary API calls.
+// are skipped to avoid unnecessary API calls.
+//
+// Triggers (per #350):
+//   - Triage state: status ACCEPTED, or resolution FALSE-POSITIVE / WONTFIX.
+//     CONFIRMED is intentionally excluded per the issue spec. WONTFIX is
+//     the legacy resolution that became ACCEPTED in MQR — kept here so
+//     older SQ servers and pre-MQR issues still match.
+//   - Custom tags.
+//   - Any comment on the issue.
+//
+// Assignee was previously a trigger but was dropped per the issue spec:
+// auto-assigned issues (e.g. via "default assignee") are common and
+// inflate the actionable set without carrying real triage signal.
+//
+// Manual-severity overrides are not detected here yet — they require a
+// rule-default comparison (issue.severity vs rule.severity in Std mode,
+// issue.impacts vs rule.impacts in MQR mode) and are slated for the
+// changelog/rule-join follow-up pass.
 func hasManualChanges(iss matchableIssue) bool {
-	// Non-migrated comments (we consider all source comments relevant).
-	if len(iss.Comments) > 0 {
+	status := strings.ToUpper(iss.Status)
+	resolution := strings.ToUpper(iss.Resolution)
+	if status == "ACCEPTED" || resolution == "FALSE-POSITIVE" || resolution == "WONTFIX" {
 		return true
 	}
-	// Tags.
 	if len(iss.Tags) > 0 {
 		return true
 	}
-	// Assignee.
-	if iss.Assignee != "" {
-		return true
-	}
-	// Non-OPEN status.
-	if strings.ToUpper(iss.Status) != "OPEN" {
+	if len(iss.Comments) > 0 {
 		return true
 	}
 	return false
