@@ -225,6 +225,13 @@ func applyProjectFailures(succeeded, nearPerfect, partial []EntityItem,
 		if f.Bucket > pp.worst {
 			pp.worst = f.Bucket
 		}
+		// Route-only failures (empty Operation) bubble the bucket but
+		// add nothing to Issues — used by #359 to push project-data-
+		// skipped projects into Partial without re-stating the reason
+		// (the |scan: marker already carries it as a head line).
+		if f.Operation == "" {
+			continue
+		}
 		if _, seen := pp.byOp[f.Operation]; !seen {
 			pp.opsOrder = append(pp.opsOrder, f.Operation)
 		}
@@ -288,58 +295,72 @@ func applyProjectFailures(succeeded, nearPerfect, partial []EntityItem,
 // covering #228's orange criteria plus #356's yellow criteria:
 //
 //   - importProjectData rows with status != "success" → Partial,
-//     "Project data migration was skipped" (one row per project,
-//     listing the failed branches).
+//     ROUTE-ONLY (empty Operation): the new |scan: marker attached by
+//     attachProjectData renders the operator-facing skip reason in the
+//     head, so this entry is solely for bucket routing (#359).
 //   - syncHotspotMetadata / syncIssueMetadata rows whose source-issue
 //     could not be resolved to a single cloud counterpart on the same
 //     line (line_mismatch > 0 || not_found > 0) → NearPerfect,
 //     "Issue sync had unresolved counterparts" /
-//     "Hotspot sync had unresolved counterparts".
+//     "Hotspot sync had unresolved counterparts" — but ONLY for
+//     projects whose data import succeeded (sync fidelity is moot when
+//     the import didn't happen, #359).
 //   - syncHotspotMetadata / syncIssueMetadata rows with error != ""
-//     → Partial, "<task> errored".
+//     → Partial, "<task> errored" — same gating: skipped when the
+//     project's data import was skipped or failed.
 //
-// The returned failures plug straight into applyProjectFailures.
-func collectProjectSyncSkips(store *common.DataStore) []projectFailure {
+// scanMap (the per-project data outcomes from collectProjectData) is
+// used to gate the sync-side failures.
+func collectProjectSyncSkips(store *common.DataStore, scanMap map[string]projectDataOutcome) []projectFailure {
+	dataSkipped := func(key string) bool {
+		o, ok := scanMap[key]
+		if !ok {
+			return false
+		}
+		return o.State == "skipped" || o.State == "failed"
+	}
+
 	var out []projectFailure
 
-	// importProjectData — one row per branch per project.
+	// importProjectData — one row per branch per project. Emit a
+	// route-only Partial failure (empty Operation/Detail) so the
+	// project lands in the Partial bucket without duplicating the
+	// |scan: marker's "Project data migration skipped: <reason>"
+	// head line into Issues.
+	seenSkipped := make(map[string]bool)
 	historyItems, _ := store.ReadAll("importProjectData")
-	byProject := make(map[string][]string)
 	for _, raw := range historyItems {
 		key := jsonStr(raw, "cloud_project_key")
 		status := jsonStr(raw, "status")
-		if key == "" || status == "success" {
+		if key == "" || status == "success" || seenSkipped[key] {
 			continue
 		}
-		branch := jsonStr(raw, "branch")
-		var detail string
-		switch {
-		case branch != "" && status != "":
-			detail = branch + " (" + status + ")"
-		case branch != "":
-			detail = branch
-		default:
-			detail = status
-		}
-		byProject[key] = append(byProject[key], detail)
-	}
-	for key, branches := range byProject {
+		seenSkipped[key] = true
 		out = append(out, projectFailure{
 			CloudProjectKey: key,
 			Bucket:          projectBucketPartial,
-			Operation:       "Project data migration was skipped",
-			Detail:          strings.Join(branches, ", "),
+			// Operation/Detail intentionally empty — see applyProjectFailures.
 		})
 	}
 
 	// Per-project issue / hotspot sync rows — Near perfect when b+c > 0,
-	// Partial when a fatal error was captured.
-	out = append(out, collectSyncOutcome(store, "syncIssueMetadata",
-		"Issue sync had unresolved counterparts",
-		"Issue sync errored")...)
-	out = append(out, collectSyncOutcome(store, "syncHotspotMetadata",
-		"Hotspot sync had unresolved counterparts",
-		"Hotspot sync errored")...)
+	// Partial when a fatal error was captured. Skip emission for projects
+	// whose data import was skipped or failed — there's nothing
+	// meaningful to say about sync fidelity in that case.
+	for _, f := range collectSyncOutcome(store, "syncIssueMetadata",
+		"Issue sync had unresolved counterparts", "Issue sync errored") {
+		if dataSkipped(f.CloudProjectKey) {
+			continue
+		}
+		out = append(out, f)
+	}
+	for _, f := range collectSyncOutcome(store, "syncHotspotMetadata",
+		"Hotspot sync had unresolved counterparts", "Hotspot sync errored") {
+		if dataSkipped(f.CloudProjectKey) {
+			continue
+		}
+		out = append(out, f)
+	}
 
 	return out
 }

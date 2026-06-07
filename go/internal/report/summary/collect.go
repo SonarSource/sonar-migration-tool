@@ -61,7 +61,7 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 			// project-data / hotspot-sync skip records (orange) read
 			// from the data-migration tasks' JSONL output.
 			projectFailures := collectProjectFailures(runDir)
-			projectFailures = append(projectFailures, collectProjectSyncSkips(store)...)
+			projectFailures = append(projectFailures, collectProjectSyncSkips(store, projectDataMap)...)
 			section.Succeeded, section.NearPerfect, section.Partial = applyProjectFailures(
 				section.Succeeded, section.NearPerfect, section.Partial, projectFailures)
 			// #356 — append a per-project "x/y issues synced (z%)"
