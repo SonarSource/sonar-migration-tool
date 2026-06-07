@@ -40,16 +40,27 @@ func issueMetadataSyncTasks() []TaskDef {
 // matchableIssue is a normalised issue representation used to pair source
 // (SQS extract) issues with their Cloud counterparts. The struct is
 // intentionally flat so that matching and filtering logic stays simple.
+//
+// Tags holds ONLY the user-added subset (issue.tags minus the rule's
+// default tags+sysTags). The raw /api/issues/search response folds
+// rule defaults into every issue's tags array, so the unsubtracted
+// list is useless as a "manual triage" signal — see ruleTagDefaults
+// (#352 follow-up).
+//
+// ManualSeverity mirrors the `manualSeverity` boolean on the SQ Server
+// API response: true means a user has explicitly overridden the issue's
+// severity vs the rule default.
 type matchableIssue struct {
-	Key        string
-	Rule       string
-	Component  string
-	Line       int
-	Status     string
-	Resolution string
-	Tags       []string
-	Comments   []issueComment
-	Assignee   string
+	Key            string
+	Rule           string
+	Component      string
+	Line           int
+	Status         string
+	Resolution     string
+	Tags           []string
+	Comments       []issueComment
+	Assignee       string
+	ManualSeverity bool
 }
 
 // issueComment is a normalised comment attached to a matchableIssue.
@@ -182,23 +193,36 @@ const metadataSyncTag = "metadata-synchronized"
 // hasManualChanges returns true when the source issue carries metadata
 // that should be propagated to Cloud — i.e. the issue was manually
 // triaged on the source server. Issues that have never been touched
-// (OPEN, no comments, no tags, no assignee) are skipped to avoid
-// unnecessary API calls.
+// are skipped to avoid unnecessary API calls.
+//
+// Triggers (per #350):
+//   - Triage state: status ACCEPTED / FALSE_POSITIVE (modern unified
+//     issueStatus enum, post-10.4), or legacy resolution FALSE-POSITIVE
+//     / WONTFIX. CONFIRMED is intentionally excluded per the issue spec.
+//   - manualSeverity == true on the API response — user has overridden
+//     the rule's default severity.
+//   - User-added tags (rule defaults already subtracted at load time).
+//   - Any comment on the issue.
+//
+// Assignee was previously a trigger but was dropped per the issue spec:
+// auto-assigned issues (e.g. via "default assignee") are common and
+// inflate the actionable set without carrying real triage signal.
 func hasManualChanges(iss matchableIssue) bool {
-	// Non-migrated comments (we consider all source comments relevant).
-	if len(iss.Comments) > 0 {
+	status := strings.ToUpper(iss.Status)
+	resolution := strings.ToUpper(iss.Resolution)
+	if status == "ACCEPTED" || status == "FALSE_POSITIVE" {
 		return true
 	}
-	// Tags.
+	if resolution == "FALSE-POSITIVE" || resolution == "WONTFIX" {
+		return true
+	}
+	if iss.ManualSeverity {
+		return true
+	}
 	if len(iss.Tags) > 0 {
 		return true
 	}
-	// Assignee.
-	if iss.Assignee != "" {
-		return true
-	}
-	// Non-OPEN status.
-	if strings.ToUpper(iss.Status) != "OPEN" {
+	if len(iss.Comments) > 0 {
 		return true
 	}
 	return false
@@ -271,8 +295,13 @@ func isExpectedTransitionError(err error) bool {
 // runSyncIssueMetadata iterates every migrated project and synchronises
 // the issue metadata (transitions, comments, tags) from the SQS extract
 // to the corresponding Cloud issues.
+//
+// Rule-default tags are indexed ONCE up front and shared across all
+// projects — the index is read-only after construction so it's safe
+// to fan out concurrently.
 func runSyncIssueMetadata(ctx context.Context, e *Executor) error {
 	counter := TaskCounterFromContext(ctx)
+	ruleDefaults := loadRuleTagDefaults(e)
 	err := forEachMigrateItem(ctx, e, "syncIssueMetadata", "createProjects",
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
 			cloudKey := extractField(item, "cloud_project_key")
@@ -282,7 +311,7 @@ func runSyncIssueMetadata(ctx context.Context, e *Executor) error {
 			if cloudKey == "" || orgKey == "" {
 				return nil
 			}
-			return syncProjectIssues(ctx, e, cloudKey, orgKey, serverURL, serverKey, counter)
+			return syncProjectIssues(ctx, e, cloudKey, orgKey, serverURL, serverKey, counter, ruleDefaults)
 		})
 	return err
 }
@@ -300,9 +329,9 @@ func runSyncIssueMetadata(ctx context.Context, e *Executor) error {
 //  5. Pre-filter (hasManualChanges)
 //  6. Sync pairs with bounded concurrency
 //  7. Log summary
-func syncProjectIssues(ctx context.Context, e *Executor, cloudKey, orgKey, serverURL, serverKey string, counter *TaskCounter) error {
+func syncProjectIssues(ctx context.Context, e *Executor, cloudKey, orgKey, serverURL, serverKey string, counter *TaskCounter, ruleDefaults *ruleTagDefaults) error {
 	// 1. Load source issues from extract data.
-	sourceIssues := loadMatchableIssues(e, serverURL, serverKey)
+	sourceIssues := loadMatchableIssues(e, serverURL, serverKey, ruleDefaults)
 	if len(sourceIssues) == 0 {
 		e.Logger.Debug("syncIssueMetadata: no source issues", "project", cloudKey)
 		return nil
@@ -359,6 +388,8 @@ func syncProjectIssues(ctx context.Context, e *Executor, cloudKey, orgKey, serve
 
 	e.Logger.Info("syncIssueMetadata: syncing pairs",
 		"project", cloudKey,
+		"source_total", len(sourceIssues),
+		"cloud_total", len(cloudIssues),
 		"matched", len(matchedPairs),
 		"actionable", len(actionable),
 	)
@@ -502,11 +533,83 @@ func syncIssueTags(ctx context.Context, e *Executor, cloudKey string, sourceTags
 // Extract loaders
 // ---------------------------------------------------------------------------
 
+// ruleTagDefaults indexes the default tag set (rule.tags ∪ rule.sysTags)
+// by serverURL → ruleKey. Issue extracts fold these defaults into every
+// issue's `tags` array, so a plain `len(tags) > 0` check would treat
+// every issue as user-tagged. Subtracting these defaults at load time
+// keeps `matchableIssue.Tags` honest as a "user-added tags" signal
+// (#352 follow-up).
+type ruleTagDefaults struct {
+	bySrv map[string]map[string]map[string]struct{}
+}
+
+// loadRuleTagDefaults reads the getRuleDetails extract and indexes
+// each rule's default tag set. Safe to call when the extract is
+// missing or empty — returns a non-nil receiver that simply yields no
+// subtraction, in which case issue.Tags falls back to the raw API
+// values (the pre-fix behaviour, no worse than what shipped).
+func loadRuleTagDefaults(e *Executor) *ruleTagDefaults {
+	r := &ruleTagDefaults{bySrv: make(map[string]map[string]map[string]struct{})}
+	items, err := readExtractItems(e, "getRuleDetails")
+	if err != nil {
+		return r
+	}
+	for _, item := range items {
+		key := extractField(item.Data, "key")
+		if key == "" {
+			continue
+		}
+		defaults := make(map[string]struct{})
+		for _, t := range extractStringArray(item.Data, "tags") {
+			defaults[t] = struct{}{}
+		}
+		for _, t := range extractStringArray(item.Data, "sysTags") {
+			defaults[t] = struct{}{}
+		}
+		inner := r.bySrv[item.ServerURL]
+		if inner == nil {
+			inner = make(map[string]map[string]struct{})
+			r.bySrv[item.ServerURL] = inner
+		}
+		inner[key] = defaults
+	}
+	return r
+}
+
+// UserTagsOnly returns the subset of allTags that are NOT default tags
+// on the given rule. When the rule isn't indexed (missing extract,
+// stale cache) the input is returned unchanged — the caller pays the
+// cost of an over-trigger, which is no worse than the pre-fix behaviour.
+func (r *ruleTagDefaults) UserTagsOnly(serverURL, ruleKey string, allTags []string) []string {
+	if r == nil || len(allTags) == 0 {
+		return allTags
+	}
+	inner := r.bySrv[serverURL]
+	if inner == nil {
+		return allTags
+	}
+	defaults, ok := inner[ruleKey]
+	if !ok {
+		return allTags
+	}
+	out := make([]string, 0, len(allTags))
+	for _, t := range allTags {
+		if _, isDefault := defaults[t]; !isDefault {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // loadMatchableIssues reads the extracted SQS issues for a project and
 // converts them to matchableIssue values. Issues with CLOSED status or
 // FIXED resolution are excluded because they have no Cloud counterpart
 // (the scan report does not reproduce them).
-func loadMatchableIssues(e *Executor, serverURL, serverKey string) []matchableIssue {
+//
+// ruleDefaults is used to strip rule-default tags from each issue's
+// tag list so that matchableIssue.Tags holds only the user-added tags
+// — see the type doc on ruleTagDefaults.
+func loadMatchableIssues(e *Executor, serverURL, serverKey string, ruleDefaults *ruleTagDefaults) []matchableIssue {
 	items, err := readExtractItems(e, "getProjectIssuesFull")
 	if err != nil {
 		return nil
@@ -535,18 +638,20 @@ func loadMatchableIssues(e *Executor, serverURL, serverKey string) []matchableIs
 		line := int(extractInt32Field(item.Data, "line"))
 
 		comments := parseIssueComments(item.Data)
-		tags := extractStringArray(item.Data, "tags")
+		rule := extractField(item.Data, "rule")
+		userTags := ruleDefaults.UserTagsOnly(serverURL, rule, extractStringArray(item.Data, "tags"))
 
 		issues = append(issues, matchableIssue{
-			Key:        extractField(item.Data, "key"),
-			Rule:       extractField(item.Data, "rule"),
-			Component:  extractField(item.Data, "component"),
-			Line:       line,
-			Status:     extractField(item.Data, "status"),
-			Resolution: extractField(item.Data, "resolution"),
-			Tags:       tags,
-			Comments:   comments,
-			Assignee:   extractField(item.Data, "assignee"),
+			Key:            extractField(item.Data, "key"),
+			Rule:           rule,
+			Component:      extractField(item.Data, "component"),
+			Line:           line,
+			Status:         extractField(item.Data, "status"),
+			Resolution:     extractField(item.Data, "resolution"),
+			Tags:           userTags,
+			Comments:       comments,
+			Assignee:       extractField(item.Data, "assignee"),
+			ManualSeverity: extractBool(item.Data, "manualSeverity"),
 		})
 	}
 	return issues
