@@ -1146,7 +1146,12 @@ func buildChangesetMap(cr *scanreport.ComponentRef, components []scanreport.Comp
 		}
 		lineCount := 0
 		if src, hasSrc := pbSources[ref]; hasSrc && src != "" {
-			lineCount = strings.Count(src, "\n") + 1
+			// Use sourceLineCount, not "count('\n') + 1": api/sources/raw
+			// responses always end with "\n" so the unconditional +1
+			// was off-by-one, producing a Changesets array one longer
+			// than the actual source line count (#358 — same root
+			// cause as the buildSourceLineCountMap fix).
+			lineCount = sourceLineCount(src)
 		}
 		if lineCount == 0 {
 			lineCount = int(comp.Lines)
