@@ -43,7 +43,7 @@ Adversarial verification of every claim in [MIGRATION-FACETS.md](MIGRATION-FACET
 ---
 
 ## ⚠️ PARTIALLY_CONFIRMED — core true, details overstated/wrong (22)
-<!-- updated: 2026-06-05_21:03:00 -->
+<!-- updated: 2026-06-08_23:04:10 -->
 
 | Claim | Accurate part | Inaccurate / overstated part |
 |---|---|---|
@@ -59,7 +59,7 @@ Adversarial verification of every claim in [MIGRATION-FACETS.md](MIGRATION-FACET
 | **Active Rules** | repo, key, severity, q-profile key migrate (+ key remapped) | **impacts, params, timestamps NOT migrated** — params always empty map, timestamps fall back to migration run-time |
 | **External Issues** | all 6 fields migrate via protobuf — accurate | Filename wrong: code writes **`external-issues-{ref}.pb`** (hyphen), not `externalissues-{ref}.pb` |
 | **Ad-Hoc Rules** | 6 fields encoded correctly | **name** = rule key (not display name); **description** = generated literal `"Rule from {engine} plugin"`, not source description |
-| **Issue Status** | mechanism + 5 states map correctly | **FIXED excluded** entirely from sync (`tasks_issuesync.go:536`); **ACCEPTED maps to `wontfix`** → lands as WONTFIX on Cloud, not ACCEPTED |
+| **Issue Status** | mechanism + states map correctly; **ACCEPTED now maps to the `accept` transition** → lands as ACCEPTED on Cloud (fixed in #322) | **FIXED is intentionally excluded** from sync (`tasks_issuesync.go` `loadMatchableIssues`) — a fixed issue's code no longer exists, so the freshly-built scanner report's CE re-analysis won't reproduce it and there is no Cloud counterpart to transition. This is correct/by-design, not a bug. |
 | **Issue Comments** | text, author, timestamp, `add_comment` mechanism | Prefix is **`[Migrated from {login} on {date}]`**, not `[Migrated from SonarQube Server - @author]`; dedup is **substring match, not hash-deduped** |
 | **Hotspot Review Status** | SAFE/FIXED sync correctly | **ACKNOWLEDGED silently downgraded to SAFE** (`tasks_hotspotsync.go:135`) |
 | **Branches** | main + non-main **LONG** migrate (main-first), issues/source/SCM/ref-branch/analysis handshake | **SHORT skipped, PULL_REQUEST never submitted** (all forced to LONG); **measures empty**; per-branch **NCD skipped**; SCM author/revision stubbed |
@@ -101,11 +101,11 @@ Adversarial verification of every claim in [MIGRATION-FACETS.md](MIGRATION-FACET
 4. **Stub SCM identity.** Only issue *dates* are real; per-line *revision* and *author* are synthetic stubs.
 
 ## Recommended doc fixes (priority order)
-<!-- updated: 2026-06-05_21:03:00 -->
+<!-- updated: 2026-06-08_23:04:10 -->
 
 1. **Move to NOT-MIGRATED / GAP:** Measures, Duplications, Issue Assignments, User Mapping, Groups *membership*.
 2. **Move to IS-MIGRATED:** Webhooks (auto-recreated; note secret caveat); Per-issue severity overrides (via `overriddenSeverity`).
 3. **Correct mechanisms:** New Code Periods → `/api/settings/set` (not `new_code_periods/set`); External Issues filename → `external-issues-{ref}.pb`; Source language/lines → `component-{ref}.pb`.
 4. **Add field-level caveats:** Issues (native field coverage), Active Rules (no params/impacts/timestamps), Branches (LONG-only, no measures), Permissions/Templates (group-only), Portfolios (flattened), Projects (visibility forced private, key prefixed).
-5. **Fix status fidelity notes:** FIXED not synced, ACCEPTED→WONTFIX, hotspot ACKNOWLEDGED→SAFE.
+5. **Status fidelity notes:** FIXED intentionally not synced (no Cloud counterpart — by design); ACCEPTED→accept (lands as ACCEPTED, fixed in #322); hotspot ACKNOWLEDGED→SAFE (still a real gap, tracked separately).
 6. **Fix the two self-contradictions** (Assignments, severity overrides).

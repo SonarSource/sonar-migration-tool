@@ -4,6 +4,7 @@
 > **Reconciled against the actual Go code on 2026-06-05.** Every row below reflects what the running binary does (`go/`, `lib/sq-api-go/`), not spec/design intent. Claims that previously described unbuilt specs or dead code have been corrected or moved. Full claim-by-claim evidence (file:line) is in [MIGRATION-FACETS-AUDIT.md](MIGRATION-FACETS-AUDIT.md).
 
 ## ✅ What IS Migrated
+<!-- updated: 2026-06-08_23:03:54 -->
 
 The **Caveats / NOT carried** column is load-bearing — read it before relying on a row.
 
@@ -25,7 +26,7 @@ The **Caveats / NOT carried** column is load-bearing — read it before relying 
 | **Analysis Data** | Active Rules | repo, key, severity, q-profile key (remapped SQ→Cloud) | **params, impacts, and timestamps are NOT migrated** on this path — params default to empty, timestamps fall back to the migration run-time | Protobuf `activerules.pb` | 001 |
 | **Analysis Data** | External Issues (3rd-party analyzers) | engineId, ruleId, message, severity, type, textRange | filename is **`external-issues-{ref}.pb`** (hyphenated) | Protobuf `external-issues-{ref}.pb` | 013 |
 | **Analysis Data** | Ad-Hoc Rules | engineId, ruleId, severity, type, cleanCodeAttribute | **`name` = rule key** (not a display name); **`description` = generic placeholder** `"Rule from {engine} plugin"`, not the source rule description | Protobuf `adhocrules.pb` | 013 |
-| **Metadata Sync** | Issue Status | OPEN, CONFIRMED, REOPENED, RESOLVED, FALSE_POSITIVE, WONTFIX | **`FIXED` is excluded** from sync entirely; **`ACCEPTED` is mapped to the `wontfix` transition** → lands as WONTFIX on Cloud, not ACCEPTED | `/api/issues/do_transition` | 008/024 |
+| **Metadata Sync** | Issue Status | OPEN, CONFIRMED, REOPENED, RESOLVED, FALSE_POSITIVE, WONTFIX, **ACCEPTED** | **`ACCEPTED` maps to the `accept` transition** → lands as ACCEPTED on Cloud (fixed in #322); modern MQR `ACCEPTED` (surfaced over the Server API as status=RESOLVED, resolution=WONTFIX) is detected via the `issueStatus` enum and routed to `accept`, while genuine legacy `WONTFIX` still maps to `wontfix`. **`FIXED`-resolution issues are intentionally excluded** — the fixed code no longer exists, so CE re-analysis of the migrated scanner report won't reproduce them (no Cloud counterpart to transition) | `/api/issues/do_transition` | 008/024 |
 | **Metadata Sync** | Issue Comments | text (Markdown, HTML fallback) + original author + timestamp | prefix is **`[Migrated from {login} on {date}]`** (no literal "SonarQube Server", no `@`); dedup is **plain substring match, not hashing** | `/api/issues/add_comment` | 008/024 |
 | **Metadata Sync** | Issue Tags | all custom tags | — (fully accurate) | `/api/issues/set_tags` | 008/024 |
 | **Metadata Sync** | Hotspot Review Status | TO_REVIEW / REVIEWED + resolution SAFE / FIXED | **`ACKNOWLEDGED` is silently downgraded to `SAFE`**; TO_REVIEW makes no API call (Cloud default) | `/api/hotspots/change_status` | 009/024 |
@@ -36,6 +37,7 @@ The **Caveats / NOT carried** column is load-bearing — read it before relying 
 | **Config** | Webhooks | project + global/server webhooks auto-recreated on Cloud (global fanned out to every migrated org); list-then-create idempotency | **webhook secret is NOT carried** (source API doesn't expose it) — migrated webhooks land unsecured; global fan-out runs on the `migrate` path only (`transfer` recreates project webhooks only) | `/api/webhooks/create` | — |
 
 ## ❌ What is NOT Migrated
+<!-- updated: 2026-06-08_23:03:54 -->
 
 | Entity / Data | Reason | Notes |
 |---|---|---|
@@ -56,9 +58,11 @@ The **Caveats / NOT carried** column is load-bearing — read it before relying 
 | CI/CD pipeline configuration | Tool can't modify external systems | `SONAR_HOST_URL` / `SONAR_TOKEN` must be updated manually |
 | `IN_SANDBOX` issue status (SQ 2025.1+) | No SonarCloud equivalent | **Omitted from the extraction query** on the live path (no warning emitted; the warn-and-skip code is in the unused `pipeline` package) |
 | Closed issues (sync phase) | May not exist in Cloud after re-analysis | Skipped at the source-load stage, before status sync |
+| FIXED-resolution issues (sync phase) | The fixed code no longer exists, so the migrated scanner report's CE re-analysis does not reproduce them — no Cloud counterpart | Intentionally skipped at the source-load stage (`loadMatchableIssues`), before status sync; by design, not a bug |
 | Symbols / syntax-highlighting reference data | Lower-priority, optional (SPEC-004 FR-12/FR-13) | Endpoints never called; proto types unused |
 
 ## ⚠️ Known Gaps (real bugs / partial fidelity, verified in code)
+<!-- updated: 2026-06-08_23:03:54 -->
 
 | Item | Status | Spec |
 |---|---|---|
@@ -66,7 +70,6 @@ The **Caveats / NOT carried** column is load-bearing — read it before relying 
 | **BUG-05** — issue **assignee** extracted but the assign call is never invoked (no Cloud assign API) | Real | 010 |
 | **BUG-06** — no source-link / back-reference comment to the original Server issue/hotspot is added | Real | 008/009 |
 | Hotspot resolution **ACKNOWLEDGED** is downgraded to SAFE on Cloud | Real | 009 |
-| Issue status **FIXED** excluded from sync; **ACCEPTED** lands as WONTFIX | Real | 008 |
 | External rule **descriptions** use a generic placeholder rather than rule-specific text | Real | 013 |
 | SCM **author/revision** are stub values (only dates are real) | Real | 004 |
 | Symbols / syntax-highlighting reference data | Optional, not implemented | 004 |

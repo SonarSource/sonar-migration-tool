@@ -57,6 +57,20 @@ func issueMetadataSyncTasks() []TaskDef {
 // getProjectIssuesFull extract's branch enrichment) and left empty for
 // Cloud-side candidates. Used at sync time to log a per-project
 // branch count so operators can see the project's shape.
+//
+// IssueStatus mirrors the modern unified `issueStatus` enum
+// (SonarQube 10.4+ / MQR model: OPEN, CONFIRMED, FALSE_POSITIVE,
+// ACCEPTED, FIXED). It is the authoritative triage signal and the only
+// field that distinguishes an ACCEPTED issue from a legacy Won't Fix —
+// an accepted issue reports status=RESOLVED, resolution=WONTFIX,
+// issueStatus=ACCEPTED. Populated for source-side issues; left empty
+// for Cloud candidates (the search response is consulted via
+// Transitions instead). See #322.
+//
+// Transitions is the Cloud issue's available-transition list (from
+// /api/issues/search?additionalFields=transitions). Populated only for
+// Cloud-side candidates; used to verify the "accept" transition is
+// offered before applying it (#322). Empty for source-side issues.
 type matchableIssue struct {
 	Key            string
 	Rule           string
@@ -64,11 +78,13 @@ type matchableIssue struct {
 	Line           int
 	Status         string
 	Resolution     string
+	IssueStatus    string
 	Tags           []string
 	Comments       []issueComment
 	Assignee       string
 	ManualSeverity bool
 	Branch         string
+	Transitions    []string
 }
 
 // issueComment is a normalised comment attached to a matchableIssue.
@@ -105,16 +121,57 @@ func stripProjectKeyPrefix(component string) string {
 // Transition logic
 // ---------------------------------------------------------------------------
 
-// getFallbackTransition maps an SQS issue's resolution and status to the
-// Cloud transition name required to move the Cloud issue into an equivalent
-// state.
+// acceptTransition is the MQR-model transition that moves a Cloud issue
+// into the ACCEPTED state. It supersedes the deprecated "wontfix"
+// transition: applying "wontfix" lands the issue as Won't Fix, which the
+// modern issue lifecycle surfaces differently from Accepted. SonarCloud
+// is always the migration target and exposes "accept" (per SPEC-008), so
+// accepted / won't-fix source issues map here. See issue #322.
+const acceptTransition = "accept"
+
+// getFallbackTransition maps an SQS issue to the Cloud transition name
+// required to move the Cloud issue into the equivalent state.
 //
-// Resolution takes priority (it is the most specific signal). When the
-// resolution is empty or unrecognised, we fall back to the status field.
+// Precedence — most authoritative first:
+//  1. issueStatus: the modern unified enum (SonarQube 10.4+ / MQR
+//     model). It is the ONLY field that distinguishes ACCEPTED from a
+//     legacy Won't Fix — an accepted issue reports status=RESOLVED,
+//     resolution=WONTFIX, issueStatus=ACCEPTED. The previous code
+//     checked resolution first and so mapped every ACCEPTED issue to
+//     "wontfix", landing it as Won't Fix on Cloud (issue #322). Reading
+//     issueStatus first fixes that.
+//  2. resolution: legacy signal for pre-10.4 servers that emit no
+//     issueStatus.
+//  3. status: final legacy fallback.
+//
+// Accepted / won't-fix issues resolve to acceptTransition; availability
+// of that transition on the specific Cloud issue is verified separately
+// by resolveTransition, which leaves the issue OPEN (rather than
+// mislabeling it) when "accept" is not offered.
 //
 // Returns "" when no transition is needed (e.g. OPEN issues).
-func getFallbackTransition(resolution, status string) string {
-	// Resolution-based priority — most specific.
+func getFallbackTransition(issueStatus, resolution, status string) string {
+	// 1. Modern unified issueStatus enum — most authoritative.
+	switch strings.ToUpper(issueStatus) {
+	case "ACCEPTED":
+		return acceptTransition
+	case "FALSE_POSITIVE":
+		return "falsepositive"
+	case "CONFIRMED":
+		return "confirm"
+	case "OPEN", "FIXED":
+		// OPEN needs no transition; FIXED issues are excluded at load
+		// time (no Cloud counterpart) and should not reach here.
+		return ""
+	}
+
+	// 2. Legacy resolution-based priority (pre-10.4 servers that emit no
+	// issueStatus). A genuine legacy WONTFIX keeps mapping to the
+	// deprecated-but-still-accepted "wontfix" transition, per SPEC-008,
+	// to avoid regressing pre-10.4 migrations. Only the MODERN
+	// issueStatus=ACCEPTED case (handled above) routes to "accept";
+	// modern accepted issues never reach here because issueStatus is
+	// checked first.
 	switch strings.ToUpper(resolution) {
 	case "FALSE-POSITIVE":
 		return "falsepositive"
@@ -122,7 +179,7 @@ func getFallbackTransition(resolution, status string) string {
 		return "wontfix"
 	}
 
-	// Status-based fallback.
+	// 3. Legacy status-based fallback.
 	switch strings.ToUpper(status) {
 	case "CONFIRMED":
 		return "confirm"
@@ -133,7 +190,7 @@ func getFallbackTransition(resolution, status string) string {
 	case "RESOLVED", "CLOSED":
 		return "resolve"
 	case "ACCEPTED":
-		return "wontfix"
+		return acceptTransition
 	case "FALSE_POSITIVE":
 		return "falsepositive"
 	case "IN_SANDBOX":
@@ -141,6 +198,27 @@ func getFallbackTransition(resolution, status string) string {
 	default:
 		return ""
 	}
+}
+
+// resolveTransition decides the Cloud transition to apply for a source
+// issue, gating the MQR "accept" transition on its availability on the
+// matched Cloud issue.
+//
+// cloudTransitions is the matched Cloud issue's available-transition
+// list (from /api/issues/search?additionalFields=transitions). A
+// non-empty list that does NOT contain "accept" means the Cloud issue
+// cannot be accepted from its current state. Rather than downgrade to
+// "wontfix" — which would mislabel the issue as Won't Fix — we leave it
+// OPEN (return "") and report downgraded=true so the caller can log the
+// fidelity loss (issue #322). An empty/unknown list is treated
+// optimistically: we still attempt "accept" and let do_transition +
+// isExpectedTransitionError absorb a rejection.
+func resolveTransition(src matchableIssue, cloudTransitions []string) (transition string, downgraded bool) {
+	desired := getFallbackTransition(src.IssueStatus, src.Resolution, src.Status)
+	if desired == acceptTransition && len(cloudTransitions) > 0 && !slices.Contains(cloudTransitions, acceptTransition) {
+		return "", true
+	}
+	return desired, false
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +250,14 @@ const metadataSyncTag = "metadata-synchronized"
 func hasManualChanges(iss matchableIssue) bool {
 	status := strings.ToUpper(iss.Status)
 	resolution := strings.ToUpper(iss.Resolution)
+	issueStatus := strings.ToUpper(iss.IssueStatus)
+	// Modern unified issueStatus enum (10.4+) is the authoritative
+	// triage signal: an accepted issue can report status=RESOLVED (or
+	// OPEN) with the triage state living only in issueStatus, so check
+	// it directly rather than relying on the legacy fields (#322).
+	if issueStatus == "ACCEPTED" || issueStatus == "FALSE_POSITIVE" {
+		return true
+	}
 	if status == "ACCEPTED" || status == "FALSE_POSITIVE" {
 		return true
 	}
@@ -208,7 +294,9 @@ func classifyActionableReasons(actionable []matchableIssue) actionableReasonBrea
 	for _, iss := range actionable {
 		status := strings.ToUpper(iss.Status)
 		resolution := strings.ToUpper(iss.Resolution)
-		if status == "ACCEPTED" || status == "FALSE_POSITIVE" ||
+		issueStatus := strings.ToUpper(iss.IssueStatus)
+		if issueStatus == "ACCEPTED" || issueStatus == "FALSE_POSITIVE" ||
+			status == "ACCEPTED" || status == "FALSE_POSITIVE" ||
 			resolution == "FALSE-POSITIVE" || resolution == "WONTFIX" {
 			b.acceptedOrFP++
 		}
@@ -531,6 +619,9 @@ func findCloudIssueCandidates(ctx context.Context, e *Executor, cloudKey, orgKey
 	// run (the cloud counterpart may be in ACCEPTED / FALSE_POSITIVE
 	// state already).
 	params.Set("issueStatuses", "OPEN,CONFIRMED,FALSE_POSITIVE,ACCEPTED")
+	// Ask for the per-issue available-transition list so we can verify
+	// the "accept" transition is offered before applying it (#322).
+	params.Set("additionalFields", "transitions")
 	apiIssues, err := e.Cloud.Issues.SearchAll(ctx, params)
 	if err != nil {
 		return nil, err
@@ -558,7 +649,7 @@ func syncOnePair(ctx context.Context, e *Executor, pair issuePair, counter *Task
 	}
 
 	cloudKey := pair.cloud.Key
-	transFailed := syncIssueTransition(ctx, e, cloudKey, pair.source)
+	transFailed := syncIssueTransition(ctx, e, cloudKey, pair.source, pair.cloud.Transitions)
 	commentFailed := syncIssueComments(ctx, e, cloudKey, pair.source.Comments, pair.cloud.Comments)
 	tagsFailed := syncIssueTags(ctx, e, cloudKey, pair.source.Tags)
 
@@ -569,10 +660,22 @@ func syncOnePair(ctx context.Context, e *Executor, pair issuePair, counter *Task
 	}
 }
 
-// syncIssueTransition applies the fallback status transition on the Cloud issue.
+// syncIssueTransition applies the status transition on the Cloud issue.
+// cloudTransitions is the matched Cloud issue's available-transition list,
+// used to gate the "accept" transition (see resolveTransition).
 // Returns true if the transition failed with an unexpected error.
-func syncIssueTransition(ctx context.Context, e *Executor, cloudKey string, src matchableIssue) bool {
-	transition := getFallbackTransition(src.Resolution, src.Status)
+func syncIssueTransition(ctx context.Context, e *Executor, cloudKey string, src matchableIssue, cloudTransitions []string) bool {
+	transition, downgraded := resolveTransition(src, cloudTransitions)
+	if downgraded {
+		// Fidelity loss surfaced explicitly per #322: the source issue
+		// is ACCEPTED but the Cloud issue cannot take "accept", so we
+		// leave it OPEN rather than mislabeling it as Won't Fix.
+		e.Logger.Warn("syncIssueMetadata: 'accept' transition unavailable on Cloud issue; leaving it OPEN rather than mislabeling it Won't Fix",
+			"issue", cloudKey,
+			"source_issue_status", src.IssueStatus,
+			"source_resolution", src.Resolution,
+			"available_transitions", cloudTransitions)
+	}
 	if transition == "" {
 		return false
 	}
@@ -728,9 +831,16 @@ func (r *ruleTagDefaults) UserTagsOnly(serverURL, ruleKey string, allTags []stri
 }
 
 // loadMatchableIssues reads the extracted SQS issues for a project and
-// converts them to matchableIssue values. Issues with CLOSED status or
-// FIXED resolution are excluded because they have no Cloud counterpart
-// (the scan report does not reproduce them).
+// converts them to matchableIssue values.
+//
+// Issues with no Cloud counterpart are excluded — intentionally and,
+// per #322, explicitly (the FIXED count is logged rather than silently
+// dropped):
+//   - CLOSED status: the issue was removed by analysis.
+//   - FIXED (legacy resolution=FIXED or modern issueStatus=FIXED): the
+//     underlying code was fixed, so a fresh Cloud scan does not re-raise
+//     the issue. There is nothing to sync onto — this is a documented
+//     exclusion, not a bug.
 //
 // ruleDefaults is used to strip rule-default tags from each issue's
 // tag list so that matchableIssue.Tags holds only the user-added tags
@@ -742,6 +852,7 @@ func loadMatchableIssues(e *Executor, serverURL, serverKey string, ruleDefaults 
 	}
 
 	var issues []matchableIssue
+	var excludedFixed int
 	for _, item := range items {
 		if item.ServerURL != serverURL {
 			continue
@@ -752,12 +863,14 @@ func loadMatchableIssues(e *Executor, serverURL, serverKey string, ruleDefaults 
 
 		status := strings.ToUpper(extractField(item.Data, "status"))
 		resolution := strings.ToUpper(extractField(item.Data, "resolution"))
+		issueStatus := strings.ToUpper(extractField(item.Data, "issueStatus"))
 
-		// Exclude CLOSED and FIXED — these won't exist in Cloud.
+		// Exclude CLOSED and FIXED — these have no Cloud counterpart.
 		if status == "CLOSED" {
 			continue
 		}
-		if resolution == "FIXED" {
+		if resolution == "FIXED" || issueStatus == "FIXED" {
+			excludedFixed++
 			continue
 		}
 
@@ -774,12 +887,22 @@ func loadMatchableIssues(e *Executor, serverURL, serverKey string, ruleDefaults 
 			Line:           line,
 			Status:         extractField(item.Data, "status"),
 			Resolution:     extractField(item.Data, "resolution"),
+			IssueStatus:    extractField(item.Data, "issueStatus"),
 			Tags:           userTags,
 			Comments:       comments,
 			Assignee:       extractField(item.Data, "assignee"),
 			ManualSeverity: extractBool(item.Data, "manualSeverity"),
 			Branch:         extractField(item.Data, "branch"),
 		})
+	}
+
+	// Surface the FIXED exclusion explicitly (#322) rather than dropping
+	// silently: FIXED issues are resolved because the code was fixed, so
+	// a fresh Cloud scan does not re-raise them and there is nothing to
+	// sync onto. Operators should still see how many were skipped.
+	if excludedFixed > 0 {
+		e.Logger.Info("syncIssueMetadata: excluding FIXED source issues from status sync (code was fixed; no Cloud counterpart is re-raised by analysis)",
+			"project", serverKey, "excluded_fixed", excludedFixed)
 	}
 	return issues
 }
@@ -797,15 +920,16 @@ func apiIssueToMatchable(ai sqtypes.Issue) matchableIssue {
 		})
 	}
 	return matchableIssue{
-		Key:        ai.Key,
-		Rule:       ai.Rule,
-		Component:  ai.Component,
-		Line:       ai.Line,
-		Status:     ai.Status,
-		Resolution: ai.Resolution,
-		Tags:       ai.Tags,
-		Comments:   comments,
-		Assignee:   ai.Assignee,
+		Key:         ai.Key,
+		Rule:        ai.Rule,
+		Component:   ai.Component,
+		Line:        ai.Line,
+		Status:      ai.Status,
+		Resolution:  ai.Resolution,
+		Tags:        ai.Tags,
+		Comments:    comments,
+		Assignee:    ai.Assignee,
+		Transitions: ai.Transitions,
 	}
 }
 

@@ -368,3 +368,131 @@ func TestClassifyIssueCandidatesByLine(t *testing.T) {
 		})
 	}
 }
+
+// #322: getFallbackTransition must read the modern issueStatus enum
+// FIRST. A real ACCEPTED issue from a 10.4+ server arrives as
+// status=RESOLVED, resolution=WONTFIX, issueStatus=ACCEPTED — the old
+// resolution-first logic caught the WONTFIX resolution and mapped it to
+// the "wontfix" transition, landing the issue as Won't Fix on Cloud
+// instead of Accepted. It must now map to the "accept" transition, while
+// a GENUINE legacy WONTFIX (no issueStatus, pre-10.4) still maps to
+// "wontfix" so those migrations are not regressed.
+func TestGetFallbackTransition(t *testing.T) {
+	tests := []struct {
+		name        string
+		issueStatus string
+		resolution  string
+		status      string
+		want        string
+	}{
+		// --- Modern issueStatus enum (10.4+) takes priority ---
+		{name: "#322 regression: ACCEPTED arrives as RESOLVED+WONTFIX -> accept", issueStatus: "ACCEPTED", resolution: "WONTFIX", status: "RESOLVED", want: "accept"},
+		{name: "modern FALSE_POSITIVE -> falsepositive", issueStatus: "FALSE_POSITIVE", resolution: "FALSE-POSITIVE", status: "RESOLVED", want: "falsepositive"},
+		{name: "modern CONFIRMED -> confirm", issueStatus: "CONFIRMED", status: "CONFIRMED", want: "confirm"},
+		{name: "modern OPEN -> no transition", issueStatus: "OPEN", status: "OPEN", want: ""},
+		{name: "modern FIXED -> no transition (excluded at load)", issueStatus: "FIXED", resolution: "FIXED", status: "RESOLVED", want: ""},
+		{name: "issueStatus is case-insensitive", issueStatus: "accepted", resolution: "WONTFIX", status: "RESOLVED", want: "accept"},
+
+		// --- Legacy resolution path (pre-10.4, no issueStatus) ---
+		{name: "legacy WONTFIX (no issueStatus) -> wontfix, NOT regressed", issueStatus: "", resolution: "WONTFIX", status: "RESOLVED", want: "wontfix"},
+		{name: "legacy FALSE-POSITIVE (no issueStatus) -> falsepositive", issueStatus: "", resolution: "FALSE-POSITIVE", status: "RESOLVED", want: "falsepositive"},
+
+		// --- Legacy status fallback (no issueStatus, no resolution) ---
+		{name: "legacy CONFIRMED status -> confirm", status: "CONFIRMED", want: "confirm"},
+		{name: "legacy REOPENED status -> reopen", status: "REOPENED", want: "reopen"},
+		{name: "legacy OPEN status -> no transition", status: "OPEN", want: ""},
+		{name: "legacy RESOLVED status (no resolution) -> resolve", status: "RESOLVED", want: "resolve"},
+		{name: "legacy ACCEPTED status (no issueStatus) -> accept", status: "ACCEPTED", want: "accept"},
+		{name: "legacy FALSE_POSITIVE status -> falsepositive", status: "FALSE_POSITIVE", want: "falsepositive"},
+		{name: "IN_SANDBOX -> no transition", status: "IN_SANDBOX", want: ""},
+		{name: "all empty -> no transition", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := getFallbackTransition(tc.issueStatus, tc.resolution, tc.status)
+			if got != tc.want {
+				t.Errorf("getFallbackTransition(%q, %q, %q) = %q, want %q", tc.issueStatus, tc.resolution, tc.status, got, tc.want)
+			}
+		})
+	}
+}
+
+// #322: resolveTransition gates the "accept" transition on the matched
+// Cloud issue's available-transition list. When "accept" is not offered
+// it must leave the issue OPEN (return "") and report downgraded=true —
+// it must NEVER silently downgrade to "wontfix" (that would mislabel the
+// issue as Won't Fix). An empty/unknown list is treated optimistically.
+// Transitions other than "accept" are not gated.
+func TestResolveTransition(t *testing.T) {
+	accepted := matchableIssue{IssueStatus: "ACCEPTED", Resolution: "WONTFIX", Status: "RESOLVED"}
+	falsePos := matchableIssue{IssueStatus: "FALSE_POSITIVE", Resolution: "FALSE-POSITIVE", Status: "RESOLVED"}
+	legacyWontfix := matchableIssue{Resolution: "WONTFIX", Status: "RESOLVED"}
+	open := matchableIssue{IssueStatus: "OPEN", Status: "OPEN"}
+
+	tests := []struct {
+		name           string
+		src            matchableIssue
+		cloudTrans     []string
+		wantTransition string
+		wantDowngraded bool
+	}{
+		{name: "accept available -> accept", src: accepted, cloudTrans: []string{"confirm", "accept", "falsepositive"}, wantTransition: "accept", wantDowngraded: false},
+		{name: "accept unavailable -> OPEN + downgraded (never wontfix)", src: accepted, cloudTrans: []string{"reopen", "unconfirm"}, wantTransition: "", wantDowngraded: true},
+		{name: "unknown transitions (nil) -> optimistic accept", src: accepted, cloudTrans: nil, wantTransition: "accept", wantDowngraded: false},
+		{name: "unknown transitions (empty slice) -> optimistic accept", src: accepted, cloudTrans: []string{}, wantTransition: "accept", wantDowngraded: false},
+		{name: "false positive is not gated", src: falsePos, cloudTrans: []string{"confirm"}, wantTransition: "falsepositive", wantDowngraded: false},
+		{name: "legacy wontfix is not gated", src: legacyWontfix, cloudTrans: []string{"reopen"}, wantTransition: "wontfix", wantDowngraded: false},
+		{name: "open needs no transition", src: open, cloudTrans: []string{"accept"}, wantTransition: "", wantDowngraded: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotT, gotD := resolveTransition(tc.src, tc.cloudTrans)
+			if gotT != tc.wantTransition || gotD != tc.wantDowngraded {
+				t.Errorf("resolveTransition(%+v, %v) = (%q, %v), want (%q, %v)", tc.src, tc.cloudTrans, gotT, gotD, tc.wantTransition, tc.wantDowngraded)
+			}
+		})
+	}
+}
+
+// #322: hasManualChanges must recognise the modern issueStatus enum so
+// accepted / false-positive issues on 10.4+ servers (whose legacy status
+// may be OPEN/RESOLVED with the triage state living only in issueStatus)
+// are still flagged actionable — otherwise the transition fix never
+// fires for them.
+func TestHasManualChangesIssueStatus(t *testing.T) {
+	tests := []struct {
+		name string
+		iss  matchableIssue
+		want bool
+	}{
+		{name: "issueStatus ACCEPTED, legacy status OPEN -> actionable", iss: matchableIssue{IssueStatus: "ACCEPTED", Status: "OPEN"}, want: true},
+		{name: "issueStatus FALSE_POSITIVE, legacy status OPEN -> actionable", iss: matchableIssue{IssueStatus: "FALSE_POSITIVE", Status: "OPEN"}, want: true},
+		{name: "real-data shape: RESOLVED+WONTFIX+issueStatus ACCEPTED -> actionable", iss: matchableIssue{IssueStatus: "ACCEPTED", Resolution: "WONTFIX", Status: "RESOLVED"}, want: true},
+		{name: "issueStatus OPEN, no other signal -> skip", iss: matchableIssue{IssueStatus: "OPEN", Status: "OPEN"}, want: false},
+		{name: "issueStatus lowercase accepted -> actionable", iss: matchableIssue{IssueStatus: "accepted", Status: "OPEN"}, want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasManualChanges(tc.iss); got != tc.want {
+				t.Errorf("hasManualChanges(%+v) = %v, want %v", tc.iss, got, tc.want)
+			}
+		})
+	}
+}
+
+// #322: classifyActionableReasons counts issueStatus-driven accepted/FP
+// even when the legacy status/resolution fields don't carry the state.
+func TestClassifyActionableReasonsIssueStatus(t *testing.T) {
+	issues := []matchableIssue{
+		{IssueStatus: "ACCEPTED", Status: "OPEN"},                  // accepted via issueStatus only
+		{IssueStatus: "FALSE_POSITIVE", Status: "OPEN"},            // fp via issueStatus only
+		{IssueStatus: "OPEN", Status: "OPEN", Tags: []string{"x"}}, // tags only, not acceptedOrFP
+	}
+	b := classifyActionableReasons(issues)
+	if b.acceptedOrFP != 2 {
+		t.Errorf("acceptedOrFP via issueStatus: want 2, got %d", b.acceptedOrFP)
+	}
+	if b.customTags != 1 {
+		t.Errorf("customTags: want 1, got %d", b.customTags)
+	}
+}
