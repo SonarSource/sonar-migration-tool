@@ -1228,22 +1228,26 @@ func buildSourceLineCountMap(sources []sourceRecord) map[string]int {
 	return m
 }
 
-// sourceLineCount returns the number of source lines in src. Counting
-// "\n" + 1 unconditionally (the previous behaviour) is off-by-one
-// whenever the content ends with "\n" — which is the universal case
-// for api/sources/raw responses. SonarCloud CE validates that
-// Components.Lines matches the count of lines actually present in
-// source-<ref>.txt; an over-count silently drops the source from
-// the file_sources table, leaving the Code tab empty (#358).
+// sourceLineCount returns the number of source lines in src under
+// SonarCloud's CE convention. CE counts lines as
+// `content.split('\n').length` — equivalent to `count('\n') + 1`
+// for any non-empty content — which intentionally counts the
+// trailing empty element after a final newline as a line. (Empty
+// content has 0 lines in our convention; CloudVoyager's
+// resolveLineCount floors at 1 there, but our pipeline filters
+// out empty source records upstream so the difference is moot.)
+//
+// History: an earlier iteration treated the trailing "\n" as
+// "doesn't count" and returned count('\n') instead of count('\n')+1.
+// That dropped Component.Lines below the actual file_sources row
+// count CE expects, and the file_sources row was silently rejected,
+// leaving the Code tab empty even after a successful CE import
+// (#358).
 func sourceLineCount(src string) int {
 	if src == "" {
 		return 0
 	}
-	n := strings.Count(src, "\n")
-	if !strings.HasSuffix(src, "\n") {
-		n++
-	}
-	return n
+	return strings.Count(src, "\n") + 1
 }
 
 // isValidSourceText reports whether src is a plausible text source

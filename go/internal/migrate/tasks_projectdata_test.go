@@ -1228,12 +1228,13 @@ func TestImportSkipsCompletedBranches(t *testing.T) {
 	}
 }
 
-// #358: api/sources/raw responses ALWAYS terminate the file with "\n".
-// The previous formula `count("\n") + 1` therefore over-counted by
-// exactly one — and SonarCloud's CE validates that Components.Lines
-// matches the count of lines in source-<ref>.txt. An over-count
-// silently drops the source from file_sources and leaves the Code
-// tab empty for the migrated project.
+// #358: SonarCloud's CE counts source lines using
+// content.split('\n').length — equivalent to count('\n') + 1 for
+// non-empty content. That intentionally treats the empty element
+// after a trailing '\n' as a line so that file_sources row count
+// matches what the CE expects. Verified against CloudVoyager's
+// resolveLineCount, which uses the same formula and is known to
+// populate the Code tab correctly.
 func TestSourceLineCount(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1242,21 +1243,19 @@ func TestSourceLineCount(t *testing.T) {
 	}{
 		{name: "empty", src: "", want: 0},
 
-		// Files that end with a newline — the universal case for
-		// api/sources/raw. Counting "\n" alone gives the correct
-		// number of source lines.
-		{name: "single line with newline", src: "a\n", want: 1},
-		{name: "two lines with trailing newline", src: "a\nb\n", want: 2},
-		{name: "three lines with trailing newline", src: "a\nb\nc\n", want: 3},
-		{name: "trailing blank line", src: "a\nb\n\n", want: 3},
+		// Files that end with a newline — count('\n') + 1.
+		{name: "single line with newline", src: "a\n", want: 2},
+		{name: "two lines with trailing newline", src: "a\nb\n", want: 3},
+		{name: "three lines with trailing newline", src: "a\nb\nc\n", want: 4},
+		{name: "trailing blank line", src: "a\nb\n\n", want: 4},
 
-		// Files without a trailing newline — count("\n") + 1.
+		// Files without a trailing newline.
 		{name: "single line no trailing newline", src: "a", want: 1},
 		{name: "two lines no trailing newline", src: "a\nb", want: 2},
 
 		// Edge case from the user's reference run (Python file with a
 		// trailing blank line — extracted file ends with "\n\n").
-		{name: "python file from reference run", src: "def f():\n    a = 1\n    b = 2\n\n", want: 4},
+		{name: "python file from reference run", src: "def f():\n    a = 1\n    b = 2\n\n", want: 5},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
