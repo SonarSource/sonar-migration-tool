@@ -7,7 +7,15 @@ package extract
 import (
 	"context"
 	"net/url"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
+
+// aiCodeFixV2Available marks the SQS release where
+// api/v2/fix-suggestions/feature-enablements first answered GET
+// requests. 2025.1 / 2025.2 return HTTP 405 for the GET, so the task
+// is skipped entirely on those servers (issue #372).
+var aiCodeFixV2Available = common.MustParseVersion("2025.3")
 
 func systemTasks() []TaskDef {
 	return []TaskDef{
@@ -65,11 +73,17 @@ func systemTasks() []TaskDef {
 			// (each carrying type, selected/selfHosted flags, and the
 			// chosen model). The migrate + predict pipelines combine
 			// this with sonar.ai.codefix.hidden to drive the per-key
-			// migration strategy. The endpoint was added in SQS
-			// 2025.x; older servers may return 404 — non-fatal.
+			// migration strategy. The endpoint was added in SQS 2025.3;
+			// 2025.1 / 2025.2 return 405 for the GET and pre-2025
+			// servers return 404 — both are skipped (issue #372).
 			Name:     "getAiCodeFixConfig",
 			Editions: AllEditions,
 			Run: func(ctx context.Context, e *Executor) error {
+				if e.Version.Less(aiCodeFixV2Available) {
+					e.Logger.Debug("getAiCodeFixConfig skipped: SQS version predates api/v2/fix-suggestions/feature-enablements",
+						"version", e.Version.String())
+					return nil
+				}
 				err := fetchAndWriteSingle(ctx, e, "getAiCodeFixConfig",
 					"api/v2/fix-suggestions/feature-enablements", nil, "",
 					map[string]any{"serverUrl": e.ServerURL})

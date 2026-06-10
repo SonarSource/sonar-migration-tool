@@ -17,7 +17,12 @@ import (
 )
 
 const (
-	testServerVersion = "10.7.0.12345"
+	// Default to a 2025.x version so version-gated tasks (e.g.
+	// getAiCodeFixConfig, which requires the v2 fix-suggestions
+	// endpoint introduced in 2025.3 — issue #372) exercise their
+	// happy path. Tests covering older-server behaviour spin up
+	// their own mock with an explicit version.
+	testServerVersion = "2025.4.0.12345"
 	testToken         = "test-token"
 	testResultsFile   = "results.1.jsonl"
 )
@@ -525,6 +530,55 @@ func TestRunExtractEditionFiltering(t *testing.T) {
 	_, err := RunExtract(context.Background(), cfg)
 	if err == nil {
 		t.Error("expected error for enterprise-only task on community edition")
+	}
+}
+
+// TestRunExtractAiCodeFixSkippedOnOldSQS verifies issue #372: SQS 2025.1
+// returns HTTP 405 for GET api/v2/fix-suggestions/feature-enablements
+// because the endpoint was only introduced in 2025.3. The task should
+// skip itself before issuing the GET, so the extract does NOT fail and
+// no getAiCodeFixConfig output directory is created.
+func TestRunExtractAiCodeFixSkippedOnOldSQS(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/server/version", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "2025.1.0.12345")
+	})
+	mux.HandleFunc("GET /api/system/info", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"edition": "developer", "version": "2025.1.0.12345",
+		})
+	})
+	// If the task fails to gate itself, the mock answers with 405 just
+	// like the real SQS 2025.1 server in the issue report.
+	v2Hit := false
+	mux.HandleFunc("GET /api/v2/fix-suggestions/feature-enablements", func(w http.ResponseWriter, r *http.Request) {
+		v2Hit = true
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = w.Write([]byte(`{"message":"Method not supported."}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	cfg := ExtractConfig{
+		URL: srv.URL, Token: testToken, ExportDirectory: dir,
+		TargetTask: "getAiCodeFixConfig", Concurrency: 1,
+	}
+
+	if _, err := RunExtract(context.Background(), cfg); err != nil {
+		t.Fatalf("RunExtract failed: %v", err)
+	}
+	if v2Hit {
+		t.Error("api/v2/fix-suggestions/feature-enablements was called; task should skip on SQS < 2025.3")
+	}
+
+	entries, _ := os.ReadDir(dir)
+	if len(entries) == 0 {
+		t.Fatal("expected extract run directory")
+	}
+	extractDir := filepath.Join(dir, entries[0].Name())
+	if _, err := os.Stat(filepath.Join(extractDir, "getAiCodeFixConfig")); !os.IsNotExist(err) {
+		t.Errorf("getAiCodeFixConfig directory should not exist on SQS < 2025.3, got err=%v", err)
 	}
 }
 
