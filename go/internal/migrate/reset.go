@@ -79,8 +79,9 @@ func RunReset(ctx context.Context, cfg ResetConfig) error {
 	// whose dependency chains do not pull migrate-only create*/set*
 	// work back into the plan. The other reset* tasks
 	// (resetDefaultProfiles, resetDefaultGates, resetPermissionTemplates)
-	// remain no-ops triggered as side-effects of deletes and are
-	// intentionally NOT in this list.
+	// are pulled into the plan as dependencies of the corresponding
+	// delete* tasks (so they run first to clear the current default
+	// before the destroy call) and are intentionally NOT named here.
 	resetPrefixTargets := map[string]bool{
 		"resetGlobalSettings": true,
 	}

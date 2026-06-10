@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 
 	sqapi "github.com/sonar-solutions/sq-api-go"
@@ -48,6 +49,26 @@ func isBuiltInProfile(p types.QualityProfile) bool {
 func matchesSonarWayName(name string) bool {
 	n := strings.ToLower(strings.TrimSpace(name))
 	return n == "sonar way" || n == "sonar way (built-in)"
+}
+
+// defaultPermissionTemplateName is the canonical name of the
+// permission template every new SonarCloud org ships with. Reset
+// uses it to identify the built-in (case-insensitively) so it can
+// promote it as default for every qualifier and skip it during the
+// delete sweep.
+const defaultPermissionTemplateName = "Default Template"
+
+// resetPermissionTemplateQualifiers lists the object qualifiers reset
+// promotes the built-in "Default Template" as default for. Mirrors
+// the per-qualifier semantics of /api/permissions/set_default_template.
+var resetPermissionTemplateQualifiers = []string{"TRK", "VW", "APP"}
+
+// isBuiltInPermissionTemplate matches the built-in "Default Template"
+// by name (case-insensitive, trimmed). The SQC search_templates
+// response carries no isBuiltIn flag for permission templates, so the
+// name is the only signal available.
+func isBuiltInPermissionTemplate(name string) bool {
+	return strings.EqualFold(strings.TrimSpace(name), defaultPermissionTemplateName)
 }
 
 // deleteTasks returns tasks for deleting/resetting entities in Cloud.
@@ -96,8 +117,18 @@ func deleteTasks() []TaskDef {
 			Run:          runDeleteGroups,
 		},
 		{
-			Name:         "deleteTemplates",
-			Dependencies: []string{"createPermissionTemplates"},
+			Name: "deleteTemplates",
+			// deleteTemplates enumerates the org's permission templates
+			// via the SonarCloud API rather than reading
+			// createPermissionTemplates' output — issue #368 requires
+			// deleting EVERY non-built-in template, not just the ones
+			// the migration created (otherwise an org reset can leave
+			// templates the migration set as default behind, since
+			// SQC refuses to delete the current default). The
+			// resetPermissionTemplates dependency runs first so the
+			// built-in "Default Template" is the current default for
+			// every qualifier before any delete call.
+			Dependencies: []string{"generateOrganizationMappings", "resetPermissionTemplates"},
 			Run:          runDeleteTemplates,
 		},
 		{
@@ -129,8 +160,15 @@ func deleteTasks() []TaskDef {
 			Run:          runResetDefaultGates,
 		},
 		{
+			// Promotes the built-in "Default Template" as the org's
+			// default permission template for every qualifier (TRK,
+			// VW, APP) before deleteTemplates runs. SonarCloud rejects
+			// /api/permissions/delete_template on whichever template
+			// is the current default for any qualifier, so without
+			// this step the migration-promoted custom default
+			// template survives reset. Issue #368.
 			Name:         "resetPermissionTemplates",
-			Dependencies: []string{"setDefaultTemplates"},
+			Dependencies: []string{"generateOrganizationMappings"},
 			Run:          runResetPermissionTemplates,
 		},
 		{
@@ -303,20 +341,43 @@ func runDeleteGroups(ctx context.Context, e *Executor) error {
 	return err
 }
 
+// runDeleteTemplates enumerates every permission template in each
+// mapped org via /api/permissions/search_templates and deletes the
+// non-built-in ones. Issue #368 requires reset to delete every
+// non-built-in template, not just those the migration created.
+// resetPermissionTemplates is a dependency, so by the time this runs
+// the built-in "Default Template" is the current default for every
+// qualifier and any previously-default custom template is deletable.
 func runDeleteTemplates(ctx context.Context, e *Executor) error {
 	counter := TaskCounterFromContext(ctx)
-	err := forEachMigrateItem(ctx, e, "deleteTemplates", "createPermissionTemplates",
+	err := forEachMigrateItem(ctx, e, "deleteTemplates", "generateOrganizationMappings",
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
-			templateID := extractField(item, "cloud_template_id")
-			if templateID == "" {
+			orgKey := extractField(item, "sonarcloud_org_key")
+			if shouldSkipOrg(orgKey) {
 				return nil
 			}
-			orgKey := extractField(item, "sonarcloud_org_key")
-			err := e.Cloud.Permissions.DeleteTemplate(ctx, templateID, orgKey)
+			templates, _, err := searchPermissionTemplates(ctx, e, orgKey)
 			if err != nil {
 				counter.Fail()
-				logAPIWarn(e.Logger, "deleteTemplates failed", err, "template", templateID)
-			} else {
+				logAPIWarn(e.Logger, "deleteTemplates: listing templates failed", err, "org", orgKey)
+				return nil
+			}
+			e.Logger.Debug("deleteTemplates: listed templates",
+				"org", orgKey, "count", len(templates), "summary", summarisePermissionTemplates(templates))
+			for _, tpl := range templates {
+				if isBuiltInPermissionTemplate(tpl.Name) {
+					e.Logger.Debug("deleteTemplates: keeping built-in template",
+						"org", orgKey, "template", tpl.Name)
+					continue
+				}
+				e.Logger.Info("deleteTemplates: deleting template",
+					"org", orgKey, "template", tpl.Name, "template_id", tpl.ID)
+				if err := e.Cloud.Permissions.DeleteTemplate(ctx, tpl.ID, orgKey); err != nil {
+					counter.Fail()
+					logAPIWarn(e.Logger, "deleteTemplates failed", err,
+						"template", tpl.Name, "template_id", tpl.ID, "org", orgKey)
+					continue
+				}
 				counter.Success()
 			}
 			return nil
@@ -547,8 +608,113 @@ func summariseGates(gates []types.QualityGate) string {
 	return strings.Join(parts, ", ")
 }
 
-func runResetPermissionTemplates(_ context.Context, e *Executor) error {
-	// No-op: Cloud resets defaults when templates are deleted.
-	w, _ := e.Store.Writer("resetPermissionTemplates")
-	return w.WriteChunk(nil)
+// runResetPermissionTemplates promotes the built-in "Default Template"
+// as each mapped org's default permission template for every
+// qualifier (TRK, VW, APP), so deleteTemplates can subsequently
+// destroy whichever custom template the migration (or the user) had
+// promoted to default. SonarCloud's /api/permissions/delete_template
+// rejects whichever template is the current default for any
+// qualifier; without this step the custom default survives reset.
+// Issue #368.
+func runResetPermissionTemplates(ctx context.Context, e *Executor) error {
+	counter := TaskCounterFromContext(ctx)
+	err := forEachMigrateItem(ctx, e, "resetPermissionTemplates", "generateOrganizationMappings",
+		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
+			orgKey := extractField(item, "sonarcloud_org_key")
+			if shouldSkipOrg(orgKey) {
+				return nil
+			}
+			templates, defaults, err := searchPermissionTemplates(ctx, e, orgKey)
+			if err != nil {
+				counter.Fail()
+				logAPIWarn(e.Logger, "resetPermissionTemplates: listing templates failed", err, "org", orgKey)
+				return nil
+			}
+			e.Logger.Debug("resetPermissionTemplates: listed templates",
+				"org", orgKey, "count", len(templates), "summary", summarisePermissionTemplates(templates))
+
+			var builtIn *permissionTemplateInfo
+			for i := range templates {
+				if isBuiltInPermissionTemplate(templates[i].Name) {
+					builtIn = &templates[i]
+					break
+				}
+			}
+			if builtIn == nil {
+				e.Logger.Warn("resetPermissionTemplates: no built-in \"Default Template\" found; deleteTemplates may fail to delete the current default",
+					"org", orgKey, "templates_returned", summarisePermissionTemplates(templates))
+				counter.Fail()
+				return nil
+			}
+
+			for _, q := range resetPermissionTemplateQualifiers {
+				if defaults[q] == builtIn.ID {
+					e.Logger.Info("resetPermissionTemplates: built-in is already default",
+						"org", orgKey, "qualifier", q, "template", builtIn.Name, "template_id", builtIn.ID)
+					counter.Success()
+					continue
+				}
+				e.Logger.Info("resetPermissionTemplates: promoting built-in to default",
+					"org", orgKey, "qualifier", q, "template", builtIn.Name, "template_id", builtIn.ID)
+				if err := e.Cloud.Permissions.SetDefaultTemplate(ctx, builtIn.ID, q, orgKey); err != nil {
+					counter.Fail()
+					logAPIWarn(e.Logger, "resetPermissionTemplates: set_default_template failed", err,
+						"org", orgKey, "qualifier", q, "template_id", builtIn.ID)
+					continue
+				}
+				counter.Success()
+			}
+			return nil
+		})
+	return err
+}
+
+// permissionTemplateInfo is the slim subset of /api/permissions/
+// search_templates each reset/delete task needs.
+type permissionTemplateInfo struct {
+	ID   string
+	Name string
+}
+
+// searchPermissionTemplates fetches and parses both the
+// permissionTemplates[] list and the defaultTemplates[] map (keyed
+// by qualifier -> templateId) for one org via
+// /api/permissions/search_templates.
+func searchPermissionTemplates(ctx context.Context, e *Executor, orgKey string) ([]permissionTemplateInfo, map[string]string, error) {
+	body, err := e.Raw.Get(ctx, "api/permissions/search_templates", url.Values{"organization": {orgKey}})
+	if err != nil {
+		return nil, nil, fmt.Errorf("search_templates org=%s: %w", orgKey, err)
+	}
+	var parsed struct {
+		PermissionTemplates []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"permissionTemplates"`
+		DefaultTemplates []struct {
+			TemplateID string `json:"templateId"`
+			Qualifier  string `json:"qualifier"`
+		} `json:"defaultTemplates"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, nil, fmt.Errorf("decoding search_templates response for org=%s: %w", orgKey, err)
+	}
+	templates := make([]permissionTemplateInfo, 0, len(parsed.PermissionTemplates))
+	for _, t := range parsed.PermissionTemplates {
+		templates = append(templates, permissionTemplateInfo{ID: t.ID, Name: t.Name})
+	}
+	defaults := make(map[string]string, len(parsed.DefaultTemplates))
+	for _, d := range parsed.DefaultTemplates {
+		defaults[d.Qualifier] = d.TemplateID
+	}
+	return templates, defaults, nil
+}
+
+// summarisePermissionTemplates renders a compact, log-friendly summary
+// of an org's permission templates: "<name> (id=X)" joined by ", ".
+func summarisePermissionTemplates(templates []permissionTemplateInfo) string {
+	parts := make([]string, 0, len(templates))
+	for _, t := range templates {
+		parts = append(parts, fmt.Sprintf("%q (id=%s)", t.Name, t.ID))
+	}
+	return strings.Join(parts, ", ")
 }

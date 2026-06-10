@@ -588,3 +588,198 @@ func TestRunResetGlobalSettingsAllInherited(t *testing.T) {
 		t.Errorf("Reset should not be called when no customized settings; got %d calls", resetCalls)
 	}
 }
+
+// TestRunResetPermissionTemplatesPromotesBuiltInForEveryQualifier
+// pins the #368 behavior: when the built-in "Default Template" is not
+// the current default for some qualifier(s), the task must call
+// /api/permissions/set_default_template once per missing qualifier,
+// targeting the built-in's templateId.
+func TestRunResetPermissionTemplatesPromotesBuiltInForEveryQualifier(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		setCalls []map[string]string
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/permissions/search_templates", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"permissionTemplates": []map[string]any{
+				{"id": "tpl-default", "name": "Default Template"},
+				{"id": "tpl-custom-proj", "name": "Custom Project Template"},
+				{"id": "tpl-custom-app", "name": "Mobile Apps"},
+			},
+			"defaultTemplates": []map[string]any{
+				// Built-in is currently default ONLY for portfolios.
+				{"templateId": "tpl-custom-proj", "qualifier": "TRK"},
+				{"templateId": "tpl-default", "qualifier": "VW"},
+				{"templateId": "tpl-custom-app", "qualifier": "APP"},
+			},
+		})
+	})
+	mux.HandleFunc("POST /api/permissions/set_default_template", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		mu.Lock()
+		setCalls = append(setCalls, map[string]string{
+			"templateId":   r.FormValue("templateId"),
+			"qualifier":    r.FormValue("qualifier"),
+			"organization": r.FormValue("organization"),
+		})
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	cloudSrv := httptest.NewServer(mux)
+	defer cloudSrv.Close()
+
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+
+	dir := t.TempDir()
+	setupExtractData(dir)
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+
+	w, _ := e.Store.Writer("generateOrganizationMappings")
+	b, _ := json.Marshal(map[string]any{"sonarcloud_org_key": testCloudOrg})
+	w.WriteOne(b)
+
+	if err := runResetPermissionTemplates(context.Background(), e); err != nil {
+		t.Fatalf("runResetPermissionTemplates: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	// Expect exactly two set_default_template calls (TRK + APP); VW is
+	// already default and must be skipped to avoid a redundant API call.
+	if len(setCalls) != 2 {
+		t.Fatalf("expected 2 set_default_template calls (TRK + APP), got %d: %v", len(setCalls), setCalls)
+	}
+	gotQualifiers := map[string]bool{}
+	for _, c := range setCalls {
+		if c["templateId"] != "tpl-default" {
+			t.Errorf("templateId: got %q, want \"tpl-default\" (the built-in)", c["templateId"])
+		}
+		if c["organization"] != testCloudOrg {
+			t.Errorf("organization: got %q, want %q", c["organization"], testCloudOrg)
+		}
+		gotQualifiers[c["qualifier"]] = true
+	}
+	if !gotQualifiers["TRK"] || !gotQualifiers["APP"] {
+		t.Errorf("expected qualifiers {TRK, APP}, got %v", gotQualifiers)
+	}
+	if gotQualifiers["VW"] {
+		t.Error("VW must NOT be re-promoted: built-in was already default for it")
+	}
+}
+
+// TestRunResetPermissionTemplatesSkipsWhenAlreadyDefault confirms the
+// task makes ZERO set_default_template calls when the built-in is
+// already the current default for every qualifier — guards against
+// redundant API noise.
+func TestRunResetPermissionTemplatesSkipsWhenAlreadyDefault(t *testing.T) {
+	setCalls := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/permissions/search_templates", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"permissionTemplates": []map[string]any{
+				{"id": "tpl-default", "name": "Default Template"},
+			},
+			"defaultTemplates": []map[string]any{
+				{"templateId": "tpl-default", "qualifier": "TRK"},
+				{"templateId": "tpl-default", "qualifier": "VW"},
+				{"templateId": "tpl-default", "qualifier": "APP"},
+			},
+		})
+	})
+	mux.HandleFunc("POST /api/permissions/set_default_template", func(w http.ResponseWriter, r *http.Request) {
+		setCalls++
+		w.WriteHeader(http.StatusNoContent)
+	})
+	cloudSrv := httptest.NewServer(mux)
+	defer cloudSrv.Close()
+
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+
+	dir := t.TempDir()
+	setupExtractData(dir)
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+
+	w, _ := e.Store.Writer("generateOrganizationMappings")
+	b, _ := json.Marshal(map[string]any{"sonarcloud_org_key": testCloudOrg})
+	w.WriteOne(b)
+
+	if err := runResetPermissionTemplates(context.Background(), e); err != nil {
+		t.Fatalf("runResetPermissionTemplates: %v", err)
+	}
+	if setCalls != 0 {
+		t.Errorf("set_default_template must not be called when built-in already default for all qualifiers; got %d", setCalls)
+	}
+}
+
+// TestRunDeleteTemplatesEnumeratesAndDeletes confirms the rewritten
+// deleteTemplates enumerates via search_templates and deletes every
+// non-built-in template, regardless of whether the migration created
+// it. Issue #368.
+func TestRunDeleteTemplatesEnumeratesAndDeletes(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		deleted []string
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/permissions/search_templates", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"permissionTemplates": []map[string]any{
+				{"id": "tpl-default", "name": "Default Template"},
+				{"id": "tpl-1", "name": "DEFAULT"},
+				{"id": "tpl-2", "name": "Mobile Apps"},
+				// Trimmed + alternate case must still match the built-in.
+				{"id": "tpl-default-alt", "name": "  default template  "},
+			},
+			"defaultTemplates": []map[string]any{
+				{"templateId": "tpl-default", "qualifier": "TRK"},
+				{"templateId": "tpl-default", "qualifier": "VW"},
+				{"templateId": "tpl-default", "qualifier": "APP"},
+			},
+		})
+	})
+	mux.HandleFunc("POST /api/permissions/delete_template", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		mu.Lock()
+		deleted = append(deleted, r.FormValue("templateId"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	cloudSrv := httptest.NewServer(mux)
+	defer cloudSrv.Close()
+
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+
+	dir := t.TempDir()
+	setupExtractData(dir)
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+
+	w, _ := e.Store.Writer("generateOrganizationMappings")
+	b, _ := json.Marshal(map[string]any{"sonarcloud_org_key": testCloudOrg})
+	w.WriteOne(b)
+
+	if err := runDeleteTemplates(context.Background(), e); err != nil {
+		t.Fatalf("runDeleteTemplates: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(deleted) != 2 {
+		t.Fatalf("expected 2 deletes (\"DEFAULT\" + \"Mobile Apps\"), got %d: %v", len(deleted), deleted)
+	}
+	deletedSet := map[string]bool{}
+	for _, id := range deleted {
+		deletedSet[id] = true
+	}
+	if !deletedSet["tpl-1"] || !deletedSet["tpl-2"] {
+		t.Errorf("expected both \"DEFAULT\" (tpl-1) and \"Mobile Apps\" (tpl-2) deleted, got %v", deletedSet)
+	}
+	if deletedSet["tpl-default"] || deletedSet["tpl-default-alt"] {
+		t.Error("built-in \"Default Template\" must never be deleted (case-insensitive name match)")
+	}
+}
