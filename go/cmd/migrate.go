@@ -61,6 +61,7 @@ func init() {
 	f.Bool(flagSkipProjectDataMigration, false, "Skip the entire project-data migration: importProjectData and the trailing per-issue/per-hotspot sync (#303). Defaults to false (data is migrated); pass the flag to skip.")
 	f.String("default_organization", "", "SonarQube Cloud organization to migrate every project into when organizations.csv has no mapping defined. Ignored if any mapping is present.")
 	f.StringSlice("exclude_branches", nil, "Glob patterns for non-main branches to skip during project data import (e.g. feature/*,bugfix/*)")
+	f.Bool("debug_scanner_report", false, "Diagnostic only — write each packaged scanner-report ZIP to <runDir>/scanner-reports/<project>_<branch>.zip before submitting to SonarCloud's CE. Off by default (#358).")
 }
 
 func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfig, error) {
@@ -120,6 +121,9 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	}
 	if cmd.Flags().Changed("exclude_branches") {
 		cfg.ExcludeBranches, _ = cmd.Flags().GetStringSlice("exclude_branches")
+	}
+	if cmd.Flags().Changed("debug_scanner_report") {
+		cfg.DebugScannerReport, _ = cmd.Flags().GetBool("debug_scanner_report")
 	}
 
 	// Default the export directory when neither config nor flag supplied

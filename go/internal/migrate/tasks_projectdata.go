@@ -8,11 +8,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/scanreport"
@@ -322,6 +324,23 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 		return nil, &importResult{Status: "skipped"}, nil
 	}
 
+	// Drop binary FILE components (e.g. __pycache__/*.pyc, .class,
+	// .jar). SonarQube Server indexes those when their path is
+	// reachable from the project, and api/sources/raw returns the
+	// raw bytes verbatim. The earlier fix (#358) skipped the binary
+	// content from the source map but left the FILE component in
+	// the report — and the CE's SourceFilesAction step still tried
+	// to persist source for that component and aborted with
+	// "Cannot persist sources of <key>" (Visit of Component failed).
+	// Dropping the whole component for binary files keeps the CE
+	// happy: it never sees the entry, and SonarCloud's file tree
+	// just doesn't list it — matching what a fresh scan would
+	// produce since binary files aren't analysed anyway.
+	components, sources = excludeBinarySourceComponents(e, input.CloudKey, input.Branch, components, sources)
+	if len(components) == 0 {
+		return nil, &importResult{Status: "skipped"}, nil
+	}
+
 	// The source server returns no source TEXT for this branch even though line
 	// measures may still exist (SonarQube housekeeping purges source/SCM data
 	// for old or inactive branches while keeping aggregate measures and issues;
@@ -458,6 +477,10 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 		return nil, nil, fmt.Errorf("packaging report: %w", err)
 	}
 
+	if e.DebugScannerReport {
+		dumpScannerReport(e, input.CloudKey, input.Branch, zipBytes)
+	}
+
 	e.Logger.Info("report packaged",
 		"project", input.CloudKey, "sourceBranch", input.Branch, "targetBranch", targetBranch,
 		"projectVersion", projectVersion,
@@ -471,6 +494,51 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	)
 
 	return &branchReport{ZIP: zipBytes, ProjectVersion: projectVersion}, nil, nil
+}
+
+// dumpScannerReport writes the packaged ZIP to disk so the operator
+// can unzip and inspect source-<ref>.txt, component-<ref>.pb, etc.
+// against a known-good scanner-generated report. Enabled via
+// --debug_scanner_report. Errors are logged but do not block the
+// real submission. #358.
+func dumpScannerReport(e *Executor, cloudKey, branch string, zipBytes []byte) {
+	if e.RunDir == "" {
+		e.Logger.Warn("debug_scanner_report set but RunDir is empty; skipping dump")
+		return
+	}
+	dir := filepath.Join(e.RunDir, "scanner-reports")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		e.Logger.Warn("debug_scanner_report: mkdir failed", "dir", dir, "err", err)
+		return
+	}
+	// Sanitise the path: branch can contain slashes (release/foo) or
+	// commas (the user's "comma,branch"). Replace anything that isn't
+	// alnum / dot / dash / underscore with "_".
+	safeBranch := sanitiseScannerReportName(branch)
+	name := fmt.Sprintf("%s_%s.zip", cloudKey, safeBranch)
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, zipBytes, 0o644); err != nil {
+		e.Logger.Warn("debug_scanner_report: write failed", "path", path, "err", err)
+		return
+	}
+	e.Logger.Info("debug_scanner_report: wrote ZIP", "path", path, "bytes", len(zipBytes))
+}
+
+// sanitiseScannerReportName replaces filesystem-unfriendly characters
+// in a branch name (slash, comma, colon, ...) with "_".
+func sanitiseScannerReportName(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '.', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
 }
 
 // fixComponentLineCounts sets each component's line count to the best available
@@ -1146,7 +1214,12 @@ func buildChangesetMap(cr *scanreport.ComponentRef, components []scanreport.Comp
 		}
 		lineCount := 0
 		if src, hasSrc := pbSources[ref]; hasSrc && src != "" {
-			lineCount = strings.Count(src, "\n") + 1
+			// Use sourceLineCount, not "count('\n') + 1": api/sources/raw
+			// responses always end with "\n" so the unconditional +1
+			// was off-by-one, producing a Changesets array one longer
+			// than the actual source line count (#358 — same root
+			// cause as the buildSourceLineCountMap fix).
+			lineCount = sourceLineCount(src)
 		}
 		if lineCount == 0 {
 			lineCount = int(comp.Lines)
@@ -1199,10 +1272,96 @@ func buildSourceLineCountMap(sources []sourceRecord) map[string]int {
 	m := make(map[string]int, len(sources))
 	for _, s := range sources {
 		if s.Source != "" {
-			m[s.Component] = strings.Count(s.Source, "\n") + 1
+			m[s.Component] = sourceLineCount(s.Source)
 		}
 	}
 	return m
+}
+
+// sourceLineCount returns the number of source lines in src under
+// SonarCloud's CE convention. CE counts lines as
+// `content.split('\n').length` — equivalent to `count('\n') + 1`
+// for any non-empty content — which intentionally counts the
+// trailing empty element after a final newline as a line. (Empty
+// content has 0 lines in our convention; CloudVoyager's
+// resolveLineCount floors at 1 there, but our pipeline filters
+// out empty source records upstream so the difference is moot.)
+//
+// History: an earlier iteration treated the trailing "\n" as
+// "doesn't count" and returned count('\n') instead of count('\n')+1.
+// That dropped Component.Lines below the actual file_sources row
+// count CE expects, and the file_sources row was silently rejected,
+// leaving the Code tab empty even after a successful CE import
+// (#358).
+func sourceLineCount(src string) int {
+	if src == "" {
+		return 0
+	}
+	return strings.Count(src, "\n") + 1
+}
+
+// isValidSourceText reports whether src is a plausible text source
+// file: valid UTF-8 with no embedded NUL bytes. SonarQube Server
+// indexes some non-text files (e.g. __pycache__/*.pyc — Python
+// bytecode, .class — JVM bytecode) whose api/sources/raw response
+// is raw binary. Including those entries in the scanner report
+// breaks SonarCloud's CE source-import step and leaves the project's
+// Code tab empty for ALL files, not just the bad one (#358).
+//
+// Empty content is treated as valid — an empty source file is
+// legitimate (e.g. __init__.py) and CE handles it fine.
+func isValidSourceText(src string) bool {
+	if src == "" {
+		return true
+	}
+	if strings.ContainsRune(src, '\x00') {
+		return false
+	}
+	return utf8.ValidString(src)
+}
+
+// excludeBinarySourceComponents drops FILE components whose
+// api/sources/raw response is binary (not valid UTF-8 or contains
+// embedded NUL bytes). The matching source records are dropped too
+// so the downstream map[sourceRef]content stays consistent.
+//
+// Removing only the source-<ref>.txt entry while keeping the FILE
+// component triggers a CE error: "Cannot persist sources of <key>
+// (Visit of Component failed)" — the CE's SourceFilesAction step
+// expects every FILE component to either have valid source or be
+// absent entirely. Dropping the component up front matches what
+// SonarCloud would have shown if the file were never indexed
+// (binary files aren't analysed anyway).
+//
+// Components without ANY source record (rare — e.g. a file
+// referenced only by external issues) pass through unchanged so the
+// "ALL FIL components" CloudVoyager behaviour is preserved for the
+// external-issues edge case.
+func excludeBinarySourceComponents(e *Executor, cloudKey, branch string, components []scanreport.ComponentInput, sources []sourceRecord) ([]scanreport.ComponentInput, []sourceRecord) {
+	binaryKeys := make(map[string]bool)
+	for _, s := range sources {
+		if !isValidSourceText(s.Source) {
+			binaryKeys[s.Component] = true
+		}
+	}
+	if len(binaryKeys) == 0 {
+		return components, sources
+	}
+	filteredComponents := make([]scanreport.ComponentInput, 0, len(components))
+	for _, c := range components {
+		if !binaryKeys[c.Key] {
+			filteredComponents = append(filteredComponents, c)
+		}
+	}
+	filteredSources := make([]sourceRecord, 0, len(sources))
+	for _, s := range sources {
+		if !binaryKeys[s.Component] {
+			filteredSources = append(filteredSources, s)
+		}
+	}
+	e.Logger.Info("excluded binary FILE components from scanner report",
+		"project", cloudKey, "branch", branch, "count", len(binaryKeys))
+	return filteredComponents, filteredSources
 }
 
 // buildSourceKeySet returns a set of component keys that have extracted source code.

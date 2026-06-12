@@ -381,6 +381,16 @@ func BuildActiveRules(rules []ActiveRuleInput, defaultTSMillis int64) []*pb.Acti
 	return result
 }
 
+// stubRevision is the fixed-length SHA-1-shaped synthetic revision
+// id we stamp on every per-line changeset entry. SonarCloud's CE
+// uses scm revisions as the primary line-tracking key and is known
+// to silently drop source storage when the revision string isn't
+// a 40-character SHA-1 — leaving the Code tab empty after an
+// otherwise successful import (#358). CloudVoyager uses the same
+// 40-char-padded pattern (a recognisable prefix + zero padding);
+// we mirror it with our own prefix so operators can grep for it.
+const stubRevision = "smt0000000000000000000000000000000000000" // 40 chars
+
 // BuildDefaultChangesets creates a Changesets message for a component with
 // lineCount lines, all attributed to a single date. Use BackdateChangesets
 // to rewrite these with per-issue dates afterward.
@@ -389,7 +399,7 @@ func BuildDefaultChangesets(compRef int32, lineCount int, date time.Time) *pb.Ch
 	cs := &pb.Changesets{
 		ComponentRef: compRef,
 		Changeset: []*pb.Changesets_Changeset{{
-			Revision: "migration-initial",
+			Revision: stubRevision,
 			Author:   stubAuthor,
 			Date:     dateMs,
 		}},

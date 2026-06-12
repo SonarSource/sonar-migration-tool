@@ -54,25 +54,34 @@ type MigrateConfig struct {
 	// ExcludeBranches holds glob patterns for non-main branches to skip
 	// during project data import. Main branch is never excluded.
 	ExcludeBranches []string
+
+	// DebugScannerReport, when true, writes every packaged scanner
+	// report ZIP to disk before submitting it to SonarCloud's CE
+	// (#358). Output path is <runDir>/scanner-reports/
+	// <project>_<branch>.zip. Off by default — only enable when
+	// diagnosing source-import problems; the ZIPs can be sizeable.
+	DebugScannerReport bool
 }
 
 // Executor is the runtime context passed to every migrate task function.
 type Executor struct {
-	Cloud           *cloud.Client     // Standard Cloud API (sonarcloud.io)
-	CloudAPI        *cloud.Client     // Enterprise API (api.sonarcloud.io)
-	Raw             *common.RawClient // For reading from Cloud standard API
-	RawAPI          *common.RawClient // For reading from Cloud enterprise API
-	Extract         *common.DataStore // Reads extract data (across all extract runs)
-	Store           *common.DataStore // Writes migrate output to run directory
-	CloudURL        string            // e.g. "https://sonarcloud.io/"
-	APIURL          string            // e.g. "https://api.sonarcloud.io/"
-	EntKey          string            // Enterprise key
-	Edition         common.Edition
-	ExportDir       string // Root export directory
-	Mapping         structure.ExtractMapping
-	Sem             chan struct{}
-	Logger          *slog.Logger
-	ExcludeBranches []string
+	Cloud              *cloud.Client     // Standard Cloud API (sonarcloud.io)
+	CloudAPI           *cloud.Client     // Enterprise API (api.sonarcloud.io)
+	Raw                *common.RawClient // For reading from Cloud standard API
+	RawAPI             *common.RawClient // For reading from Cloud enterprise API
+	Extract            *common.DataStore // Reads extract data (across all extract runs)
+	Store              *common.DataStore // Writes migrate output to run directory
+	CloudURL           string            // e.g. "https://sonarcloud.io/"
+	APIURL             string            // e.g. "https://api.sonarcloud.io/"
+	EntKey             string            // Enterprise key
+	Edition            common.Edition
+	ExportDir          string // Root export directory
+	RunDir             string // Per-run output directory (where scanner-reports/ lands)
+	Mapping            structure.ExtractMapping
+	Sem                chan struct{}
+	Logger             *slog.Logger
+	ExcludeBranches    []string
+	DebugScannerReport bool // #358: dump packaged ZIPs for diagnostics
 }
 
 // RunMigrate is the main entry point for the migrate command.
@@ -237,21 +246,23 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 	plan = filterCompleted(plan, store)
 
 	executor := &Executor{
-		Cloud:           cc,
-		CloudAPI:        apiCC,
-		Raw:             raw,
-		RawAPI:          rawAPI,
-		Extract:         nil, // Will be set per-task based on extract mapping
-		Store:           store,
-		CloudURL:        cloudClient.BaseURL(),
-		APIURL:          apiClient.BaseURL(),
-		EntKey:          cfg.EnterpriseKey,
-		Edition:         edition,
-		ExportDir:       cfg.ExportDirectory,
-		Mapping:         mapping,
-		Sem:             make(chan struct{}, cfg.Concurrency),
-		ExcludeBranches: cfg.ExcludeBranches,
-		Logger:          logger,
+		Cloud:              cc,
+		CloudAPI:           apiCC,
+		Raw:                raw,
+		RawAPI:             rawAPI,
+		Extract:            nil, // Will be set per-task based on extract mapping
+		Store:              store,
+		CloudURL:           cloudClient.BaseURL(),
+		APIURL:             apiClient.BaseURL(),
+		EntKey:             cfg.EnterpriseKey,
+		Edition:            edition,
+		ExportDir:          cfg.ExportDirectory,
+		RunDir:             runDir,
+		Mapping:            mapping,
+		Sem:                make(chan struct{}, cfg.Concurrency),
+		ExcludeBranches:    cfg.ExcludeBranches,
+		DebugScannerReport: cfg.DebugScannerReport,
+		Logger:             logger,
 	}
 
 	// Execute phases.

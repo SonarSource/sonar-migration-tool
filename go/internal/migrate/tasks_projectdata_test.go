@@ -1227,3 +1227,121 @@ func TestImportSkipsCompletedBranches(t *testing.T) {
 		}
 	}
 }
+
+// #358: SonarCloud's CE counts source lines using
+// content.split('\n').length — equivalent to count('\n') + 1 for
+// non-empty content. That intentionally treats the empty element
+// after a trailing '\n' as a line so that file_sources row count
+// matches what the CE expects. Verified against CloudVoyager's
+// resolveLineCount, which uses the same formula and is known to
+// populate the Code tab correctly.
+func TestSourceLineCount(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+		want int
+	}{
+		{name: "empty", src: "", want: 0},
+
+		// Files that end with a newline — count('\n') + 1.
+		{name: "single line with newline", src: "a\n", want: 2},
+		{name: "two lines with trailing newline", src: "a\nb\n", want: 3},
+		{name: "three lines with trailing newline", src: "a\nb\nc\n", want: 4},
+		{name: "trailing blank line", src: "a\nb\n\n", want: 4},
+
+		// Files without a trailing newline.
+		{name: "single line no trailing newline", src: "a", want: 1},
+		{name: "two lines no trailing newline", src: "a\nb", want: 2},
+
+		// Edge case from the user's reference run (Python file with a
+		// trailing blank line — extracted file ends with "\n\n").
+		{name: "python file from reference run", src: "def f():\n    a = 1\n    b = 2\n\n", want: 5},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sourceLineCount(tc.src); got != tc.want {
+				t.Errorf("sourceLineCount(%q) = %d, want %d", tc.src, got, tc.want)
+			}
+		})
+	}
+}
+
+// #358 root cause: SonarQube Server indexes some non-text files
+// (e.g. __pycache__/*.pyc, .class, .jar). api/sources/raw returns
+// their raw bytes verbatim. Including one of those entries in the
+// scanner report breaks SonarCloud's CE source-import step and
+// leaves the Code tab empty for the entire project (not just the
+// bad file).
+//
+// User-reported example: okorach-oss_sonar-tools' branch had 5
+// `.pyc` files in __pycache__/; their api/sources/raw responses
+// began with Python's `o\n\n\x00\x00\x00\x00...` magic bytes.
+func TestIsValidSourceText(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{name: "empty — valid (empty source files are legit)", src: "", want: true},
+		{name: "plain ASCII", src: "package main\n\nfunc main() {}\n", want: true},
+		{name: "UTF-8 with non-ASCII chars", src: "// Olivier Korách's file\n# 日本語\n", want: true},
+		{name: "embedded NUL byte — binary", src: "abc\x00def", want: false},
+		{name: "leading NUL byte — binary", src: "\x00\x00\x00", want: false},
+		{name: "invalid UTF-8 — binary", src: "abc\xff\xfedef", want: false},
+		{name: "python pyc magic — binary", src: "o\n\n\x00\x00\x00\x00\xa7\xff\xa6i", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isValidSourceText(tc.src); got != tc.want {
+				t.Errorf("isValidSourceText(%q) = %v, want %v", tc.src, got, tc.want)
+			}
+		})
+	}
+}
+
+// #358 v2: skipping the source content for a binary file but
+// keeping the FILE component triggered a CE failure:
+// "Cannot persist sources of <key> (Visit of Component failed)".
+// excludeBinarySourceComponents drops both the component AND its
+// source record so the CE never sees the binary entry.
+func TestExcludeBinarySourceComponents(t *testing.T) {
+	e := &Executor{Logger: discardLogger()}
+
+	components := []scanreport.ComponentInput{
+		{Key: "proj:src/Foo.py", Path: "src/Foo.py", Language: "py"},
+		{Key: "proj:src/__pycache__/Foo.cpython-310.pyc", Path: "src/__pycache__/Foo.cpython-310.pyc"},
+		{Key: "proj:src/Bar.py", Path: "src/Bar.py", Language: "py"},
+		{Key: "proj:src/Baz.java", Path: "src/Baz.java", Language: "java"}, // no source — referenced via external issue only
+	}
+	sources := []sourceRecord{
+		{Component: "proj:src/Foo.py", Source: "def f():\n    pass\n"},
+		{Component: "proj:src/__pycache__/Foo.cpython-310.pyc", Source: "o\n\n\x00\x00\x00\x00\xa7\xff\xa6i"},
+		{Component: "proj:src/Bar.py", Source: "x = 1\n"},
+		// no source for Baz.java
+	}
+
+	gotComponents, gotSources := excludeBinarySourceComponents(e, "cloud-key", "main", components, sources)
+
+	// Binary component must be dropped; text components and the
+	// component-without-source must pass through.
+	wantKeys := []string{"proj:src/Foo.py", "proj:src/Bar.py", "proj:src/Baz.java"}
+	if len(gotComponents) != len(wantKeys) {
+		t.Fatalf("components: want %d, got %d (%v)", len(wantKeys), len(gotComponents), gotComponents)
+	}
+	for i, w := range wantKeys {
+		if gotComponents[i].Key != w {
+			t.Errorf("components[%d]: want %q, got %q", i, w, gotComponents[i].Key)
+		}
+	}
+
+	// Binary source record must be dropped.
+	wantSrcKeys := []string{"proj:src/Foo.py", "proj:src/Bar.py"}
+	if len(gotSources) != len(wantSrcKeys) {
+		t.Fatalf("sources: want %d, got %d (%v)", len(wantSrcKeys), len(gotSources), gotSources)
+	}
+	for i, w := range wantSrcKeys {
+		if gotSources[i].Component != w {
+			t.Errorf("sources[%d]: want %q, got %q", i, w, gotSources[i].Component)
+		}
+	}
+}
