@@ -126,6 +126,7 @@ type OrgConfigEntry struct {
 type settingsBlock struct {
 	ExportDirectory string `json:"export_directory"`
 	Concurrency     int    `json:"concurrency"`
+	Timeout         int    `json:"timeout"`
 }
 
 func parseConfigFile(path string) (configFileShape, error) {
@@ -159,11 +160,15 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			cfg.RunID = s.Target.RunID
 			cfg.TargetTask = s.Target.TargetTask
 			cfg.Concurrency = s.Target.Concurrency
+			cfg.Timeout = s.Target.Timeout
 			cfg.DefaultOrganization = s.Target.DefaultOrganization
 			cfg.ExcludeBranches = s.Target.ExcludeBranches
 		}
 		if cfg.Concurrency == 0 {
 			cfg.Concurrency = s.Concurrency
+		}
+		if cfg.Timeout == 0 {
+			cfg.Timeout = s.Timeout
 		}
 		cfg.ExportDirectory = s.ExportDirectory
 		// Top-level skip_issue_sync applies to every shape (#299).
@@ -204,6 +209,7 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			Edition:            s.Edition,
 			ExportDirectory:    s.ExportDirectory,
 			Concurrency:        s.Concurrency,
+			Timeout:            s.Timeout,
 			RunID:              s.RunID,
 			TargetTask:         s.TargetTask,
 			SkipProfiles:       s.SkipProfiles,
@@ -245,6 +251,7 @@ func (sc sonarCloudBlock) toMigrateConfig(settings *settingsBlock) MigrateConfig
 	if settings != nil {
 		cfg.ExportDirectory = settings.ExportDirectory
 		cfg.Concurrency = settings.Concurrency
+		cfg.Timeout = settings.Timeout
 	}
 	return cfg
 }

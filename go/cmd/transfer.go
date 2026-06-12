@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
@@ -35,6 +36,7 @@ const (
 	flagTargetToken        = "target_token"
 	flagEnterpriseKey      = "enterprise_key"
 	flagDefaultOrg         = "default_organization"
+	flagEdition            = "edition"
 	flagExportDir                = "export_dir"
 	flagSkipIssueSync            = "skip_issue_sync"
 	flagSkipProjectDataMigration = "skip_project_data_migration"
@@ -149,19 +151,21 @@ func init() {
 	f.StringP(flagConfig, "c", "", "Path to JSON configuration file (common shape with source / target sections)")
 	f.String(flagSourceURL, "", sqServerName+" URL (maps to source.url)")
 	f.String(flagSourceToken, "", sqServerName+" token (maps to source.token)")
-	f.String(flagProjectKey, "", "Project key to transfer (omit to transfer all projects)")
+	f.String(flagProjectKey, "", "Project key to transfer (required; transfer is project-scoped — also accepts top-level project_key in the config file)")
 	f.String(flagTargetURL, "", scCloudName+" URL (maps to target.url, default: https://sonarcloud.io/)")
 	f.String(flagTargetToken, "", scCloudName+" token (maps to target.token)")
 	f.String(flagDefaultOrg, "", scCloudName+" organization key (maps to target.default_organization)")
 	f.String(flagEnterpriseKey, "", scCloudName+" enterprise key (maps to target.enterprise_key, defaults to --"+flagDefaultOrg+")")
+	f.String(flagEdition, "", scCloudName+" license edition (maps to target.edition; defaults to enterprise)")
 	f.String(flagExportDir, "./migration-files/", "Working directory for intermediate files (maps to export_directory)")
 	f.Bool(flagSkipIssueSync, false, "Skip the final per-issue and per-hotspot metadata sync (#299). Same semantics as the skip_issue_sync config-file field — defaults to false (sync happens); pass the flag to skip.")
 	f.Bool(flagSkipProjectDataMigration, false, "Skip the entire project-data migration: importProjectData and the trailing per-issue/per-hotspot sync (#303). Defaults to false (data is migrated); pass the flag to skip.")
 	f.Int(flagConcurrency, 0, "Max concurrent requests (default: 25) (maps to concurrency)")
-	f.Int(flagTimeout, 0, "HTTP request timeout in seconds (maps to timeout)")
+	f.Int(flagTimeout, 0, "HTTP request timeout in seconds (maps to timeout; default: 60)")
 	f.String(flagPEMFilePath, "", "Path to client mTLS PEM file for the source server (maps to source.pem_file_path)")
 	f.String(flagKeyFilePath, "", "Path to client mTLS key file for the source server (maps to source.key_file_path)")
 	f.String(flagCertPassword, "", "Password for the source server mTLS client certificate (maps to source.cert_password)")
+	// --debug is inherited from the persistent root flag; see cmd/root.go.
 	f.StringSlice(flagExcludeBranches, nil, "Glob patterns for non-main branches to skip during project data import (e.g. feature/*,bugfix/*)")
 }
 
@@ -174,6 +178,7 @@ type transferConfig struct {
 	targetToken         string
 	defaultOrganization string
 	enterpriseKey       string
+	edition             string
 	exportDir           string
 	concurrency              int
 	timeout                  int
@@ -248,6 +253,7 @@ func loadTransferFileDefaults(path string) (transferConfig, error) {
 	cfg.targetURL = migrateCfg.URL
 	cfg.targetToken = migrateCfg.Token
 	cfg.enterpriseKey = migrateCfg.EnterpriseKey
+	cfg.edition = migrateCfg.Edition
 	cfg.defaultOrganization = migrateCfg.DefaultOrganization
 
 	cfg.exportDir = extractCfg.ExportDirectory
@@ -293,6 +299,7 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 	applyFlagString(cmd, flagTargetToken, &cfg.targetToken)
 	applyFlagString(cmd, flagDefaultOrg, &cfg.defaultOrganization)
 	applyFlagString(cmd, flagEnterpriseKey, &cfg.enterpriseKey)
+	applyFlagString(cmd, flagEdition, &cfg.edition)
 	applyFlagString(cmd, flagExportDir, &cfg.exportDir)
 	applyFlagInt(cmd, flagConcurrency, &cfg.concurrency)
 	applyFlagInt(cmd, flagTimeout, &cfg.timeout)
@@ -337,6 +344,17 @@ func validateTransferConfig(cfg transferConfig) error {
 	}
 	if cfg.targetToken == "" || cfg.defaultOrganization == "" {
 		return fmt.Errorf("%s token and organization key are required (--%s / --%s or target.token / target.default_organization in config file)", scCloudName, flagTargetToken, flagDefaultOrg)
+	}
+	// #383: transfer is project-scoped by design (see the command's
+	// long help). Without an explicit project key, the extract phase
+	// would fan out across every project visible to the source token
+	// — surprising the operator and, on most non-admin tokens, ending
+	// in a "no projects found" failure after each per-project task
+	// gets a 403 / 404 in the deeper API calls. Require the key up
+	// front so the failure mode is a clear validation error instead
+	// of a downstream cascade.
+	if cfg.projectKey == "" {
+		return fmt.Errorf("project key is required (--%s or project_key in config file) — transfer is project-scoped by design", flagProjectKey)
 	}
 	return nil
 }
@@ -425,7 +443,44 @@ func runTransferExtract(ctx context.Context, cfg transferConfig) ([]string, erro
 	if err != nil {
 		return nil, fmt.Errorf("extract failed: %w", err)
 	}
+	// #383: validateTransferConfig already required a project key, but
+	// it doesn't catch misspellings — /api/projects/search?projects=<typo>
+	// returns 200 with zero components, the extract chain silently writes
+	// nothing, and downstream phases fail with a confusing "no projects
+	// found" once mappings runs. Verify post-extract that the requested
+	// project actually surfaced in getProjects; if not, abort with a
+	// clear error that names the exact value the operator typed.
+	if err := ensureTransferProjectExtracted(cfg); err != nil {
+		return nil, err
+	}
 	return skipped, nil
+}
+
+// ensureTransferProjectExtracted reads the latest extract's getProjects
+// records for the configured source URL and returns an error when the
+// configured --project_key isn't among them. Called only when
+// cfg.projectKey is non-empty (validateTransferConfig enforces that).
+func ensureTransferProjectExtracted(cfg transferConfig) error {
+	mapping, err := structure.GetUniqueExtracts(cfg.exportDir)
+	if err != nil {
+		return fmt.Errorf("scanning extract directory %s: %w", cfg.exportDir, err)
+	}
+	items, _ := structure.ReadExtractData(cfg.exportDir, mapping, "getProjects")
+	// The extract pipeline normalises URLs with a trailing slash; the
+	// config may or may not. Strip slashes on both sides before matching.
+	wantURL := strings.TrimRight(cfg.sourceURL, "/")
+	for _, item := range items {
+		if strings.TrimRight(item.ServerURL, "/") != wantURL {
+			continue
+		}
+		if common.ExtractField(item.Data, "key") == cfg.projectKey {
+			return nil
+		}
+	}
+	return fmt.Errorf(
+		"project %q does not exist on source server %s — check the --%s value "+
+			"(keys are case-sensitive; verify with GET /api/projects/search?projects=%s)",
+		cfg.projectKey, cfg.sourceURL, flagProjectKey, cfg.projectKey)
 }
 
 func runTransferStructure(cfg transferConfig) error {
@@ -454,8 +509,10 @@ func runTransferMigrate(ctx context.Context, cfg transferConfig) (string, error)
 		URL:             cfg.targetURL,
 		Token:           cfg.targetToken,
 		EnterpriseKey:   cfg.enterpriseKey,
+		Edition:         cfg.edition,
 		ExportDirectory: cfg.exportDir,
 		Concurrency:     cfg.concurrency,
+		Timeout:         cfg.timeout,
 		// Project-scoped migration: run only the leaf tasks for the project,
 		// its quality gate/profiles, permissions, and issue/hotspot history.
 		// Their dependencies are resolved automatically.

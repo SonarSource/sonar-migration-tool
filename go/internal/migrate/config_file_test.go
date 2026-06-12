@@ -51,6 +51,8 @@ func TestLoadMigrateConfigFileShapes(t *testing.T) {
 				URL:             "https://sonarcloud.io/",
 				ExportDirectory: "./files",
 				Concurrency:     10,
+				// #383: settings.timeout now propagates to MigrateConfig.
+				Timeout: 60,
 			},
 		},
 	}
@@ -286,6 +288,89 @@ func TestLoadMigrateConfigFileUnifiedShape_TargetOverridesGlobals(t *testing.T) 
 	cfg, _ := LoadMigrateConfigFile(path)
 	if cfg.Concurrency != 25 {
 		t.Errorf("override: concurrency=%d", cfg.Concurrency)
+	}
+}
+
+// #383: Timeout must flow into MigrateConfig from every documented
+// config-file shape so the migrate phase honors the operator's value
+// instead of falling back to the SDK default (60s). The unified
+// shape's top-level timeout supplies a default; an explicit
+// target.timeout overrides it (same precedence as concurrency).
+func TestLoadMigrateConfigFile_TimeoutAllShapes(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want int
+	}{
+		{
+			name: "flat",
+			body: `{"url":"u","token":"t","timeout":15}`,
+			want: 15,
+		},
+		{
+			name: "command-sectioned (migrate block)",
+			body: `{"migrate":{"url":"u","token":"t","timeout":20}}`,
+			want: 20,
+		},
+		{
+			name: "side-sectioned (sonarcloud + settings)",
+			body: `{"sonarcloud":{"url":"u","token":"t"},"settings":{"timeout":30}}`,
+			want: 30,
+		},
+		{
+			name: "unified — top-level only",
+			body: `{"timeout":45,"target":{"url":"u","token":"t"}}`,
+			want: 45,
+		},
+		{
+			name: "unified — target overrides top-level",
+			body: `{"timeout":10,"target":{"url":"u","token":"t","timeout":99}}`,
+			want: 99,
+		},
+		{
+			name: "unified — target only",
+			body: `{"target":{"url":"u","token":"t","timeout":55}}`,
+			want: 55,
+		},
+		{
+			name: "unified — missing leaves Timeout at zero (applyDefaults will fill 60)",
+			body: `{"target":{"url":"u","token":"t"}}`,
+			want: 0,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := dir + "/cfg.json"
+			if err := os.WriteFile(path, []byte(c.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadMigrateConfigFile(path)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if cfg.Timeout != c.want {
+				t.Errorf("Timeout: got %d, want %d (body=%s)", cfg.Timeout, c.want, c.body)
+			}
+		})
+	}
+}
+
+// #383: applyDefaults must fill Timeout with the SDK default (60s)
+// when the config left it at zero, so callers that previously relied
+// on the SDK fallback keep working.
+func TestMigrateConfig_ApplyDefaultsFillsTimeout(t *testing.T) {
+	cfg := MigrateConfig{}
+	cfg.applyDefaults()
+	if cfg.Timeout != 60 {
+		t.Errorf("Timeout default: got %d, want 60", cfg.Timeout)
+	}
+
+	// Explicit value is preserved.
+	cfg = MigrateConfig{Timeout: 5}
+	cfg.applyDefaults()
+	if cfg.Timeout != 5 {
+		t.Errorf("Timeout preservation: got %d, want 5", cfg.Timeout)
 	}
 }
 

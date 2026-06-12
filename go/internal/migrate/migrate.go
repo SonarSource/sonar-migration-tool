@@ -31,6 +31,11 @@ type MigrateConfig struct {
 	URL             string // Cloud URL (default: https://sonarcloud.io/)
 	RunID           string // Resume a prior run
 	Concurrency     int
+	// Timeout is the per-HTTP-request timeout in seconds applied to
+	// every SonarQube Cloud call the migrate phase makes (#383). When
+	// <= 0, applyDefaults sets it to 60 — matching the SDK default
+	// and what the extract pipeline uses (extract.go).
+	Timeout         int
 	ExportDirectory string
 	TargetTask      string
 
@@ -119,6 +124,7 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 		}
 	}
 	clientOpts := []sqapi.Option{
+		sqapi.WithTimeout(cfg.Timeout),
 		sqapi.WithRetryLogger(retryLog),
 		sqapi.WithRateLimitObserver(rateLimitObs),
 	}
@@ -308,6 +314,9 @@ func runPhase(ctx context.Context, e *Executor, taskNames []string, registry map
 func (cfg *MigrateConfig) applyDefaults() {
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 25
+	}
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = 60
 	}
 	if cfg.ExportDirectory == "" {
 		cfg.ExportDirectory = "/app/files/"

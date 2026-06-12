@@ -54,6 +54,7 @@ func init() {
 	f.String("url", "", "URL of SonarQube Cloud")
 	f.String("run_id", "", "ID of a run to resume in case of failures")
 	f.Int("concurrency", 0, "Maximum number of concurrent requests")
+	f.Int("timeout", 0, "Per-HTTP-request timeout in seconds (default: 60). Maps to the top-level timeout config field.")
 	f.String("export_directory", "", "Root directory containing all SonarQube exports")
 	f.String("target_task", "", "Name of a specific migration task to complete")
 	f.Bool("skip_profiles", false, "Skip quality profile migration/provisioning in SonarQube Cloud")
@@ -93,6 +94,7 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	overrideString(cmd, "target_task", &cfg.TargetTask)
 	overrideString(cmd, "default_organization", &cfg.DefaultOrganization)
 	overrideInt(cmd, "concurrency", &cfg.Concurrency)
+	overrideInt(cmd, "timeout", &cfg.Timeout)
 	if cmd.Flags().Changed("skip_profiles") {
 		cfg.SkipProfiles, _ = cmd.Flags().GetBool("skip_profiles")
 	}

@@ -28,6 +28,7 @@ func newTransferTestCmd() *cobra.Command {
 	f.String(flagTargetToken, "", "")
 	f.String(flagDefaultOrg, "", "")
 	f.String(flagEnterpriseKey, "", "")
+	f.String(flagEdition, "", "")
 	f.String(flagExportDir, "./migration-files/", "")
 	f.Int(flagConcurrency, 0, "")
 	f.Int(flagTimeout, 0, "")
@@ -66,6 +67,7 @@ func TestResolveTransferConfig_UnifiedConfigShape(t *testing.T) {
 			"url": "https://sonarcloud.io/",
 			"token": "sc-token",
 			"enterprise_key": "ent-key",
+			"edition": "developer",
 			"default_organization": "my-org"
 		}
 	}`)
@@ -87,6 +89,7 @@ func TestResolveTransferConfig_UnifiedConfigShape(t *testing.T) {
 		targetToken:         "sc-token",
 		defaultOrganization: "my-org",
 		enterpriseKey:       "ent-key",
+		edition:             "developer",
 		exportDir:           "/tmp/from-cfg",
 		concurrency:         7,
 		timeout:             42,
@@ -107,6 +110,7 @@ func TestResolveTransferConfig_CLIOverridesConfig(t *testing.T) {
 		"concurrency": 7,
 		"timeout": 42,
 		"export_directory": "/tmp/from-cfg",
+		"debug": false,
 		"source": {
 			"url": "https://from-cfg",
 			"token": "cfg-source",
@@ -118,6 +122,7 @@ func TestResolveTransferConfig_CLIOverridesConfig(t *testing.T) {
 			"url": "https://from-cfg",
 			"token": "cfg-target",
 			"enterprise_key": "cfg-ent",
+			"edition": "developer",
 			"default_organization": "cfg-org"
 		}
 	}`)
@@ -131,12 +136,14 @@ func TestResolveTransferConfig_CLIOverridesConfig(t *testing.T) {
 		"--target_token", "cli-target-tok",
 		"--default_organization", "cli-org",
 		"--enterprise_key", "cli-ent",
+		"--edition", "community",
 		"--export_dir", "/tmp/cli",
 		"--concurrency", "11",
 		"--timeout", "99",
 		"--pem_file_path", "/cli/pem",
 		"--key_file_path", "/cli/key",
 		"--cert_password", "cli-pass",
+		"--debug",
 	}
 	if err := cmd.ParseFlags(args); err != nil {
 		t.Fatal(err)
@@ -158,12 +165,14 @@ func TestResolveTransferConfig_CLIOverridesConfig(t *testing.T) {
 		{"targetToken", cfg.targetToken, "cli-target-tok"},
 		{"defaultOrganization", cfg.defaultOrganization, "cli-org"},
 		{"enterpriseKey", cfg.enterpriseKey, "cli-ent"},
+		{"edition", cfg.edition, "community"},
 		{"exportDir", cfg.exportDir, "/tmp/cli"},
 		{"concurrency", cfg.concurrency, 11},
 		{"timeout", cfg.timeout, 99},
 		{"pemFilePath", cfg.pemFilePath, "/cli/pem"},
 		{"keyFilePath", cfg.keyFilePath, "/cli/key"},
 		{"certPassword", cfg.certPassword, "cli-pass"},
+		{"debug", cfg.debug, true},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -193,10 +202,11 @@ func TestResolveTransferConfig_EnterpriseKeyDefaultsToOrg(t *testing.T) {
 	}
 }
 
-// Validation must error if either side is missing credentials, with a
-// message that names the new --source_* / --target_* flags so users
-// aren't pointed at the retired --sq-* / --sc-* names.
-func TestValidateTransferConfig_MissingCredentials(t *testing.T) {
+// Validation must error if either side is missing credentials or the
+// project key is missing (#383), with messages that name the relevant
+// CLI flag so users aren't pointed at the retired --sq-* / --sc-*
+// names.
+func TestValidateTransferConfig_MissingFields(t *testing.T) {
 	cases := []struct {
 		name   string
 		cfg    transferConfig
@@ -204,13 +214,21 @@ func TestValidateTransferConfig_MissingCredentials(t *testing.T) {
 	}{
 		{
 			name:   "missing source",
-			cfg:    transferConfig{targetToken: "t", defaultOrganization: "o"},
+			cfg:    transferConfig{targetToken: "t", defaultOrganization: "o", projectKey: "p"},
 			errSub: "--" + flagSourceURL,
 		},
 		{
 			name:   "missing target",
-			cfg:    transferConfig{sourceURL: "u", sourceToken: "t"},
+			cfg:    transferConfig{sourceURL: "u", sourceToken: "t", projectKey: "p"},
 			errSub: "--" + flagTargetToken,
+		},
+		{
+			name: "missing project key (#383)",
+			cfg: transferConfig{
+				sourceURL: "u", sourceToken: "t",
+				targetToken: "tt", defaultOrganization: "o",
+			},
+			errSub: "--" + flagProjectKey,
 		},
 	}
 	for _, c := range cases {
@@ -223,6 +241,98 @@ func TestValidateTransferConfig_MissingCredentials(t *testing.T) {
 				t.Errorf("error %q does not mention %q", err.Error(), c.errSub)
 			}
 		})
+	}
+}
+
+// #383: with all required fields present (including project_key),
+// validation must pass.
+func TestValidateTransferConfig_HappyPath(t *testing.T) {
+	cfg := transferConfig{
+		sourceURL:           "https://sq.example.com",
+		sourceToken:         "sq-tok",
+		projectKey:          "my-project",
+		targetToken:         "sc-tok",
+		defaultOrganization: "my-org",
+	}
+	if err := validateTransferConfig(cfg); err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
+}
+
+// #383: a misspelled --project_key passes validation but silently
+// returns zero projects from /api/projects/search?projects=<typo>.
+// ensureTransferProjectExtracted closes that gap by checking the
+// post-extract getProjects records and erroring with a clear message
+// that names the exact value the operator typed.
+func TestEnsureTransferProjectExtracted_MissingProject(t *testing.T) {
+	dir := t.TempDir()
+	srvURL := "http://localhost:10000"
+
+	// Synthesise an extract dir with extract.json + getProjects/ containing
+	// real project keys, but NOT the one the operator typed.
+	extractDir := filepath.Join(dir, "2026-06-12-01")
+	if err := os.MkdirAll(filepath.Join(extractDir, "getProjects"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, extractDir, "extract.json", `{"url":"`+srvURL+`/"}`)
+	writeFile(t, filepath.Join(extractDir, "getProjects"), "results.1.jsonl",
+		`{"key":"real-project-1","serverUrl":"`+srvURL+`/"}`+"\n"+
+			`{"key":"real-project-2","serverUrl":"`+srvURL+`/"}`+"\n")
+
+	cfg := transferConfig{
+		sourceURL:  srvURL,
+		projectKey: "missspelled-key",
+		exportDir:  dir,
+	}
+	err := ensureTransferProjectExtracted(cfg)
+	if err == nil {
+		t.Fatal("expected error for misspelled project key, got nil")
+	}
+	for _, want := range []string{"missspelled-key", srvURL, "--" + flagProjectKey} {
+		if !contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err.Error(), want)
+		}
+	}
+}
+
+// #383: when the configured project key matches a record in
+// getProjects (trailing-slash variations on the source URL accepted),
+// no error is returned.
+func TestEnsureTransferProjectExtracted_PresentProject(t *testing.T) {
+	cases := []struct {
+		name      string
+		cfgURL    string
+		recordURL string
+	}{
+		{name: "both with trailing slash", cfgURL: "http://localhost:10000/", recordURL: "http://localhost:10000/"},
+		{name: "cfg without slash, record with", cfgURL: "http://localhost:10000", recordURL: "http://localhost:10000/"},
+		{name: "cfg with slash, record without", cfgURL: "http://localhost:10000/", recordURL: "http://localhost:10000"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			extractDir := filepath.Join(dir, "2026-06-12-01")
+			if err := os.MkdirAll(filepath.Join(extractDir, "getProjects"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, extractDir, "extract.json", `{"url":"`+c.recordURL+`"}`)
+			writeFile(t, filepath.Join(extractDir, "getProjects"), "results.1.jsonl",
+				`{"key":"my-project","serverUrl":"`+c.recordURL+`"}`+"\n")
+
+			cfg := transferConfig{sourceURL: c.cfgURL, projectKey: "my-project", exportDir: dir}
+			if err := ensureTransferProjectExtracted(cfg); err != nil {
+				t.Errorf("expected no error, got %v", err)
+			}
+		})
+	}
+}
+
+// writeFile is a tiny helper that writes contents to dir/name.
+func writeFile(t *testing.T, dir, name, contents string) {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
