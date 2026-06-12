@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"unicode/utf8"
 
 	sqapi "github.com/sonar-solutions/sq-api-go"
 )
@@ -61,17 +62,40 @@ func writeBody(label string, body []byte) {
 }
 
 // formatBody returns the body indented as JSON when it parses, otherwise
-// the raw string.
+// the raw string. Binary payloads (e.g. /api/sources/raw, ZIPs, PDFs)
+// are replaced with a compact "<binary, N bytes>" placeholder so the
+// debug log doesn't garble the terminal with control bytes.
 func formatBody(body []byte) string {
 	var v any
-	if err := json.Unmarshal(body, &v); err != nil {
-		return string(body)
+	if err := json.Unmarshal(body, &v); err == nil {
+		pretty, err := json.MarshalIndent(v, "", "  ")
+		if err == nil {
+			return string(pretty)
+		}
 	}
-	pretty, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return string(body)
+	if !isPrintableText(body) {
+		return fmt.Sprintf("<binary, %d bytes>", len(body))
 	}
-	return string(pretty)
+	return string(body)
+}
+
+// isPrintableText reports whether body is safe to write to the
+// terminal verbatim: valid UTF-8 with no NUL byte and no ASCII C0
+// control bytes other than TAB / LF / CR. A NUL byte alone is enough
+// to classify the payload as binary — text bodies never contain one.
+func isPrintableText(body []byte) bool {
+	if !utf8.Valid(body) {
+		return false
+	}
+	for _, b := range body {
+		if b == 0 {
+			return false
+		}
+		if b < 0x20 && b != '\t' && b != '\n' && b != '\r' {
+			return false
+		}
+	}
+	return true
 }
 
 // indentBlock prefixes every line of s with prefix so the body block is

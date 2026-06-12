@@ -1540,6 +1540,123 @@ func TestCollectLimitations_GlobalProjectDataSkipped(t *testing.T) {
 	}
 }
 
+// #323: encodeSyncStats must emit "ack=N" alongside i=/h= when any
+// ACKNOWLEDGED hotspots had to be left in TO_REVIEW. Only emitted
+// when N > 0 so unrelated projects keep their compact marker.
+func TestEncodeSyncStatsAckSegment(t *testing.T) {
+	cases := []struct {
+		name string
+		in   projectSyncCounts
+		want string
+	}{
+		{
+			name: "no demotions — no ack segment",
+			in:   projectSyncCounts{HotspotActionable: 10, HotspotSynced: 10},
+			want: "h=10/10",
+		},
+		{
+			name: "ack only — issues empty, hotspots all demoted",
+			in:   projectSyncCounts{HotspotActionable: 3, HotspotSynced: 0, HotspotAckDemoted: 3},
+			want: "h=0/3,ack=3",
+		},
+		{
+			name: "mixed issues + hotspots + ack",
+			in:   projectSyncCounts{IssueActionable: 5, IssueSynced: 5, HotspotActionable: 4, HotspotSynced: 3, HotspotAckDemoted: 1},
+			want: "i=5/5,h=3/4,ack=1",
+		},
+		{
+			name: "ack but no actionable hotspots (defensive) — segment still emitted, h= suppressed",
+			in:   projectSyncCounts{HotspotAckDemoted: 2},
+			want: "ack=2",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := encodeSyncStats(tc.in)
+			if got != tc.want {
+				t.Errorf("encodeSyncStats() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// #323: collectSyncStats must read the acknowledged_demoted JSONL
+// field on hotspot records and surface it via HotspotAckDemoted.
+func TestCollectSyncStatsReadsAcknowledgedDemoted(t *testing.T) {
+	dir := t.TempDir()
+	writeTaskJSONL(t, dir, "syncHotspotMetadata", []map[string]any{
+		{
+			"cloud_project_key":    "proj1",
+			"synced":               7,
+			"actionable":           10,
+			"acknowledged_demoted": 3,
+		},
+		{
+			"cloud_project_key":    "proj2",
+			"synced":               5,
+			"actionable":           5,
+			"acknowledged_demoted": 0,
+		},
+	})
+
+	store := common.NewDataStore(dir)
+	stats := collectSyncStats(store)
+	if got := stats["proj1"]; got.HotspotAckDemoted != 3 || got.HotspotSynced != 7 || got.HotspotActionable != 10 {
+		t.Errorf("proj1: got %+v, want HotspotAckDemoted=3 HotspotSynced=7 HotspotActionable=10", got)
+	}
+	if got := stats["proj2"]; got.HotspotAckDemoted != 0 || got.HotspotSynced != 5 {
+		t.Errorf("proj2: got %+v, want HotspotAckDemoted=0 HotspotSynced=5", got)
+	}
+}
+
+// #323: collectSyncOutcome must route a project to NearPerfect when
+// the hotspot record carries acknowledged_demoted > 0 — even if
+// line_mismatch and not_found are both zero (everything matched
+// cleanly, but ACKNOWLEDGED hotspots couldn't preserve their state).
+func TestCollectSyncOutcomeNearPerfectOnAcknowledgedDemoted(t *testing.T) {
+	dir := t.TempDir()
+	writeTaskJSONL(t, dir, "syncHotspotMetadata", []map[string]any{
+		{
+			"cloud_project_key":    "proj-ack",
+			"synced":               4,
+			"actionable":           5,
+			"acknowledged_demoted": 1,
+			"line_mismatch":        0,
+			"not_found":            0,
+		},
+		{
+			// Control: clean project with no demotions, no mismatches → no failure entry.
+			"cloud_project_key":    "proj-clean",
+			"synced":               5,
+			"actionable":           5,
+			"acknowledged_demoted": 0,
+			"line_mismatch":        0,
+			"not_found":            0,
+		},
+	})
+
+	store := common.NewDataStore(dir)
+	failures := collectSyncOutcome(store, "syncHotspotMetadata", "Hotspot sync errored")
+	var ackEntries, cleanEntries int
+	for _, f := range failures {
+		switch f.CloudProjectKey {
+		case "proj-ack":
+			ackEntries++
+			if f.Bucket != projectBucketNearPerfect {
+				t.Errorf("proj-ack: got bucket %v, want NearPerfect", f.Bucket)
+			}
+		case "proj-clean":
+			cleanEntries++
+		}
+	}
+	if ackEntries != 1 {
+		t.Errorf("expected 1 NearPerfect entry for proj-ack, got %d (failures=%+v)", ackEntries, failures)
+	}
+	if cleanEntries != 0 {
+		t.Errorf("clean project must produce no failure entry, got %d", cleanEntries)
+	}
+}
+
 // #359: when project data is skipped (any reason), the sync stats
 // line MUST be suppressed even if the syncStats marker is present —
 // the sync depended on the import that didn't happen.

@@ -428,13 +428,21 @@ func runSyncIssueMetadata(ctx context.Context, e *Executor) error {
 // (1 cloud counterpart on the same line — synced); B counts case b
 // (>1 counterparts on the same line — ambiguous, skipped); C counts
 // case c (no counterpart on the source's line — skipped). Actionable
-// is the size of the input set, so A+B+C ≤ Actionable (some pairs may
-// short-circuit before classification, e.g. lookup errors).
+// is the size of the input set, so A+B+C+AckDemoted ≤ Actionable
+// (some pairs may short-circuit before classification, e.g. lookup
+// errors).
+//
+// AckDemoted (#323) is hotspot-only: a hotspot whose source resolution
+// is ACKNOWLEDGED. SonarQube Cloud has no equivalent resolution, so
+// the hotspot is left in its default TO_REVIEW state. It IS NOT
+// counted in A — "synced" is reserved for hotspots whose status was
+// fully preserved on Cloud.
 type projectSyncStats struct {
 	Actionable int64
 	A          int64
 	B          int64
 	C          int64
+	AckDemoted int64
 }
 
 // ---------------------------------------------------------------------------
@@ -544,6 +552,12 @@ const (
 	// (network, 5xx). Reported but not classified into a/b/c so a
 	// noisy network doesn't pollute the near-perfect signal.
 	syncOutcomeLookupError
+	// syncOutcomeAckDemoted — hotspot-only (#323). The source hotspot
+	// is REVIEWED/ACKNOWLEDGED; SonarQube Cloud has no equivalent
+	// resolution so the cloud counterpart is left in TO_REVIEW. Not
+	// counted as synced — the user-facing "synced" notion is reserved
+	// for hotspots whose state was fully preserved.
+	syncOutcomeAckDemoted
 )
 
 // resolveAndSyncIssue searches Cloud for counterparts of src, resolves

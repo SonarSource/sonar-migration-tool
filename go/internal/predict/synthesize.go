@@ -142,6 +142,9 @@ func BuildPredictiveRun(exportDir string) (string, error) {
 		if err := synthesizeAnalyzeProfileRulesNotes(exportDir, runDir, extractMapping); err != nil {
 			return "", fmt.Errorf("synthesizing analyzeProfileRules: %w", err)
 		}
+		if err := synthesizeSyncHotspotMetadata(exportDir, runDir, extractMapping); err != nil {
+			return "", fmt.Errorf("synthesizing syncHotspotMetadata: %w", err)
+		}
 	}
 
 	return runDir, nil

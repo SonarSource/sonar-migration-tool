@@ -387,13 +387,19 @@ func collectSyncOutcome(store *common.DataStore, taskName, errorOp string) []pro
 		}
 		lineMismatch := jsonInt(raw, "line_mismatch")
 		notFound := jsonInt(raw, "not_found")
+		// #323: hotspot-only field; absent on issue sync records.
+		ackDemoted := jsonInt(raw, "acknowledged_demoted")
 		errMsg := jsonStr(raw, "error")
 
-		if lineMismatch+notFound > 0 {
+		if lineMismatch+notFound+ackDemoted > 0 {
 			out = append(out, projectFailure{
 				CloudProjectKey: key,
 				Bucket:          projectBucketNearPerfect,
 				// Operation/Detail intentionally empty — route-only.
+				// The sync stats line on the Detail already conveys
+				// the "X% synced (N/M)" head and the dedicated
+				// "N ACKNOWLEDGED hotspot(s)…" line (#323) when any
+				// were demoted.
 			})
 		}
 		if errMsg != "" {

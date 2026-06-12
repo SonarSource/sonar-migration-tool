@@ -106,29 +106,54 @@ func projectIssuesFullTask() func(ctx context.Context, e *Executor) error {
 // projectHotspotsFullTask extracts all hotspots per project per branch.
 // For REVIEWED hotspots, it fetches detail via /api/hotspots/show to get
 // comments and ruleKey.
+//
+// SonarQube Server's /api/hotspots/search applies a TO_REVIEW default
+// on several versions when the `status` parameter is omitted, which
+// silently drops every REVIEWED hotspot (including ACKNOWLEDGED) from
+// the extract — and therefore from migration's source set (#323). To
+// be version-independent, the extract issues one paginated request
+// per status (TO_REVIEW + REVIEWED) and concatenates the results.
 func projectHotspotsFullTask() func(ctx context.Context, e *Executor) error {
 	return func(ctx context.Context, e *Executor) error {
 		return forEachProjectBranch(ctx, e, "getProjectHotspotsFull",
 			func(ctx context.Context, projectKey, branch string, w *ChunkWriter) error {
-				params := url.Values{
-					hotspotsProjectParam(e.Version): {projectKey},
-					"ps":                            {"500"},
-				}
-				if branch != "" {
-					params.Set("branch", branch)
-				}
-				items, err := e.Raw.GetPaginated(ctx, PaginatedOpts{
-					Path:      "api/hotspots/search",
-					Params:    params,
-					ResultKey: "hotspots",
-					PageLimit: 20,
-				})
-				if err != nil {
-					if isNonFatalHTTPErr(err) {
-						e.Logger.Warn("getProjectHotspotsFull skipped", "project", projectKey, "branch", branch, "err", err)
-						return nil
+				baseParams := func() url.Values {
+					p := url.Values{
+						hotspotsProjectParam(e.Version): {projectKey},
+						"ps":                            {"500"},
 					}
-					return err
+					if branch != "" {
+						p.Set("branch", branch)
+					}
+					return p
+				}
+
+				var all []json.RawMessage
+				seen := make(map[string]bool)
+				for _, status := range []string{"TO_REVIEW", "REVIEWED"} {
+					params := baseParams()
+					params.Set("status", status)
+					items, err := e.Raw.GetPaginated(ctx, PaginatedOpts{
+						Path:      "api/hotspots/search",
+						Params:    params,
+						ResultKey: "hotspots",
+						PageLimit: 20,
+					})
+					if err != nil {
+						if isNonFatalHTTPErr(err) {
+							e.Logger.Warn("getProjectHotspotsFull skipped", "project", projectKey, "branch", branch, "status", status, "err", err)
+							return nil
+						}
+						return err
+					}
+					for _, raw := range items {
+						key := extractField(raw, "key")
+						if key == "" || seen[key] {
+							continue
+						}
+						seen[key] = true
+						all = append(all, raw)
+					}
 				}
 
 				meta := map[string]any{
@@ -137,7 +162,7 @@ func projectHotspotsFullTask() func(ctx context.Context, e *Executor) error {
 					"serverUrl":  e.ServerURL,
 				}
 
-				enriched := enrichAll(items, meta)
+				enriched := enrichAll(all, meta)
 				enrichHotspotDetails(ctx, e, enriched)
 				return w.WriteChunk(enriched)
 			})

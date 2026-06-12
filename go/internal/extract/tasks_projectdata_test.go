@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 )
 
@@ -233,6 +234,76 @@ func TestProjectIssuesFullTask(t *testing.T) {
 	items, _ := e.Store.ReadAll("getProjectIssuesFull")
 	if len(items) != 1 {
 		t.Fatalf("expected 1 issue, got %d", len(items))
+	}
+}
+
+// #323: SonarQube Server's /api/hotspots/search defaults to TO_REVIEW
+// on several versions when `status` is omitted, silently dropping
+// REVIEWED (incl. ACKNOWLEDGED) hotspots from the extract — so the
+// migration sync code never sees a source for them. The extract task
+// must issue both queries explicitly and merge.
+func TestProjectHotspotsFullTaskQueriesBothStatuses(t *testing.T) {
+	var (
+		mu     sync.Mutex
+		seen   []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/hotspots/search" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		status := r.URL.Query().Get("status")
+		mu.Lock()
+		seen = append(seen, status)
+		mu.Unlock()
+		switch status {
+		case "TO_REVIEW":
+			json.NewEncoder(w).Encode(map[string]any{
+				"hotspots": []map[string]any{
+					{"key": "hs-tr", "status": "TO_REVIEW", "line": 5, "ruleKey": "rk1"},
+				},
+				"paging": map[string]any{"pageIndex": 1, "pageSize": 500, "total": 1},
+			})
+		case "REVIEWED":
+			json.NewEncoder(w).Encode(map[string]any{
+				"hotspots": []map[string]any{
+					{"key": "hs-ack", "status": "REVIEWED", "resolution": "ACKNOWLEDGED", "line": 10, "ruleKey": "rk1"},
+				},
+				"paging": map[string]any{"pageIndex": 1, "pageSize": 500, "total": 1},
+			})
+		default:
+			t.Errorf("unexpected status param: %q", status)
+		}
+	}))
+	defer srv.Close()
+
+	e := newTestExecutor(t)
+	e.ServerURL = "http://test/"
+	e.Raw = NewRawClient(srv.Client(), srv.URL+"/")
+
+	pw, _ := e.Store.Writer("getProjects")
+	b, _ := json.Marshal(map[string]any{"key": "p1"})
+	pw.WriteOne(b)
+	e.Store.Writer("getBranches")
+
+	fn := projectHotspotsFullTask()
+	if err := fn(ctx(t), e); err != nil {
+		t.Fatalf("projectHotspotsFullTask: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 2 || seen[0] != "TO_REVIEW" || seen[1] != "REVIEWED" {
+		t.Errorf("expected per-status queries [TO_REVIEW, REVIEWED], got %v", seen)
+	}
+
+	items, _ := e.Store.ReadAll("getProjectHotspotsFull")
+	keys := map[string]bool{}
+	for _, raw := range items {
+		keys[extractField(raw, "key")] = true
+	}
+	if !keys["hs-tr"] || !keys["hs-ack"] {
+		t.Errorf("expected both hs-tr (TO_REVIEW) and hs-ack (ACKNOWLEDGED) extracted, got %v", keys)
 	}
 }
 

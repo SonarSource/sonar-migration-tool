@@ -108,6 +108,59 @@ func TestNewHTTPDebugLogger_ErrorPath(t *testing.T) {
 	}
 }
 
+// Binary bodies (NUL bytes, control bytes, invalid UTF-8) must be
+// replaced with a "<binary, N bytes>" placeholder so a debug log
+// against an endpoint that returns binary (e.g. /api/sources/raw on
+// binary files, ZIPs, PDFs) doesn't garble the operator's terminal.
+func TestNewHTTPDebugLogger_BinaryBodyReplaced(t *testing.T) {
+	cases := []struct {
+		name string
+		body []byte
+	}{
+		{name: "NUL byte present", body: []byte{'h', 'i', 0x00, '!'}},
+		{name: "control byte ESC", body: []byte{'h', 'i', 0x1b, '['}},
+		{name: "invalid UTF-8", body: []byte{0xff, 0xfe, 0xfd}},
+		{name: "PNG header", body: []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := swapBodyWriter(t)
+			logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+			debug := NewHTTPDebugLogger(logger)
+			debug("GET", "https://x/api/y", nil, nil, 200, tc.body, nil)
+
+			want := strings.Contains(body.String(), "<binary, ") && strings.Contains(body.String(), " bytes>")
+			if !want {
+				t.Errorf("expected binary placeholder, got %q", body.String())
+			}
+			// The raw bytes themselves must not appear.
+			if bytes.Contains(body.Bytes(), []byte{0x00}) {
+				t.Errorf("NUL byte leaked into debug output: %q", body.String())
+			}
+		})
+	}
+}
+
+// Printable text (UTF-8 with non-ASCII chars) stays verbatim — the
+// binary detector must not over-trigger on, say, French project names
+// or other non-ASCII text that's still safe for the terminal.
+func TestNewHTTPDebugLogger_NonASCIIUTF8KeptVerbatim(t *testing.T) {
+	body := swapBodyWriter(t)
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	debug := NewHTTPDebugLogger(logger)
+	debug("GET", "https://x/api/y", nil, nil, 200, []byte("Bonjour — naïve café 한국어"), nil)
+
+	out := body.String()
+	if strings.Contains(out, "<binary") {
+		t.Errorf("non-ASCII UTF-8 must not be classified as binary, got %q", out)
+	}
+	if !strings.Contains(out, "Bonjour — naïve café 한국어") {
+		t.Errorf("expected verbatim non-ASCII text, got %q", out)
+	}
+}
+
 // Empty bodies must not produce a labeled block.
 func TestNewHTTPDebugLogger_EmptyBodiesSkipped(t *testing.T) {
 	body := swapBodyWriter(t)

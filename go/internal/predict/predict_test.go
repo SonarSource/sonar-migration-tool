@@ -352,3 +352,92 @@ func TestGeneratePredictiveReport_ConsolidatesSonarAuth(t *testing.T) {
 		t.Errorf("expected exactly 1 consolidated sonar.auth.* row in Skipped, got %d (skipped=%+v)", seen, settings.Skipped)
 	}
 }
+
+// #323: predictive report must surface per-project hotspot sync stats
+// and route projects with ACKNOWLEDGED hotspots to NearPerfect with
+// the "N ACKNOWLEDGED hotspot(s) left as TO_REVIEW" callout in the
+// Details column.
+func TestGeneratePredictiveReport_HotspotAcknowledgedDemotion(t *testing.T) {
+	exportDir := t.TempDir()
+
+	writeFile(t, exportDir, "organizations.csv",
+		"sonarqube_org_key,sonarcloud_org_key,server_url\n"+
+			"default,target-org,"+testServerURL+"\n")
+	writeFile(t, exportDir, "projects.csv",
+		"name,key,server_url,sonarqube_org_key\n"+
+			"App,com.example:app,"+testServerURL+",default\n")
+	writeFile(t, exportDir, "gates.csv",
+		"name,server_url,source_gate_key,is_default,sonarqube_org_key\n")
+
+	extractID := "extract-0001"
+	extractDir := filepath.Join(exportDir, extractID)
+	writeFile(t, extractDir, "extract.json", `{"url":"`+testServerURL+`"}`)
+
+	// Three actionable hotspots: 2 SAFE (cleanly synced), 1 ACKNOWLEDGED
+	// (demoted to TO_REVIEW). Plus one TO_REVIEW with no comments — not
+	// actionable, must NOT inflate the actionable count.
+	writeJSONL(t, filepath.Join(extractDir, "getProjectHotspotsFull", "hotspots.jsonl"),
+		[]map[string]any{
+			{"key": "h1", "project": "com.example:app", "status": "REVIEWED", "resolution": "SAFE"},
+			{"key": "h2", "project": "com.example:app", "status": "REVIEWED", "resolution": "SAFE"},
+			{"key": "h3", "project": "com.example:app", "status": "REVIEWED", "resolution": "ACKNOWLEDGED"},
+			{"key": "h4", "project": "com.example:app", "status": "TO_REVIEW"},
+		})
+
+	if _, err := GeneratePredictiveReport(exportDir); err != nil {
+		t.Fatalf("GeneratePredictiveReport: %v", err)
+	}
+
+	entries, err := os.ReadDir(exportDir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	var runDir string
+	for _, e := range entries {
+		if e.IsDir() && strings.HasPrefix(e.Name(), "predictive-") {
+			runDir = filepath.Join(exportDir, e.Name())
+			break
+		}
+	}
+	if runDir == "" {
+		t.Fatal("no predictive run directory found")
+	}
+
+	mig, err := summary.CollectSummary(runDir, exportDir)
+	if err != nil {
+		t.Fatalf("CollectSummary: %v", err)
+	}
+	projects := findSection(mig, "Projects")
+	if projects == nil {
+		t.Fatal("Projects section missing")
+	}
+
+	// The project must land in NearPerfect (not Succeeded) because
+	// one ACKNOWLEDGED hotspot was demoted.
+	if len(projects.Succeeded) != 0 {
+		var names []string
+		for _, it := range projects.Succeeded {
+			names = append(names, it.Name)
+		}
+		t.Errorf("project must NOT remain in Succeeded; found %v", names)
+	}
+	var app *summary.EntityItem
+	for i := range projects.NearPerfect {
+		if projects.NearPerfect[i].Name == "App" {
+			app = &projects.NearPerfect[i]
+			break
+		}
+	}
+	if app == nil {
+		t.Fatalf("expected App in Projects.NearPerfect; got %+v", projects.NearPerfect)
+	}
+
+	// The Detail must carry both the hotspot sync fraction and the
+	// ack= demotion segment so the renderer emits the #323 callout.
+	if !strings.Contains(app.Detail, "h=2/3") {
+		t.Errorf("Detail must include h=2/3 hotspot sync fraction; got %q", app.Detail)
+	}
+	if !strings.Contains(app.Detail, "ack=1") {
+		t.Errorf("Detail must include ack=1 ACKNOWLEDGED-demoted segment; got %q", app.Detail)
+	}
+}

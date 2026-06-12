@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -75,23 +76,121 @@ func hotspotHasManualChanges(h matchableHotspot) bool {
 	return reviewed || len(h.Comments) > 0
 }
 
+// HotspotHasManualChanges is the exported counterpart of
+// hotspotHasManualChanges. Read by the predict pipeline (#323), where
+// the synthesizer has only the raw extract record in hand and needs
+// the same filter to count actionable hotspots per project.
+func HotspotHasManualChanges(status, resolution string, hasComments bool) bool {
+	s := strings.ToUpper(status)
+	r := strings.ToUpper(resolution)
+	reviewed := s == "REVIEWED" && (r == "SAFE" || r == "ACKNOWLEDGED" || r == "FIXED")
+	return reviewed || hasComments
+}
+
+// IsAcknowledgedResolution reports whether a hotspot resolution is the
+// SonarQube Server-only ACKNOWLEDGED state (#323). Exported so the
+// predict pipeline can count these without duplicating the literal.
+func IsAcknowledgedResolution(resolution string) bool {
+	return strings.EqualFold(strings.TrimSpace(resolution), "ACKNOWLEDGED")
+}
+
+// hotspotResolutionPriority orders source resolutions from most to
+// least "cautious" — used by dedupeActionableHotspots when several
+// source-branch records collapse to the same cloud hotspot. The most
+// cautious wins so a hotspot ACKNOWLEDGED on any branch is never
+// silently downgraded to SAFE on Cloud by a sibling-branch record.
+//
+//	ACKNOWLEDGED → 0 (highest priority, will reset Cloud to TO_REVIEW)
+//	TO_REVIEW    → 1
+//	FIXED        → 2
+//	SAFE         → 3 (lowest priority — the most permissive state)
+//	(anything else) → 4
+func hotspotResolutionPriority(h matchableHotspot) int {
+	status := strings.ToUpper(strings.TrimSpace(h.Status))
+	resolution := strings.ToUpper(strings.TrimSpace(h.Resolution))
+	switch {
+	case status == "REVIEWED" && resolution == "ACKNOWLEDGED":
+		return 0
+	case status == "TO_REVIEW":
+		return 1
+	case status == "REVIEWED" && resolution == "FIXED":
+		return 2
+	case status == "REVIEWED" && resolution == "SAFE":
+		return 3
+	}
+	return 4
+}
+
+// dedupeActionableHotspots collapses cross-branch duplicate source
+// hotspots — same (component, ruleKey, line) but different SQS keys —
+// into a single representative whose Comments are the union of all
+// duplicates' comments. The representative carries the highest-
+// priority (most cautious) status/resolution per hotspotResolutionPriority
+// so an ACKNOWLEDGED branch always wins over a SAFE sibling. Iteration
+// order is stable (sorted by source key) so the result is deterministic.
+func dedupeActionableHotspots(in []matchableHotspot) []matchableHotspot {
+	if len(in) < 2 {
+		return in
+	}
+	type groupKey struct {
+		Component string
+		RuleKey   string
+		Line      int
+	}
+	sorted := make([]matchableHotspot, len(in))
+	copy(sorted, in)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Key < sorted[j].Key })
+
+	groups := make(map[groupKey]*matchableHotspot, len(sorted))
+	order := make([]groupKey, 0, len(sorted))
+	for i := range sorted {
+		h := sorted[i]
+		k := groupKey{Component: h.Component, RuleKey: h.RuleKey, Line: h.Line}
+		rep, ok := groups[k]
+		if !ok {
+			cp := h
+			groups[k] = &cp
+			order = append(order, k)
+			continue
+		}
+		if hotspotResolutionPriority(h) < hotspotResolutionPriority(*rep) {
+			// New record beats the current rep on priority — promote
+			// it, then re-append the previous rep's comments so the
+			// new rep's Comments still reflect the union.
+			prevComments := rep.Comments
+			cp := h
+			groups[k] = &cp
+			rep = groups[k]
+			rep.Comments = append(rep.Comments, prevComments...)
+		} else {
+			rep.Comments = append(rep.Comments, h.Comments...)
+		}
+	}
+	out := make([]matchableHotspot, 0, len(order))
+	for _, k := range order {
+		out = append(out, *groups[k])
+	}
+	return out
+}
+
 // ---------------------------------------------------------------------------
 // Resolution mapping
 // ---------------------------------------------------------------------------
 
-// mapHotspotResolution converts a SonarQube Server hotspot resolution into
-// the equivalent SonarQube Cloud resolution value.
-// ACKNOWLEDGED does not exist in SonarCloud; the closest equivalent is SAFE.
+// mapHotspotResolution converts a SonarQube Server hotspot resolution
+// into the equivalent SonarQube Cloud resolution value, or "" when the
+// source resolution has no SonarQube Cloud counterpart and the caller
+// must skip the status change entirely (#323 — ACKNOWLEDGED falls
+// here: SQC has no equivalent, so we leave the hotspot in its default
+// TO_REVIEW state and record the demotion in the per-project stats).
 func mapHotspotResolution(resolution string) string {
 	switch strings.ToUpper(resolution) {
 	case "SAFE":
 		return "SAFE"
 	case "FIXED":
 		return "FIXED"
-	case "ACKNOWLEDGED":
-		return "SAFE"
 	default:
-		return "SAFE"
+		return ""
 	}
 }
 
@@ -122,12 +221,13 @@ func runSyncHotspotMetadata(ctx context.Context, e *Executor) error {
 			})
 
 			record, _ := json.Marshal(map[string]any{
-				"cloud_project_key": cloudKey,
-				"synced":            result.Stats.A,
-				"line_mismatch":     result.Stats.B,
-				"not_found":         result.Stats.C,
-				"actionable":        result.Stats.Actionable,
-				"error":             result.Error,
+				"cloud_project_key":    cloudKey,
+				"synced":               result.Stats.A,
+				"line_mismatch":        result.Stats.B,
+				"not_found":            result.Stats.C,
+				"acknowledged_demoted": result.Stats.AckDemoted,
+				"actionable":           result.Stats.Actionable,
+				"error":                result.Error,
 			})
 			return w.WriteOne(record)
 		})
@@ -179,9 +279,25 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 			actionable = append(actionable, h)
 		}
 	}
+	// #323 follow-up: the source extract carries one hotspot record per
+	// branch of the SQS project, but a single SQC hotspot exists per
+	// (file, line, rule). Without dedup, two source records that map
+	// to the same cloud hotspot race in the dispatch loop — the loser
+	// silently overwrites the winner's change_status call. When one is
+	// ACKNOWLEDGED (→ TO_REVIEW reset) and another is REVIEWED/SAFE
+	// (→ change_status SAFE), the SAFE call wins on order and the
+	// ACKNOWLEDGED demotion is lost. Dedup by (component, ruleKey,
+	// line) before dispatch, picking the most cautious resolution per
+	// group so an ACK on any branch wins over SAFE/FIXED on another.
+	preDedupCount := len(actionable)
+	actionable = dedupeActionableHotspots(actionable)
+	if dropped := preDedupCount - len(actionable); dropped > 0 {
+		e.Logger.Info("syncHotspotMetadata: deduplicated cross-branch source hotspots",
+			"project", input.CloudKey, "before", preDedupCount, "after", len(actionable), "dropped", dropped)
+	}
 	result.Stats.Actionable = int64(len(actionable))
 	if len(actionable) == 0 {
-		e.Logger.Debug("syncHotspotMetadata: no actionable source hotspots after filter", "project", input.CloudKey, "source_total", len(sourceHotspots))
+		e.Logger.Info("syncHotspotMetadata: no actionable source hotspots after filter", "project", input.CloudKey, "source_total", len(sourceHotspots))
 		return result
 	}
 
@@ -200,7 +316,7 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 	// (ruleKey, line). Race-safety: actionable is read-only, each
 	// goroutine takes one hotspot by value, stats counters are
 	// atomic.
-	var a, b, c atomic.Int64
+	var a, b, c, ack atomic.Int64
 	label := "Project key " + input.CloudKey + " hotspot sync:"
 	runProjectSyncLoop(ctx, e, actionable, label, 10,
 		func(gctx context.Context, src matchableHotspot) {
@@ -212,11 +328,14 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 				b.Add(1)
 			case syncOutcomeNotFound:
 				c.Add(1)
+			case syncOutcomeAckDemoted:
+				ack.Add(1)
 			}
 		})
 	result.Stats.A = a.Load()
 	result.Stats.B = b.Load()
 	result.Stats.C = c.Load()
+	result.Stats.AckDemoted = ack.Load()
 	return result
 }
 
@@ -249,6 +368,14 @@ func resolveAndSyncHotspot(ctx context.Context, e *Executor, cloudKey, orgKey, s
 				"source_key", src.Key, "cloud_key", target.Key)
 		} else {
 			counter.Success()
+		}
+		// #323: matched a cloud counterpart but the source resolution
+		// is ACKNOWLEDGED, which SQC doesn't support. syncOneHotspot
+		// has already skipped the status change (still synced comments)
+		// — re-classify here so the per-project tally records a
+		// demotion instead of a clean sync.
+		if IsAcknowledgedResolution(src.Resolution) {
+			outcome = syncOutcomeAckDemoted
 		}
 	case syncOutcomeNotFound:
 		e.Logger.Debug("syncHotspotMetadata: no cloud counterpart on source line", "source_key", src.Key, "rule", src.RuleKey, "file", filePath, "line", src.Line)
@@ -294,31 +421,49 @@ func classifyHotspotCandidatesByLine(candidates []matchableHotspot, sourceRule s
 // /api/hotspots/search endpoint also does not accept a rules
 // parameter.
 //
+// The endpoint defaults to status=TO_REVIEW when no status is
+// supplied — a hotspot already moved to REVIEWED by a prior migration
+// run would be invisible (#323). We issue one paginated request per
+// status (TO_REVIEW + REVIEWED) and merge the results so re-runs can
+// see (and correct) cloud hotspots in any state, deduplicating by
+// hotspot key on the off chance the same key surfaces in both
+// responses.
+//
 // Uses e.Raw (the cloud-side raw client) because the typed
 // HotspotsClient's SearchAll doesn't expose a per-file filter.
 func findCloudHotspotCandidates(ctx context.Context, e *Executor, cloudKey, orgKey, filePath string) ([]matchableHotspot, error) {
-	params := url.Values{}
-	params.Set("projectKey", cloudKey)
-	params.Set("files", filePath)
-	if orgKey != "" {
-		params.Set("organization", orgKey)
-	}
-	items, err := e.Raw.GetPaginated(ctx, common.PaginatedOpts{
-		Path:      "api/hotspots/search",
-		Params:    params,
-		ResultKey: "hotspots",
-		PageLimit: 5, // hotspots-in-one-file is small; cap for safety
-	})
-	if err != nil {
-		return nil, err
-	}
-	out := make([]matchableHotspot, 0, len(items))
-	for _, raw := range items {
-		h := parseMatchableHotspot(raw)
-		if h.Key == "" {
-			continue
+	baseParams := func() url.Values {
+		p := url.Values{}
+		p.Set("projectKey", cloudKey)
+		p.Set("files", filePath)
+		if orgKey != "" {
+			p.Set("organization", orgKey)
 		}
-		out = append(out, h)
+		return p
+	}
+
+	out := make([]matchableHotspot, 0)
+	seen := make(map[string]bool)
+	for _, status := range []string{"TO_REVIEW", "REVIEWED"} {
+		params := baseParams()
+		params.Set("status", status)
+		items, err := e.Raw.GetPaginated(ctx, common.PaginatedOpts{
+			Path:      "api/hotspots/search",
+			Params:    params,
+			ResultKey: "hotspots",
+			PageLimit: 5, // hotspots-in-one-file is small; cap for safety
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, raw := range items {
+			h := parseMatchableHotspot(raw)
+			if h.Key == "" || seen[h.Key] {
+				continue
+			}
+			seen[h.Key] = true
+			out = append(out, h)
+		}
 	}
 	return out, nil
 }
@@ -330,11 +475,26 @@ func findCloudHotspotCandidates(ctx context.Context, e *Executor, cloudKey, orgK
 // syncOneHotspot synchronises a single hotspot's status and comments.
 // Operations are sequential within each hotspot: status first, then comments.
 func syncOneHotspot(ctx context.Context, e *Executor, pair hotspotPair) error {
-	// 1. Sync status: if source is REVIEWED, change Cloud hotspot status.
+	// 1. Sync status. Three branches when the source is REVIEWED:
+	//   - SAFE/FIXED → mapHotspotResolution returns the SQC resolution;
+	//     post change_status REVIEWED+<resolution>.
+	//   - ACKNOWLEDGED → SQC has no equivalent resolution. Actively
+	//     reset the cloud hotspot to TO_REVIEW with no resolution so a
+	//     re-run undoes any SAFE state a previous (buggy) migration
+	//     may have left on SQC. Idempotent — TO_REVIEW is also the
+	//     cloud default for a never-touched hotspot. #323.
+	//   - Unknown resolution → no API call (defensive).
 	if strings.ToUpper(pair.source.Status) == "REVIEWED" {
 		resolution := mapHotspotResolution(pair.source.Resolution)
-		if err := e.Cloud.Hotspots.ChangeStatus(ctx, pair.cloud.Key, "REVIEWED", resolution); err != nil {
-			return fmt.Errorf("change status: %w", err)
+		switch {
+		case resolution != "":
+			if err := e.Cloud.Hotspots.ChangeStatus(ctx, pair.cloud.Key, "REVIEWED", resolution); err != nil {
+				return fmt.Errorf("change status: %w", err)
+			}
+		case IsAcknowledgedResolution(pair.source.Resolution):
+			if err := e.Cloud.Hotspots.ChangeStatus(ctx, pair.cloud.Key, "TO_REVIEW", ""); err != nil {
+				return fmt.Errorf("reset ACKNOWLEDGED to TO_REVIEW: %w", err)
+			}
 		}
 	}
 

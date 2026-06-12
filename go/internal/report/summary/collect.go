@@ -1046,42 +1046,53 @@ func attachDroppedUserPerms(items []EntityItem, perms map[string]int, sectionNam
 // projectSyncCounts holds the issue/hotspot sync a/b/c counts for a
 // single cloud project. Built by collectSyncStats from the JSONL
 // records syncIssueMetadata and syncHotspotMetadata write per project.
+//
+// HotspotAckDemoted (#323) is the count of ACKNOWLEDGED source
+// hotspots that had to be left in SQC's default TO_REVIEW state. It
+// is NOT included in HotspotSynced — the user-facing "synced" notion
+// is reserved for hotspots whose state was fully preserved on SQC.
 type projectSyncCounts struct {
-	IssueActionable    int
-	IssueSynced        int
-	HotspotActionable  int
-	HotspotSynced      int
+	IssueActionable   int
+	IssueSynced       int
+	HotspotActionable int
+	HotspotSynced     int
+	HotspotAckDemoted int
 }
 
 // collectSyncStats reads per-project sync records and returns a map
 // keyed by cloud project key. The per-project record schema is
-// {synced, line_mismatch, not_found, actionable}; only `synced` and
-// `actionable` need to surface in the Details line (#356).
+// {synced, line_mismatch, not_found, acknowledged_demoted, actionable};
+// `synced`, `actionable`, and (hotspots only) `acknowledged_demoted`
+// surface in the Details line (#356 + #323).
 func collectSyncStats(store *common.DataStore) map[string]projectSyncCounts {
 	out := map[string]projectSyncCounts{}
-	collect := func(taskName string, set func(*projectSyncCounts, int, int)) {
-		items, err := store.ReadAll(taskName)
-		if err != nil {
-			return
-		}
+	items, err := store.ReadAll("syncIssueMetadata")
+	if err == nil {
 		for _, raw := range items {
 			key := jsonStr(raw, "cloud_project_key")
 			if key == "" {
 				continue
 			}
 			counts := out[key]
-			set(&counts, jsonInt(raw, "synced"), jsonInt(raw, "actionable"))
+			counts.IssueSynced = jsonInt(raw, "synced")
+			counts.IssueActionable = jsonInt(raw, "actionable")
 			out[key] = counts
 		}
 	}
-	collect("syncIssueMetadata", func(c *projectSyncCounts, synced, actionable int) {
-		c.IssueSynced = synced
-		c.IssueActionable = actionable
-	})
-	collect("syncHotspotMetadata", func(c *projectSyncCounts, synced, actionable int) {
-		c.HotspotSynced = synced
-		c.HotspotActionable = actionable
-	})
+	items, err = store.ReadAll("syncHotspotMetadata")
+	if err == nil {
+		for _, raw := range items {
+			key := jsonStr(raw, "cloud_project_key")
+			if key == "" {
+				continue
+			}
+			counts := out[key]
+			counts.HotspotSynced = jsonInt(raw, "synced")
+			counts.HotspotActionable = jsonInt(raw, "actionable")
+			counts.HotspotAckDemoted = jsonInt(raw, "acknowledged_demoted")
+			out[key] = counts
+		}
+	}
 	return out
 }
 
@@ -1110,9 +1121,11 @@ func attachSyncStats(projects []EntityItem, syncMap map[string]projectSyncCounts
 }
 
 // encodeSyncStats renders projectSyncCounts as a compact marker
-// payload: "i=<synced>/<actionable>,h=<synced>/<actionable>". Either
-// half is omitted when its actionable count is zero so the renderer
-// can simply split-and-render the segments that exist.
+// payload: "i=<synced>/<actionable>,h=<synced>/<actionable>[,ack=N]".
+// Each half is omitted when its actionable count is zero so the
+// renderer can split-and-render only the segments that exist. The
+// ack= segment is emitted whenever HotspotAckDemoted > 0 — #323's
+// "ACKNOWLEDGED demoted to TO_REVIEW" callout.
 func encodeSyncStats(c projectSyncCounts) string {
 	var parts []string
 	if c.IssueActionable > 0 {
@@ -1120,6 +1133,9 @@ func encodeSyncStats(c projectSyncCounts) string {
 	}
 	if c.HotspotActionable > 0 {
 		parts = append(parts, fmt.Sprintf("h=%d/%d", c.HotspotSynced, c.HotspotActionable))
+	}
+	if c.HotspotAckDemoted > 0 {
+		parts = append(parts, fmt.Sprintf("ack=%d", c.HotspotAckDemoted))
 	}
 	return strings.Join(parts, ",")
 }

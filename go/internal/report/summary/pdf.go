@@ -1181,12 +1181,16 @@ func successDetails(item EntityItem, predictive, hideCloudKey, labelProjectKey b
 	if !predictive && dataSkipped {
 		parts = append(parts, formatProjectDataSkipped(reason))
 	}
-	// #356 — render the per-project "x% of items with manual changes
-	// were successfully synchronized" comment. Suppressed when the
-	// project's data migration was skipped or failed (issue sync
-	// depends on a successful import) and in the predictive report
-	// (#359 + #356).
-	if !predictive && !dataSkipped && syncStats != "" {
+	// #356 / #323 — render the per-project "x% of items with manual
+	// changes were successfully synchronized" comment plus the
+	// "N ACKNOWLEDGED hotspot(s) left as TO_REVIEW" callout.
+	// Suppressed when the project's data migration was skipped or
+	// failed (sync depends on a successful import). The predictive
+	// pipeline now synthesizes hotspot stats from the extract (#323),
+	// so this line renders in both actual and predictive reports —
+	// the i= segment is naturally absent on predict because issue
+	// sync cannot be predicted, but the h=/ack= segments are.
+	if !dataSkipped && syncStats != "" {
 		if line := renderSyncStatsLine(syncStats); line != "" {
 			parts = append(parts, line)
 		}
@@ -1253,9 +1257,10 @@ func formatProjectDataSkipped(reason string) string {
 }
 
 // renderSyncStatsLine turns an attachSyncStats payload
-// ("i=42/50,h=10/12") into a human-readable line. The marker
-// guarantees each segment has the shape "x=N/M"; we render N/M and
-// the truncated percent.
+// ("i=42/50,h=10/12,ack=3") into a human-readable line. The marker
+// guarantees each segment has a fixed shape ("x=N/M" for fractions,
+// "ack=N" for the #323 ACKNOWLEDGED demotion callout); we render the
+// fraction and truncated percent, or the count + explanation.
 func renderSyncStatsLine(payload string) string {
 	var segments []string
 	for _, seg := range strings.Split(payload, ",") {
@@ -1268,9 +1273,29 @@ func renderSyncStatsLine(payload string) string {
 			if s := formatSyncStatSegment("hotspots with manual changes", seg[2:]); s != "" {
 				segments = append(segments, s)
 			}
+		case strings.HasPrefix(seg, "ack="):
+			if s := formatAckDemotedSegment(seg[len("ack="):]); s != "" {
+				segments = append(segments, s)
+			}
 		}
 	}
 	return strings.Join(segments, "; ")
+}
+
+// formatAckDemotedSegment renders the #323 ACKNOWLEDGED-demotion
+// segment: "N ACKNOWLEDGED hotspot(s) left as TO_REVIEW (status not
+// supported on SonarQube Cloud)". Skipped silently when N is invalid
+// or zero.
+func formatAckDemotedSegment(value string) string {
+	n, err := strconv.Atoi(value)
+	if err != nil || n <= 0 {
+		return ""
+	}
+	noun := "hotspot"
+	if n != 1 {
+		noun = "hotspots"
+	}
+	return fmt.Sprintf("%d ACKNOWLEDGED %s left as TO_REVIEW (status not supported on SonarQube Cloud)", n, noun)
 }
 
 func formatSyncStatSegment(label, fraction string) string {
