@@ -266,6 +266,17 @@ func loadCSVToJSONL(e *Executor, taskName, csvFilename string) error {
 				row["sonarcloud_org_key"] = scKey
 			}
 		}
+		// #381: in reset mode, rows whose cloud org wasn't confirmed
+		// by the operator get their sonarcloud_org_key rewritten to
+		// the SKIPPED sentinel so the existing shouldSkipOrg check at
+		// every per-org reset/delete task site naturally excludes
+		// them. A nil map = not in reset mode = no rewrite.
+		if e.ResetConfirmedOrgs != nil {
+			scKey, _ := row["sonarcloud_org_key"].(string)
+			if !e.ResetConfirmedOrgs[scKey] {
+				row["sonarcloud_org_key"] = skippedOrgSentinel
+			}
+		}
 		b, err := json.Marshal(row)
 		if err != nil {
 			continue

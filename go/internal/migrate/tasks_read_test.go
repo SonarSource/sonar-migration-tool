@@ -7,7 +7,8 @@ package migrate
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -55,58 +56,73 @@ func TestGetProfileBackups(t *testing.T) {
 	}
 }
 
-func TestGetCreatedProjects(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	setupCreateOutputs(t, e)
-
-	reg := BuildMigrateRegistry(RegisterAll())
-	err := reg["getCreatedProjects"].Run(context.Background(), e)
+// seedMigrateRunDir writes a fake migrate run under exportDir: a
+// run_meta.json marker (distinguishes it from a reset run, which uses
+// clear.json) and a createProjects/results.1.jsonl JSONL with the
+// supplied records. Returns the run path.
+func seedMigrateRunDir(t *testing.T, exportDir, runID string, records []map[string]any) string {
+	t.Helper()
+	runDir := filepath.Join(exportDir, runID)
+	if err := os.MkdirAll(filepath.Join(runDir, "createProjects"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "run_meta.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(filepath.Join(runDir, "createProjects", "results.1.jsonl"))
 	if err != nil {
-		t.Fatalf("getCreatedProjects: %v", err)
+		t.Fatal(err)
 	}
-
-	items, _ := e.Store.ReadAll("getCreatedProjects")
-	if len(items) == 0 {
-		t.Error("expected getCreatedProjects output")
+	defer f.Close()
+	for _, r := range records {
+		b, _ := json.Marshal(r)
+		f.Write(b)
+		f.Write([]byte("\n"))
 	}
+	return runDir
 }
 
-// Regression: getCreatedProjects must iterate per-org (one
-// /api/projects/search call per organization), not per createProjects
-// record. Reset fed deleteProjects through this task, and the old
-// per-record iteration produced one chunk per createProjects entry —
-// for a tenant with N projects in M orgs, deleteProjects would attempt
-// N deletions per record, returning 404 for every duplicate. Pin the
-// per-org iteration shape so we never regress.
-func TestGetCreatedProjectsDeduplicatesByOrg(t *testing.T) {
+// #381 follow-up: getCreatedProjects now scopes deletion to projects
+// the migrate tool ACTUALLY created (read from prior migrate run
+// dirs' createProjects JSONL) instead of listing every project in the
+// SonarCloud org via /api/projects/search. The new behaviour:
+//
+//   - Reads every subdir of exportDir that has run_meta.json (= a
+//     migrate run) and unions their createProjects records.
+//   - Dedupes by cloud_project_key so re-runs that re-touch the same
+//     project don't produce duplicate delete attempts.
+//   - Skips records whose sonarcloud_org_key is empty / SKIPPED.
+//   - When Executor.ResetConfirmedOrgs is set (the operator confirmed
+//     a subset via the interactive prompt), records whose cloud org
+//     isn't confirmed are filtered out so deleteProjects never sees
+//     them.
+//   - Emits {key, sonarcloud_org_key, source_key, server_url} per
+//     project, with `key` carrying the CLOUD key (the shape
+//     deleteProjects extracts).
+func TestGetCreatedProjects_UnionsMigrateRuns(t *testing.T) {
 	cloudSrv := newMockCloudServer()
 	defer cloudSrv.Close()
 	apiSrv := newMockAPIServer()
 	defer apiSrv.Close()
 	dir := t.TempDir()
-	setupExtractData(dir)
 	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	setupCreateOutputs(t, e)
 
-	// Write extra createProjects records for the same org. If the
-	// iteration source regressed back to createProjects, getCreatedProjects
-	// would call /api/projects/search once per record and write one
-	// chunk per record. Iterating generateOrganizationMappings (one
-	// record per org) caps it at one chunk per org.
-	w, _ := e.Store.Writer("createProjects")
-	for i := 0; i < 9; i++ {
-		extra, _ := json.Marshal(map[string]any{
-			"sonarcloud_org_key": testCloudOrg,
-			"cloud_project_key":  fmt.Sprintf("cloud-org1_proj%d", i+2),
-		})
-		w.WriteOne(extra)
-	}
+	// Two migrate runs with overlapping cloud_project_key (dedup
+	// must keep exactly one record).
+	seedMigrateRunDir(t, dir, "2026-06-12-01", []map[string]any{
+		{"key": "src-a", "cloud_project_key": "cloud-a", "sonarcloud_org_key": "org1"},
+		{"key": "src-b", "cloud_project_key": "cloud-b", "sonarcloud_org_key": "org1"},
+	})
+	seedMigrateRunDir(t, dir, "2026-06-12-02", []map[string]any{
+		{"key": "src-b", "cloud_project_key": "cloud-b", "sonarcloud_org_key": "org1"},
+		{"key": "src-c", "cloud_project_key": "cloud-c", "sonarcloud_org_key": "org2"},
+	})
+	// Reset run (clear.json instead of run_meta.json) must be ignored.
+	resetDir := filepath.Join(dir, "2026-06-12-03")
+	os.MkdirAll(filepath.Join(resetDir, "createProjects"), 0o755)
+	os.WriteFile(filepath.Join(resetDir, "clear.json"), []byte(`{}`), 0o644)
+	os.WriteFile(filepath.Join(resetDir, "createProjects", "results.1.jsonl"),
+		[]byte(`{"cloud_project_key":"cloud-LEAK","sonarcloud_org_key":"org1"}`+"\n"), 0o644)
 
 	reg := BuildMigrateRegistry(RegisterAll())
 	if err := reg["getCreatedProjects"].Run(context.Background(), e); err != nil {
@@ -114,11 +130,92 @@ func TestGetCreatedProjectsDeduplicatesByOrg(t *testing.T) {
 	}
 
 	items, _ := e.Store.ReadAll("getCreatedProjects")
-	// Mock returns 1 component per /api/projects/search call. With one
-	// org we expect exactly 1 component. Old behaviour: 10 (1 per
-	// createProjects record).
-	if len(items) != 1 {
-		t.Errorf("expected 1 item (one chunk per org), got %d — iteration likely regressed to per-record", len(items))
+	gotKeys := map[string]string{}
+	for _, raw := range items {
+		var rec map[string]any
+		_ = json.Unmarshal(raw, &rec)
+		k, _ := rec["key"].(string)
+		org, _ := rec["sonarcloud_org_key"].(string)
+		gotKeys[k] = org
+	}
+	want := map[string]string{
+		"cloud-a": "org1",
+		"cloud-b": "org1",
+		"cloud-c": "org2",
+	}
+	if len(gotKeys) != len(want) {
+		t.Errorf("got %d records, want %d: %+v", len(gotKeys), len(want), gotKeys)
+	}
+	for k, org := range want {
+		if got, ok := gotKeys[k]; !ok || got != org {
+			t.Errorf("missing or wrong org for %s: got %q, want %q", k, got, org)
+		}
+	}
+	if _, leaked := gotKeys["cloud-LEAK"]; leaked {
+		t.Error("reset run's createProjects must NOT contribute records (clear.json, not run_meta.json)")
+	}
+}
+
+// #381: Executor.ResetConfirmedOrgs filters per-org. Records whose
+// sonarcloud_org_key isn't in the confirmed set are excluded.
+func TestGetCreatedProjects_HonorsResetConfirmedOrgs(t *testing.T) {
+	cloudSrv := newMockCloudServer()
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+	dir := t.TempDir()
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	e.ResetConfirmedOrgs = map[string]bool{"org1": true}
+
+	seedMigrateRunDir(t, dir, "2026-06-12-01", []map[string]any{
+		{"cloud_project_key": "cloud-a", "sonarcloud_org_key": "org1"},
+		{"cloud_project_key": "cloud-b", "sonarcloud_org_key": "org2"},
+		{"cloud_project_key": "cloud-c", "sonarcloud_org_key": "org1"},
+		{"cloud_project_key": "cloud-d", "sonarcloud_org_key": "SKIPPED"},
+	})
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["getCreatedProjects"].Run(context.Background(), e); err != nil {
+		t.Fatalf("getCreatedProjects: %v", err)
+	}
+
+	items, _ := e.Store.ReadAll("getCreatedProjects")
+	keys := map[string]bool{}
+	for _, raw := range items {
+		var rec map[string]any
+		_ = json.Unmarshal(raw, &rec)
+		k, _ := rec["key"].(string)
+		keys[k] = true
+	}
+	if !keys["cloud-a"] || !keys["cloud-c"] {
+		t.Errorf("expected cloud-a and cloud-c (org1) to pass through, got %+v", keys)
+	}
+	if keys["cloud-b"] {
+		t.Error("cloud-b (org2 — not confirmed) must be filtered out")
+	}
+	if keys["cloud-d"] {
+		t.Error("cloud-d (SKIPPED org) must be filtered out")
+	}
+}
+
+// #381: when no prior migrate run exists, getCreatedProjects writes no
+// records (reset has nothing safe to delete). It must not error so the
+// rest of the reset plan can still run (resetGlobalSettings etc.).
+func TestGetCreatedProjects_NoMigrateRunIsNoOp(t *testing.T) {
+	cloudSrv := newMockCloudServer()
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+	dir := t.TempDir()
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["getCreatedProjects"].Run(context.Background(), e); err != nil {
+		t.Fatalf("getCreatedProjects: %v", err)
+	}
+	items, _ := e.Store.ReadAll("getCreatedProjects")
+	if len(items) != 0 {
+		t.Errorf("expected no records when there are no migrate runs, got %d", len(items))
 	}
 }
 

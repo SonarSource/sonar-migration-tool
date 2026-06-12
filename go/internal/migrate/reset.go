@@ -30,6 +30,14 @@ type ResetConfig struct {
 	Concurrency     int
 	ExportDirectory string
 	Debug           bool
+
+	// ConfirmedOrgs is the operator-confirmed subset of mapped
+	// SonarCloud organizations to actually wipe (#381). Populated by
+	// the reset command's interactive confirmation prompt or by the
+	// --yes flag for non-interactive runs. When empty / nil, no
+	// filter is applied (all mapped orgs get reset — the legacy
+	// behaviour for callers that don't go through cmd/reset.go).
+	ConfirmedOrgs []string
 }
 
 // RunReset deletes all migrated entities from SonarQube Cloud.
@@ -128,6 +136,12 @@ func RunReset(ctx context.Context, cfg ResetConfig) error {
 		ExportDir: cfg.ExportDirectory,
 		Sem:       make(chan struct{}, cfg.Concurrency),
 		Logger:    logger,
+	}
+	if len(cfg.ConfirmedOrgs) > 0 {
+		executor.ResetConfirmedOrgs = make(map[string]bool, len(cfg.ConfirmedOrgs))
+		for _, o := range cfg.ConfirmedOrgs {
+			executor.ResetConfirmedOrgs[o] = true
+		}
 	}
 
 	for i, phase := range plan {

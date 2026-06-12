@@ -61,6 +61,78 @@ func TestLoadCSVToJSONL(t *testing.T) {
 	}
 }
 
+// #381: when Executor.ResetConfirmedOrgs is set, loadCSVToJSONL must
+// rewrite the sonarcloud_org_key of every un-confirmed row to the
+// SKIPPED sentinel so the existing shouldSkipOrg path naturally
+// excludes those orgs from every per-org reset task. Rows whose
+// cloud org IS in the confirmed set must pass through untouched.
+// A nil map (the migrate-time default) leaves every row alone.
+func TestLoadCSVToJSONLResetConfirmedOrgsFilter(t *testing.T) {
+	cases := []struct {
+		name      string
+		confirmed map[string]bool
+		wantOrgs  []string
+	}{
+		{
+			name:      "nil map — no rewrite (migrate-time default)",
+			confirmed: nil,
+			wantOrgs:  []string{"cloud-a", "cloud-b", "cloud-c"},
+		},
+		{
+			name:      "subset confirmed — others rewritten to SKIPPED",
+			confirmed: map[string]bool{"cloud-a": true, "cloud-c": true},
+			wantOrgs:  []string{"cloud-a", "SKIPPED", "cloud-c"},
+		},
+		{
+			name:      "none confirmed — every row goes to SKIPPED",
+			confirmed: map[string]bool{},
+			wantOrgs:  []string{"SKIPPED", "SKIPPED", "SKIPPED"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			csvContent := "sonarqube_org_key,sonarcloud_org_key\norg1,cloud-a\norg2,cloud-b\norg3,cloud-c\n"
+			if err := os.WriteFile(filepath.Join(dir, "test.csv"), []byte(csvContent), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			// loadCSVToJSONL also reads organizations.csv for the
+			// enrichment join — write a self-referential one that
+			// matches the test rows.
+			if err := os.WriteFile(filepath.Join(dir, "organizations.csv"), []byte(csvContent), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			runDir := filepath.Join(dir, "run-01")
+			os.MkdirAll(runDir, 0o755)
+			store := common.NewDataStore(runDir)
+
+			e := &Executor{
+				Store:              store,
+				ExportDir:          dir,
+				ResetConfirmedOrgs: c.confirmed,
+			}
+			if err := loadCSVToJSONL(e, "testTask", "test.csv"); err != nil {
+				t.Fatalf("loadCSVToJSONL: %v", err)
+			}
+			items, err := store.ReadAll("testTask")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(items) != len(c.wantOrgs) {
+				t.Fatalf("expected %d items, got %d", len(c.wantOrgs), len(items))
+			}
+			for i, raw := range items {
+				var row map[string]any
+				_ = json.Unmarshal(raw, &row)
+				got, _ := row["sonarcloud_org_key"].(string)
+				if got != c.wantOrgs[i] {
+					t.Errorf("row %d: sonarcloud_org_key = %q, want %q", i, got, c.wantOrgs[i])
+				}
+			}
+		})
+	}
+}
+
 func TestLoadCSVToJSONLMissingFile(t *testing.T) {
 	dir := t.TempDir()
 	runDir := filepath.Join(dir, "run-01")

@@ -118,7 +118,7 @@ func TestLoadResetConfigFileShapes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("LoadResetConfigFile(%s): %v", tc.file, err)
 			}
-			if got != tc.want {
+			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("ResetConfig mismatch\n got=%+v\nwant=%+v", got, tc.want)
 			}
 		})

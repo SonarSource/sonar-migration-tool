@@ -7,7 +7,11 @@ package migrate
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
@@ -187,34 +191,172 @@ func runGetMigrationUser(ctx context.Context, e *Executor) error {
 	return w.WriteOne(raw)
 }
 
-// runGetCreatedProjects lists every project in every mapped SonarCloud
-// organization. It iterates generateOrganizationMappings (one record per
-// org) rather than createProjects (one record per project) so that the
-// /api/projects/search call fires exactly once per org. Reset feeds the
-// output to deleteProjects; iterating per-project caused N×N duplicates
-// where reset would try to delete the same key once per createProjects
-// record in that org.
+// runGetCreatedProjects unions every prior migrate run's createProjects
+// JSONL output and writes the deduplicated, org-filtered list to the
+// reset run's getCreatedProjects task — the input deleteProjects reads
+// to know which SonarCloud project keys to delete.
+//
+// Previously this task queried /api/projects/search?organization=<org>,
+// which lists EVERY project in the SonarCloud org — including projects
+// the migrate tool never created (pre-existing, manually provisioned,
+// or imported via another tool). Running reset would then wipe those
+// too — a serious safety problem (#381 follow-up). Scoping deletion to
+// projects the migrate tool actually created closes that gap.
+//
+// The migrate task createProjects writes one record per provisioned
+// SonarCloud project, with `cloud_project_key` + `sonarcloud_org_key`
+// populated. We scan every migrate run directory under exportDir
+// (identified by run_meta.json — reset runs use clear.json instead),
+// union their createProjects records, dedup by cloud_project_key, and
+// emit a {key, sonarcloud_org_key} record that matches the shape
+// deleteProjects expects (`key` carries the cloud project key).
+//
+// Reset's interactive confirmation (#381) populates
+// Executor.ResetConfirmedOrgs; when set, records whose cloud org isn't
+// confirmed are filtered out here so deleteProjects never sees them.
 func runGetCreatedProjects(ctx context.Context, e *Executor) error {
-	return forEachMigrateItem(ctx, e, "getCreatedProjects", "generateOrganizationMappings",
-		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
+	w, err := e.Store.Writer("getCreatedProjects")
+	if err != nil {
+		return err
+	}
+
+	migrateRuns, err := listMigrateRunDirs(e.ExportDir)
+	if err != nil {
+		return fmt.Errorf("scanning migrate run directories: %w", err)
+	}
+	if len(migrateRuns) == 0 {
+		e.Logger.Warn("getCreatedProjects: no prior migrate runs found under export directory — nothing to delete",
+			"export_dir", e.ExportDir)
+		return nil
+	}
+
+	seen := make(map[string]bool)
+	var out []json.RawMessage
+	for _, runDir := range migrateRuns {
+		items, err := readJSONLDir(filepath.Join(runDir, "createProjects"))
+		if err != nil {
+			e.Logger.Debug("getCreatedProjects: skipping migrate run with no createProjects output",
+				"run_dir", runDir, "err", err)
+			continue
+		}
+		for _, item := range items {
+			cloudKey := extractField(item, "cloud_project_key")
+			if cloudKey == "" || seen[cloudKey] {
+				continue
+			}
 			orgKey := extractField(item, "sonarcloud_org_key")
 			if shouldSkipOrg(orgKey) {
-				return nil
+				continue
 			}
-			e.Logger.Debug("project api call: GET /api/projects/search (list org projects)",
-				"org", orgKey)
-			raw, err := e.Raw.GetPaginated(ctx, common.PaginatedOpts{
-				Path: "api/projects/search", ResultKey: "components",
-				Params: url.Values{"organization": {orgKey}},
-			})
-			if err != nil {
-				return err
+			// Honor the operator's interactive confirmation (#381).
+			if e.ResetConfirmedOrgs != nil && !e.ResetConfirmedOrgs[orgKey] {
+				continue
 			}
-			enriched := common.EnrichAll(raw, map[string]any{
+			seen[cloudKey] = true
+
+			// Emit a record shaped for deleteProjects: it extracts
+			// `key` (cloud project key) and uses sonarcloud_org_key
+			// for the org context. The original createProjects record
+			// carries `key` as the SOURCE key, so we transform here.
+			rec, _ := json.Marshal(map[string]any{
+				"key":                cloudKey,
 				"sonarcloud_org_key": orgKey,
+				"source_key":         extractField(item, "key"),
+				"server_url":         extractField(item, "server_url"),
 			})
-			return w.WriteChunk(enriched)
-		})
+			out = append(out, rec)
+		}
+	}
+	e.Logger.Info("getCreatedProjects: collected migrate-created projects",
+		"count", len(out), "migrate_runs_scanned", len(migrateRuns))
+	return w.WriteChunk(out)
+}
+
+// MigrateCreatedProjectCounts returns the count of distinct
+// migrate-created projects per SonarCloud organization key across
+// every prior migrate run found under exportDir. It mirrors exactly
+// what runGetCreatedProjects feeds deleteProjects, so the reset
+// command's interactive confirmation prompt (#381) can display the
+// real number of projects each org will lose.
+//
+// Returns (nil, nil) when exportDir doesn't exist or contains no
+// migrate runs — callers render "(0 projects)" for every org in that
+// case.
+func MigrateCreatedProjectCounts(exportDir string) (map[string]int, error) {
+	runDirs, err := listMigrateRunDirs(exportDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	seen := make(map[string]bool)
+	counts := make(map[string]int)
+	for _, runDir := range runDirs {
+		items, err := readJSONLDir(filepath.Join(runDir, "createProjects"))
+		if err != nil {
+			continue
+		}
+		for _, item := range items {
+			cloudKey := extractField(item, "cloud_project_key")
+			if cloudKey == "" || seen[cloudKey] {
+				continue
+			}
+			orgKey := extractField(item, "sonarcloud_org_key")
+			if shouldSkipOrg(orgKey) {
+				continue
+			}
+			seen[cloudKey] = true
+			counts[orgKey]++
+		}
+	}
+	return counts, nil
+}
+
+// listMigrateRunDirs returns the absolute paths of every subdirectory
+// under exportDir that holds a migrate run (signalled by a
+// run_meta.json file). Reset run directories are skipped — they hold
+// clear.json instead.
+func listMigrateRunDirs(exportDir string) ([]string, error) {
+	entries, err := os.ReadDir(exportDir)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		runDir := filepath.Join(exportDir, e.Name())
+		if _, err := os.Stat(filepath.Join(runDir, "run_meta.json")); err != nil {
+			continue
+		}
+		out = append(out, runDir)
+	}
+	return out, nil
+}
+
+// readJSONLDir reads every results.*.jsonl file under dir and returns
+// the concatenated records. Mirrors common.DataStore.ReadAll without
+// requiring an Executor / DataStore (used by listMigrateRunDirs to
+// look at directories that aren't the reset's own run dir).
+func readJSONLDir(dir string) ([]json.RawMessage, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var all []json.RawMessage
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			continue
+		}
+		items, err := common.ReadJSONLFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		all = append(all, items...)
+	}
+	return all, nil
 }
 
 func runGetEnterprises(ctx context.Context, e *Executor) error {

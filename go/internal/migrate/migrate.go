@@ -78,6 +78,15 @@ type Executor struct {
 	Sem             chan struct{}
 	Logger          *slog.Logger
 	ExcludeBranches []string
+
+	// ResetConfirmedOrgs is populated only by RunReset after the
+	// operator has interactively confirmed which SonarCloud orgs to
+	// wipe (#381). When set (non-nil), loadCSVToJSONL rewrites the
+	// sonarcloud_org_key of every row whose org is NOT in this set to
+	// the SKIPPED sentinel — the existing shouldSkipOrg path then
+	// naturally excludes those orgs from every per-org delete/reset
+	// task without per-task plumbing. Nil for migrate runs (no filter).
+	ResetConfirmedOrgs map[string]bool
 }
 
 // RunMigrate is the main entry point for the migrate command.
