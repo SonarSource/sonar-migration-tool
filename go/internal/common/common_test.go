@@ -21,6 +21,8 @@ func TestEditionParsing(t *testing.T) {
 		{`{"edition":"community"}`, EditionCommunity},
 		{`{"edition":"developer"}`, EditionDeveloper},
 		{`{"edition":"datacenter"}`, EditionDatacenter},
+		// #395: a truly unrecognised non-empty value falls back to
+		// Community (with a Warn line that this test doesn't assert).
 		{`{"edition":"unknown"}`, EditionCommunity},
 		{`{}`, EditionCommunity},
 		{`invalid`, EditionCommunity},
@@ -31,6 +33,20 @@ func TestEditionParsing(t *testing.T) {
 		{`{"System":{"Edition":"Community"}}`, EditionCommunity},
 		// Top-level takes precedence over nested.
 		{`{"edition":"developer","System":{"Edition":"Enterprise"}}`, EditionDeveloper},
+		// #395: api/system/info reports the edition in display form
+		// — i.e. with a space and mixed case. parseEditionString
+		// normalises (lowercase + strip whitespace) and then matches
+		// by prefix so display-form values resolve correctly.
+		{`{"edition":"Data Center"}`, EditionDatacenter},
+		{`{"edition":"data center"}`, EditionDatacenter},
+		{`{"edition":"DATA CENTER"}`, EditionDatacenter},
+		{`{"edition":"  Data  Center  "}`, EditionDatacenter},
+		{`{"edition":"Data Center Edition"}`, EditionDatacenter},
+		{`{"edition":"Enterprise Edition"}`, EditionEnterprise},
+		{`{"edition":"Developer Edition"}`, EditionDeveloper},
+		{`{"edition":"Community Edition"}`, EditionCommunity},
+		{`{"System":{"Edition":"Data Center"}}`, EditionDatacenter},
+		{`{"System":{"Edition":"Data Center Edition"}}`, EditionDatacenter},
 	}
 	for _, tt := range tests {
 		got := ParseEdition([]byte(tt.input))

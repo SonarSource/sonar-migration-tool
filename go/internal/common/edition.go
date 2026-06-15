@@ -6,6 +6,7 @@ package common
 
 import (
 	"encoding/json"
+	"log/slog"
 	"strings"
 )
 
@@ -48,7 +49,25 @@ func ParseEdition(raw json.RawMessage) Edition {
 	return EditionCommunity
 }
 
-// parseEditionString extracts and normalises an edition from a raw JSON string.
+// parseEditionString extracts and normalises an edition from a raw
+// JSON string into one of the four enum values.
+//
+// Normalisation contract (#395): the SonarQube Server api/system/info
+// payload carries the edition in display form — e.g. "Data Center"
+// with a space, or a future "Data Center Edition" — which used to
+// fall through the exact-match switch and silently downgrade real
+// Data Center servers to Community. We now:
+//
+//  1. lowercase + strip every space, so "Data Center" → "datacenter"
+//     and "  DATA  CENTER  " → "datacenter";
+//  2. accept any prefix match against the known enums, so a future
+//     "Data Center Edition" → "datacenter" too. None of the four
+//     enum values is a prefix of another, so prefix ordering is
+//     unambiguous.
+//
+// Truly-unknown non-empty values are still treated as "no match"
+// (caller falls back to EditionCommunity) but we log one slog.Warn
+// so the silent-downgrade no longer happens invisibly.
 func parseEditionString(raw json.RawMessage) (Edition, bool) {
 	if raw == nil {
 		return "", false
@@ -57,10 +76,16 @@ func parseEditionString(raw json.RawMessage) (Edition, bool) {
 	if json.Unmarshal(raw, &s) != nil {
 		return "", false
 	}
-	ed := Edition(strings.ToLower(s))
-	switch ed {
-	case EditionCommunity, EditionDeveloper, EditionEnterprise, EditionDatacenter:
-		return ed, true
+	if s == "" {
+		return "", false
 	}
+	normalised := strings.ReplaceAll(strings.ToLower(s), " ", "")
+	for _, ed := range AllEditions {
+		if strings.HasPrefix(normalised, string(ed)) {
+			return ed, true
+		}
+	}
+	slog.Warn("unrecognised SonarQube edition value — falling back to community",
+		"raw_value", s)
 	return "", false
 }
