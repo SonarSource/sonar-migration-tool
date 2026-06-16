@@ -1058,6 +1058,84 @@ func TestShouldSkipBranch(t *testing.T) {
 	}
 }
 
+// #393 regression: filterCompleted must NOT drop importProjectData
+// from the plan even when its task dir already exists. The task dir
+// is created by the first e.Store.Writer call (via os.MkdirAll
+// inside ChunkWriter), which happens before any branch finishes.
+// Resume granularity is per (project, branch) via
+// loadCompletedBranches + shouldSkipBranch — if the whole task is
+// skipped, un-imported branches are silently dropped.
+func TestFilterCompletedKeepsImportProjectData(t *testing.T) {
+	dir := t.TempDir()
+	store := common.NewDataStore(dir)
+
+	// Simulate a previously-started run: writer created (which created
+	// the task dir) plus one successful main-branch record on disk.
+	w, err := store.Writer("importProjectData")
+	if err != nil {
+		t.Fatalf("Writer: %v", err)
+	}
+	rec, _ := json.Marshal(map[string]any{
+		"cloud_project_key": "proj1", "branch": "main", "status": "success",
+	})
+	if err := w.WriteOne(rec); err != nil {
+		t.Fatalf("WriteOne: %v", err)
+	}
+	if !store.TaskDirExists("importProjectData") {
+		t.Fatal("precondition: importProjectData dir should exist on disk")
+	}
+
+	plan := [][]string{{"createProjects", "importProjectData"}}
+	filtered := filterCompleted(plan, store)
+
+	// createProjects has no dir, so it stays. importProjectData is the
+	// regression target: it MUST stay even though its dir exists.
+	if len(filtered) != 1 {
+		t.Fatalf("expected one phase, got %d: %v", len(filtered), filtered)
+	}
+	gotImport := false
+	for _, name := range filtered[0] {
+		if name == "importProjectData" {
+			gotImport = true
+		}
+	}
+	if !gotImport {
+		t.Errorf("importProjectData should remain in plan on resume, got %v", filtered[0])
+	}
+
+	// Sanity-check the partner mechanism: the existing per-branch
+	// completed map records proj1:main, so a re-run would skip it.
+	completed := loadCompletedBranches(store)
+	if !shouldSkipBranch(completed, "proj1", "main") {
+		t.Error("loadCompletedBranches + shouldSkipBranch should skip the previously-recorded branch on resume")
+	}
+	if shouldSkipBranch(completed, "proj1", "develop") {
+		t.Error("an un-recorded branch must NOT be skipped — that is the data the regression protects")
+	}
+}
+
+// filterCompleted still applies the dir-existence gate to every
+// task that isn't on the importProjectData exception path.
+func TestFilterCompletedSkipsCompletedNonImportTasks(t *testing.T) {
+	dir := t.TempDir()
+	store := common.NewDataStore(dir)
+	if _, err := store.Writer("createProjects"); err != nil {
+		t.Fatalf("Writer: %v", err)
+	}
+
+	plan := [][]string{{"createProjects", "setProjectProfiles"}}
+	filtered := filterCompleted(plan, store)
+
+	if len(filtered) != 1 {
+		t.Fatalf("expected one phase, got %d: %v", len(filtered), filtered)
+	}
+	for _, name := range filtered[0] {
+		if name == "createProjects" {
+			t.Errorf("createProjects has an existing dir and should be filtered out, got %v", filtered[0])
+		}
+	}
+}
+
 func newCEFailMockServer() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

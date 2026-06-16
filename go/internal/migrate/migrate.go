@@ -402,6 +402,17 @@ func filterCompleted(plan [][]string, store *common.DataStore) [][]string {
 	for _, phase := range plan {
 		var fp []string
 		for _, task := range phase {
+			// importProjectData owns its own resume granularity:
+			// loadCompletedBranches + shouldSkipBranch decide per
+			// (project, branch) what to redo. Its output directory is
+			// created by the first e.Store.Writer call — long before
+			// every branch finishes — so the generic dir-existence
+			// gate would silently drop the task on resume and never
+			// re-run the unfinished branches. #393.
+			if task == "importProjectData" {
+				fp = append(fp, task)
+				continue
+			}
 			if !store.TaskDirExists(task) {
 				fp = append(fp, task)
 			}
