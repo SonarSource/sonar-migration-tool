@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -234,6 +235,61 @@ func TestProjectIssuesFullTask(t *testing.T) {
 	items, _ := e.Store.ReadAll("getProjectIssuesFull")
 	if len(items) != 1 {
 		t.Fatalf("expected 1 issue, got %d", len(items))
+	}
+}
+
+// #400 regression: the /api/issues/search project filter must be
+// passed as componentKeys (not components). SQ 9.9 only knows the
+// historical componentKeys name; the newer components name is
+// silently ignored there, so the API returns the global issue set
+// (capped at 10k) for every project. The records then get enriched
+// per-project, polluting each project's scanner-report import with
+// the same ~10k server-wide issues — explaining the massive 9.9
+// issue-loss bug.
+func TestProjectIssuesFullTaskUsesComponentKeysParam(t *testing.T) {
+	var (
+		mu   sync.Mutex
+		urls []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		urls = append(urls, r.URL.RawQuery)
+		mu.Unlock()
+		json.NewEncoder(w).Encode(map[string]any{
+			"issues": []map[string]any{
+				{"key": "issue-1", "rule": "java:S100"},
+			},
+			"paging": map[string]any{"total": 1, "pageIndex": 1, "pageSize": 500},
+		})
+	}))
+	defer srv.Close()
+
+	e := newTestExecutor(t)
+	e.ServerURL = "http://test/"
+	e.Raw = NewRawClient(srv.Client(), srv.URL+"/")
+
+	w, _ := e.Store.Writer("getProjects")
+	b, _ := json.Marshal(map[string]any{"key": "p1"})
+	w.WriteOne(b)
+	e.Store.Writer("getBranches")
+
+	if err := projectIssuesFullTask()(ctx(t), e); err != nil {
+		t.Fatalf("projectIssuesFullTask: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(urls) == 0 {
+		t.Fatal("expected at least one /api/issues/search call")
+	}
+	for _, q := range urls {
+		if !strings.Contains(q, "componentKeys=p1") {
+			t.Errorf("expected componentKeys=p1 in query, got %q", q)
+		}
+		// Guard against accidentally regressing back to the broken name.
+		if strings.Contains(q, "components=p1") {
+			t.Errorf("query must not use components=; SQ 9.9 ignores it. got %q", q)
+		}
 	}
 }
 

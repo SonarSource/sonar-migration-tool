@@ -70,9 +70,16 @@ func projectIssuesFullTask() func(ctx context.Context, e *Executor) error {
 		return forEachProjectBranch(ctx, e, "getProjectIssuesFull",
 			func(ctx context.Context, projectKey, branch string, w *ChunkWriter) error {
 				params := url.Values{
-					"components": {projectKey},
-					"branch":     {branch},
-					"ps":         {"500"},
+					// componentKeys (not components) is the canonical project
+					// filter on /api/issues/search across every SQ version we
+					// support — 9.9, 10.x, current, and SQC. SQ 9.9 silently
+					// ignores `components`, returning the global issue set
+					// instead, which then gets enriched per-project and
+					// pollutes every project's import with the first ~10k
+					// issues server-wide. #400.
+					"componentKeys": {projectKey},
+					"branch":        {branch},
+					"ps":            {"500"},
 				}
 				// additionalFields=_all is what brings comments and
 				// changelog into the response — the data only the
