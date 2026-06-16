@@ -8,7 +8,7 @@
 <head>
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1">
-	<title>{{block "title" .}}SQ Migration{{end}}</title>
+	<title>{{block "title" .}}SonarQube Server To Cloud Migration{{end}}</title>
 	<link rel="icon" href="/static/favicon.ico">
 	<link rel="stylesheet" href="/static/app.css">
 	<script src="/static/htmx.min.js"></script>
@@ -18,7 +18,8 @@
 	<header id="header" class="header">
 		<div id="header-inner" class="header-inner">
 			<div id="header-left" class="header-left">
-				<span id="header-title" class="header-title">SonarQube Migration Tool</span>
+				<span id="header-title" class="header-title">SonarQube Server To Cloud Migration</span>
+				<span id="header-experimental" class="header-experimental" title="The GUI is experimental and may change or have rough edges.">Experimental</span>
 				<nav id="header-nav" class="header-nav">
 					<a id="nav-wizard" href="/" {{if eq .ActiveNav "wizard"}}class="active"{{end}}>Wizard</a>
 					<a id="nav-history" href="/history" {{if eq .ActiveNav "history"}}class="active"{{end}}>History</a>

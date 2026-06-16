@@ -185,7 +185,7 @@ Full reference, more examples, and the config-file format:
 ## Prefer a visual interface?
 <!-- updated: 2026-06-04_01:13:00.000 by Claude -->
 
-`sonar-migration-tool` with a GUI. It is **experimental** in the current version of the tool.
+> **⚠️ Experimental:** The GUI is experimental in the current version of `sonar-migration-tool`. It may change between releases and can have rough edges. For production migrations, prefer the CLI.
 
 If you'd rather click through the migration in a browser instead of typing commands, run the GUI:
 

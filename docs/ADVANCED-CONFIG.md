@@ -201,6 +201,8 @@ CLI flags always override the corresponding config-file value.
 
 ### `wizard` / `gui`
 
+> **⚠️ Experimental:** The `gui` command is experimental. It may change between releases and can have rough edges. For production migrations, prefer the CLI commands.
+
 | Flag | Description |
 |---|---|
 | `--export_directory <dir>` | Working directory (default `./migration-files`). |

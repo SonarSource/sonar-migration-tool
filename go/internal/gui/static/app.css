@@ -204,6 +204,18 @@ select:focus {
 	font-weight: 600;
 }
 
+.header-experimental {
+	font-size: 0.7rem;
+	font-weight: 600;
+	letter-spacing: 0.05em;
+	text-transform: uppercase;
+	padding: 0.15rem 0.5rem;
+	border-radius: var(--radius);
+	color: #1a1a1a;
+	background: #f4b942;
+	cursor: help;
+}
+
 .header-nav {
 	display: flex;
 	gap: 0.5rem;
