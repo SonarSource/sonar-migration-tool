@@ -104,7 +104,7 @@ func makeExpandedIssueTask(taskName string, resolutionValues []string, extraPara
 func fetchIssueCombos(ctx context.Context, e *Executor, w *ChunkWriter, projectKey string,
 	combos []map[string]string, extraParams url.Values, meta map[string]any) error {
 	for _, combo := range combos {
-		params := url.Values{"components": {projectKey}, "ps": {"1"}}
+		params := url.Values{"componentKeys": {projectKey}, "ps": {"1"}}
 		for k, v := range combo {
 			params.Set(k, v)
 		}
@@ -168,7 +168,7 @@ func fetchChunkedRuleIssues(ctx context.Context, e *Executor, w *ChunkWriter,
 	projectKey string, chunks [][]string, meta map[string]any) error {
 	for _, chunk := range chunks {
 		raw, err := e.Raw.Get(ctx, issuesSearchAPI,
-			url.Values{"components": {projectKey}, "rules": {strings.Join(chunk, ",")}, "ps": {"1"}})
+			url.Values{"componentKeys": {projectKey}, "rules": {strings.Join(chunk, ",")}, "ps": {"1"}})
 		if err != nil {
 			return err
 		}

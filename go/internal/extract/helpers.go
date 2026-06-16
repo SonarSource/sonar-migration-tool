@@ -273,7 +273,7 @@ func perProjectIssueCount(taskName string, extraParams url.Values) func(ctx cont
 		return forEachDep(ctx, e, taskName, "getProjects",
 			func(ctx context.Context, item json.RawMessage, w *ChunkWriter) error {
 				key := extractField(item, "key")
-				params := url.Values{"components": {key}, "ps": {"1"}}
+				params := url.Values{"componentKeys": {key}, "ps": {"1"}}
 				for k, v := range extraParams {
 					params[k] = v
 				}
