@@ -10,16 +10,23 @@ The tool ships as a single static binary. No installer, no runtime dependencies.
 ## What gets migrated
 <!-- updated: 2026-06-05_19:25:00 -->
 
-| ✅ Migrated | ❌ NOT migrated |
-|---|---|
-| Projects, Quality Gates, Quality Profiles | User accounts (Cloud users are managed by the IdP) |
-| Groups, Permissions, Permission Templates | CI/CD pipeline configuration (update `SONAR_HOST_URL` manually) |
-| Project Settings, Webhooks, Links | |
-| Portfolios (Enterprise) | |
-| **Issues & Hotspots** with status, comments, and tags (project data, on by default) | |
-| **Source Code** and measures (project data, on by default) | |
-| **Issue Creation Dates** preserved via BackdateChangesets (project data, on by default) | |
-| **All branches** — non-main branches migrate as long-lived branches with full issue history (project data, on by default) | |
+### ✅ Migrated
+* Projects, Quality Gates, Quality Profiles<br> 
+* Groups, Permissions, Permission Templates<br>
+* Project Settings, Webhooks, Links<br>
+* Portfolios (Enterprise)<br>
+* Project data (Branches with Source files, Measures, Issues...) (Optional)<br>
+* Issues & Hotspots status, comments, and tags (optional)
+
+### ❌ NOT migrated
+* User accounts & auth
+* User Permissions on users
+* Analysis history
+* Applications
+* Portfolio hierarchies
+* Issue assignments
+* CI/CD pipelines
+* SCM blame authorship
 
 ---
 
@@ -42,18 +49,19 @@ That's it. No Go install, no databases, no config files required for the simple 
 
 Go to the [**Releases** page](https://github.com/sonar-solutions/sonar-migration-tool/releases) and download the binary that matches your operating system:
 
-| OS | File |
-|---|---|
-| macOS (Apple Silicon) | `sonar-migration-tool_darwin_arm64.tar.gz` |
-| macOS (Intel) | `sonar-migration-tool_darwin_amd64.tar.gz` |
-| Linux | `sonar-migration-tool_linux_amd64.tar.gz` |
-| Windows | `sonar-migration-tool_windows_amd64.zip` |
+| OS | Intel X64 | ARM 64 / Apple Silicon |
+|---|---|---|
+| Linux | sonar-migration-tool-linux-amd64 | sonar-migration-tool-linux-arm64 |
+| macOS | sonar-migration-tool-darwin-amd64 | sonar-migration-tool-darwin-arm64 |
+| Windows | sonar-migration-tool-windows-amd64.exe | sonar-migration-tool-windows-arm64.exe |
 
-Extract the archive. On macOS and Linux, make the binary executable:
+Rename the file and, on macOS and Linux, make the binary executable:
 
 ```bash
+mv sonar-migration-tool-<OS>-<ARCH> sonar-migration-tool
 chmod +x sonar-migration-tool
 ```
+
 
 You can now run it from the same folder:
 
@@ -63,76 +71,59 @@ You can now run it from the same folder:
 
 ---
 
-## Step 2 — Open a terminal
+## Step 2 — Prepare a configuration file
 <!-- updated: 2026-06-04_01:13:00.000 by Claude -->
 
-You'll type one command and the tool does the rest. Open the right app for your OS:
+The minimal JSON configuration file should look like this
+```json
+{
+    "concurrency": 10,
+    "timeout": 60,
+    "source": {
+        "url": "<YOUR_SQS_URL>",
+        "token": "<YOUR_SQS_TOKEN>",
+    },
+    "target": {
+        "url": "<YOUR_SQC_URL>",
+        "token": "<YOUR_SQC_TOKEN>",
+        "enterprise_key": "<YOUR_SQC_ENTERPRISE_KEY>",
+        "edition": "enterprise",
+    }
+}
+```
+**Note**: If you don't want to disclose tokens or URL in the configuration file, you can pass them on the tool command line (as `--url` and `--token` parameters)
+**Note**: SQS = SonarQube Server, SQC = SonarQube Cloud
+
+
+## Step 2 — Open a terminal
+<!-- updated: 2026-06-04_01:13:00.000 by Claude -->
 
 - **macOS** — open **Terminal** (find it in Applications → Utilities, or press `⌘ Space` and type "Terminal").
 - **Linux** — open your distro's terminal application.
 - **Windows** — open **PowerShell** (press the Windows key and type "PowerShell").
 
 ---
-
-## Step 3 — Run the migration
+## Step 3 — Run the migration, for all projects
 <!-- updated: 2026-06-04_01:13:00.000 by Claude -->
-
-The tool ships with several commands. Pick the workflow that matches your situation.
-
-### Migrating one project (or just a few)
-<!-- updated: 2026-06-04_01:13:00.000 by Claude -->
-
-Use `transfer`. It runs the whole migration in a single command — extracting from SonarQube Server, mapping the configuration, importing source code and issues, and pushing everything to SonarQube Cloud — then writes a PDF summary you can hand to your team.
-
-`transfer` shares the same `--config` file and the same direction-neutral CLI flags as `extract` / `migrate` / `reset` — `--source_*` for the SonarQube Server side, `--target_*` for the SonarQube Cloud side. Anything you don't pass on the CLI is read from the config file; CLI flags always win.
-
-```bash
-./sonar-migration-tool transfer \
-  --source_url https://sonarqube.example.com \
-  --source_token sqp_xxx \
-  --project_key my-project \
-  --target_token squ_xxx \
-  --default_organization my-org
-```
 
 Or use a **config file** to keep tokens out of your shell history:
 
 ```bash
-cp examples/config-transfer.example.json my-config.json
-# Edit my-config.json with your SonarQube Server and SonarQube Cloud credentials
-./sonar-migration-tool transfer -c my-config.json --project_key my-project
+# Example with URL and Token passed on the command line if not in the configuration file
+./sonar-migration-tool extract --url <YOUR_SQS_URL> --token <YOUR_SQS_TOKEN>
+./sonar-migration-tool structure
+./sonar-migration-tool mappings
+
+# → edit organizations.csv to set sonarcloud_org_key per row
+
+./sonar-migration-tool migrate --url <YOUR_SQC_URL> --token <YOUR_SQC_TOKEN>
 ```
+**Note**: SQS = SonarQube Server, SQC = SonarQube Cloud
+
 
 The config file uses the same unified shape as every other command — one top-level block of shared defaults plus `source` and `target` sub-objects. `concurrency`, `timeout`, `export_directory`, mTLS (`pem_file_path` / `key_file_path` / `cert_password`), and `--default_organization` / `--enterprise_key` are all honored either via the JSON file or as CLI overrides.
 
-Add `--target_url` to target a different SonarQube Cloud instance (e.g. `--target_url https://sc-staging.io` for staging).
-
-Full reference, more examples, and the config-file format:
-👉 **[Using `transfer` — Transfer One Project](docs/TRANSFER.md)**
-
-### Migrating many projects (or many SonarQube Server instances)
-<!-- updated: 2026-06-04_01:13:00.000 by Claude -->
-
-Use `migrate` together with the underlying `extract` / `structure` / `mappings` commands. This gives you a chance to review and edit the mapping CSVs between phases — useful when projects need to land in different SonarQube Cloud organizations, or when you want to re-run individual steps after a failure.
-
-```bash
-./sonar-migration-tool extract <SQ_URL> <SQ_TOKEN>
-# → edit organizations.csv to set sonarcloud_org_key per row
-./sonar-migration-tool structure
-./sonar-migration-tool mappings
-./sonar-migration-tool migrate <SC_TOKEN> <SC_ENTERPRISE_KEY>
-```
-
-Or use a **config file** for extract and migrate:
-
-```bash
-cp examples/config.unified.example.json my-config.json
-# Edit my-config.json with your source (SonarQube Server) and target (SonarQube Cloud) credentials
-./sonar-migration-tool extract --config my-config.json
-./sonar-migration-tool structure --config my-config.json
-./sonar-migration-tool mappings --config my-config.json
-./sonar-migration-tool migrate --config my-config.json
-```
+Add `--url` to target a different SonarQube Cloud instance (e.g. `--target_url https://sc-staging.io` for staging).
 
 Full reference, flags, multi-server migration, and resume support:
 👉 **[Using `migrate` — Migrate All Projects](docs/MIGRATE.md)**
@@ -145,9 +136,6 @@ If you'd rather not pick phases yourself, run the interactive wizard — it asks
 ```bash
 ./sonar-migration-tool wizard
 ```
-
-If you're not sure which path fits, start with `transfer`. You can always re-run with `migrate` for more control.
-
 ---
 
 ## Step 4 — Verify in SonarQube Cloud
@@ -155,42 +143,88 @@ If you're not sure which path fits, start with `transfer`. You can always re-run
 
 Once the command finishes:
 
-1. Log in to [sonarcloud.io](https://sonarcloud.io).
+1. Log in to [sonarcloud.io](https://sonarcloud.io) or  [sonarqube.us](https://sonarqube.us).
 2. Open the target organization.
 3. Spot-check that your project(s) are listed and the quality gate and quality profile are correct.
 4. Unless you passed `--skip_project_data_migration`, verify that issues, hotspots, and their creation dates match the source — and that non-main branches appear under **Branches** with their issues. You can also run `./sonar-migration-tool regtest` for automated verification.
+4. Unless you passed `--skip_issue_sync`, verify that issues, hotspots marked as **false positive**, **accepted** and **safe** respectively, are in same status on SonarQube Cloud.
 5. **Re-scan your projects in CI** to seed ongoing analysis. If you used `--skip_project_data_migration`, this first scan will be the baseline for all issue tracking.
-6. Update your CI/CD pipeline to point at SonarQube Cloud (`SONAR_TOKEN` and `SONAR_HOST_URL`).
+6. Update your CI/CD pipeline to point at SonarQube Cloud (`SONAR_TOKEN`, `SONAR_HOST_URL`, and `sonar.organization`).
 
 For the full post-migration checklist, see [After you migrate](docs/MIGRATE.md#after-you-migrate) in the MIGRATE guide.
+
+---
+
+### Migrating one project (or just a few)
+<!-- updated: 2026-06-04_01:13:00.000 by Claude -->
+
+Use `transfer`. It runs the whole migration in a single command — extracting from SonarQube Server, mapping the configuration, importing source code and issues, and pushing everything to SonarQube Cloud — then writes a PDF summary you can hand to your team.
+
+`transfer` shares the same `--config` file and the same direction-neutral CLI flags as `extract` / `migrate` / `reset` — `--source_*` for the SonarQube Server side, `--target_*` for the SonarQube Cloud side. Anything you don't pass on the CLI is read from the config file; CLI flags always win.
+
+```bash
+./sonar-migration-tool transfer \
+  --source_url <YOUR_SQS_URL> \
+  --source_token <YOUR_SQS_TOKEN> \
+  --project_key <YOUR_PROJECT_KEY> \
+  --target_url https://sonarcloud.io \
+  --target_token <YOUR_SQC_TOKEN> \
+  --enterprise_key <YOUR_SQC_ENTERPRISE_KEY>
+  --default_organization <YOUR_SQC_ORG>
+```
+
+**Note**: SQS = SonarQube Server, SQC = SonarQube Cloud
+
+Full reference, more examples, and the config-file format:
+👉 **[Using `transfer` — Transfer One Project](docs/TRANSFER.md)**
+
+**Note**: You may use https://sonarqube.us instead https://sonarcloud.io to migrate to the US instance of SonarQube Cloud
 
 ---
 
 ## Prefer a visual interface?
 <!-- updated: 2026-06-04_01:13:00.000 by Claude -->
 
+`sonar-migration-tool` with a GUI. It is **experimental** in the current version of the tool.
+
 If you'd rather click through the migration in a browser instead of typing commands, run the GUI:
 
 ```bash
 ./sonar-migration-tool gui
 ```
-
 It opens the same workflow in your default browser with progress bars, an event log, and CSV viewers for the mapping files.
 
----
 
 ## Something went wrong?
 <!-- updated: 2026-06-04_01:13:00.000 by Claude -->
 
 Most errors fall into a few common buckets — see [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for the full list.
+You may want to rerun the command with the extra `--debug` flag to get more troubleshooting logs.
 
-The single best first step is to look at the request log:
+---
 
+### Migrating many SonarQube Server instances into one SonarQube Cloud Enterprise
+<!-- updated: 2026-06-04_01:13:00.000 by Claude -->
+
+* Run `extract` for as many SonarQube Server instances as you have
+* Run `structure` and `mappings` once
+* Edit the `organizations.csv` to define your project mapping in the SonarQube Cloud organizations
+* Run `migration` 
+
+```bash
+./sonar-migration-tool extract --url <YOUR_SQS_1_URL> --token <YOUR_SQS_1_TOKEN>
+./sonar-migration-tool extract --url <YOUR_SQS_2_URL> --token <YOUR_SQS_n_TOKEN>
+...
+./sonar-migration-tool extract --url <YOUR_SQS_n_URL> --token <YOUR_SQS_n_TOKEN>
+
+./sonar-migration-tool structure
+./sonar-migration-tool mappings
+
+# → edit organizations.csv to set sonarcloud_org_key per row (column 2)
+
+./sonar-migration-tool migrate --enterprise_key <YOUR_SQC_ENTERPRISE_KEY> --url <SQC_URL> --token <SQC_TOKEN>
 ```
-files/<run_id>/requests.log
-```
-
-It shows every API call the tool made and how the server responded.
+**Note**: SQS = SonarQube Server, SQC = SonarQube Cloud
 
 ---
 
