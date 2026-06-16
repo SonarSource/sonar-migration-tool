@@ -66,7 +66,7 @@ func TestRender(t *testing.T) {
 	}
 
 	html := buf.String()
-	if !strings.Contains(html, "SQ Migration") {
+	if !strings.Contains(html, "SonarQube Server To Cloud Migration") {
 		t.Error("rendered HTML missing title")
 	}
 	if !strings.Contains(html, "htmx.min.js") {
