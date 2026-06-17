@@ -5,6 +5,7 @@ This page lists **every** option `sonar-migration-tool` accepts — JSON config 
 ## Contents
 
 - [Configuration file shape](#configuration-file-shape)
+- [All parameters reference](#all-parameters-reference)
 - [Top-level fields](#top-level-fields)
 - [`source` block — consumed by `extract`](#source-block--consumed-by-extract)
 - [`target` block — consumed by `migrate` / `reset`](#target-block--consumed-by-migrate--reset)
@@ -27,6 +28,70 @@ The recommended shape ("unified config") carries one top-level block of defaults
 | `transfer` | top-level + `source` + `target` |
 
 Complete annotated example: [`examples/config.unified.example.json`](../examples/config.unified.example.json). Minimal example: [`examples/config.minimal.example.json`](../examples/config.minimal.example.json). JSON Schema for editor autocomplete: [`schemas/config.schema.json`](../schemas/config.schema.json).
+
+---
+
+## All parameters reference
+
+Every parameter the tool accepts, its JSON location, the equivalent CLI flag, where it applies, its default, and whether it's mandatory. **CLI flags always override the config file.** The sections after this one give the same information grouped by block with extra prose; this table is the at-a-glance index. Authoritative source: [`schemas/config.schema.json`](../schemas/config.schema.json).
+
+Only `source.url` / `source.token` (for `extract`) and `target.url` / `target.token` (for `migrate` / `reset`) are mandatory; everything else has a default or is optional.
+
+### Top-level fields
+
+| Parameter | CLI flag | Commands | Default | Required | Role |
+|---|---|---|---|:--:|---|
+| `concurrency` | `--concurrency` | all | `10` | No | Max parallel HTTP calls. Overridable per block via `source`/`target`. |
+| `timeout` | `--timeout` | extract, transfer | `60` | No | HTTP request timeout in seconds. Overridable per block. |
+| `export_directory` | `--export_directory` (`--export_dir` on `transfer`) | all | `./migration-files` | No | Root directory for extract / migrate output. |
+| `skip_issue_sync` | `--skip_issue_sync` | extract, migrate, transfer | `false` | No | Skip the final per-issue / per-hotspot metadata sync (#299). Accepts `true`/`on`/`yes`/`1` (case-insensitive). CLI flag is a one-way override. |
+| `skip_project_data_migration` | `--skip_project_data_migration` | extract, migrate, transfer | `false` | No | Skip the entire project-data migration (import + trailing sync). Implies `skip_issue_sync` (#303). |
+
+### `source` block — SonarQube Server side (`extract`, `transfer`)
+
+| Parameter | CLI flag | Default | Required | Role |
+|---|---|---|:--:|---|
+| `source.url` | `--source_url` | — | ✅ | SonarQube Server base URL. |
+| `source.token` | `--source_token` | — | ✅ | SonarQube Server user token (admin scope). |
+| `source.extract_type` | `--extract_type` | `all` | No | Extract scope: `all` or the name of a specific extract task. |
+| `source.concurrency` | `--concurrency` | top-level | No | Override top-level concurrency for extract calls. |
+| `source.timeout` | `--timeout` | top-level | No | Override top-level timeout for extract calls. |
+| `source.pem_file_path` | `--pem_file_path` | `null` | No | mTLS client-certificate PEM file. |
+| `source.key_file_path` | `--key_file_path` | `null` | No | mTLS private key matching the PEM. |
+| `source.cert_password` | `--cert_password` | `null` | No | mTLS certificate password, if any. |
+| `source.target_task` | `--target_task` | `null` | No | Stop extract at a specific task (dependencies still run). |
+| `source.extract_id` | `--extract_id` | `null` | No | Reuse / resume an existing extract directory ID. |
+| `source.enterprise_key`, `source.organization_key`, `source.edition` | — | `null` / `enterprise` | No | Provisional — accepted but ignored today; reserved for future SQC-to-SQC migration. |
+| `source.run_id` | — | `null` | No | Ignored by `extract`; present for shape symmetry with `target`. |
+
+### `target` block — SonarQube Cloud side (`migrate`, `reset`, `transfer`)
+
+| Parameter | CLI flag | Default | Required | Role |
+|---|---|---|:--:|---|
+| `target.url` | `--target_url` | — | ✅ | SonarQube Cloud base URL (e.g. `https://sonarcloud.io/`). |
+| `target.token` | `--target_token` | — | ✅ | SonarQube Cloud user token (enterprise + org admin scope). |
+| `target.enterprise_key` | `--enterprise_key` | `null` | No¹ | SonarQube Cloud enterprise key. ¹Required for any enterprise-scoped endpoint (portfolios, org listings, etc.). |
+| `target.edition` | `--edition` | `enterprise` | No | SonarQube Cloud edition: `enterprise`, `team`, or `foss`. |
+| `target.concurrency` | `--concurrency` | top-level | No | Override top-level concurrency for migrate / reset calls. |
+| `target.timeout` | `--timeout` | top-level | No | Override top-level timeout for migrate / reset calls. |
+| `target.run_id` | `--run_id` | `null` | No | Resume an in-progress migrate run by ID. |
+| `target.target_task` | `--target_task` | `null` | No | Stop migrate at a specific task (dependencies still run). |
+| `target.default_organization` | `--default_organization` | `null` | No | SonarQube Cloud org applied to every project when `organizations.csv` has no per-row mapping. Ignored (with a WARN) when any row carries a `sonarcloud_org_key` (#281). |
+| `target.skip_profiles` | `--skip_profiles` | `false` | No | Skip quality profile migration / provisioning. |
+| `target.exclude_branches` | `--exclude_branches` | `[]` | No | Glob patterns (Go `filepath.Match`) for non-main branches to skip. The main branch is never excluded. Repeatable on the CLI. |
+| `target.organization_key` | — | `null` | No | Provisional — accepted but ignored today. |
+
+### CLI-only / global flags
+
+These have no config-file field.
+
+| Flag | Commands | Default | Role |
+|---|---|---|---|
+| `-c, --config <path>` | all | — | Path to the JSON configuration file. |
+| `--project_key <key>` | transfer | all projects | Project key to transfer; omit to transfer every project. |
+| `--debug` | all | off | Verbose request/response logging for troubleshooting. |
+| `-h, --help` | all | — | Help for the command. |
+| `-v, --version` | all | — | Print version and exit. |
 
 ---
 

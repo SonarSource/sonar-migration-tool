@@ -1,7 +1,0 @@
-{
-  "url": "http://localhost:9000",
-  "token": "YOUR_SONARQUBE_TOKEN_HERE",
-  "export_directory": "./files",
-  "concurrency": 10,
-  "timeout": 60
-}

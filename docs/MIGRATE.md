@@ -77,7 +77,7 @@ The three legacy shapes (flat top-level keys, `extract` / `migrate` sub-objects,
 
 **Precedence:** CLI flags override values from the config file when both are provided. `--export_directory` on the CLI wins over `export_directory` in the config when explicitly set.
 
-For deeper config reference, see [CONFIG.md](CONFIG.md).
+For deeper config reference, see [ADVANCED-CONFIG.md](ADVANCED-CONFIG.md).
 
 ---
 
@@ -113,7 +113,7 @@ sonar-migration-tool extract --source_url <URL> --source_token <TOKEN> --export_
 
 | Flag | Description |
 |---|---|
-| `--config` | Path to a JSON configuration file (see [CONFIG.md](CONFIG.md)) |
+| `--config` | Path to a JSON configuration file (see [ADVANCED-CONFIG.md](ADVANCED-CONFIG.md)) |
 | `--extract_id` | Resume a previous extraction by its ID |
 | `--target_task` | Run a specific task (with its dependencies) |
 | `--concurrency` | Max concurrent requests (default: server-detected) |
