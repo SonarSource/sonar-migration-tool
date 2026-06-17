@@ -120,6 +120,10 @@ func RenderPDF(summary *MigrationSummary) ([]byte, error) {
 		renderRateLimitWarning(pdf, summary.RateLimit)
 	}
 
+	if summary.ProjectKeys != nil {
+		renderProjectKeyWarning(pdf, summary.ProjectKeys)
+	}
+
 	for _, section := range summary.Sections {
 		if summary.OmitSections[section.Name] {
 			continue

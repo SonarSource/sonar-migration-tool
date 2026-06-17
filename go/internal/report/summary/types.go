@@ -54,6 +54,45 @@ type MigrationSummary struct {
 	// exceeded the impact threshold, or any non-SQC 429 was observed).
 	// Nil for clean runs, which renders the report unchanged.
 	RateLimit *RateLimitReport
+
+	// ProjectKeys is populated only when the configured project-key
+	// renaming strategy produces a target-key collision (the same key in
+	// more than one organization) or a key over the SonarQube length
+	// limit. Nil when every rendered key is unique and within limits.
+	// Issue #138.
+	ProjectKeys *ProjectKeyReport
+}
+
+// ProjectKeyReport surfaces problems with the renamed target project keys
+// in the orange callout box and a markdown section. Issue #138.
+type ProjectKeyReport struct {
+	// Pattern is the project_key_pattern in effect for the run.
+	Pattern string
+	// Collisions lists target keys produced by more than one distinct
+	// source project (typically the same source key landing in different
+	// organizations under a pattern that omits <ORGANIZATION_KEY>).
+	Collisions []ProjectKeyCollision
+	// TooLong lists rendered keys that exceed migrate.MaxProjectKeyLength.
+	TooLong []ProjectKeyTooLong
+}
+
+// ProjectKeySource identifies a source project by its key and target org.
+type ProjectKeySource struct {
+	SourceKey string
+	OrgKey    string
+}
+
+// ProjectKeyCollision is one target key claimed by multiple source projects.
+type ProjectKeyCollision struct {
+	TargetKey string
+	Sources   []ProjectKeySource
+}
+
+// ProjectKeyTooLong is one rendered key that exceeds the length limit.
+type ProjectKeyTooLong struct {
+	ProjectKeySource
+	TargetKey string
+	Length    int
 }
 
 // RateLimitReport summarises 429 hits seen during the run for inclusion

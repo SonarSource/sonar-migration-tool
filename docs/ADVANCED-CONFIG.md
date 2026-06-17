@@ -9,6 +9,7 @@ This page lists **every** option `sonar-migration-tool` accepts — JSON config 
 - [Top-level fields](#top-level-fields)
 - [`source` block — consumed by `extract`](#source-block--consumed-by-extract)
 - [`target` block — consumed by `migrate` / `reset`](#target-block--consumed-by-migrate--reset)
+- [Project key renaming strategy](#project-key-renaming-strategy)
 - [Per-command CLI flags](#per-command-cli-flags)
 - [SonarQube Cloud API rate limiting handling](#sonarqube-cloud-api-rate-limiting-handling)
 - [Legacy config shapes](#legacy-config-shapes)
@@ -77,6 +78,7 @@ Only `source.url` / `source.token` (for `extract`) and `target.url` / `target.to
 | `target.run_id` | `--run_id` | `null` | No | Resume an in-progress migrate run by ID. |
 | `target.target_task` | `--target_task` | `null` | No | Stop migrate at a specific task (dependencies still run). |
 | `target.default_organization` | `--default_organization` | `null` | No | SonarQube Cloud org applied to every project when `organizations.csv` has no per-row mapping. Ignored (with a WARN) when any row carries a `sonarcloud_org_key` (#281). |
+| `target.project_key_pattern` | `--project_key_pattern` | `<ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>` | No | Template for target project keys (#138). See [Project key renaming strategy](#project-key-renaming-strategy). |
 | `target.skip_profiles` | `--skip_profiles` | `false` | No | Skip quality profile migration / provisioning. |
 | `target.exclude_branches` | `--exclude_branches` | `[]` | No | Glob patterns (Go `filepath.Match`) for non-main branches to skip. The main branch is never excluded. Repeatable on the CLI. |
 | `target.organization_key` | — | `null` | No | Provisional — accepted but ignored today. |
@@ -144,9 +146,71 @@ The CLI flags `--skip_issue_sync` and `--skip_project_data_migration` on `migrat
 | `run_id` | | Resume an in-progress migrate run by ID. |
 | `target_task` | | Stop migrate at a specific task. |
 | `default_organization` | | SonarCloud org applied to every project when `organizations.csv` has no per-row mapping. Ignored (with a WARN) when any row already carries a `sonarcloud_org_key`. CLI `--default_organization` wins. |
+| `project_key_pattern` | | Template for target project keys, built from `<ORIGINAL_PROJECT_KEY>` and `<ORGANIZATION_KEY>`. Default `<ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>`. CLI `--project_key_pattern` wins. See [Project key renaming strategy](#project-key-renaming-strategy). |
 | `skip_profiles` | | Skip quality profile migration. |
 | `exclude_branches` | | Array of glob patterns (Go `filepath.Match` syntax) for non-main branches to skip during project data import. The main branch is never excluded regardless of patterns. Example: `["feature/*", "release/*"]`. |
 | `organization_key` | | Provisional — accepted but ignored today. |
+
+---
+
+## Project key renaming strategy
+
+When a project is migrated to SonarQube Cloud its key is rewritten according to
+`target.project_key_pattern` (CLI: `--project_key_pattern`). The pattern is a template built from
+two placeholders:
+
+| Placeholder | Replaced with |
+|---|---|
+| `<ORIGINAL_PROJECT_KEY>` | the source project key (mandatory; `<PROJECT_KEY>` is accepted as an alias) |
+| `<ORGANIZATION_KEY>` | the target SonarQube Cloud organization key |
+
+**Default:** `<ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>` — SonarQube Cloud's own convention, and the tool's
+historical behavior. Leaving the field unset reproduces exactly what previous versions did.
+
+### Examples
+
+```text
+<ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>            →  myorg_my-project
+ACME_CORP_<ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>  →  ACME_CORP_myorg_my-project
+<ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>_migrated   →  myorg_my-project_migrated
+ACME_CORP_<ORIGINAL_PROJECT_KEY>                     →  ACME_CORP_my-project
+sqs_<ORIGINAL_PROJECT_KEY>_migrated                  →  sqs_my-project_migrated
+<ORIGINAL_PROJECT_KEY>                               →  my-project          (keep unchanged)
+```
+
+### Validation rules
+
+The pattern is validated before the migration starts; an invalid pattern aborts the run with a
+clear error:
+
+- It must contain `<ORIGINAL_PROJECT_KEY>` (a pattern with no placeholder is rejected).
+- Only the two documented placeholders are allowed; any other `<…>` token is rejected.
+- A pattern whose **only** placeholder is `<ORIGINAL_PROJECT_KEY>` is allowed in two forms: bare
+  (`<ORIGINAL_PROJECT_KEY>`, i.e. keep the key unchanged) or with a **static prefix and/or postfix
+  totalling at least 5 characters** (`acme_<ORIGINAL_PROJECT_KEY>` ✅,
+  `MYCORP_<ORIGINAL_PROJECT_KEY>` ✅, `sqs_<ORIGINAL_PROJECT_KEY>_migrated` ✅,
+  `AAA_<ORIGINAL_PROJECT_KEY>` ❌). A short generic affix is too collision-prone to allow.
+
+### Organization-prefix collision guard
+
+If the pattern does **not** include `<ORGANIZATION_KEY>` (so every project gets the same static prefix),
+the tool checks that the prefix does not match an existing SonarQube Cloud organization key. A
+match would make the renamed keys look organization-scoped while not being mapped through one, so
+`migrate` aborts and asks you to disambiguate (for example by adding `<ORGANIZATION_KEY>`).
+
+### Conflict & length reporting
+
+Before keys are created the tool renders every target key and reports, in both the markdown and
+PDF migration reports (an amber callout):
+
+- **Collisions** — the same target key produced by more than one source project. Because SonarQube
+  Cloud project keys are globally unique, colliding projects cannot all be created. This typically
+  happens when a pattern without `<ORGANIZATION_KEY>` maps the same source key from two organizations.
+- **Over-length keys** — any rendered key longer than the SonarQube limit of 400 characters, which
+  the API would reject.
+
+Permission-template and portfolio selection regexes are adapted automatically to whatever prefix
+the chosen pattern produces, so they keep matching the renamed keys.
 
 ---
 
@@ -212,6 +276,7 @@ sonar-migration-tool migrate --target_token <token> --enterprise_key <key> [flag
 | `--skip_project_data_migration` | Skip the entire project-data migration: `importProjectData` plus the trailing sync pair. Implies `--skip_issue_sync`. One-way override of the `skip_project_data_migration` config field. Issue #303. |
 | `--exclude_branches <pattern>` | Glob pattern for non-main branches to skip during project data import. Repeatable. Main branch is never excluded. |
 | `--default_organization <key>` | SonarCloud org applied to every project when `organizations.csv` has no mapping defined. |
+| `--project_key_pattern <pattern>` | Template for target project keys (`<ORIGINAL_PROJECT_KEY>` / `<ORGANIZATION_KEY>`). Default `<ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>`. See [Project key renaming strategy](#project-key-renaming-strategy). |
 | `--concurrency <n>` | Max concurrent requests. |
 
 ### `reset`
@@ -252,6 +317,7 @@ file.
 | `--target_url <url>` | `target.url` | SonarQube Cloud URL. |
 | `--target_token <token>` | `target.token` | SonarQube Cloud token. |
 | `--default_organization <key>` | `target.default_organization` | SonarQube Cloud organization key. |
+| `--project_key_pattern <pattern>` | `target.project_key_pattern` | Template for target project keys. See [Project key renaming strategy](#project-key-renaming-strategy). |
 | `--enterprise_key <key>` | `target.enterprise_key` | SonarQube Cloud enterprise key (defaults to `--default_organization`). |
 | `--export_dir <dir>` | `export_directory` | Working directory (default `./migration-files/`). |
 | `--concurrency <n>` | `concurrency` | Max concurrent HTTP requests. |

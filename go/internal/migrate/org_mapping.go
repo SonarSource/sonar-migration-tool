@@ -224,6 +224,37 @@ func orgsByKey(ctx context.Context, lookup orgLookup, keys []string) (map[string
 	return out, nil
 }
 
+// validatePatternOrgCollision implements the issue #138 guard: when the
+// project-key pattern does NOT use <ORGANIZATION_KEY>, the static prefix is the same
+// for every migrated project. If that prefix (minus a trailing underscore)
+// matches an existing SonarQube Cloud organization key, the resulting keys
+// would look org-scoped while not being mapped through one — ambiguous
+// enough that we abort and ask the operator to disambiguate the pattern.
+//
+// Patterns that include <ORGANIZATION_KEY> are inherently org-scoped and skip this
+// check. So does a bare <ORIGINAL_PROJECT_KEY> (keep-unchanged), which has
+// no prefix to collide.
+func validatePatternOrgCollision(ctx context.Context, lookup orgLookup, pattern string) error {
+	if PatternUsesOrg(pattern) {
+		return nil
+	}
+	prefix, _ := ProjectKeyAffixes(pattern, "")
+	candidate := strings.TrimRight(prefix, "_")
+	if candidate == "" {
+		return nil
+	}
+	known, err := orgsByKey(ctx, lookup, []string{candidate})
+	if err != nil {
+		return fmt.Errorf("checking project_key_pattern prefix against SonarQube Cloud organizations: %w", err)
+	}
+	if known[candidate] {
+		return common.NewExitError(2, fmt.Errorf(
+			`project_key_pattern prefix %q collides with existing SonarQube Cloud organization %q; use <ORGANIZATION_KEY> in the pattern or choose a prefix that is not an organization key`,
+			prefix, candidate))
+	}
+	return nil
+}
+
 func defaultOrgMissingError(defaultOrg, enterpriseKey string) error {
 	return common.NewExitError(3, fmt.Errorf(
 		`Default organization %q does not exists in SonarQube Cloud, or is not part of Enterprise %q`,

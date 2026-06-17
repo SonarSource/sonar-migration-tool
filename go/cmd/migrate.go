@@ -68,6 +68,7 @@ func init() {
 	f.Bool(flagSkipIssueSync, false, "Skip the final per-issue and per-hotspot metadata sync (#299). Same semantics as the skip_issue_sync config-file field — defaults to false (sync happens); pass the flag to skip.")
 	f.Bool(flagSkipProjectDataMigration, false, "Skip the entire project-data migration: importProjectData and the trailing per-issue/per-hotspot sync (#303). Defaults to false (data is migrated); pass the flag to skip.")
 	f.String("default_organization", "", "SonarQube Cloud organization to migrate every project into when organizations.csv has no mapping defined. Ignored if any mapping is present.")
+	f.String("project_key_pattern", "", "Template for target project keys, built from <ORIGINAL_PROJECT_KEY> and <ORGANIZATION_KEY> (default: <ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>). #138")
 	f.StringSlice("exclude_branches", nil, "Glob patterns for non-main branches to skip during project data import (e.g. feature/*,bugfix/*)")
 }
 
@@ -98,6 +99,7 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	overrideString(cmd, "export_directory", &cfg.ExportDirectory)
 	overrideString(cmd, "target_task", &cfg.TargetTask)
 	overrideString(cmd, "default_organization", &cfg.DefaultOrganization)
+	overrideString(cmd, "project_key_pattern", &cfg.ProjectKeyPattern)
 	overrideInt(cmd, "concurrency", &cfg.Concurrency)
 	overrideInt(cmd, "timeout", &cfg.Timeout)
 	if cmd.Flags().Changed("skip_profiles") {

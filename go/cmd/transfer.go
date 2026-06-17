@@ -28,25 +28,26 @@ const (
 	sqServerName = "SonarQube Server"
 	scCloudName  = "SonarQube Cloud"
 
-	flagConfig             = "config"
-	flagSourceURL          = "source_url"
-	flagSourceToken        = "source_token"
-	flagProjectKey         = "project_key"
-	flagTargetURL          = "target_url"
-	flagTargetToken        = "target_token"
-	flagEnterpriseKey      = "enterprise_key"
-	flagDefaultOrg         = "default_organization"
-	flagEdition            = "edition"
+	flagConfig                   = "config"
+	flagSourceURL                = "source_url"
+	flagSourceToken              = "source_token"
+	flagProjectKey               = "project_key"
+	flagTargetURL                = "target_url"
+	flagTargetToken              = "target_token"
+	flagEnterpriseKey            = "enterprise_key"
+	flagDefaultOrg               = "default_organization"
+	flagProjectKeyPattern        = "project_key_pattern"
+	flagEdition                  = "edition"
 	flagExportDir                = "export_dir"
 	flagSkipIssueSync            = "skip_issue_sync"
 	flagSkipProjectDataMigration = "skip_project_data_migration"
 	flagConcurrency              = "concurrency"
-	flagTimeout            = "timeout"
-	flagPEMFilePath        = "pem_file_path"
-	flagKeyFilePath        = "key_file_path"
-	flagCertPassword       = "cert_password"
-	flagDebug              = "debug"
-	flagExcludeBranches    = "exclude_branches"
+	flagTimeout                  = "timeout"
+	flagPEMFilePath              = "pem_file_path"
+	flagKeyFilePath              = "key_file_path"
+	flagCertPassword             = "cert_password"
+	flagDebug                    = "debug"
+	flagExcludeBranches          = "exclude_branches"
 )
 
 // transferTargetTasks is the explicit set of project-scoped "leaf" migrate
@@ -155,6 +156,7 @@ func init() {
 	f.String(flagTargetURL, "", scCloudName+" URL (maps to target.url, default: https://sonarcloud.io/)")
 	f.String(flagTargetToken, "", scCloudName+" token (maps to target.token)")
 	f.String(flagDefaultOrg, "", scCloudName+" organization key (maps to target.default_organization)")
+	f.String(flagProjectKeyPattern, "", "Template for target project keys, built from <ORIGINAL_PROJECT_KEY> and <ORGANIZATION_KEY> (maps to target.project_key_pattern; default: <ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>)")
 	f.String(flagEnterpriseKey, "", scCloudName+" enterprise key (maps to target.enterprise_key, defaults to --"+flagDefaultOrg+")")
 	f.String(flagEdition, "", scCloudName+" license edition (maps to target.edition; defaults to enterprise)")
 	f.String(flagExportDir, "./migration-files/", "Working directory for intermediate files (maps to export_directory)")
@@ -171,15 +173,16 @@ func init() {
 
 // transferConfig holds the resolved configuration after merging file and flag values.
 type transferConfig struct {
-	sourceURL           string
-	sourceToken         string
-	projectKey          string
-	targetURL           string
-	targetToken         string
-	defaultOrganization string
-	enterpriseKey       string
-	edition             string
-	exportDir           string
+	sourceURL                string
+	sourceToken              string
+	projectKey               string
+	targetURL                string
+	targetToken              string
+	defaultOrganization      string
+	projectKeyPattern        string
+	enterpriseKey            string
+	edition                  string
+	exportDir                string
 	concurrency              int
 	timeout                  int
 	pemFilePath              string
@@ -255,6 +258,7 @@ func loadTransferFileDefaults(path string) (transferConfig, error) {
 	cfg.enterpriseKey = migrateCfg.EnterpriseKey
 	cfg.edition = migrateCfg.Edition
 	cfg.defaultOrganization = migrateCfg.DefaultOrganization
+	cfg.projectKeyPattern = migrateCfg.ProjectKeyPattern
 
 	cfg.exportDir = extractCfg.ExportDirectory
 	if cfg.exportDir == "" {
@@ -298,6 +302,7 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 	applyFlagString(cmd, flagTargetURL, &cfg.targetURL)
 	applyFlagString(cmd, flagTargetToken, &cfg.targetToken)
 	applyFlagString(cmd, flagDefaultOrg, &cfg.defaultOrganization)
+	applyFlagString(cmd, flagProjectKeyPattern, &cfg.projectKeyPattern)
 	applyFlagString(cmd, flagEnterpriseKey, &cfg.enterpriseKey)
 	applyFlagString(cmd, flagEdition, &cfg.edition)
 	applyFlagString(cmd, flagExportDir, &cfg.exportDir)
@@ -522,6 +527,7 @@ func runTransferMigrate(ctx context.Context, cfg transferConfig) (string, error)
 		SkipProjectDataMigration: cfg.skipProjectDataMigration,
 		Debug:                    cfg.debug,
 		ExcludeBranches:          cfg.excludeBranches,
+		ProjectKeyPattern:        cfg.projectKeyPattern,
 	})
 	if err != nil {
 		return "", fmt.Errorf("migrate failed: %w", err)

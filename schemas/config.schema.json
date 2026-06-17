@@ -176,6 +176,11 @@
         "default_organization": {
           "type": ["string", "null"],
           "description": "SonarQube Cloud organization key applied to every project when organizations.csv has no mapping defined. Ignored (with a WARN) when at least one row in organizations.csv carries a sonarcloud_org_key. CLI --default_organization overrides this. Issue #281."
+        },
+        "project_key_pattern": {
+          "type": ["string", "null"],
+          "default": "<ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>",
+          "description": "Template for target SonarQube Cloud project keys, built from the placeholders <ORIGINAL_PROJECT_KEY> (mandatory) and <ORGANIZATION_KEY>. Defaults to <ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>. A single <ORIGINAL_PROJECT_KEY> with a static prefix requires a prefix of at least 5 characters; a bare <ORIGINAL_PROJECT_KEY> keeps the key unchanged. CLI --project_key_pattern overrides this. Issue #138."
         }
       }
     }

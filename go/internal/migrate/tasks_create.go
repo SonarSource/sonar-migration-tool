@@ -65,7 +65,7 @@ func runCreateProjects(ctx context.Context, e *Executor) error {
 			ncdType := extractField(item, "new_code_definition_type")
 			ncdValue := extractAnyStr(item, "new_code_definition_value")
 
-			cloudKey := orgKey + "_" + key
+			cloudKey := RenderProjectKey(e.ProjectKeyPattern, key, orgKey)
 			e.Logger.Debug("project api call: POST /api/projects/create",
 				"source_key", key, "cloud_key", cloudKey, "name", name, "org", orgKey,
 				"new_code_type", ncdType, "new_code_value", ncdValue)
@@ -298,9 +298,13 @@ func runCreatePermissionTemplates(ctx context.Context, e *Executor) error {
 			name := extractField(item, "name")
 			desc := extractField(item, "description")
 			pattern := extractField(item, "project_key_pattern")
-			// Prepend org key to pattern if present.
+			// Wrap the source pattern with the same affixes the project
+			// keys get, so the template keeps matching after renaming
+			// (issue #138). For the default <ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>
+			// pattern this reduces to the historical orgKey + "_" + pattern.
 			if pattern != "" {
-				pattern = orgKey + "_" + pattern
+				prefix, suffix := ProjectKeyAffixes(e.ProjectKeyPattern, orgKey)
+				pattern = prefix + pattern + suffix
 			}
 
 			var templateID string

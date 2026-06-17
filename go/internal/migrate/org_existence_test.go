@@ -165,3 +165,43 @@ func TestCSVOrgMissingError_MessageShape(t *testing.T) {
 		t.Error("missing enterprise key in message")
 	}
 }
+
+// Issue #138: a static-prefix pattern (no <ORGANIZATION_KEY>) whose prefix matches an
+// existing SonarQube Cloud organization is ambiguous → exit 2.
+func TestValidatePatternOrgCollision(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("static prefix collides with org → abort", func(t *testing.T) {
+		lookup := newFakeOrgs("acme")
+		err := validatePatternOrgCollision(ctx, lookup, "acme_<ORIGINAL_PROJECT_KEY>")
+		var ec *common.ExitCodeError
+		if !errors.As(err, &ec) || ec.Code != 2 {
+			t.Fatalf("expected exit code 2, got %v (%T)", err, err)
+		}
+	})
+
+	t.Run("static prefix with no matching org → ok", func(t *testing.T) {
+		lookup := newFakeOrgs("some-other-org")
+		if err := validatePatternOrgCollision(ctx, lookup, "acme_<ORIGINAL_PROJECT_KEY>"); err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+	})
+
+	t.Run("pattern using <ORGANIZATION_KEY> skips the check entirely", func(t *testing.T) {
+		lookup := newFakeOrgs("acme")
+		// Even though "acme" exists, an org-scoped pattern is never ambiguous.
+		if err := validatePatternOrgCollision(ctx, lookup, DefaultProjectKeyPattern); err != nil {
+			t.Fatalf("expected no error for org-scoped pattern, got %v", err)
+		}
+		if len(lookup.calls) != 0 {
+			t.Fatalf("org-scoped pattern must not query organizations, got %d calls", len(lookup.calls))
+		}
+	})
+
+	t.Run("bare keep-unchanged pattern has no prefix to collide", func(t *testing.T) {
+		lookup := newFakeOrgs("acme")
+		if err := validatePatternOrgCollision(ctx, lookup, "<ORIGINAL_PROJECT_KEY>"); err != nil {
+			t.Fatalf("expected no error for bare pattern, got %v", err)
+		}
+	})
+}

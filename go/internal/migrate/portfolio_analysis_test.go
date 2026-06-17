@@ -110,7 +110,7 @@ func TestResolveEffectivePortfolioConfig_RegexpAlternationWithOrgPrefix(t *testi
 			{SelectionMode: "REGEXP", Regexp: ".*-INVEST-.*"},
 		},
 	}
-	mode, regex, _ := resolveEffectivePortfolioConfig("", "", "", pc, []string{"acme"})
+	mode, regex, _ := resolveEffectivePortfolioConfig("", "", "", pc, []string{"acme"}, DefaultProjectKeyPattern)
 	if mode != "REGEXP" {
 		t.Fatalf("expected REGEXP, got %q", mode)
 	}
@@ -130,7 +130,7 @@ func TestResolveEffectivePortfolioConfig_TagsUnion(t *testing.T) {
 			{SelectionMode: "TAGS", Tags: []string{"frontend", "python"}}, // dedup
 		},
 	}
-	mode, _, tags := resolveEffectivePortfolioConfig("", "", "", pc, nil)
+	mode, _, tags := resolveEffectivePortfolioConfig("", "", "", pc, nil, DefaultProjectKeyPattern)
 	if mode != "TAGS" {
 		t.Fatalf("expected TAGS, got %q", mode)
 	}
@@ -144,7 +144,7 @@ func TestResolveEffectivePortfolioConfig_MixedFlattensToManual(t *testing.T) {
 		HasSubportfolios:    true,
 		MixedSelectionModes: true,
 	}
-	mode, _, _ := resolveEffectivePortfolioConfig("", "", "", pc, nil)
+	mode, _, _ := resolveEffectivePortfolioConfig("", "", "", pc, nil, DefaultProjectKeyPattern)
 	if mode != "MANUAL" {
 		t.Errorf("expected MANUAL for mixed, got %q", mode)
 	}
@@ -155,14 +155,14 @@ func TestResolveEffectivePortfolioConfig_DepthGT1FlattensToManual(t *testing.T) 
 		HasSubportfolios: true,
 		DepthGT1:         true,
 	}
-	mode, _, _ := resolveEffectivePortfolioConfig("", "", "", pc, nil)
+	mode, _, _ := resolveEffectivePortfolioConfig("", "", "", pc, nil, DefaultProjectKeyPattern)
 	if mode != "MANUAL" {
 		t.Errorf("expected MANUAL for depth>1, got %q", mode)
 	}
 }
 
 func TestResolveEffectivePortfolioConfig_RestModeFlattensToManual(t *testing.T) {
-	mode, _, _ := resolveEffectivePortfolioConfig("REST", "", "", PortfolioComposition{}, nil)
+	mode, _, _ := resolveEffectivePortfolioConfig("REST", "", "", PortfolioComposition{}, nil, DefaultProjectKeyPattern)
 	if mode != "MANUAL" {
 		t.Errorf("REST should flatten to MANUAL, got %q", mode)
 	}
@@ -170,14 +170,14 @@ func TestResolveEffectivePortfolioConfig_RestModeFlattensToManual(t *testing.T) 
 
 func TestResolveEffectivePortfolioConfig_AppsOnlyFlattensToManual(t *testing.T) {
 	pc := PortfolioComposition{HasApps: true}
-	mode, _, _ := resolveEffectivePortfolioConfig("", "", "", pc, nil)
+	mode, _, _ := resolveEffectivePortfolioConfig("", "", "", pc, nil, DefaultProjectKeyPattern)
 	if mode != "MANUAL" {
 		t.Errorf("apps-only should flatten to MANUAL, got %q", mode)
 	}
 }
 
 func TestResolveEffectivePortfolioConfig_OwnRegexpUnchanged(t *testing.T) {
-	mode, regex, _ := resolveEffectivePortfolioConfig("REGEXP", "^pre", "", PortfolioComposition{}, []string{"acme"})
+	mode, regex, _ := resolveEffectivePortfolioConfig("REGEXP", "^pre", "", PortfolioComposition{}, []string{"acme"}, DefaultProjectKeyPattern)
 	if mode != "REGEXP" {
 		t.Fatalf("expected REGEXP, got %q", mode)
 	}
@@ -187,7 +187,7 @@ func TestResolveEffectivePortfolioConfig_OwnRegexpUnchanged(t *testing.T) {
 }
 
 func TestResolveEffectivePortfolioConfig_EmptyPlainPortfolio(t *testing.T) {
-	mode, _, _ := resolveEffectivePortfolioConfig("", "", "", PortfolioComposition{}, nil)
+	mode, _, _ := resolveEffectivePortfolioConfig("", "", "", PortfolioComposition{}, nil, DefaultProjectKeyPattern)
 	if mode != "" {
 		t.Errorf("plain empty portfolio: expected no config, got %q", mode)
 	}

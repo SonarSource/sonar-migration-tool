@@ -50,6 +50,10 @@ type RunMeta struct {
 	OverallStatus string        `json:"overall_status"`
 	Phases        []PhaseTiming `json:"phases"`
 	Tasks         []TaskTiming  `json:"tasks"`
+	// ProjectKeyPattern records the target-key renaming pattern (issue #138)
+	// so the report can re-derive every project's target key and surface
+	// collisions / over-length keys.
+	ProjectKeyPattern string `json:"project_key_pattern,omitempty"`
 }
 
 // eventCollector accumulates LogEvents from the teeing slog handler. Safe for

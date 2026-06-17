@@ -119,9 +119,77 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 		sum.Warnings = rt.Warnings
 		sum.Branches = rt.Branches
 		sum.Throughput = rt.Throughput
+		sum.ProjectKeys = collectProjectKeyReport(store, rt.ProjectKeyPattern)
 	}
 
 	return sum, nil
+}
+
+// collectProjectKeyReport re-derives every project's target SonarQube Cloud
+// key from the generateProjectMappings output and the recorded
+// project_key_pattern, then flags two problems (issue #138): target keys
+// claimed by more than one source project (collisions) and keys longer than
+// migrate.MaxProjectKeyLength. Returns nil when there is nothing to report.
+func collectProjectKeyReport(store *common.DataStore, pattern string) *ProjectKeyReport {
+	rows, err := store.ReadAll("generateProjectMappings")
+	if err != nil || len(rows) == 0 {
+		return nil
+	}
+
+	type bucket struct {
+		sources []ProjectKeySource
+		seen    map[string]bool
+	}
+	byTarget := make(map[string]*bucket)
+	order := make([]string, 0, len(rows))
+	var tooLong []ProjectKeyTooLong
+
+	for _, row := range rows {
+		srcKey := jsonStr(row, "key")
+		orgKey := jsonStr(row, "sonarcloud_org_key")
+		if srcKey == "" || orgKey == "" || orgKey == "SKIPPED" {
+			continue
+		}
+		target := migrate.RenderProjectKey(pattern, srcKey, orgKey)
+		src := ProjectKeySource{SourceKey: srcKey, OrgKey: orgKey}
+
+		b := byTarget[target]
+		if b == nil {
+			b = &bucket{seen: map[string]bool{}}
+			byTarget[target] = b
+			order = append(order, target)
+		}
+		dedupe := srcKey + "\x00" + orgKey
+		if !b.seen[dedupe] {
+			b.seen[dedupe] = true
+			b.sources = append(b.sources, src)
+		}
+
+		if len(target) > migrate.MaxProjectKeyLength {
+			tooLong = append(tooLong, ProjectKeyTooLong{
+				ProjectKeySource: src,
+				TargetKey:        target,
+				Length:           len(target),
+			})
+		}
+	}
+
+	var collisions []ProjectKeyCollision
+	for _, target := range order {
+		b := byTarget[target]
+		if len(b.sources) > 1 {
+			collisions = append(collisions, ProjectKeyCollision{TargetKey: target, Sources: b.sources})
+		}
+	}
+
+	if len(collisions) == 0 && len(tooLong) == 0 {
+		return nil
+	}
+	return &ProjectKeyReport{
+		Pattern:    pattern,
+		Collisions: collisions,
+		TooLong:    tooLong,
+	}
 }
 
 // collectLimitations builds the free-text bullet list rendered in the

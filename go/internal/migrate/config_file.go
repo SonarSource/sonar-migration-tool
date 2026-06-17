@@ -96,6 +96,7 @@ type unifiedTargetBlock struct {
 	TargetTask          string   `json:"target_task"`
 	OrganizationKey     string   `json:"organization_key"`     // provisional, ignored
 	DefaultOrganization string   `json:"default_organization"` // #281
+	ProjectKeyPattern   string   `json:"project_key_pattern"`  // #138
 	ExcludeBranches     []string `json:"exclude_branches"`
 }
 
@@ -162,6 +163,7 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			cfg.Concurrency = s.Target.Concurrency
 			cfg.Timeout = s.Target.Timeout
 			cfg.DefaultOrganization = s.Target.DefaultOrganization
+			cfg.ProjectKeyPattern = s.Target.ProjectKeyPattern
 			cfg.ExcludeBranches = s.Target.ExcludeBranches
 		}
 		if cfg.Concurrency == 0 {

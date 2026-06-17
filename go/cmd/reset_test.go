@@ -188,9 +188,21 @@ func TestBuildResetConfig_NewURLWinsOverDeprecated(t *testing.T) {
 }
 
 func TestBuildResetConfigShape3FromExampleFile(t *testing.T) {
-	// Round-trip the documented side-sectioned example via buildResetConfig.
-	path, err := filepath.Abs("../../examples/migration-config.example.json")
-	if err != nil {
+	// Round-trip a side-sectioned config via buildResetConfig. The shape is
+	// no longer shipped as an example file (examples/ was consolidated in
+	// #408), so the fixture is inline; the parser still supports the shape.
+	const sideSectioned = `{
+  "sonarqube": { "url": "http://localhost:9000", "token": "x" },
+  "sonarcloud": {
+    "url": "https://sonarcloud.io/",
+    "token": "YOUR_SONARCLOUD_ADMIN_TOKEN_HERE",
+    "enterprise_key": "YOUR_ENTERPRISE_KEY_HERE",
+    "org_key": "YOUR_TARGET_ORGANIZATION_KEY_HERE"
+  },
+  "settings": { "export_directory": "./files", "concurrency": 10, "timeout": 60 }
+}`
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(sideSectioned), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

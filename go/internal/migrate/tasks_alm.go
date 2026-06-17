@@ -50,7 +50,7 @@ func runMatchProjectRepos(ctx context.Context, e *Executor) error {
 	for _, pm := range projMappings {
 		orgKey := extractField(pm, "sonarcloud_org_key")
 		key := extractField(pm, "key")
-		cloudKey := orgKey + "_" + key
+		cloudKey := RenderProjectKey(e.ProjectKeyPattern, key, orgKey)
 		projALMInfo[cloudKey] = projectALMInfo{
 			ALM:        extractField(pm, "alm"),
 			Repository: extractField(pm, "repository"),

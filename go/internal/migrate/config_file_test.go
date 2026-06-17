@@ -11,17 +11,60 @@ import (
 	"testing"
 )
 
-const examplesDir = "../../../examples"
+// The legacy config shapes no longer ship as example files (the examples/
+// directory was consolidated in #408), but the parser still supports them.
+// These fixtures keep one representative document per shape inline so the
+// parser is exercised independently of the docs examples.
+const (
+	flatShapeJSON = `{
+  "token": "YOUR_SONARCLOUD_TOKEN_HERE",
+  "enterprise_key": "YOUR_ENTERPRISE_KEY",
+  "url": "https://sonarcloud.io/",
+  "export_directory": "./files",
+  "concurrency": 10
+}`
+	commandSectionedShapeJSON = `{
+  "extract": { "url": "http://localhost:9000", "token": "x" },
+  "migrate": {
+    "token": "YOUR_SONARCLOUD_TOKEN_HERE",
+    "enterprise_key": "YOUR_ENTERPRISE_KEY",
+    "url": "https://sonarcloud.io/",
+    "edition": "enterprise",
+    "export_directory": "./files",
+    "concurrency": 10
+  }
+}`
+	sideSectionedShapeJSON = `{
+  "sonarqube": { "url": "http://localhost:9000", "token": "x" },
+  "sonarcloud": {
+    "url": "https://sonarcloud.io/",
+    "token": "YOUR_SONARCLOUD_ADMIN_TOKEN_HERE",
+    "enterprise_key": "YOUR_ENTERPRISE_KEY_HERE",
+    "org_key": "YOUR_TARGET_ORGANIZATION_KEY_HERE"
+  },
+  "settings": { "export_directory": "./files", "concurrency": 10, "timeout": 60 }
+}`
+)
+
+// writeConfigFixture writes content to a temp file and returns its path.
+func writeConfigFixture(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("writing config fixture: %v", err)
+	}
+	return path
+}
 
 func TestLoadMigrateConfigFileShapes(t *testing.T) {
 	cases := []struct {
-		name string
-		file string
-		want MigrateConfig
+		name    string
+		content string
+		want    MigrateConfig
 	}{
 		{
-			name: "shape 1 - flat",
-			file: "config-migrate.example.json",
+			name:    "shape 1 - flat",
+			content: flatShapeJSON,
 			want: MigrateConfig{
 				Token:           "YOUR_SONARCLOUD_TOKEN_HERE",
 				EnterpriseKey:   "YOUR_ENTERPRISE_KEY",
@@ -31,8 +74,8 @@ func TestLoadMigrateConfigFileShapes(t *testing.T) {
 			},
 		},
 		{
-			name: "shape 2 - command-sectioned",
-			file: "config.example.json",
+			name:    "shape 2 - command-sectioned",
+			content: commandSectionedShapeJSON,
 			want: MigrateConfig{
 				Token:           "YOUR_SONARCLOUD_TOKEN_HERE",
 				EnterpriseKey:   "YOUR_ENTERPRISE_KEY",
@@ -43,8 +86,8 @@ func TestLoadMigrateConfigFileShapes(t *testing.T) {
 			},
 		},
 		{
-			name: "shape 3 - side-sectioned",
-			file: "migration-config.example.json",
+			name:    "shape 3 - side-sectioned",
+			content: sideSectionedShapeJSON,
 			want: MigrateConfig{
 				Token:           "YOUR_SONARCLOUD_ADMIN_TOKEN_HERE",
 				EnterpriseKey:   "YOUR_ENTERPRISE_KEY_HERE",
@@ -59,9 +102,9 @@ func TestLoadMigrateConfigFileShapes(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := LoadMigrateConfigFile(filepath.Join(examplesDir, tc.file))
+			got, err := LoadMigrateConfigFile(writeConfigFixture(t, tc.content))
 			if err != nil {
-				t.Fatalf("LoadMigrateConfigFile(%s): %v", tc.file, err)
+				t.Fatalf("LoadMigrateConfigFile(%s): %v", tc.name, err)
 			}
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("MigrateConfig mismatch\n got=%+v\nwant=%+v", got, tc.want)
@@ -72,13 +115,13 @@ func TestLoadMigrateConfigFileShapes(t *testing.T) {
 
 func TestLoadResetConfigFileShapes(t *testing.T) {
 	cases := []struct {
-		name string
-		file string
-		want ResetConfig
+		name    string
+		content string
+		want    ResetConfig
 	}{
 		{
-			name: "shape 1 - flat",
-			file: "config-migrate.example.json",
+			name:    "shape 1 - flat",
+			content: flatShapeJSON,
 			want: ResetConfig{
 				Token:           "YOUR_SONARCLOUD_TOKEN_HERE",
 				EnterpriseKey:   "YOUR_ENTERPRISE_KEY",
@@ -88,8 +131,8 @@ func TestLoadResetConfigFileShapes(t *testing.T) {
 			},
 		},
 		{
-			name: "shape 2 - command-sectioned",
-			file: "config.example.json",
+			name:    "shape 2 - command-sectioned",
+			content: commandSectionedShapeJSON,
 			want: ResetConfig{
 				Token:           "YOUR_SONARCLOUD_TOKEN_HERE",
 				EnterpriseKey:   "YOUR_ENTERPRISE_KEY",
@@ -100,8 +143,8 @@ func TestLoadResetConfigFileShapes(t *testing.T) {
 			},
 		},
 		{
-			name: "shape 3 - side-sectioned",
-			file: "migration-config.example.json",
+			name:    "shape 3 - side-sectioned",
+			content: sideSectionedShapeJSON,
 			want: ResetConfig{
 				Token:           "YOUR_SONARCLOUD_ADMIN_TOKEN_HERE",
 				EnterpriseKey:   "YOUR_ENTERPRISE_KEY_HERE",
@@ -114,9 +157,9 @@ func TestLoadResetConfigFileShapes(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := LoadResetConfigFile(filepath.Join(examplesDir, tc.file))
+			got, err := LoadResetConfigFile(writeConfigFixture(t, tc.content))
 			if err != nil {
-				t.Fatalf("LoadResetConfigFile(%s): %v", tc.file, err)
+				t.Fatalf("LoadResetConfigFile(%s): %v", tc.name, err)
 			}
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("ResetConfig mismatch\n got=%+v\nwant=%+v", got, tc.want)

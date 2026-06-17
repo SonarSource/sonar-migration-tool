@@ -11,17 +11,45 @@ import (
 	"testing"
 )
 
-const examplesDir = "../../../examples"
+// The legacy config shapes are no longer shipped as example files (the
+// examples/ directory was consolidated in #408), but the parser still
+// supports them. These fixtures keep one representative document per shape
+// inline so the parser is exercised independently of the docs examples.
+const (
+	flatExtractJSON = `{
+  "url": "http://localhost:9000",
+  "token": "YOUR_SONARQUBE_TOKEN_HERE",
+  "export_directory": "./files",
+  "concurrency": 10,
+  "timeout": 60
+}`
+	commandSectionedExtractJSON = `{
+  "extract": {
+    "url": "http://localhost:9000",
+    "token": "YOUR_SONARQUBE_TOKEN_HERE",
+    "export_directory": "./files",
+    "extract_type": "all",
+    "concurrency": 10,
+    "timeout": 60
+  },
+  "migrate": { "url": "https://sonarcloud.io/", "token": "y" }
+}`
+	sideSectionedExtractJSON = `{
+  "sonarqube": { "url": "http://localhost:9000", "token": "YOUR_SONARQUBE_ADMIN_TOKEN_HERE" },
+  "sonarcloud": { "url": "https://sonarcloud.io/", "token": "y" },
+  "settings": { "export_directory": "./files", "concurrency": 10, "timeout": 60 }
+}`
+)
 
 func TestLoadExtractConfigFileShapes(t *testing.T) {
 	cases := []struct {
-		name string
-		file string
-		want ExtractConfig
+		name    string
+		content string
+		want    ExtractConfig
 	}{
 		{
-			name: "shape 1 - flat",
-			file: "config-extract.example.json",
+			name:    "shape 1 - flat",
+			content: flatExtractJSON,
 			want: ExtractConfig{
 				URL:             "http://localhost:9000",
 				Token:           "YOUR_SONARQUBE_TOKEN_HERE",
@@ -31,8 +59,8 @@ func TestLoadExtractConfigFileShapes(t *testing.T) {
 			},
 		},
 		{
-			name: "shape 2 - command-sectioned",
-			file: "config.example.json",
+			name:    "shape 2 - command-sectioned",
+			content: commandSectionedExtractJSON,
 			want: ExtractConfig{
 				URL:             "http://localhost:9000",
 				Token:           "YOUR_SONARQUBE_TOKEN_HERE",
@@ -43,8 +71,8 @@ func TestLoadExtractConfigFileShapes(t *testing.T) {
 			},
 		},
 		{
-			name: "shape 3 - side-sectioned",
-			file: "migration-config.example.json",
+			name:    "shape 3 - side-sectioned",
+			content: sideSectionedExtractJSON,
 			want: ExtractConfig{
 				URL:             "http://localhost:9000",
 				Token:           "YOUR_SONARQUBE_ADMIN_TOKEN_HERE",
@@ -57,9 +85,13 @@ func TestLoadExtractConfigFileShapes(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := LoadExtractConfigFile(filepath.Join(examplesDir, tc.file))
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("writing fixture: %v", err)
+			}
+			got, err := LoadExtractConfigFile(path)
 			if err != nil {
-				t.Fatalf("LoadExtractConfigFile(%s): %v", tc.file, err)
+				t.Fatalf("LoadExtractConfigFile(%s): %v", tc.name, err)
 			}
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("ExtractConfig mismatch\n got=%+v\nwant=%+v", got, tc.want)

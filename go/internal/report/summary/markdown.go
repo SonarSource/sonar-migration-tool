@@ -36,6 +36,7 @@ func RenderMarkdown(summary *MigrationSummary) ([]byte, error) {
 
 	renderMarkdownTitle(&sb, summary)
 	renderMarkdownExecutiveSummary(&sb, summary)
+	renderMarkdownProjectKeyConflicts(&sb, summary)
 	renderMarkdownSections(&sb, summary)
 	renderMarkdownBottlenecks(&sb, summary)
 	renderMarkdownFailureLedger(&sb, summary)

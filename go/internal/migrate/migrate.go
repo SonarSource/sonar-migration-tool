@@ -25,12 +25,12 @@ import (
 
 // MigrateConfig holds all parameters for a migrate run.
 type MigrateConfig struct {
-	Token           string
-	EnterpriseKey   string
-	Edition         string // "enterprise", "developer", etc.
-	URL             string // Cloud URL (default: https://sonarcloud.io/)
-	RunID           string // Resume a prior run
-	Concurrency     int
+	Token         string
+	EnterpriseKey string
+	Edition       string // "enterprise", "developer", etc.
+	URL           string // Cloud URL (default: https://sonarcloud.io/)
+	RunID         string // Resume a prior run
+	Concurrency   int
 	// Timeout is the per-HTTP-request timeout in seconds applied to
 	// every SonarQube Cloud call the migrate phase makes (#383). When
 	// <= 0, applyDefaults sets it to 60 — matching the SDK default
@@ -59,6 +59,11 @@ type MigrateConfig struct {
 	// ExcludeBranches holds glob patterns for non-main branches to skip
 	// during project data import. Main branch is never excluded.
 	ExcludeBranches []string
+
+	// ProjectKeyPattern is the template used to derive each target
+	// SonarQube Cloud project key from the source key, the org key, and
+	// the enterprise key. Defaults to DefaultProjectKeyPattern. Issue #138.
+	ProjectKeyPattern string
 }
 
 // Executor is the runtime context passed to every migrate task function.
@@ -78,6 +83,11 @@ type Executor struct {
 	Sem             chan struct{}
 	Logger          *slog.Logger
 	ExcludeBranches []string
+
+	// ProjectKeyPattern is the resolved target-key template (issue #138),
+	// consumed by every task that derives a SonarQube Cloud project key
+	// (createProjects, matchProjectRepos, permission templates, portfolios).
+	ProjectKeyPattern string
 
 	// ResetConfirmedOrgs is populated only by RunReset after the
 	// operator has interactively confirmed which SonarCloud orgs to
@@ -103,6 +113,14 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 	collector := &eventCollector{}
 	base := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})
 	logger := slog.New(newEventHandler(base, collector))
+
+	// Validate the project-key renaming pattern syntax before anything
+	// else — a malformed pattern is a config error the operator must fix
+	// (issue #138). The org-prefix collision guard runs later once the
+	// Cloud client exists.
+	if err := ValidateProjectKeyPattern(cfg.ProjectKeyPattern); err != nil {
+		return "", common.NewExitError(2, fmt.Errorf("invalid project_key_pattern: %w", err))
+	}
 
 	// Validate the SQC org mapping and apply --default_organization
 	// fallback if requested (issues #279 + #281). Done before any API
@@ -163,6 +181,14 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 		return "", err
 	}
 
+	// When the key pattern carries a static prefix instead of <ORGANIZATION_KEY>,
+	// that prefix is shared by every project and could be mistaken for an
+	// organization-scoped key. Abort if it collides with a real SQC org
+	// (issue #138).
+	if err := validatePatternOrgCollision(ctx, cc.Organizations, cfg.ProjectKeyPattern); err != nil {
+		return "", err
+	}
+
 	// Create RawClients for read operations.
 	raw := common.NewRawClient(cloudClient.HTTPClient(), cloudClient.BaseURL())
 	rawAPI := common.NewRawClient(apiClient.HTTPClient(), apiClient.BaseURL())
@@ -193,11 +219,12 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 	defer func() {
 		tm.CompletedAt = time.Now()
 		meta := RunMeta{
-			StartedAt:     tm.StartedAt,
-			CompletedAt:   tm.CompletedAt,
-			OverallStatus: computeStatus(retErr, tm),
-			Phases:        tm.phasesSnapshot(),
-			Tasks:         tm.tasksSnapshot(),
+			StartedAt:         tm.StartedAt,
+			CompletedAt:       tm.CompletedAt,
+			OverallStatus:     computeStatus(retErr, tm),
+			Phases:            tm.phasesSnapshot(),
+			Tasks:             tm.tasksSnapshot(),
+			ProjectKeyPattern: cfg.ProjectKeyPattern,
 		}
 		if b, err := json.MarshalIndent(meta, "", "  "); err == nil {
 			_ = os.WriteFile(filepath.Join(runDir, "run_meta.json"), b, 0o644)
@@ -263,21 +290,22 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 	plan = filterCompleted(plan, store)
 
 	executor := &Executor{
-		Cloud:           cc,
-		CloudAPI:        apiCC,
-		Raw:             raw,
-		RawAPI:          rawAPI,
-		Extract:         nil, // Will be set per-task based on extract mapping
-		Store:           store,
-		CloudURL:        cloudClient.BaseURL(),
-		APIURL:          apiClient.BaseURL(),
-		EntKey:          cfg.EnterpriseKey,
-		Edition:         edition,
-		ExportDir:       cfg.ExportDirectory,
-		Mapping:         mapping,
-		Sem:             make(chan struct{}, cfg.Concurrency),
-		ExcludeBranches: cfg.ExcludeBranches,
-		Logger:          logger,
+		Cloud:             cc,
+		CloudAPI:          apiCC,
+		Raw:               raw,
+		RawAPI:            rawAPI,
+		Extract:           nil, // Will be set per-task based on extract mapping
+		Store:             store,
+		CloudURL:          cloudClient.BaseURL(),
+		APIURL:            apiClient.BaseURL(),
+		EntKey:            cfg.EnterpriseKey,
+		Edition:           edition,
+		ExportDir:         cfg.ExportDirectory,
+		Mapping:           mapping,
+		Sem:               make(chan struct{}, cfg.Concurrency),
+		ExcludeBranches:   cfg.ExcludeBranches,
+		ProjectKeyPattern: cfg.ProjectKeyPattern,
+		Logger:            logger,
 	}
 
 	// Execute phases.
@@ -346,6 +374,9 @@ func (cfg *MigrateConfig) applyDefaults() {
 	}
 	if cfg.Edition == "" {
 		cfg.Edition = "enterprise"
+	}
+	if strings.TrimSpace(cfg.ProjectKeyPattern) == "" {
+		cfg.ProjectKeyPattern = DefaultProjectKeyPattern
 	}
 	// Ensure trailing slash.
 	if cfg.URL != "" && cfg.URL[len(cfg.URL)-1] != '/' {

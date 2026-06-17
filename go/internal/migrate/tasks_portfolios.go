@@ -119,7 +119,7 @@ func runConfigurePortfolios(ctx context.Context, e *Executor) error {
 			// otherwise). Single-mode portfolios are unaffected.
 			effMode, effRegexp, effTags := resolveEffectivePortfolioConfig(selectionMode,
 				extractField(item, "regexp"), extractField(item, "tags"),
-				composition, orgs)
+				composition, orgs, e.ProjectKeyPattern)
 			if effMode == "" {
 				return nil
 			}
@@ -360,18 +360,38 @@ func resolveProjectBranchRefs(ctx context.Context, e *Executor, cache map[string
 // With orgKeys = ["org1","org2"]:
 //
 //	"^foo" → "^(?:org1_|org2_)foo"
-func transformPortfolioRegex(regex string, orgKeys []string) string {
+//
+// The prefix each org contributes is derived from the configured
+// project-key pattern (issue #138) via ProjectKeyAffixes, so the regex
+// adapts to whatever renaming strategy is in effect. For the default
+// <ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY> pattern the prefix is "<org>_", matching
+// the historical behaviour. A non-empty affix suffix (rare — only when the
+// pattern places literal text after <ORIGINAL_PROJECT_KEY>) is mirrored onto
+// the regex tail; it is assumed org-independent.
+func transformPortfolioRegex(regex string, orgKeys []string, pattern string) string {
 	if regex == "" {
 		return ""
 	}
 	seen := map[string]bool{}
 	prefixes := make([]string, 0, len(orgKeys))
+	suffix := ""
 	for _, o := range orgKeys {
-		if o == "" || seen[o] {
+		if o == "" {
 			continue
 		}
-		seen[o] = true
-		prefixes = append(prefixes, regexp.QuoteMeta(o+"_"))
+		p, s := ProjectKeyAffixes(pattern, o)
+		quoted := regexp.QuoteMeta(p)
+		// Dedupe on the rendered prefix, not the org key: a pattern with a
+		// static prefix (no <ORGANIZATION_KEY>) produces the same prefix for every
+		// org, so the alternation must collapse to a single branch.
+		if seen[quoted] {
+			continue
+		}
+		seen[quoted] = true
+		prefixes = append(prefixes, quoted)
+		if s != "" {
+			suffix = s
+		}
 	}
 	if len(prefixes) == 0 {
 		return regex
@@ -382,10 +402,21 @@ func transformPortfolioRegex(regex string, orgKeys []string) string {
 	} else {
 		prefix = "(?:" + strings.Join(prefixes, "|") + ")"
 	}
-	if strings.HasPrefix(regex, "^") {
-		return "^" + prefix + regex[1:]
+	out := regex
+	if strings.HasPrefix(out, "^") {
+		out = "^" + prefix + out[1:]
+	} else {
+		out = prefix + out
 	}
-	return prefix + regex
+	if suffix != "" {
+		q := regexp.QuoteMeta(suffix)
+		if strings.HasSuffix(out, "$") {
+			out = out[:len(out)-1] + q + "$"
+		} else {
+			out += q
+		}
+	}
+	return out
 }
 
 // buildEmptyPortfolioSet returns composite serverURL|portfolioKey strings
@@ -468,10 +499,10 @@ func indexPortfolioCompositions(e *Executor) map[string]PortfolioComposition {
 // An empty effMode return means "no configurePortfolios call" (e.g. a
 // truly empty parent with no children).
 func resolveEffectivePortfolioConfig(parentMode, parentRegexp, parentTags string,
-	composition PortfolioComposition, orgs []string) (effMode, effRegexp string, effTags []string) {
+	composition PortfolioComposition, orgs []string, pattern string) (effMode, effRegexp string, effTags []string) {
 
 	if parentMode == "REGEXP" {
-		return "REGEXP", transformPortfolioRegex(parentRegexp, orgs), nil
+		return "REGEXP", transformPortfolioRegex(parentRegexp, orgs, pattern), nil
 	}
 	if parentMode == "TAGS" {
 		if parentTags == "" {
@@ -499,7 +530,7 @@ func resolveEffectivePortfolioConfig(parentMode, parentRegexp, parentTags string
 				if sp.Regexp == "" {
 					continue
 				}
-				parts = append(parts, transformPortfolioRegex(sp.Regexp, orgs))
+				parts = append(parts, transformPortfolioRegex(sp.Regexp, orgs, pattern))
 			}
 			if len(parts) == 0 {
 				return "", "", nil

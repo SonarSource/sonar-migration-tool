@@ -28,6 +28,7 @@
     "timeout": 60,
     "run_id": null,
     "target_task": null,
-    "organization_key": null
+    "organization_key": null,
+    "project_key_pattern": "<ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>"
   }
 }

@@ -20,32 +20,37 @@ func TestTransformPortfolioRegex(t *testing.T) {
 		name    string
 		regex   string
 		orgKeys []string
+		pattern string
 		want    string
 	}{
 		{"anchored simple",
-			"^backend-", []string{"org1"}, "^org1_backend-"},
+			"^backend-", []string{"org1"}, DefaultProjectKeyPattern, "^org1_backend-"},
 		{"anchored char class",
-			"^[A-Z].*", []string{"org1"}, "^org1_[A-Z].*"},
+			"^[A-Z].*", []string{"org1"}, DefaultProjectKeyPattern, "^org1_[A-Z].*"},
 		{"unanchored",
-			"backend", []string{"org1"}, "org1_backend"},
+			"backend", []string{"org1"}, DefaultProjectKeyPattern, "org1_backend"},
 		{"two orgs alternation",
-			"^foo", []string{"org1", "org2"},
+			"^foo", []string{"org1", "org2"}, DefaultProjectKeyPattern,
 			"^(?:org1_|org2_)foo"},
 		{"empty regex stays empty",
-			"", []string{"org1"}, ""},
+			"", []string{"org1"}, DefaultProjectKeyPattern, ""},
 		{"no orgs returns original",
-			"^foo", nil, "^foo"},
+			"^foo", nil, DefaultProjectKeyPattern, "^foo"},
 		{"org key with regex metachars is quoted",
-			"^bar", []string{"org-1.x"}, `^org-1\.x_bar`},
+			"^bar", []string{"org-1.x"}, DefaultProjectKeyPattern, `^org-1\.x_bar`},
 		{"duplicate org keys deduplicated",
-			"^foo", []string{"org1", "org1"}, "^org1_foo"},
+			"^foo", []string{"org1", "org1"}, DefaultProjectKeyPattern, "^org1_foo"},
+		{"static-prefix pattern (no org) uses constant prefix",
+			"^foo", []string{"org1", "org2"}, "ACME_CORP_<ORIGINAL_PROJECT_KEY>", "^ACME_CORP_foo"},
+		{"keep-unchanged pattern leaves regex as-is",
+			"^foo", []string{"org1"}, "<ORIGINAL_PROJECT_KEY>", "^foo"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := transformPortfolioRegex(tc.regex, tc.orgKeys)
+			got := transformPortfolioRegex(tc.regex, tc.orgKeys, tc.pattern)
 			if got != tc.want {
-				t.Errorf("transformPortfolioRegex(%q, %v): got %q, want %q",
-					tc.regex, tc.orgKeys, got, tc.want)
+				t.Errorf("transformPortfolioRegex(%q, %v, %q): got %q, want %q",
+					tc.regex, tc.orgKeys, tc.pattern, got, tc.want)
 			}
 		})
 	}
@@ -262,7 +267,6 @@ func TestRunConfigurePortfoliosSkipsNoneAndRest(t *testing.T) {
 		t.Error("PATCH must not be called for NONE/REST portfolios")
 	}
 }
-
 
 func writeJSONLLine(t *testing.T, path string, item map[string]any) {
 	t.Helper()

@@ -77,17 +77,23 @@ type runtimeData struct {
 	Warnings      WarningLedger
 	Branches      []BranchStat
 	Throughput    ThroughputStats
+
+	// ProjectKeyPattern is the target-key renaming pattern recorded in
+	// run_meta.json, used to re-derive project keys for the collision /
+	// over-length report (issue #138).
+	ProjectKeyPattern string
 }
 
 // runMetaFile mirrors the on-disk run_meta.json written by the migrate
 // engine (shared contract A). Decoded locally so the summary package
 // stays free of any migrate-package import.
 type runMetaFile struct {
-	StartedAt     time.Time      `json:"started_at"`
-	CompletedAt   time.Time      `json:"completed_at"`
-	OverallStatus string         `json:"overall_status"`
-	Phases        []runMetaPhase `json:"phases"`
-	Tasks         []runMetaTask  `json:"tasks"`
+	StartedAt         time.Time      `json:"started_at"`
+	CompletedAt       time.Time      `json:"completed_at"`
+	OverallStatus     string         `json:"overall_status"`
+	Phases            []runMetaPhase `json:"phases"`
+	Tasks             []runMetaTask  `json:"tasks"`
+	ProjectKeyPattern string         `json:"project_key_pattern"`
 }
 
 type runMetaPhase struct {
@@ -143,6 +149,7 @@ func collectRunMeta(runDir string, rt *runtimeData) {
 	rt.StartedAt = meta.StartedAt
 	rt.CompletedAt = meta.CompletedAt
 	rt.OverallStatus = meta.OverallStatus
+	rt.ProjectKeyPattern = meta.ProjectKeyPattern
 	if !meta.StartedAt.IsZero() && !meta.CompletedAt.IsZero() {
 		rt.TotalElapsed = meta.CompletedAt.Sub(meta.StartedAt)
 	}
