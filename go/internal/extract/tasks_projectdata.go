@@ -246,7 +246,16 @@ func projectComponentTreeTask() func(ctx context.Context, e *Executor) error {
 					"component":  {projectKey},
 					"branch":     {branch},
 					"qualifiers": {"FIL,UTS"},
-					"metricKeys": {"ncloc"},
+					// Per-file size/complexity measures. Without measures the
+					// packaged report carries no measures-*.pb, SonarCloud's CE
+					// computes a null project ncloc, and the branch renders as
+					// "main branch is empty". ncloc alone clears the overlay
+					// (CloudVoyager precedent); the rest populate the dashboard.
+					// Data metrics (ncloc_data, executable_lines_data) are NOT
+					// requestable via component_tree — the API requires
+					// api/measures/component (one call per file) — so they are
+					// intentionally omitted here.
+					"metricKeys": {"ncloc,comment_lines,complexity,cognitive_complexity,functions,statements,classes"},
 					"ps":         {"500"},
 				}
 				items, err := e.Raw.GetPaginated(ctx, PaginatedOpts{
