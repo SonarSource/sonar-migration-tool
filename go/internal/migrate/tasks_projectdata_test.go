@@ -485,6 +485,41 @@ func TestLoadExtractedSourcesWrongBranch(t *testing.T) {
 	}
 }
 
+// TestEmptySourcesNotIncludedInPbSources verifies that components with empty
+// extracted source are NOT added to pbSources, which prevents writing empty
+// source-N.txt files into the ZIP that would cause the CE to reject the report
+// (a 0-byte source file with a component claiming N lines is inconsistent).
+func TestEmptySourcesNotIncludedInPbSources(t *testing.T) {
+	components := []scanreport.ComponentInput{
+		{Key: "proj:A.java", Path: "A.java", Language: "java", Lines: 10},
+		{Key: "proj:B.java", Path: "B.java", Language: "java", Lines: 20},
+	}
+	sources := []sourceRecord{
+		{Component: "proj:A.java", Source: "class A {}"},
+		{Component: "proj:B.java", Source: ""},
+	}
+
+	_, _, cr := scanreport.BuildComponents("proj", components)
+	pbSources := make(map[int32]string)
+	for _, s := range sources {
+		if ref, ok := cr.Refs()[s.Component]; ok && s.Source != "" {
+			pbSources[ref] = s.Source
+		}
+	}
+
+	if len(pbSources) != 1 {
+		t.Fatalf("expected 1 source in pbSources (only non-empty), got %d", len(pbSources))
+	}
+	refA := cr.Refs()["proj:A.java"]
+	if pbSources[refA] != "class A {}" {
+		t.Errorf("expected source for A.java, got %q", pbSources[refA])
+	}
+	refB := cr.Refs()["proj:B.java"]
+	if _, present := pbSources[refB]; present {
+		t.Error("B.java has empty source and should NOT be in pbSources")
+	}
+}
+
 func TestLoadExtractedIssues(t *testing.T) {
 	dir := t.TempDir()
 	setupProjectDataExtract(t, dir)

@@ -382,7 +382,7 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	root, fileComps, cr := scanreport.BuildComponents(input.CloudKey, components)
 	pbSources := make(map[int32]string)
 	for _, s := range sources {
-		if ref, ok := cr.Refs()[s.Component]; ok {
+		if ref, ok := cr.Refs()[s.Component]; ok && s.Source != "" {
 			pbSources[ref] = s.Source
 		}
 	}
