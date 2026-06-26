@@ -70,7 +70,7 @@ func init() {
 	f.String("default_organization", "", "SonarQube Cloud organization to migrate every project into when organizations.csv has no mapping defined. Ignored if any mapping is present.")
 	f.String("project_key_pattern", "", "Template for target project keys, built from <ORIGINAL_PROJECT_KEY> and <ORGANIZATION_KEY> (default: <ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>). #138")
 	f.StringSlice("exclude_branches", nil, "Glob patterns for non-main branches to skip during project data import (e.g. feature/*,bugfix/*)")
-	f.Int("ce_submit_spacing", 0, "Minimum seconds between scanner-report submissions to the SonarCloud CE (default: 5). Spacing avoids the concurrent-submit race that drops source on some projects (#417). Set a negative value to disable.")
+	f.Int("ce_submit_spacing", 0, "Optional: minimum seconds between scanner-report submissions to the SonarCloud CE (#417). Off by default (0); the source-loss fix is phase ordering, not spacing. Set a positive value to throttle submits and reduce CE load.")
 }
 
 func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfig, error) {

@@ -47,9 +47,10 @@ type configFileShape struct {
 	SkipProjectDataMigration *FlexibleBool `json:"skip_project_data_migration"`
 	Debug                    bool          `json:"debug"`
 	ExcludeBranches          []string      `json:"exclude_branches"`
-	// CESubmitSpacing is the minimum seconds between scanner-report submits
-	// to the SonarCloud CE (issue #417). 0/absent → default (5s); negative
-	// disables. Applies across every config shape.
+	// CESubmitSpacing is an optional minimum seconds between scanner-report
+	// submits to the SonarCloud CE (issue #417). Off by default (0/absent);
+	// the source-loss fix is phase ordering. A positive value throttles
+	// submits. Applies across every config shape.
 	CESubmitSpacing int `json:"ce_submit_spacing"`
 
 	// Shape 2 (command-sectioned).
