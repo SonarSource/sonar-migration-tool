@@ -73,6 +73,9 @@ Migration of source code snapshots and version control blame data.
 **What it migrates:**
 - Source code file contents (as they existed at analysis time)
 - SCM blame/changeset data (author, revision, date per line)
+- Syntax highlighting (token colors in the Code view), reconstructed from
+  `/api/sources/lines` into `syntax-highlightings-<ref>.pb` — see
+  [SYNTAX-HIGHLIGHTING-MIGRATION.md](SYNTAX-HIGHLIGHTING-MIGRATION.md) (issue #420)
 - Line hashes for duplicate detection
 - File-level metadata (language, encoding)
 - Changeset backdating to preserve accurate issue creation dates within SonarQube Cloud
@@ -315,7 +318,7 @@ Electron-based desktop application wrapping the CLI and browser GUI.
 ---
 
 ## Migration Summary Table
-<!-- updated: 2026-06-04_12:00:00 -->
+<!-- updated: 2026-06-26_18:52:18 -->
 
 | Data Type | Current Status | Target Status |
 |-----------|---------------|---------------|
@@ -329,6 +332,7 @@ Electron-based desktop application wrapping the CLI and browser GUI.
 | **Issues** | **Not migrated** | **Full migration with metadata sync** |
 | **Security Hotspots** | **Not migrated** | **Full migration with metadata sync** |
 | **Source Code** | **Not migrated** | **Migrated via scanner protocol** |
+| **Syntax Highlighting** | **Not migrated** | **Migrated (token colors in Code view, #420)** |
 | **SCM/Blame Data** | **Not migrated** | **Full changeset migration** |
 | **Measures/Metrics** | **Not migrated** | **Full metric preservation** |
 | **Clean Code Attributes** | **Not migrated** | **Mapped across versions** |
@@ -409,7 +413,7 @@ Each version has a dedicated extraction/encoding pipeline to handle API differen
 ---
 
 ## API Endpoints Used
-<!-- updated: 2026-06-04_12:00:00 -->
+<!-- updated: 2026-06-26_18:52:18 -->
 
 ### SonarQube Server (Source -- Read Only)
 
@@ -419,6 +423,7 @@ Each version has a dedicated extraction/encoding pipeline to handle API differen
 | `/api/issues/changelog` | Fetch issue changelogs for pre-filtering |
 | `/api/hotspots/search` | Extract security hotspots |
 | `/api/sources/raw` | Extract source code |
+| `/api/sources/lines` | Extract syntax highlighting (and source-text fallback) |
 | `/api/sources/scm` | Extract SCM blame data |
 | `/api/measures/component` | Extract project measures |
 | `/api/measures/search_history` | Extract measure history |

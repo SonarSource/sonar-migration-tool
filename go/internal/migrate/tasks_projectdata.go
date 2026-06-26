@@ -323,6 +323,9 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	// view shows no author/date per line.
 	componentMeasures := loadComponentMeasures(e, input.ServerURL, input.ServerKey, input.Branch)
 	scmByComponent := loadExtractedSCM(e, input.ServerURL, input.ServerKey, input.Branch)
+	// Per-line syntax highlighting (colors in the Code view); without it the
+	// migrated source renders as raw, uncolored text (issue #420).
+	syntaxHighlighting := loadExtractedSyntaxHighlighting(e, input.ServerURL, input.ServerKey, input.Branch)
 
 	if len(components) == 0 {
 		return nil, &importResult{Status: "skipped"}, nil
@@ -448,15 +451,16 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 			FileCountByExt:      countFilesByExt(components),
 			AnalysisUUID:        analysisUUID,
 		}, root.Ref),
-		RootComponent:  root,
-		FileComponents: fileComps,
-		Issues:         scanreport.BuildIssues(issues, cr),
-		ExternalIssues: scanreport.BuildExternalIssues(extIssues, cr),
-		Measures:       scanreport.BuildMeasures(componentMeasures, cr),
-		Changesets:     changesets,
-		ActiveRules:    scanreport.BuildActiveRules(activeRules, now.UnixMilli()),
-		AdHocRules:     scanreport.BuildAdHocRules(adHocRules),
-		Sources:        pbSources,
+		RootComponent:      root,
+		FileComponents:     fileComps,
+		Issues:             scanreport.BuildIssues(issues, cr),
+		ExternalIssues:     scanreport.BuildExternalIssues(extIssues, cr),
+		Measures:           scanreport.BuildMeasures(componentMeasures, cr),
+		Changesets:         changesets,
+		ActiveRules:        scanreport.BuildActiveRules(activeRules, now.UnixMilli()),
+		AdHocRules:         scanreport.BuildAdHocRules(adHocRules),
+		Sources:            pbSources,
+		SyntaxHighlighting: scanreport.BuildSyntaxHighlighting(syntaxHighlighting, pbSources, cr),
 	}
 
 	zipBytes, err := scanreport.PackageReport(reportData)
@@ -630,6 +634,44 @@ func loadExtractedSources(e *Executor, serverURL, serverKey, branch string) []so
 		})
 	}
 	return sources
+}
+
+// loadExtractedSyntaxHighlighting reads the per-line highlighted HTML captured
+// alongside source code (getProjectSourceCode → "highlightedLines") for the
+// given branch, returning one HighlightInput per file. The highlighting is
+// parsed into protobuf rules later by scanreport.BuildSyntaxHighlighting so the
+// migrated Code view renders with colors (issue #420).
+func loadExtractedSyntaxHighlighting(e *Executor, serverURL, serverKey, branch string) []scanreport.HighlightInput {
+	items, err := readExtractItems(e, "getProjectSourceCode")
+	if err != nil {
+		return nil
+	}
+	var inputs []scanreport.HighlightInput
+	for _, item := range items {
+		if item.ServerURL != serverURL {
+			continue
+		}
+		var rec struct {
+			Key              string   `json:"key"`
+			ProjectKey       string   `json:"projectKey"`
+			Branch           string   `json:"branch"`
+			HighlightedLines []string `json:"highlightedLines"`
+		}
+		if err := json.Unmarshal(item.Data, &rec); err != nil {
+			continue
+		}
+		if rec.ProjectKey != serverKey || rec.Branch != branch || rec.Key == "" {
+			continue
+		}
+		if len(rec.HighlightedLines) == 0 {
+			continue
+		}
+		inputs = append(inputs, scanreport.HighlightInput{
+			Component: rec.Key,
+			Lines:     rec.HighlightedLines,
+		})
+	}
+	return inputs
 }
 
 func loadExtractedIssues(e *Executor, serverURL, serverKey, branch string) []scanreport.IssueInput {

@@ -318,22 +318,33 @@ func fetchSourceCode(ctx context.Context, e *Executor, item json.RawMessage, w *
 			return err
 		}
 	}
-	if len(raw) == 0 {
+	// Always fetch the per-line highlighted HTML from api/sources/lines. Its
+	// "code" field carries the syntax highlighting that api/sources/raw lacks
+	// (issue #420), and it doubles as a source-text fallback when raw has been
+	// purged. Highlighting failures are non-fatal — source still migrates.
+	highlightedLines, hErr := fetchHighlightedLines(ctx, e, fileKey, branch)
+	if hErr != nil {
+		e.Logger.Warn("getProjectSourceCode: syntax highlighting unavailable",
+			"file", fileKey, "branch", branch, "err", hErr)
+	}
+
+	if len(raw) == 0 && len(highlightedLines) > 0 {
 		// api/sources/raw returned empty — SonarQube housekeeping may have purged the
 		// raw_source_data column while the data column (used by the Code view UI) remains.
-		// Try api/sources/lines as a fallback to recover the source text.
-		if fallback, fErr := fetchSourceFromLines(ctx, e, fileKey, branch); fErr == nil && len(fallback) > 0 {
+		// Reconstruct plain source text from the highlighted lines we just fetched.
+		if fallback := plainTextFromHighlighted(highlightedLines); fallback != "" {
 			e.Logger.Info("getProjectSourceCode: recovered source via sources/lines fallback",
 				"file", fileKey, "branch", branch, "bytes", len(fallback))
 			raw = []byte(fallback)
 		}
 	}
 	record := map[string]any{
-		"key":        fileKey,
-		"branch":     branch,
-		"projectKey": extractField(item, "projectKey"),
-		"source":     string(raw),
-		"serverUrl":  e.ServerURL,
+		"key":              fileKey,
+		"branch":           branch,
+		"projectKey":       extractField(item, "projectKey"),
+		"source":           string(raw),
+		"highlightedLines": highlightedLines,
+		"serverUrl":        e.ServerURL,
 	}
 	b, err := json.Marshal(record)
 	if err != nil {
@@ -342,29 +353,53 @@ func fetchSourceCode(ctx context.Context, e *Executor, item json.RawMessage, w *
 	return w.WriteOne(b)
 }
 
-// fetchSourceFromLines retrieves plain source text via api/sources/lines when
-// api/sources/raw returns empty. The lines endpoint reads the 'data' column
-// (used by the SonarQube Code view UI), which housekeeping leaves intact even
-// after purging raw_source_data. HTML tags are stripped and HTML entities are
-// unescaped from the code field to reconstruct plain source text.
-func fetchSourceFromLines(ctx context.Context, e *Executor, fileKey, branch string) (string, error) {
+// fetchHighlightedLines retrieves the per-line highlighted HTML ("code" field)
+// from api/sources/lines. The returned slice is indexed by line-1; any line the
+// API omits is left as an empty string so indices keep matching line numbers.
+// The lines endpoint reads the 'data' column (behind the SonarQube Code view),
+// which housekeeping leaves intact even after purging raw_source_data. This HTML
+// is the only place the source server still exposes syntax highlighting.
+func fetchHighlightedLines(ctx context.Context, e *Executor, fileKey, branch string) ([]string, error) {
 	resp, err := e.Raw.Get(ctx, "api/sources/lines", fileParams(fileKey, branch))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	var result struct {
 		Sources []struct {
+			Line int    `json:"line"`
 			Code string `json:"code"`
 		} `json:"sources"`
 	}
 	if err := json.Unmarshal(resp, &result); err != nil {
-		return "", fmt.Errorf("parsing sources/lines response: %w", err)
+		return nil, fmt.Errorf("parsing sources/lines response: %w", err)
 	}
-	lines := make([]string, 0, len(result.Sources))
+	maxLine := 0
 	for _, s := range result.Sources {
-		lines = append(lines, html.UnescapeString(htmlTagRe.ReplaceAllString(s.Code, "")))
+		if s.Line > maxLine {
+			maxLine = s.Line
+		}
 	}
-	return strings.Join(lines, "\n"), nil
+	if maxLine == 0 {
+		return nil, nil
+	}
+	lines := make([]string, maxLine)
+	for _, s := range result.Sources {
+		if s.Line >= 1 && s.Line <= maxLine {
+			lines[s.Line-1] = s.Code
+		}
+	}
+	return lines, nil
+}
+
+// plainTextFromHighlighted reconstructs plain source text from highlighted HTML
+// lines by stripping tags and unescaping entities. Used as a fallback when
+// api/sources/raw returns empty.
+func plainTextFromHighlighted(lines []string) string {
+	plain := make([]string, len(lines))
+	for i, code := range lines {
+		plain[i] = html.UnescapeString(htmlTagRe.ReplaceAllString(code, ""))
+	}
+	return strings.Join(plain, "\n")
 }
 
 // projectSCMDataTask extracts SCM blame data for each file component.
