@@ -1438,7 +1438,7 @@ func TestCollectProjectDataOutcomes(t *testing.T) {
 
 	want := map[string]projectDataOutcome{
 		"proj-success":        {State: "success"},
-		"proj-never-analyzed": {State: "skipped", Reason: "Source project was provisioned but never analyzed"},
+		"proj-never-analyzed": {State: "skipped", Reason: "Source project was provisioned but never analyzed, project settings migrated anyway", NeverAnalyzed: true},
 		"proj-permission":     {State: "skipped", Reason: "Not enough permission on the source project to extract data"},
 		"proj-freetext-skip":  {State: "skipped", Reason: "some unmapped extraction error"},
 		"proj-mixed":          {State: "failed", Reason: "API error when migrating project data: CE task failed: HTTP 500"},

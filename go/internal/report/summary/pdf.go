@@ -1186,7 +1186,13 @@ func successDetails(item EntityItem, predictive, hideCloudKey, labelProjectKey b
 	// pre-migration extract).
 	state, reason := parseScanMarker(scan)
 	dataSkipped := state == "skipped" || state == "failed"
-	if !predictive && dataSkipped {
+	switch {
+	case state == "noanalysis":
+		// #432 — provisioned but never analyzed: the outcome is not degraded
+		// and the project's settings still migrated. Surface the reason as an
+		// informational note (no "migration skipped" framing).
+		parts = append(parts, reason)
+	case !predictive && dataSkipped:
 		parts = append(parts, formatProjectDataSkipped(reason))
 	}
 	// #356 / #323 — render the per-project "x% of items with manual

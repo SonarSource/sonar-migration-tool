@@ -821,6 +821,12 @@ type projectDataOutcome struct {
 	// State=="skipped" / "failed". Empty when the state is success
 	// or when no signal could be derived.
 	Reason string
+	// NeverAnalyzed is true for the specific skip case where the source
+	// project was created but never analyzed (no components on any
+	// branch). Per #432 this must NOT degrade the project outcome to
+	// Partial — its non-analysis settings still migrate — and the Details
+	// note is informational rather than a "migration skipped" warning.
+	NeverAnalyzed bool
 }
 
 // collectProjectData reads importProjectData JSONL and returns the
@@ -866,7 +872,19 @@ func collectProjectData(store *common.DataStore) map[string]projectDataOutcome {
 		case len(a.states["failed"]) > 0:
 			result[key] = projectDataOutcome{State: "failed", Reason: projectDataFailureReason(a.errs["failed"])}
 		case len(a.states["skipped"]) > 0:
-			result[key] = projectDataOutcome{State: "skipped", Reason: projectDataSkipReason(a.errs["skipped"])}
+			skipErr := a.errs["skipped"]
+			if skipErr == "" {
+				// #432 — provisioned but never analyzed: the project's
+				// settings still migrate and the outcome must NOT be
+				// degraded. Carry an informational note instead.
+				result[key] = projectDataOutcome{
+					State:         "skipped",
+					Reason:        "Source project was provisioned but never analyzed, project settings migrated anyway",
+					NeverAnalyzed: true,
+				}
+			} else {
+				result[key] = projectDataOutcome{State: "skipped", Reason: projectDataSkipReason(skipErr)}
+			}
 		case len(a.states["success"]) > 0:
 			result[key] = projectDataOutcome{State: "success"}
 		default:
@@ -928,7 +946,14 @@ func attachProjectData(projects []EntityItem, scanMap map[string]projectDataOutc
 		if !ok || outcome.State == "" {
 			continue
 		}
-		marker := outcome.State
+		// #432 — the never-analyzed case uses a distinct marker state so the
+		// renderer shows an informational note (not a "migration skipped"
+		// warning) and does not treat it as a degraded outcome.
+		markerState := outcome.State
+		if outcome.NeverAnalyzed {
+			markerState = "noanalysis"
+		}
+		marker := markerState
 		if outcome.Reason != "" {
 			marker += ":" + outcome.Reason
 		}

@@ -97,13 +97,16 @@ func TestCollectSummary_ProjectDataAndSyncStats(t *testing.T) {
 			},
 		},
 		"ProjNeverAnalyzed": {
-			bucket: "Partial",
+			// #432 — never-analyzed projects keep their (Succeeded) outcome;
+			// the Details note is informational, not a "migration skipped".
+			bucket: "Succeeded",
 			mustContain: []string{
-				"Project data migration skipped: Source project was provisioned but never analyzed",
+				"Source project was provisioned but never analyzed, project settings migrated anyway",
 			},
 			mustNot: []string{
-				"Project data migration was skipped", // legacy duplicate must be gone
-				"synced",                             // sync line must be gone
+				"Project data migration skipped", // must no longer be framed as a skip
+				"Project data migration was skipped",
+				"synced", // sync line must be gone
 				"Issue sync had unresolved",
 			},
 		},
