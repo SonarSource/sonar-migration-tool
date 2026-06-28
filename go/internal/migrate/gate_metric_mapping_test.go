@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"sort"
 	"sync"
 	"testing"
@@ -121,14 +120,7 @@ func TestAddGateConditionsAppliesMetricMapping(t *testing.T) {
 	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{})
 	})
-	cloudSrv := httptest.NewServer(cloudMux)
-	defer cloudSrv.Close()
-
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	e := newCustomCloudTest(t, cloudMux)
 
 	// Mix of source metrics:
 	//  - coverage (unmapped, pass-through, preserves source op/error)
@@ -279,14 +271,7 @@ func TestAddGateConditionsCollapsesCollisions(t *testing.T) {
 	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{})
 	})
-	cloudSrv := httptest.NewServer(cloudMux)
-	defer cloudSrv.Close()
-
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	e := newCustomCloudTest(t, cloudMux)
 
 	w, _ := e.Store.Writer("getGateConditions")
 	payload := map[string]any{

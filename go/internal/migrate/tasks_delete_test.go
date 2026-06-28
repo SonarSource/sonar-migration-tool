@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"sync"
 	"testing"
 )
@@ -45,23 +44,7 @@ func TestRunResetGlobalSettings(t *testing.T) {
 		mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	})
-	cloudSrv := httptest.NewServer(mux)
-	defer cloudSrv.Close()
-
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-
-	// Seed the org mapping so the task has one org to iterate.
-	w, _ := e.Store.Writer("generateOrganizationMappings")
-	b, _ := json.Marshal(map[string]any{
-		"sonarqube_org_key":  "org1",
-		"sonarcloud_org_key": testCloudOrg,
-	})
-	w.WriteOne(b)
+	e := newDeleteTest(t, mux)
 
 	if err := runResetGlobalSettings(context.Background(), e); err != nil {
 		t.Fatalf("runResetGlobalSettings: %v", err)
@@ -119,19 +102,7 @@ func TestRunDeleteGatesDestroysOnlyNonBuiltIn(t *testing.T) {
 		mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	})
-	cloudSrv := httptest.NewServer(mux)
-	defer cloudSrv.Close()
-
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-
-	w, _ := e.Store.Writer("generateOrganizationMappings")
-	b, _ := json.Marshal(map[string]any{"sonarcloud_org_key": testCloudOrg})
-	w.WriteOne(b)
+	e := newDeleteTest(t, mux)
 
 	if err := runDeleteGates(context.Background(), e); err != nil {
 		t.Fatalf("runDeleteGates: %v", err)
@@ -186,19 +157,7 @@ func TestRunDeleteGatesAcceptsNumericDefaultField(t *testing.T) {
 		mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	})
-	cloudSrv := httptest.NewServer(mux)
-	defer cloudSrv.Close()
-
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-
-	w, _ := e.Store.Writer("generateOrganizationMappings")
-	b, _ := json.Marshal(map[string]any{"sonarcloud_org_key": testCloudOrg})
-	w.WriteOne(b)
+	e := newDeleteTest(t, mux)
 
 	if err := runDeleteGates(context.Background(), e); err != nil {
 		t.Fatalf("runDeleteGates: %v", err)
@@ -229,19 +188,7 @@ func TestRunDeleteGatesBuiltInByName(t *testing.T) {
 		destroyCalls++
 		w.WriteHeader(http.StatusNoContent)
 	})
-	cloudSrv := httptest.NewServer(mux)
-	defer cloudSrv.Close()
-
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-
-	w, _ := e.Store.Writer("generateOrganizationMappings")
-	b, _ := json.Marshal(map[string]any{"sonarcloud_org_key": testCloudOrg})
-	w.WriteOne(b)
+	e := newDeleteTest(t, mux)
 
 	if err := runDeleteGates(context.Background(), e); err != nil {
 		t.Fatalf("runDeleteGates: %v", err)
@@ -283,19 +230,7 @@ func TestRunResetDefaultGates(t *testing.T) {
 		mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	})
-	cloudSrv := httptest.NewServer(mux)
-	defer cloudSrv.Close()
-
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-
-	w, _ := e.Store.Writer("generateOrganizationMappings")
-	b, _ := json.Marshal(map[string]any{"sonarcloud_org_key": testCloudOrg})
-	w.WriteOne(b)
+	e := newDeleteTest(t, mux)
 
 	if err := runResetDefaultGates(context.Background(), e); err != nil {
 		t.Fatalf("runResetDefaultGates: %v", err)
@@ -335,19 +270,7 @@ func TestRunResetDefaultGatesNameFallback(t *testing.T) {
 		setDefaultID = r.FormValue("id")
 		w.WriteHeader(http.StatusNoContent)
 	})
-	cloudSrv := httptest.NewServer(mux)
-	defer cloudSrv.Close()
-
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-
-	w, _ := e.Store.Writer("generateOrganizationMappings")
-	b, _ := json.Marshal(map[string]any{"sonarcloud_org_key": testCloudOrg})
-	w.WriteOne(b)
+	e := newDeleteTest(t, mux)
 
 	if err := runResetDefaultGates(context.Background(), e); err != nil {
 		t.Fatalf("runResetDefaultGates: %v", err)
@@ -374,19 +297,7 @@ func TestRunResetDefaultGatesSkipsWhenAlreadyDefault(t *testing.T) {
 		setDefaultHits++
 		w.WriteHeader(http.StatusNoContent)
 	})
-	cloudSrv := httptest.NewServer(mux)
-	defer cloudSrv.Close()
-
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-
-	w, _ := e.Store.Writer("generateOrganizationMappings")
-	b, _ := json.Marshal(map[string]any{"sonarcloud_org_key": testCloudOrg})
-	w.WriteOne(b)
+	e := newDeleteTest(t, mux)
 
 	if err := runResetDefaultGates(context.Background(), e); err != nil {
 		t.Fatalf("runResetDefaultGates: %v", err)
@@ -436,19 +347,7 @@ func TestRunResetDefaultProfilesPerLanguage(t *testing.T) {
 		mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	})
-	cloudSrv := httptest.NewServer(mux)
-	defer cloudSrv.Close()
-
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-
-	w, _ := e.Store.Writer("generateOrganizationMappings")
-	b, _ := json.Marshal(map[string]any{"sonarcloud_org_key": testCloudOrg})
-	w.WriteOne(b)
+	e := newDeleteTest(t, mux)
 
 	if err := runResetDefaultProfiles(context.Background(), e); err != nil {
 		t.Fatalf("runResetDefaultProfiles: %v", err)
@@ -509,19 +408,7 @@ func TestRunDeleteProfilesDeletesOnlyNonBuiltIn(t *testing.T) {
 		mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	})
-	cloudSrv := httptest.NewServer(mux)
-	defer cloudSrv.Close()
-
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-
-	w, _ := e.Store.Writer("generateOrganizationMappings")
-	b, _ := json.Marshal(map[string]any{"sonarcloud_org_key": testCloudOrg})
-	w.WriteOne(b)
+	e := newDeleteTest(t, mux)
 
 	if err := runDeleteProfiles(context.Background(), e); err != nil {
 		t.Fatalf("runDeleteProfiles: %v", err)
@@ -565,21 +452,7 @@ func TestRunResetGlobalSettingsAllInherited(t *testing.T) {
 		resetCalls++
 		w.WriteHeader(http.StatusNoContent)
 	})
-	cloudSrv := httptest.NewServer(mux)
-	defer cloudSrv.Close()
-
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-
-	w, _ := e.Store.Writer("generateOrganizationMappings")
-	b, _ := json.Marshal(map[string]any{
-		"sonarcloud_org_key": testCloudOrg,
-	})
-	w.WriteOne(b)
+	e := newDeleteTest(t, mux)
 
 	if err := runResetGlobalSettings(context.Background(), e); err != nil {
 		t.Fatalf("runResetGlobalSettings: %v", err)
@@ -627,19 +500,7 @@ func TestRunResetPermissionTemplatesPromotesBuiltInForEveryQualifier(t *testing.
 		mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	})
-	cloudSrv := httptest.NewServer(mux)
-	defer cloudSrv.Close()
-
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-
-	w, _ := e.Store.Writer("generateOrganizationMappings")
-	b, _ := json.Marshal(map[string]any{"sonarcloud_org_key": testCloudOrg})
-	w.WriteOne(b)
+	e := newDeleteTest(t, mux)
 
 	if err := runResetPermissionTemplates(context.Background(), e); err != nil {
 		t.Fatalf("runResetPermissionTemplates: %v", err)
@@ -693,19 +554,7 @@ func TestRunResetPermissionTemplatesSkipsWhenAlreadyDefault(t *testing.T) {
 		setCalls++
 		w.WriteHeader(http.StatusNoContent)
 	})
-	cloudSrv := httptest.NewServer(mux)
-	defer cloudSrv.Close()
-
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-
-	w, _ := e.Store.Writer("generateOrganizationMappings")
-	b, _ := json.Marshal(map[string]any{"sonarcloud_org_key": testCloudOrg})
-	w.WriteOne(b)
+	e := newDeleteTest(t, mux)
 
 	if err := runResetPermissionTemplates(context.Background(), e); err != nil {
 		t.Fatalf("runResetPermissionTemplates: %v", err)
@@ -749,19 +598,7 @@ func TestRunDeleteTemplatesEnumeratesAndDeletes(t *testing.T) {
 		mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	})
-	cloudSrv := httptest.NewServer(mux)
-	defer cloudSrv.Close()
-
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-
-	w, _ := e.Store.Writer("generateOrganizationMappings")
-	b, _ := json.Marshal(map[string]any{"sonarcloud_org_key": testCloudOrg})
-	w.WriteOne(b)
+	e := newDeleteTest(t, mux)
 
 	if err := runDeleteTemplates(context.Background(), e); err != nil {
 		t.Fatalf("runDeleteTemplates: %v", err)
