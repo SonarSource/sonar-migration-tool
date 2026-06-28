@@ -117,9 +117,7 @@ func TestAddGateConditionsAppliesMetricMapping(t *testing.T) {
 		mu.Unlock()
 		_ = json.NewEncoder(w).Encode(types.QualityGateCondition{ID: 1, Metric: r.FormValue("metric")})
 	})
-	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{})
-	})
+	addDefaultCloudHandler(cloudMux)
 	e := newCustomCloudTest(t, cloudMux)
 
 	// Mix of source metrics:
@@ -268,9 +266,7 @@ func TestAddGateConditionsCollapsesCollisions(t *testing.T) {
 		mu.Unlock()
 		_ = json.NewEncoder(w).Encode(types.QualityGateCondition{ID: 1, Metric: r.FormValue("metric")})
 	})
-	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{})
-	})
+	addDefaultCloudHandler(cloudMux)
 	e := newCustomCloudTest(t, cloudMux)
 
 	w, _ := e.Store.Writer("getGateConditions")

@@ -94,9 +94,7 @@ func TestRunSetProjectSettingsDispatchesByShape(t *testing.T) {
 	// Empty definitions registry so EVERY setting falls back to extract
 	// shape — that's exactly what this test exercises.
 	mountSettingsDefinitions(cloudMux)
-	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{})
-	})
+	addDefaultCloudHandler(cloudMux)
 	e := newCustomCloudTest(t, cloudMux)
 
 	extractDir := filepath.Join(e.ExportDir, "extract-01", "getProjectSettings")
@@ -202,9 +200,7 @@ func TestRunSetProjectSettingsRespectsSQCDefinitions(t *testing.T) {
 		map[string]any{"key": "sonar.exclusions", "type": "STRING", "multiValues": true},
 		map[string]any{"key": "sonar.issue.ignore.allfile", "type": "PROPERTY_SET", "multiValues": false},
 	)
-	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{})
-	})
+	addDefaultCloudHandler(cloudMux)
 	e := newCustomCloudTest(t, cloudMux)
 
 	extractDir := filepath.Join(e.ExportDir, "extract-01", "getProjectSettings")
@@ -297,9 +293,7 @@ func TestRunSetProjectSettingsRespectsSQCDefinitions(t *testing.T) {
 func TestRunSetProjectSettingsWarnsOnUnmappedProject(t *testing.T) {
 	cloudMux := http.NewServeMux()
 	mountSettingsDefinitions(cloudMux)
-	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{})
-	})
+	addDefaultCloudHandler(cloudMux)
 	e := newCustomCloudTest(t, cloudMux)
 	// Capture Warn output so the test can assert on it.
 	var buf bytes.Buffer
@@ -368,9 +362,7 @@ func runProjectSettingsPropagationTest(t *testing.T,
 	cloudMux := http.NewServeMux()
 	muHits, hitsPtr := mountSettingsSetCapture(cloudMux)
 	mountSettingsDefinitionsScoped(cloudMux, orgDefs, projectDefs)
-	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{})
-	})
+	addDefaultCloudHandler(cloudMux)
 	cloudSrv := httptest.NewServer(cloudMux)
 	t.Cleanup(cloudSrv.Close)
 

@@ -114,27 +114,34 @@ func checkProjectIdentity(ctx context.Context, s *Suite) []CheckResult {
 
 // ── Issues ────────────────────────────────────────────────────────────
 
-func checkIssueTotals(ctx context.Context, s *Suite) []CheckResult {
-	projects, err := s.getProjects(ctx)
-	if err != nil {
-		return []CheckResult{makeError("Issues", "Total count", err)}
-	}
-	var results []CheckResult
-	for _, proj := range projects {
-		sqsCount, err := queryTotal(ctx, s.sqsRaw, "api/issues/search", urlParams("projectKeys", proj))
+// totalsByProject returns a check function that queries api on both sides
+// using sqsParam/scParam as the project-key query parameter, comparing
+// total item counts per project.
+func totalsByProject(category, api, sqsParam, scParam string) func(context.Context, *Suite) []CheckResult {
+	return func(ctx context.Context, s *Suite) []CheckResult {
+		projects, err := s.getProjects(ctx)
 		if err != nil {
-			results = append(results, makeError("Issues", fmt.Sprintf("Total: %s", proj), err))
-			continue
+			return []CheckResult{makeError(category, "Total count", err)}
 		}
-		scCount, err := queryTotal(ctx, s.scRaw, "api/issues/search", urlParams("projects", s.scProjectKey(proj)))
-		if err != nil {
-			results = append(results, makeError("Issues", fmt.Sprintf("Total: %s", proj), err))
-			continue
+		var results []CheckResult
+		for _, proj := range projects {
+			sqsCount, err := queryTotal(ctx, s.sqsRaw, api, urlParams(sqsParam, proj))
+			if err != nil {
+				results = append(results, makeError(category, fmt.Sprintf("Total: %s", proj), err))
+				continue
+			}
+			scCount, err := queryTotal(ctx, s.scRaw, api, urlParams(scParam, s.scProjectKey(proj)))
+			if err != nil {
+				results = append(results, makeError(category, fmt.Sprintf("Total: %s", proj), err))
+				continue
+			}
+			results = append(results, makeResult(category, fmt.Sprintf("Total: %s", proj), sqsCount, scCount, "Exact"))
 		}
-		results = append(results, makeResult("Issues", fmt.Sprintf("Total: %s", proj), sqsCount, scCount, "Exact"))
+		return results
 	}
-	return results
 }
+
+var checkIssueTotals = totalsByProject("Issues", "api/issues/search", "projectKeys", "projects")
 
 func checkIssueDistribution(filterKey, filterValue string) func(ctx context.Context, s *Suite) []CheckResult {
 	return func(ctx context.Context, s *Suite) []CheckResult {
@@ -165,27 +172,7 @@ func checkIssueDistribution(filterKey, filterValue string) func(ctx context.Cont
 
 // ── Hotspots ──────────────────────────────────────────────────────────
 
-func checkHotspotTotals(ctx context.Context, s *Suite) []CheckResult {
-	projects, err := s.getProjects(ctx)
-	if err != nil {
-		return []CheckResult{makeError("Hotspots", "Total count", err)}
-	}
-	var results []CheckResult
-	for _, proj := range projects {
-		sqsCount, err := queryTotal(ctx, s.sqsRaw, "api/hotspots/search", urlParams("projectKey", proj))
-		if err != nil {
-			results = append(results, makeError("Hotspots", fmt.Sprintf("Total: %s", proj), err))
-			continue
-		}
-		scCount, err := queryTotal(ctx, s.scRaw, "api/hotspots/search", urlParams("projectKey", s.scProjectKey(proj)))
-		if err != nil {
-			results = append(results, makeError("Hotspots", fmt.Sprintf("Total: %s", proj), err))
-			continue
-		}
-		results = append(results, makeResult("Hotspots", fmt.Sprintf("Total: %s", proj), sqsCount, scCount, "Exact"))
-	}
-	return results
-}
+var checkHotspotTotals = totalsByProject("Hotspots", "api/hotspots/search", "projectKey", "projectKey")
 
 func checkHotspotByStatus(status string) func(ctx context.Context, s *Suite) []CheckResult {
 	return func(ctx context.Context, s *Suite) []CheckResult {

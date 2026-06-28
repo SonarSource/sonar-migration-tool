@@ -42,9 +42,7 @@ func runGlobalSettingsTest(t *testing.T,
 	cloudMux := http.NewServeMux()
 	muHits, hitsPtr := mountSettingsSetCapture(cloudMux)
 	mountSettingsDefinitions(cloudMux, sqcDefs...)
-	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{})
-	})
+	addDefaultCloudHandler(cloudMux)
 	cloudSrv := httptest.NewServer(cloudMux)
 	t.Cleanup(cloudSrv.Close)
 
@@ -62,12 +60,12 @@ func runGlobalSettingsTest(t *testing.T,
 	// would silently leave the production read path empty and the test
 	// would be exercising a different code path than reality. Drop the
 	// records into the configured extract directory instead.
-	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettings", sqsSettings)
-	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettingsDefinitions", sqsDefs)
+	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettings", sqsSettings)
+	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettingsDefinitions", sqsDefs)
 	// extract.json is what GetUniqueExtracts inspects to assemble the
 	// ExtractMapping; without it readExtractItems can't resolve the
 	// extract dir for a server URL.
-	writeExtractMetaJSON(t, dir, "extract-01", testServerURL)
+	writeExtractMetaJSON(t, e.ExportDir, "extract-01", testServerURL)
 	// generateOrganizationMappings IS produced by the migrate phase, so
 	// it correctly lives in the migrate store.
 	writeTaskJSONL(t, e, "generateOrganizationMappings", orgs)
@@ -273,29 +271,20 @@ func TestRunSetGlobalSettingsUsesProjectScopeOnlyReasonWhenKeyAtProjectScope(t *
 			{"key": "sonar.java.file.suffixes", "type": "STRING", "multiValues": false},
 		},
 	)
-	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{})
-	})
-	cloudSrv := httptest.NewServer(cloudMux)
-	defer cloudSrv.Close()
-
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	addDefaultCloudHandler(cloudMux)
+	e := newCustomCloudTest(t, cloudMux)
 	var logBuf bytes.Buffer
 	// Capture Info + Warn so the test can assert the Info case fires
 	// and the Warn case does NOT.
 	e.Logger = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettings", []map[string]any{
+	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettings", []map[string]any{
 		{"key": "sonar.java.file.suffixes", "values": []string{".java", ".jav"}},
 	})
-	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
+	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
 		{"key": "sonar.java.file.suffixes", "type": "STRING", "multiValues": false, "defaultValue": ".java"},
 	})
-	writeExtractMetaJSON(t, dir, "extract-01", testServerURL)
+	writeExtractMetaJSON(t, e.ExportDir, "extract-01", testServerURL)
 	writeTaskJSONL(t, e, "generateOrganizationMappings", []map[string]any{
 		{"sonarcloud_org_key": "org1"},
 	})
@@ -381,30 +370,21 @@ func TestRunSetGlobalSettingsFallsBackToProjectsOnOrgLevelRejection(t *testing.T
 			{"key": "sonar.coverage.jacoco.xmlReportPaths", "type": "STRING", "multiValues": true},
 		},
 	)
-	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{})
-	})
-	cloudSrv := httptest.NewServer(cloudMux)
-	defer cloudSrv.Close()
-
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	addDefaultCloudHandler(cloudMux)
+	e := newCustomCloudTest(t, cloudMux)
 	var logBuf bytes.Buffer
 	// LevelDebug because the "key not settable at org level" log was
 	// demoted to Debug in this PR (per-key-per-org fires too often
 	// at normal verbosity).
 	e.Logger = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettings", []map[string]any{
+	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettings", []map[string]any{
 		{"key": "sonar.coverage.jacoco.xmlReportPaths", "values": []string{"**/jacoco*.xml"}},
 	})
-	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
+	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
 		{"key": "sonar.coverage.jacoco.xmlReportPaths", "type": "STRING", "multiValues": true, "defaultValue": ""},
 	})
-	writeExtractMetaJSON(t, dir, "extract-01", testServerURL)
+	writeExtractMetaJSON(t, e.ExportDir, "extract-01", testServerURL)
 	writeTaskJSONL(t, e, "generateOrganizationMappings", []map[string]any{
 		{"sonarcloud_org_key": "org1"},
 	})
@@ -503,29 +483,20 @@ func TestRunSetGlobalSettingsOrgLevelRejectionTriedOncePerKey(t *testing.T) {
 		[]map[string]any{{"key": "sonar.coverage.jacoco.xmlReportPaths", "type": "STRING", "multiValues": true}},
 		[]map[string]any{{"key": "sonar.coverage.jacoco.xmlReportPaths", "type": "STRING", "multiValues": true}},
 	)
-	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{})
-	})
-	cloudSrv := httptest.NewServer(cloudMux)
-	defer cloudSrv.Close()
-
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	addDefaultCloudHandler(cloudMux)
+	e := newCustomCloudTest(t, cloudMux)
 	var logBuf bytes.Buffer
 	// The memoization log was demoted to Debug in #258 — open the
 	// logger to Debug so the assertion below still picks it up.
 	e.Logger = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettings", []map[string]any{
+	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettings", []map[string]any{
 		{"key": "sonar.coverage.jacoco.xmlReportPaths", "values": []string{"**/jacoco*.xml"}},
 	})
-	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
+	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
 		{"key": "sonar.coverage.jacoco.xmlReportPaths", "type": "STRING", "multiValues": true, "defaultValue": ""},
 	})
-	writeExtractMetaJSON(t, dir, "extract-01", testServerURL)
+	writeExtractMetaJSON(t, e.ExportDir, "extract-01", testServerURL)
 	// Three orgs, one project each. The first org's POST rejects;
 	// the next two orgs must NOT re-issue the failing org POST.
 	writeTaskJSONL(t, e, "generateOrganizationMappings", []map[string]any{
@@ -592,32 +563,23 @@ func TestRunSetGlobalSettingsFanOutSkipsPerProjectOverrides(t *testing.T) {
 		[]map[string]any{{"key": "sonar.coverage.jacoco.xmlReportPaths", "type": "STRING", "multiValues": true}},
 		[]map[string]any{{"key": "sonar.coverage.jacoco.xmlReportPaths", "type": "STRING", "multiValues": true}},
 	)
-	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{})
-	})
-	cloudSrv := httptest.NewServer(cloudMux)
-	defer cloudSrv.Close()
-
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	addDefaultCloudHandler(cloudMux)
+	e := newCustomCloudTest(t, cloudMux)
 	var logBuf bytes.Buffer
 	e.Logger = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	// SQS extract: per-project override for projA only.
-	writeExtractTaskJSONL(t, dir, "extract-01", "getProjectSettings", []map[string]any{
+	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getProjectSettings", []map[string]any{
 		{"project": "projA", "key": "sonar.coverage.jacoco.xmlReportPaths",
 			"values": []string{"specific-for-A.xml"}},
 	})
-	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettings", []map[string]any{
+	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettings", []map[string]any{
 		{"key": "sonar.coverage.jacoco.xmlReportPaths", "values": []string{"global-default.xml"}},
 	})
-	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
+	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
 		{"key": "sonar.coverage.jacoco.xmlReportPaths", "type": "STRING", "multiValues": true, "defaultValue": ""},
 	})
-	writeExtractMetaJSON(t, dir, "extract-01", testServerURL)
+	writeExtractMetaJSON(t, e.ExportDir, "extract-01", testServerURL)
 	writeTaskJSONL(t, e, "generateOrganizationMappings", []map[string]any{
 		{"sonarcloud_org_key": "org1"},
 	})
@@ -690,27 +652,18 @@ func TestRunSetGlobalSettingsFanOutRetriesIndexingNotFound(t *testing.T) {
 		[]map[string]any{{"key": "sonar.coverage.jacoco.xmlReportPaths", "type": "STRING", "multiValues": true}},
 		[]map[string]any{{"key": "sonar.coverage.jacoco.xmlReportPaths", "type": "STRING", "multiValues": true}},
 	)
-	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{})
-	})
-	cloudSrv := httptest.NewServer(cloudMux)
-	defer cloudSrv.Close()
-
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	addDefaultCloudHandler(cloudMux)
+	e := newCustomCloudTest(t, cloudMux)
 	var logBuf bytes.Buffer
 	e.Logger = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettings", []map[string]any{
+	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettings", []map[string]any{
 		{"key": "sonar.coverage.jacoco.xmlReportPaths", "values": []string{"**/jacoco*.xml"}},
 	})
-	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
+	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
 		{"key": "sonar.coverage.jacoco.xmlReportPaths", "type": "STRING", "multiValues": true, "defaultValue": ""},
 	})
-	writeExtractMetaJSON(t, dir, "extract-01", testServerURL)
+	writeExtractMetaJSON(t, e.ExportDir, "extract-01", testServerURL)
 	writeTaskJSONL(t, e, "generateOrganizationMappings", []map[string]any{
 		{"sonarcloud_org_key": "org1"},
 	})
@@ -980,23 +933,15 @@ func TestRunSetGlobalSettingsFanOutAllFailedRendersAsFailed(t *testing.T) {
 		[]map[string]any{{"key": "sonar.html.file.suffixes", "type": "STRING", "multiValues": true}},
 		[]map[string]any{{"key": "sonar.html.file.suffixes", "type": "STRING", "multiValues": true}},
 	)
-	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{})
-	})
-	cloudSrv := httptest.NewServer(cloudMux)
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettings", []map[string]any{
+	addDefaultCloudHandler(cloudMux)
+	e := newCustomCloudTest(t, cloudMux)
+	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettings", []map[string]any{
 		{"key": "sonar.html.file.suffixes", "values": []string{".html", ".xhtml"}},
 	})
-	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
+	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
 		{"key": "sonar.html.file.suffixes", "type": "STRING", "multiValues": true, "defaultValue": ""},
 	})
-	writeExtractMetaJSON(t, dir, "extract-01", testServerURL)
+	writeExtractMetaJSON(t, e.ExportDir, "extract-01", testServerURL)
 	writeTaskJSONL(t, e, "generateOrganizationMappings", []map[string]any{
 		{"sonarcloud_org_key": "org1"},
 	})
@@ -1068,23 +1013,15 @@ func TestRunSetGlobalSettingsFanOutPartialRendersAsPartial(t *testing.T) {
 		[]map[string]any{{"key": "sonar.html.file.suffixes", "type": "STRING", "multiValues": true}},
 		[]map[string]any{{"key": "sonar.html.file.suffixes", "type": "STRING", "multiValues": true}},
 	)
-	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{})
-	})
-	cloudSrv := httptest.NewServer(cloudMux)
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettings", []map[string]any{
+	addDefaultCloudHandler(cloudMux)
+	e := newCustomCloudTest(t, cloudMux)
+	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettings", []map[string]any{
 		{"key": "sonar.html.file.suffixes", "values": []string{".html"}},
 	})
-	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
+	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
 		{"key": "sonar.html.file.suffixes", "type": "STRING", "multiValues": true, "defaultValue": ""},
 	})
-	writeExtractMetaJSON(t, dir, "extract-01", testServerURL)
+	writeExtractMetaJSON(t, e.ExportDir, "extract-01", testServerURL)
 	writeTaskJSONL(t, e, "generateOrganizationMappings", []map[string]any{
 		{"sonarcloud_org_key": "org1"},
 	})
@@ -1419,28 +1356,20 @@ func TestRunSetGlobalSettingsSQSOnlyNoteFiresEvenAtSQSDefault(t *testing.T) {
 	cloudMux := http.NewServeMux()
 	_, _ = mountSettingsSetCapture(cloudMux)
 	mountSettingsDefinitions(cloudMux)
-	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{})
-	})
-	cloudSrv := httptest.NewServer(cloudMux)
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettings", []map[string]any{
+	addDefaultCloudHandler(cloudMux)
+	e := newCustomCloudTest(t, cloudMux)
+	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettings", []map[string]any{
 		// value matches parentValue — isSettingCustomized's #196
 		// fix would discard this if it ran first. The SQS-only
 		// interceptor must catch it before that.
 		{"key": "sonar.qualityProfiles.allowDisableInheritedRules",
 			"value": "true", "parentValue": "true"},
 	})
-	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
+	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
 		{"key": "sonar.qualityProfiles.allowDisableInheritedRules",
 			"type": "BOOLEAN", "defaultValue": "true"},
 	})
-	writeExtractMetaJSON(t, dir, "extract-01", testServerURL)
+	writeExtractMetaJSON(t, e.ExportDir, "extract-01", testServerURL)
 	writeTaskJSONL(t, e, "generateOrganizationMappings", []map[string]any{
 		{"sonarcloud_org_key": "orgA"},
 	})
@@ -1494,29 +1423,21 @@ func TestRunSetGlobalSettingsInterceptsSQSOnlyKeys(t *testing.T) {
 		// handler for them anyway.
 		map[string]any{"key": "sonar.exclusions", "type": "STRING", "multiValues": true},
 	)
-	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{})
-	})
-	cloudSrv := httptest.NewServer(cloudMux)
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettings", []map[string]any{
+	addDefaultCloudHandler(cloudMux)
+	e := newCustomCloudTest(t, cloudMux)
+	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettings", []map[string]any{
 		// Two SQS-only keys: one silent, one with a note.
 		{"key": "sonar.core.serverBaseURL", "value": "https://my-sonar.example.com"},
 		{"key": "sonar.technicalDebt.ratingGrid", "value": "0.03,0.07,0.2,0.5"},
 		// One legit customization that SHOULD be migrated.
 		{"key": "sonar.exclusions", "values": []string{"**/*.gen"}},
 	})
-	writeExtractTaskJSONL(t, dir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
+	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
 		{"key": "sonar.core.serverBaseURL", "type": "STRING", "defaultValue": ""},
 		{"key": "sonar.technicalDebt.ratingGrid", "type": "STRING", "defaultValue": "0.05,0.1,0.2,0.5"},
 		{"key": "sonar.exclusions", "type": "STRING", "multiValues": true, "defaultValue": ""},
 	})
-	writeExtractMetaJSON(t, dir, "extract-01", testServerURL)
+	writeExtractMetaJSON(t, e.ExportDir, "extract-01", testServerURL)
 	writeTaskJSONL(t, e, "generateOrganizationMappings", []map[string]any{
 		{"sonarcloud_org_key": "orgA"},
 		{"sonarcloud_org_key": "orgB"},

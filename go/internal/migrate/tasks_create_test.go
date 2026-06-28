@@ -31,111 +31,54 @@ func newCreateTest(t *testing.T) (*Executor, string) {
 	return newTestExecutor(cloudSrv, apiSrv, dir), dir
 }
 
-func TestCreateProjects(t *testing.T) {
+// runCreateTask is a test helper that creates a fresh test environment, writes
+// the standard CSVs, runs the prerequisite mapping task, then executes the
+// named create task and returns its JSONL output. It fatals if the task errors
+// or produces no output — use the returned slice for extra field assertions.
+func runCreateTask(t *testing.T, mappingTask, createTask string) []json.RawMessage {
+	t.Helper()
 	e, dir := newCreateTest(t)
-
-	// Run setup task first.
 	setupCSVs(t, dir)
-	runTask(t, e, "generateProjectMappings")
-
-	// Run createProjects.
+	runTask(t, e, mappingTask)
 	reg := BuildMigrateRegistry(RegisterAll())
-	err := reg["createProjects"].Run(context.Background(), e)
-	if err != nil {
-		t.Fatalf("createProjects: %v", err)
+	if err := reg[createTask].Run(context.Background(), e); err != nil {
+		t.Fatalf("%s: %v", createTask, err)
 	}
-
-	items, _ := e.Store.ReadAll("createProjects")
+	items, _ := e.Store.ReadAll(createTask)
 	if len(items) == 0 {
-		t.Fatal("expected createProjects output")
+		t.Fatalf("expected %s output", createTask)
 	}
-	// Verify cloud_project_key was set.
-	key := extractField(items[0], "cloud_project_key")
-	if key == "" {
+	return items
+}
+
+func TestCreateProjects(t *testing.T) {
+	items := runCreateTask(t, "generateProjectMappings", "createProjects")
+	if key := extractField(items[0], "cloud_project_key"); key == "" {
 		t.Error("expected cloud_project_key to be set")
 	}
 }
 
 func TestCreateProfiles(t *testing.T) {
-	e, dir := newCreateTest(t)
-
-	setupCSVs(t, dir)
-	runTask(t, e, "generateProfileMappings")
-
-	reg := BuildMigrateRegistry(RegisterAll())
-	err := reg["createProfiles"].Run(context.Background(), e)
-	if err != nil {
-		t.Fatalf("createProfiles: %v", err)
-	}
-
-	items, _ := e.Store.ReadAll("createProfiles")
-	if len(items) == 0 {
-		t.Fatal("expected createProfiles output")
-	}
-	profKey := extractField(items[0], "cloud_profile_key")
-	if profKey == "" {
+	items := runCreateTask(t, "generateProfileMappings", "createProfiles")
+	if profKey := extractField(items[0], "cloud_profile_key"); profKey == "" {
 		t.Error("expected cloud_profile_key")
 	}
 }
 
 func TestCreateGates(t *testing.T) {
-	e, dir := newCreateTest(t)
-
-	setupCSVs(t, dir)
-	runTask(t, e, "generateGateMappings")
-
-	reg := BuildMigrateRegistry(RegisterAll())
-	err := reg["createGates"].Run(context.Background(), e)
-	if err != nil {
-		t.Fatalf("createGates: %v", err)
-	}
-
-	items, _ := e.Store.ReadAll("createGates")
-	if len(items) == 0 {
-		t.Fatal("expected createGates output")
-	}
-	gateID := extractField(items[0], "cloud_gate_id")
-	if gateID == "" {
+	items := runCreateTask(t, "generateGateMappings", "createGates")
+	if gateID := extractField(items[0], "cloud_gate_id"); gateID == "" {
 		t.Error("expected cloud_gate_id")
 	}
 }
 
 func TestCreateGroups(t *testing.T) {
-	e, dir := newCreateTest(t)
-
-	setupCSVs(t, dir)
-	runTask(t, e, "generateGroupMappings")
-
-	reg := BuildMigrateRegistry(RegisterAll())
-	err := reg["createGroups"].Run(context.Background(), e)
-	if err != nil {
-		t.Fatalf("createGroups: %v", err)
-	}
-
-	items, _ := e.Store.ReadAll("createGroups")
-	if len(items) == 0 {
-		t.Fatal("expected createGroups output")
-	}
+	runCreateTask(t, "generateGroupMappings", "createGroups")
 }
 
 func TestCreatePermissionTemplates(t *testing.T) {
-	e, dir := newCreateTest(t)
-
-	setupCSVs(t, dir)
-	runTask(t, e, "generateTemplateMappings")
-
-	reg := BuildMigrateRegistry(RegisterAll())
-	err := reg["createPermissionTemplates"].Run(context.Background(), e)
-	if err != nil {
-		t.Fatalf("createPermissionTemplates: %v", err)
-	}
-
-	items, _ := e.Store.ReadAll("createPermissionTemplates")
-	if len(items) == 0 {
-		t.Fatal("expected createPermissionTemplates output")
-	}
-	tplID := extractField(items[0], "cloud_template_id")
-	if tplID == "" {
+	items := runCreateTask(t, "generateTemplateMappings", "createPermissionTemplates")
+	if tplID := extractField(items[0], "cloud_template_id"); tplID == "" {
 		t.Error("expected cloud_template_id")
 	}
 }
@@ -240,43 +183,14 @@ func TestCreatePortfoliosReusesExisting(t *testing.T) {
 }
 
 func TestGetMigrationUser(t *testing.T) {
-	e, dir := newCreateTest(t)
-
-	setupCSVs(t, dir)
-	runTask(t, e, "generateOrganizationMappings")
-
-	reg := BuildMigrateRegistry(RegisterAll())
-	err := reg["getMigrationUser"].Run(context.Background(), e)
-	if err != nil {
-		t.Fatalf("getMigrationUser: %v", err)
-	}
-
-	items, _ := e.Store.ReadAll("getMigrationUser")
-	if len(items) == 0 {
-		t.Fatal("expected getMigrationUser output")
-	}
-	login := extractField(items[0], "login")
-	if login != "migration-user" {
+	items := runCreateTask(t, "generateOrganizationMappings", "getMigrationUser")
+	if login := extractField(items[0], "login"); login != "migration-user" {
 		t.Errorf("expected login=migration-user, got %q", login)
 	}
 }
 
 func TestGetEnterprises(t *testing.T) {
-	e, dir := newCreateTest(t)
-
-	setupCSVs(t, dir)
-	runTask(t, e, "generateOrganizationMappings")
-
-	reg := BuildMigrateRegistry(RegisterAll())
-	err := reg["getEnterprises"].Run(context.Background(), e)
-	if err != nil {
-		t.Fatalf("getEnterprises: %v", err)
-	}
-
-	items, _ := e.Store.ReadAll("getEnterprises")
-	if len(items) == 0 {
-		t.Fatal("expected getEnterprises output")
-	}
+	runCreateTask(t, "generateOrganizationMappings", "getEnterprises")
 }
 
 func TestGetProjectIds(t *testing.T) {
@@ -299,21 +213,7 @@ func TestGetProjectIds(t *testing.T) {
 }
 
 func TestGetOrgRepos(t *testing.T) {
-	e, dir := newCreateTest(t)
-
-	setupCSVs(t, dir)
-	runTask(t, e, "generateOrganizationMappings")
-
-	reg := BuildMigrateRegistry(RegisterAll())
-	err := reg["getOrgRepos"].Run(context.Background(), e)
-	if err != nil {
-		t.Fatalf("getOrgRepos: %v", err)
-	}
-
-	items, _ := e.Store.ReadAll("getOrgRepos")
-	if len(items) == 0 {
-		t.Fatal("expected getOrgRepos output")
-	}
+	runCreateTask(t, "generateOrganizationMappings", "getOrgRepos")
 }
 
 // --- Already-exists idempotency tests ---

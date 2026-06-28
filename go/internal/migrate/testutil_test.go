@@ -530,6 +530,15 @@ func writeJSON(path string, data any) {
 	os.WriteFile(path, b, 0o644)
 }
 
+// addDefaultCloudHandler installs a catch-all GET handler that responds with an
+// empty JSON object. Mount this on a cloudMux after all specific handlers so
+// that any unexpected endpoint gets a safe no-op response instead of a 404.
+func addDefaultCloudHandler(mux *http.ServeMux) {
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	})
+}
+
 // newCustomCloudTest wires a test environment with a caller-supplied cloudMux,
 // a fresh mock API server, a temp export dir, and a new Executor. It does NOT
 // call setupExtractData — use this for tasks whose extract data is written
