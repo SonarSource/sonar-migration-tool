@@ -387,12 +387,14 @@ func TestFindCloudHotspotCandidatesQueriesBothStatuses(t *testing.T) {
 	var (
 		mu          sync.Mutex
 		seenStatus  []string
+		seenBranch  []string
 	)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/hotspots/search", func(w http.ResponseWriter, r *http.Request) {
 		status := r.URL.Query().Get("status")
 		mu.Lock()
 		seenStatus = append(seenStatus, status)
+		seenBranch = append(seenBranch, r.URL.Query().Get("branch"))
 		mu.Unlock()
 		switch status {
 		case "TO_REVIEW":
@@ -424,7 +426,7 @@ func TestFindCloudHotspotCandidatesQueriesBothStatuses(t *testing.T) {
 	dir := t.TempDir()
 	e := newTestExecutor(cloudSrv, apiSrv, dir)
 
-	got, err := findCloudHotspotCandidates(context.Background(), e, "cloud-proj", "cloud-org", "src/app.go")
+	got, err := findCloudHotspotCandidates(context.Background(), e, "cloud-proj", "cloud-org", "src/app.go", "develop")
 	if err != nil {
 		t.Fatalf("findCloudHotspotCandidates: %v", err)
 	}
@@ -433,6 +435,13 @@ func TestFindCloudHotspotCandidatesQueriesBothStatuses(t *testing.T) {
 	defer mu.Unlock()
 	if len(seenStatus) != 2 || seenStatus[0] != "TO_REVIEW" || seenStatus[1] != "REVIEWED" {
 		t.Errorf("expected status queries [TO_REVIEW, REVIEWED], got %v", seenStatus)
+	}
+	// The branch must be forwarded to the cloud search so non-main-branch
+	// hotspots are matched (otherwise the search resolves to main only).
+	for _, b := range seenBranch {
+		if b != "develop" {
+			t.Errorf("expected branch=develop on every hotspot search, got %q in %v", b, seenBranch)
+		}
 	}
 	if len(got) != 2 {
 		t.Fatalf("expected 2 candidates (one per status), got %d: %+v", len(got), got)
@@ -468,7 +477,7 @@ func TestFindCloudHotspotCandidatesDedupsByKey(t *testing.T) {
 	dir := t.TempDir()
 	e := newTestExecutor(cloudSrv, apiSrv, dir)
 
-	got, err := findCloudHotspotCandidates(context.Background(), e, "cloud-proj", "cloud-org", "src/app.go")
+	got, err := findCloudHotspotCandidates(context.Background(), e, "cloud-proj", "cloud-org", "src/app.go", "")
 	if err != nil {
 		t.Fatalf("findCloudHotspotCandidates: %v", err)
 	}

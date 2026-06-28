@@ -573,10 +573,10 @@ func resolveAndSyncIssue(ctx context.Context, e *Executor, cloudKey, orgKey, bas
 		e.Logger.Debug("syncIssueMetadata: source issue not matchable", "key", src.Key, "rule", src.Rule, "component", src.Component, "line", src.Line)
 		return syncOutcomeNotFound
 	}
-	candidates, err := findCloudIssueCandidates(ctx, e, cloudKey, orgKey, filePath, src.Rule)
+	candidates, err := findCloudIssueCandidates(ctx, e, cloudKey, orgKey, filePath, src.Rule, src.Branch)
 	if err != nil {
 		logAPIWarn(e.Logger, "syncIssueMetadata: cloud candidate lookup failed", err,
-			"project", cloudKey, "source_key", src.Key, "rule", src.Rule, "file", filePath)
+			"project", cloudKey, "source_key", src.Key, "rule", src.Rule, "file", filePath, "branch", src.Branch)
 		return syncOutcomeLookupError
 	}
 	target, outcome := classifyIssueCandidatesByLine(candidates, src.Line)
@@ -624,14 +624,24 @@ func classifyIssueCandidatesByLine(candidates []matchableIssue, sourceLine int) 
 }
 
 // findCloudIssueCandidates queries /api/issues/search for cloud issues
-// matching the given file path + rule. Typical result set is 1–3
-// issues; pagination cost is dwarfed by the savings from no longer
-// fetching every issue in the project.
-func findCloudIssueCandidates(ctx context.Context, e *Executor, cloudKey, orgKey, filePath, ruleKey string) ([]matchableIssue, error) {
+// matching the given file path + rule on the given branch. Typical result
+// set is 1–3 issues; pagination cost is dwarfed by the savings from no
+// longer fetching every issue in the project.
+//
+// The branch parameter is essential for multi-branch projects: without it
+// /api/issues/search resolves against the project's main branch only, so
+// issues on non-main branches never find their cloud counterpart and go
+// unsynced. Source and target branch names match 1:1 (the main branch is
+// renamed to the source name on import — #428), so the source branch name
+// is the correct cloud branch to search.
+func findCloudIssueCandidates(ctx context.Context, e *Executor, cloudKey, orgKey, filePath, ruleKey, branch string) ([]matchableIssue, error) {
 	params := url.Values{}
 	params.Set("componentKeys", cloudKey+":"+filePath)
 	params.Set("organization", orgKey)
 	params.Set("rules", ruleKey)
+	if branch != "" {
+		params.Set("branch", branch)
+	}
 	// Same statuses we already use on the source side — we want to be
 	// idempotent against issues that were already migrated in a prior
 	// run (the cloud counterpart may be in ACCEPTED / FALSE_POSITIVE
