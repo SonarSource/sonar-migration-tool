@@ -13,6 +13,15 @@ import (
 	"testing"
 )
 
+// mountHotspotsShowEmpty installs a GET /api/hotspots/show handler on mux that
+// always responds with an empty comment list — the standard no-prior-comments
+// fixture used by syncOneHotspot tests.
+func mountHotspotsShowEmpty(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/hotspots/show", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"comment": []map[string]any{}})
+	})
+}
+
 // #356: filter now runs source-side directly on matchableHotspot —
 // no longer pair-based, since we no longer pre-match against the
 // full Cloud hotspot list before filtering.
@@ -261,9 +270,7 @@ func TestSyncOneHotspotAddsSourceLink(t *testing.T) {
 	mux.HandleFunc("POST /api/hotspots/change_status", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
-	mux.HandleFunc("GET /api/hotspots/show", func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"comment": []map[string]any{}})
-	})
+	mountHotspotsShowEmpty(mux)
 	mux.HandleFunc("POST /api/hotspots/add_comment", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		mu.Lock()
@@ -323,9 +330,7 @@ func TestSyncOneHotspotAcknowledgedResetsToToReview(t *testing.T) {
 		mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	})
-	mux.HandleFunc("GET /api/hotspots/show", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"comment": []map[string]any{}})
-	})
+	mountHotspotsShowEmpty(mux)
 	mux.HandleFunc("POST /api/hotspots/add_comment", func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		commentCalls++
@@ -597,9 +602,7 @@ func TestSyncOneHotspotSafeCallsChangeStatus(t *testing.T) {
 		mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	})
-	mux.HandleFunc("GET /api/hotspots/show", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"comment": []map[string]any{}})
-	})
+	mountHotspotsShowEmpty(mux)
 	e := newCustomCloudTest(t, mux)
 
 	pair := hotspotPair{

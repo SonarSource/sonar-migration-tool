@@ -12,27 +12,33 @@ import (
 	"github.com/sonar-solutions/sonar-migration-tool/internal/migrate"
 )
 
+// runProjectKeyTest writes rows to generateProjectMappings and runs
+// collectProjectKeyReport with the given pattern. Reduces the
+// 3-line dir+writeTaskJSONL+collect block to a single call.
+func runProjectKeyTest(t *testing.T, rows []map[string]any, pattern string) *ProjectKeyReport {
+	t.Helper()
+	dir := t.TempDir()
+	writeTaskJSONL(t, dir, "generateProjectMappings", rows)
+	return collectProjectKeyReport(common.NewDataStore(dir), pattern)
+}
+
 func TestCollectProjectKeyReport(t *testing.T) {
 	t.Run("default pattern, unique keys → nil", func(t *testing.T) {
-		dir := t.TempDir()
-		writeTaskJSONL(t, dir, "generateProjectMappings", []map[string]any{
+		got := runProjectKeyTest(t, []map[string]any{
 			{"key": "proj-a", "sonarcloud_org_key": "org1"},
 			{"key": "proj-b", "sonarcloud_org_key": "org2"},
-		})
-		got := collectProjectKeyReport(common.NewDataStore(dir), migrate.DefaultProjectKeyPattern)
+		}, migrate.DefaultProjectKeyPattern)
 		if got != nil {
 			t.Fatalf("expected nil report, got %+v", got)
 		}
 	})
 
 	t.Run("static-prefix pattern collides same key across orgs", func(t *testing.T) {
-		dir := t.TempDir()
-		writeTaskJSONL(t, dir, "generateProjectMappings", []map[string]any{
+		got := runProjectKeyTest(t, []map[string]any{
 			{"key": "shared", "sonarcloud_org_key": "org1"},
 			{"key": "shared", "sonarcloud_org_key": "org2"},
 			{"key": "unique", "sonarcloud_org_key": "org1"},
-		})
-		got := collectProjectKeyReport(common.NewDataStore(dir), "ACME_CORP_<ORIGINAL_PROJECT_KEY>")
+		}, "ACME_CORP_<ORIGINAL_PROJECT_KEY>")
 		if got == nil {
 			t.Fatal("expected a report, got nil")
 		}
@@ -49,25 +55,21 @@ func TestCollectProjectKeyReport(t *testing.T) {
 	})
 
 	t.Run("default pattern keeps same key in different orgs distinct", func(t *testing.T) {
-		dir := t.TempDir()
-		writeTaskJSONL(t, dir, "generateProjectMappings", []map[string]any{
+		// org1_shared vs org2_shared — no collision under the default pattern.
+		got := runProjectKeyTest(t, []map[string]any{
 			{"key": "shared", "sonarcloud_org_key": "org1"},
 			{"key": "shared", "sonarcloud_org_key": "org2"},
-		})
-		// org1_shared vs org2_shared — no collision under the default pattern.
-		got := collectProjectKeyReport(common.NewDataStore(dir), migrate.DefaultProjectKeyPattern)
+		}, migrate.DefaultProjectKeyPattern)
 		if got != nil {
 			t.Fatalf("expected nil report (org prefix disambiguates), got %+v", got)
 		}
 	})
 
 	t.Run("over-length key is flagged", func(t *testing.T) {
-		dir := t.TempDir()
 		longKey := strings.Repeat("x", migrate.MaxProjectKeyLength)
-		writeTaskJSONL(t, dir, "generateProjectMappings", []map[string]any{
+		got := runProjectKeyTest(t, []map[string]any{
 			{"key": longKey, "sonarcloud_org_key": "org1"}, // org1_ + 400 x's > 400
-		})
-		got := collectProjectKeyReport(common.NewDataStore(dir), migrate.DefaultProjectKeyPattern)
+		}, migrate.DefaultProjectKeyPattern)
 		if got == nil || len(got.TooLong) != 1 {
 			t.Fatalf("expected 1 over-length key, got %+v", got)
 		}
@@ -77,12 +79,10 @@ func TestCollectProjectKeyReport(t *testing.T) {
 	})
 
 	t.Run("SKIPPED and empty orgs are ignored", func(t *testing.T) {
-		dir := t.TempDir()
-		writeTaskJSONL(t, dir, "generateProjectMappings", []map[string]any{
+		got := runProjectKeyTest(t, []map[string]any{
 			{"key": "shared", "sonarcloud_org_key": "SKIPPED"},
 			{"key": "shared", "sonarcloud_org_key": ""},
-		})
-		got := collectProjectKeyReport(common.NewDataStore(dir), "ACME_CORP_<ORIGINAL_PROJECT_KEY>")
+		}, "ACME_CORP_<ORIGINAL_PROJECT_KEY>")
 		if got != nil {
 			t.Fatalf("expected nil (all rows skipped), got %+v", got)
 		}
