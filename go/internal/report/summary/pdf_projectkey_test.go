@@ -18,10 +18,17 @@ import (
 // fix routes the no-marker branch through the same width-aware
 // wrap that already handles the marker branch, gaining its
 // hard-break-at-runes fallback for tokens wider than the cell.
-func TestWrapPlainText_LongProjectKeyStaysInCell(t *testing.T) {
+// newTestPDF creates a fresh Letter-format PDF with the migration-tool Unicode
+// font registered and a single blank page ready for rendering.
+func newTestPDF() *fpdf.Fpdf {
 	pdf := fpdf.New("P", "mm", "Letter", "")
 	registerUnicodeFont(pdf)
 	pdf.AddPage()
+	return pdf
+}
+
+func TestWrapPlainText_LongProjectKeyStaysInCell(t *testing.T) {
+	pdf := newTestPDF()
 	pdf.SetFont(pdfFontFamilyBody, "", 6.0)
 
 	longKey := "migration-tool-test-gh_okorach-org_pr-demo:" +
@@ -66,9 +73,7 @@ func TestWrapPlainText_LongProjectKeyStaysInCell(t *testing.T) {
 // cursor's Y must not have advanced — any Y drift means pdf.Write
 // or CellFormat triggered an unintended wrap.
 func TestWriteInlineBoldLine_NoOverflowAtPageRightMargin(t *testing.T) {
-	pdf := fpdf.New("P", "mm", "Letter", "")
-	registerUnicodeFont(pdf)
-	pdf.AddPage()
+	pdf := newTestPDF()
 
 	// Exact cloud key shape from the #345 screenshot.
 	cloudKey := "migration-tool-test_okorach_demo-gitlabci-cli_e81d5112-e681-44b2-aee4-62b56c8ac5cb"
@@ -121,9 +126,7 @@ func absMM(x float64) float64 {
 // cursor must land flush right of the cell at the row's top — any
 // vertical drift means the renderer wrapped to a fresh page row.
 func TestDrawDetailsCell_LongProjectKeyNoOverflow(t *testing.T) {
-	pdf := fpdf.New("P", "mm", "Letter", "")
-	registerUnicodeFont(pdf)
-	pdf.AddPage()
+	pdf := newTestPDF()
 	pdf.SetFont(pdfFontFamilyBody, "", 6.0)
 
 	longKey := "migration-tool-test-gh_okorach-org_pr-demo:" +
@@ -191,9 +194,7 @@ func TestDrawDetailsCell_LongProjectKeyNoOverflow(t *testing.T) {
 // `-`, `/`, `.` as break points lets the wrap split at natural
 // project-key boundaries before any overflow.
 func TestWrapInlineBoldLines_LongProjectKeyStaysInCell(t *testing.T) {
-	pdf := fpdf.New("P", "mm", "Letter", "")
-	registerUnicodeFont(pdf)
-	pdf.AddPage()
+	pdf := newTestPDF()
 
 	// Worst-case key shape — every segment is at the upper end of
 	// what users put in their SonarQube project keys.

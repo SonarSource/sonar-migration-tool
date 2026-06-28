@@ -13,6 +13,17 @@ import (
 // when multiple source conditions produce target conditions on the same SQC
 // metric, keep one — the most stringent. "More stringent" means "fires the
 // gate for more cases" (lower threshold for GT, higher threshold for LT).
+// blockerExpansion returns the two-condition set produced when
+// software_quality_blocker_issues expands: security_rating GT 4 and
+// reliability_rating GT 4. Several test cases use this pair for both
+// input and expected output, so naming it avoids the inline repetition.
+func blockerExpansion(src string) []targetCondition {
+	return []targetCondition{
+		{Metric: "security_rating", Op: "GT", Error: "4", SourceMetric: src},
+		{Metric: "reliability_rating", Op: "GT", Error: "4", SourceMetric: src},
+	}
+}
+
 func TestResolveTargetConditions(t *testing.T) {
 	cases := []struct {
 		name string
@@ -21,25 +32,17 @@ func TestResolveTargetConditions(t *testing.T) {
 	}{
 		{
 			name: "no collision passes through unchanged",
-			in: []targetCondition{
-				{Metric: "security_rating", Op: "GT", Error: "4", SourceMetric: "software_quality_blocker_issues"},
-				{Metric: "reliability_rating", Op: "GT", Error: "4", SourceMetric: "software_quality_blocker_issues"},
-			},
-			want: []targetCondition{
-				{Metric: "security_rating", Op: "GT", Error: "4", SourceMetric: "software_quality_blocker_issues"},
-				{Metric: "reliability_rating", Op: "GT", Error: "4", SourceMetric: "software_quality_blocker_issues"},
-			},
+			in:   blockerExpansion("software_quality_blocker_issues"),
+			want: blockerExpansion("software_quality_blocker_issues"),
 		},
 		{
 			// #234 example: blocker_issues expansion (reliability_rating GT 4)
 			// collides with a direct reliability_rating GT 2. The direct
 			// passthrough is more stringent (B < D), so it wins.
 			name: "blocker expansion + direct reliability GT 2 → direct wins",
-			in: []targetCondition{
-				{Metric: "security_rating", Op: "GT", Error: "4", SourceMetric: "software_quality_blocker_issues"},
-				{Metric: "reliability_rating", Op: "GT", Error: "4", SourceMetric: "software_quality_blocker_issues"},
-				{Metric: "reliability_rating", Op: "GT", Error: "2", SourceMetric: "reliability_rating"},
-			},
+			in: append(blockerExpansion("software_quality_blocker_issues"),
+				targetCondition{Metric: "reliability_rating", Op: "GT", Error: "2", SourceMetric: "reliability_rating"},
+			),
 			want: []targetCondition{
 				{Metric: "security_rating", Op: "GT", Error: "4", SourceMetric: "software_quality_blocker_issues"},
 				{Metric: "reliability_rating", Op: "GT", Error: "2", SourceMetric: "reliability_rating"},

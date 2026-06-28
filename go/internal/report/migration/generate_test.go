@@ -43,6 +43,33 @@ func setupExtract(t *testing.T, tasks map[string][]map[string]any) (string, stru
 	return dir, structure.ExtractMapping{testServerURL: testExtractID}
 }
 
+// emptyTaskMap returns the standard set of task names used by both migration
+// report tests, all pre-populated with empty record slices.
+func emptyTaskMap() map[string][]map[string]any {
+	return map[string][]map[string]any{
+		"getServerInfo":          {},
+		"getProjectDetails":      {},
+		"getProjectAnalyses":     {},
+		"getProjectBindings":     {},
+		"getBindings":            {},
+		"getBranches":            {},
+		"getProjectPullRequests": {},
+		"getDefaultTemplates":    {},
+		"getTemplates":           {},
+		"getPlugins":             {},
+		"getRules":               {},
+		"getProfileRules":        {},
+		"getProfiles":            {},
+		"getPortfolioDetails":    {},
+		"getPortfolioProjects":   {},
+		"getGates":               {},
+		"getApplicationDetails":  {},
+		"getUsers":               {},
+		"getProjectSettings":     {},
+		"getUsage":               {},
+	}
+}
+
 func TestFillTemplate(t *testing.T) {
 	tmpl := "Hello {name}, welcome to {place}!"
 	result := fillTemplate(tmpl, map[string]string{"name": "Alice", "place": "Go"})
@@ -60,32 +87,14 @@ func TestFillTemplateUnusedPlaceholder(t *testing.T) {
 }
 
 func TestGenerateMigrationReport(t *testing.T) {
-	dir, mapping := setupExtract(t, map[string][]map[string]any{
-		"getServerInfo": {
-			{"System": map[string]any{"Version": "10.7", "Server ID": testServerID, "Edition": "enterprise", "Lines of Code": float64(5000)}},
-		},
-		"getProjectDetails": {
-			{"key": "proj-1", "name": "Project 1", "qualityProfiles": []any{}, "qualityGate": map[string]any{"name": "Sonar way"}},
-		},
-		"getProjectAnalyses":    {},
-		"getProjectBindings":    {},
-		"getBindings":           {},
-		"getBranches":           {},
-		"getProjectPullRequests": {},
-		"getDefaultTemplates":   {},
-		"getTemplates":          {},
-		"getPlugins":            {},
-		"getRules":              {},
-		"getProfileRules":       {},
-		"getProfiles":           {},
-		"getPortfolioDetails":   {},
-		"getPortfolioProjects":  {},
-		"getGates":              {},
-		"getApplicationDetails": {},
-		"getUsers":              {},
-		"getProjectSettings":    {},
-		"getUsage":              {},
-	})
+	tasks := emptyTaskMap()
+	tasks["getServerInfo"] = []map[string]any{
+		{"System": map[string]any{"Version": "10.7", "Server ID": testServerID, "Edition": "enterprise", "Lines of Code": float64(5000)}},
+	}
+	tasks["getProjectDetails"] = []map[string]any{
+		{"key": "proj-1", "name": "Project 1", "qualityProfiles": []any{}, "qualityGate": map[string]any{"name": "Sonar way"}},
+	}
+	dir, mapping := setupExtract(t, tasks)
 
 	md := GenerateMigrationReport(dir, mapping)
 
@@ -107,28 +116,7 @@ func TestGenerateMigrationReport(t *testing.T) {
 }
 
 func TestGenerateMigrationReportEmpty(t *testing.T) {
-	dir, mapping := setupExtract(t, map[string][]map[string]any{
-		"getServerInfo":          {},
-		"getProjectDetails":      {},
-		"getProjectAnalyses":     {},
-		"getProjectBindings":     {},
-		"getBindings":            {},
-		"getBranches":            {},
-		"getProjectPullRequests": {},
-		"getDefaultTemplates":    {},
-		"getTemplates":           {},
-		"getPlugins":             {},
-		"getRules":               {},
-		"getProfileRules":        {},
-		"getProfiles":            {},
-		"getPortfolioDetails":    {},
-		"getPortfolioProjects":   {},
-		"getGates":               {},
-		"getApplicationDetails":  {},
-		"getUsers":               {},
-		"getProjectSettings":     {},
-		"getUsage":               {},
-	})
+	dir, mapping := setupExtract(t, emptyTaskMap())
 
 	md := GenerateMigrationReport(dir, mapping)
 
