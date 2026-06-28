@@ -31,7 +31,7 @@ type profileFinding struct {
 //
 // HasOrangeCriterion is true when at least one finding belongs to a
 // criterion treated as Partial (orange) rather than NearPerfect
-// (yellow) — currently just "third-party" rules. Those represent a
+// (yellow) — currently just kindThirdParty rules. Those represent a
 // real loss of coverage on SQC (rules dropped from the profile), so
 // the QP should be classified Partial.
 type profileFindings struct {
@@ -79,12 +79,12 @@ func collectProfileFindings(store *common.DataStore) map[string]*profileFindings
 		// template-instance message already says the rule is not
 		// migrated at all — reporting a severity revert for the
 		// same rule is misleading.
-		if templateEntries, hasTemplate := kinds["template-instance"]; hasTemplate {
+		if templateEntries, hasTemplate := kinds[kindTemplateInstance]; hasTemplate {
 			instantiated := make(map[string]bool, len(templateEntries))
 			for _, e := range templateEntries {
 				instantiated[e.key] = true
 			}
-			if csEntries := kinds["custom-severity"]; len(csEntries) > 0 {
+			if csEntries := kinds[kindCustomSeverity]; len(csEntries) > 0 {
 				filtered := csEntries[:0]
 				for _, e := range csEntries {
 					if instantiated[e.key] {
@@ -93,9 +93,9 @@ func collectProfileFindings(store *common.DataStore) map[string]*profileFindings
 					filtered = append(filtered, e)
 				}
 				if len(filtered) == 0 {
-					delete(kinds, "custom-severity")
+					delete(kinds, kindCustomSeverity)
 				} else {
-					kinds["custom-severity"] = filtered
+					kinds[kindCustomSeverity] = filtered
 				}
 			}
 		}
@@ -139,11 +139,11 @@ func collectProfileFindings(store *common.DataStore) map[string]*profileFindings
 			// did to the profile, so they are written in past tense.
 			// The predictive report swaps "were X" → "will be X" via
 			// toPredictiveTense at render time (#167).
-			if kind == "custom-severity" {
+			if kind == kindCustomSeverity {
 				lines = append(lines, "Because rules custom severities are not supported in SQC, the following rules were reverted to their default severities: "+strings.Join(order, ", "))
 				continue
 			}
-			if kind == "third-party" {
+			if kind == kindThirdParty {
 				lines = append(lines, "Because SQC does not support 3rd party plugins, the following 3rd party rules were removed from the quality profile: "+strings.Join(order, ", "))
 				continue
 			}
@@ -151,15 +151,15 @@ func collectProfileFindings(store *common.DataStore) map[string]*profileFindings
 				lines = append(lines, "Since SQC does not support prioritized rules, the following rules were migrated in the profile as regular rules: "+strings.Join(order, ", "))
 				continue
 			}
-			if kind == "template-instance" {
+			if kind == kindTemplateInstance {
 				lines = append(lines, "Because rule templates and instantiated rules are not supported in SQC, the following rules were not migrated: "+strings.Join(order, ", "))
 				continue
 			}
-			if kind == "custom-params" {
+			if kind == kindCustomParams {
 				lines = append(lines, "The following rules custom parameters could not be migrated due to an unexpected error: "+strings.Join(order, ", "))
 				continue
 			}
-			if kind == "disabled-inherited" {
+			if kind == kindDisabledInherited {
 				lines = append(lines, "Since SQC does not support parent profile rules disabled in child profiles, the following rules were enabled in the profile: "+strings.Join(order, ", "))
 				continue
 			}
@@ -176,7 +176,7 @@ func collectProfileFindings(store *common.DataStore) map[string]*profileFindings
 		if len(lines) == 0 {
 			continue
 		}
-		_, hasOrange := kinds["third-party"]
+		_, hasOrange := kinds[kindThirdParty]
 		out[cloudKey] = &profileFindings{
 			Issues:             lines,
 			HasOrangeCriterion: hasOrange,
@@ -239,24 +239,33 @@ func applyProfileFindings(succeeded, nearPerfect, partial []EntityItem, findings
 	return keep, nearPerfect, partial
 }
 
+// Profile finding kind constants used throughout profile_notes.go.
+const (
+	kindTemplateInstance  = "template-instance"
+	kindCustomSeverity    = "custom-severity"
+	kindThirdParty        = "third-party"
+	kindCustomParams      = "custom-params"
+	kindDisabledInherited = "disabled-inherited"
+)
+
 // profileFindingKindOrder fixes the rendering order of the six
 // criteria so the Issues column reads consistently across reports.
 var profileFindingKindOrder = []string{
-	"custom-severity",
+	kindCustomSeverity,
 	"prioritized",
-	"third-party",
-	"custom-params",
-	"template-instance",
-	"disabled-inherited",
+	kindThirdParty,
+	kindCustomParams,
+	kindTemplateInstance,
+	kindDisabledInherited,
 }
 
 // profileFindingKindLabel is the bullet header for each criterion —
 // short enough to fit at the head of a multi-line Detail block.
 var profileFindingKindLabel = map[string]string{
-	"custom-severity":    "Rules with custom severities (not portable to SonarQube Cloud)",
+	kindCustomSeverity:    "Rules with custom severities (not portable to SonarQube Cloud)",
 	"prioritized":        "Prioritized rules (no equivalent on SonarQube Cloud)",
-	"third-party":        "Third-party plugin rules (not available on SonarQube Cloud)",
-	"custom-params":      "Rules with customised parameter values (revert to defaults on SonarQube Cloud)",
-	"template-instance":  "Rule-template instantiations (not migratable to SonarQube Cloud)",
-	"disabled-inherited": "Rules disabled in this child profile but enabled in the parent — will be re-enabled on SonarQube Cloud (no sonar.qualityProfiles.allowDisableInheritedRules)",
+	kindThirdParty:        "Third-party plugin rules (not available on SonarQube Cloud)",
+	kindCustomParams:      "Rules with customised parameter values (revert to defaults on SonarQube Cloud)",
+	kindTemplateInstance:  "Rule-template instantiations (not migratable to SonarQube Cloud)",
+	kindDisabledInherited: "Rules disabled in this child profile but enabled in the parent — will be re-enabled on SonarQube Cloud (no sonar.qualityProfiles.allowDisableInheritedRules)",
 }

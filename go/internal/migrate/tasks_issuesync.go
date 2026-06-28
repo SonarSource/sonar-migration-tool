@@ -20,6 +20,8 @@ import (
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
+const resolutionFalsePositive = "FALSE-POSITIVE"
+
 // issueMetadataSyncTasks returns the task definition for synchronising
 // issue metadata (status transitions, comments, tags) from the extracted
 // SonarQube Server data to the newly-created SonarQube Cloud issues.
@@ -173,7 +175,7 @@ func getFallbackTransition(issueStatus, resolution, status string) string {
 	// modern accepted issues never reach here because issueStatus is
 	// checked first.
 	switch strings.ToUpper(resolution) {
-	case "FALSE-POSITIVE":
+	case resolutionFalsePositive:
 		return "falsepositive"
 	case "WONTFIX":
 		return "wontfix"
@@ -261,7 +263,7 @@ func hasManualChanges(iss matchableIssue) bool {
 	if status == "ACCEPTED" || status == "FALSE_POSITIVE" {
 		return true
 	}
-	if resolution == "FALSE-POSITIVE" || resolution == "WONTFIX" {
+	if resolution == resolutionFalsePositive || resolution == "WONTFIX" {
 		return true
 	}
 	if iss.ManualSeverity {
@@ -297,7 +299,7 @@ func classifyActionableReasons(actionable []matchableIssue) actionableReasonBrea
 		issueStatus := strings.ToUpper(iss.IssueStatus)
 		if issueStatus == "ACCEPTED" || issueStatus == "FALSE_POSITIVE" ||
 			status == "ACCEPTED" || status == "FALSE_POSITIVE" ||
-			resolution == "FALSE-POSITIVE" || resolution == "WONTFIX" {
+			resolution == resolutionFalsePositive || resolution == "WONTFIX" {
 			b.acceptedOrFP++
 		}
 		if len(iss.Tags) > 0 {

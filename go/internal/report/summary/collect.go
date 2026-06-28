@@ -599,7 +599,7 @@ func collectSection(store *common.DataStore, def sectionDef,
 	// Gates with any dropped condition — no SQC equivalent — are Partial
 	// (orange, #227). The per-condition decisions are written by
 	// addGateConditions to a sidecar JSONL.
-	if def.Name == "Quality Gates" {
+	if def.Name == sectionQualityGates {
 		notes := collectGateMappingNotes(store.BaseDir())
 		succeeded, nearPerfect, partial = applyGateMappingNotes(succeeded, nearPerfect, partial, notes)
 	}
@@ -607,7 +607,7 @@ func collectSection(store *common.DataStore, def sectionDef,
 	// Quality profiles flagged by analyzeProfileRules (#226 yellow
 	// criteria) move from Succeeded into NearPerfect with per-rule
 	// Issues. Orange (Partial) dominates yellow per the #224 rule.
-	if def.Name == "Quality Profiles" {
+	if def.Name == sectionQualityProfiles {
 		findings := collectProfileFindings(store)
 		succeeded, nearPerfect, partial = applyProfileFindings(succeeded, nearPerfect, partial, findings)
 	}
@@ -782,14 +782,14 @@ func buildMappedKeys(def sectionDef, store *common.DataStore) map[string]bool {
 }
 
 func mappedKeyFor(def sectionDef, name, language string) string {
-	if def.Name == "Quality Profiles" {
+	if def.Name == sectionQualityProfiles {
 		return name + "|" + language
 	}
 	return name
 }
 
 func extractKeyFor(def sectionDef, name, language, serverURL string) string {
-	if def.Name == "Quality Profiles" {
+	if def.Name == sectionQualityProfiles {
 		return serverURL + "|" + name + "|" + language
 	}
 	return serverURL + "|" + name
@@ -1023,7 +1023,7 @@ func collectDroppedUserPermsBySection(exportDir string, mapping structure.Extrac
 	// reserved for use by the input mappings — so we translate via
 	// source_profile_key → cloud_profile_key.
 	if profMap := buildSourceToCloudMap(store, "createProfiles", "source_profile_key", "cloud_profile_key"); len(profMap) > 0 {
-		out["Quality Profiles"] = aggregateUserPermsByEntity(exportDir, mapping,
+		out[sectionQualityProfiles] = aggregateUserPermsByEntity(exportDir, mapping,
 			[]string{"getProfileUsers"}, "profileKey", profMap)
 	}
 
@@ -1041,7 +1041,7 @@ func collectDroppedUserPermsBySection(exportDir string, mapping structure.Extrac
 	// same string the EntityItem.Name field holds — no translation
 	// needed. The identity map below routes the lookup straight
 	// through gate name.
-	out["Quality Gates"] = aggregateUserPermsByEntity(exportDir, mapping,
+	out[sectionQualityGates] = aggregateUserPermsByEntity(exportDir, mapping,
 		[]string{"getGateUsers"}, "gateName", nil)
 
 	return out
@@ -1124,7 +1124,7 @@ func aggregateUserPermsByEntity(exportDir string, mapping structure.ExtractMappi
 
 // attachDroppedUserPerms stamps a |userPerms:N marker on each
 // EntityItem whose lookup key carries N > 0 dropped user permissions.
-// The lookup key is the EntityItem.Name for the "Quality Gates"
+// The lookup key is the EntityItem.Name for the sectionQualityGates
 // section (gate names match directly) and the stripped cloud
 // identifier from Detail for the other sections.
 func attachDroppedUserPerms(items []EntityItem, perms map[string]int, sectionName string) {
@@ -1133,7 +1133,7 @@ func attachDroppedUserPerms(items []EntityItem, perms map[string]int, sectionNam
 	}
 	for i := range items {
 		var key string
-		if sectionName == "Quality Gates" {
+		if sectionName == sectionQualityGates {
 			key = items[i].Name
 		} else {
 			key = projectCloudKey(items[i].Detail)

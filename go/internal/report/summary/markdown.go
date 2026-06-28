@@ -88,11 +88,11 @@ func renderMarkdownTitle(sb *strings.Builder, summary *MigrationSummary) {
 	}
 
 	fmt.Fprintf(sb, "- Run ID: %s\n", summary.RunID)
-	fmt.Fprintf(sb, "- Generated: %s\n", summary.GeneratedAt.Format("2006-01-02 15:04:05"))
+	fmt.Fprintf(sb, "- Generated: %s\n", summary.GeneratedAt.Format(dateTimeLayout))
 
 	if !summary.Predictive && !summary.StartedAt.IsZero() {
-		fmt.Fprintf(sb, "- Started: %s\n", summary.StartedAt.Format("2006-01-02 15:04:05"))
-		fmt.Fprintf(sb, "- Completed: %s\n", summary.CompletedAt.Format("2006-01-02 15:04:05"))
+		fmt.Fprintf(sb, "- Started: %s\n", summary.StartedAt.Format(dateTimeLayout))
+		fmt.Fprintf(sb, "- Completed: %s\n", summary.CompletedAt.Format(dateTimeLayout))
 		fmt.Fprintf(sb, "- Total elapsed: %s\n", fmtDuration(summary.TotalElapsed))
 		fmt.Fprintf(sb, "- Overall status: %s\n", summary.OverallStatus)
 	}

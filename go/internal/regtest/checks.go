@@ -15,6 +15,45 @@ import (
 	"strings"
 )
 
+// Category constants
+const (
+	catQualityProfiles = "Quality Profiles"
+	catQualityGates    = "Quality Gates"
+	catPermTemplates   = "Permission Templates"
+	catNewCodePeriods  = "New Code Periods"
+	catALMBindings     = "ALM Bindings"
+	catExtractFiles    = "Extract Files"
+)
+
+// Check name constants — prefixed "name" to avoid shadowing the check functions.
+const (
+	nameProfileCount   = "Profile count"
+	nameGateCount      = "Gate count"
+	nameDefaultGate    = "Default gate"
+	nameGroupCount     = "Group count"
+	nameTemplateCount  = "Template count"
+	nameGlobalSettings = "Global settings"
+	namePortfolioCount = "Portfolio count"
+	nameProjectCount   = "Project count"
+	nameRuleCount      = "Rule count"
+)
+
+// API path constants
+const (
+	apiProfilesSearch   = "api/qualityprofiles/search"
+	apiGatesList        = "api/qualitygates/list"
+	apiUserGroupsSearch = "api/user_groups/search"
+	apiTemplatesSearch  = "api/permissions/search_templates"
+	apiSettingsValues   = "api/settings/values"
+)
+
+// Misc string constants
+const (
+	notFound           = "NOT FOUND"
+	scCompatibleSubset = "SC-compatible subset"
+	ndjsonExt          = ".ndjson"
+)
+
 // allChecks returns every registered check function.
 func allChecks() []checkFn {
 	return []checkFn{
@@ -40,27 +79,27 @@ func allChecks() []checkFn {
 		{"Hotspots", "Total hotspot count (per project)", checkHotspotTotals},
 		{"Hotspots", "TO_REVIEW status", checkHotspotByStatus("TO_REVIEW")},
 		{"Hotspots", "REVIEWED status", checkHotspotByStatus("REVIEWED")},
-		{"Quality Profiles", "Profile count", checkProfileCount},
-		{"Quality Profiles", "Active rules per profile", checkProfileRules},
-		{"Quality Profiles", "Default profile per language", checkProfileDefaults},
-		{"Quality Profiles", "Inheritance chains", checkProfileInheritance},
-		{"Quality Gates", "Gate count", checkGateCount},
-		{"Quality Gates", "Conditions per gate", checkGateConditions},
-		{"Quality Gates", "Default gate", checkGateDefault},
-		{"Quality Gates", "Gate-project associations", checkGateAssociations},
-		{"Groups", "Group count", checkGroupCount},
+		{catQualityProfiles, nameProfileCount, checkProfileCount},
+		{catQualityProfiles, "Active rules per profile", checkProfileRules},
+		{catQualityProfiles, "Default profile per language", checkProfileDefaults},
+		{catQualityProfiles, "Inheritance chains", checkProfileInheritance},
+		{catQualityGates, nameGateCount, checkGateCount},
+		{catQualityGates, "Conditions per gate", checkGateConditions},
+		{catQualityGates, nameDefaultGate, checkGateDefault},
+		{catQualityGates, "Gate-project associations", checkGateAssociations},
+		{"Groups", nameGroupCount, checkGroupCount},
 		{"Groups", "Group membership", checkGroupMembership},
-		{"Permission Templates", "Template count", checkTemplateCount},
-		{"Permission Templates", "Template group permissions", checkTemplatePermissions},
-		{"Settings", "Global settings", checkGlobalSettings},
+		{catPermTemplates, nameTemplateCount, checkTemplateCount},
+		{catPermTemplates, "Template group permissions", checkTemplatePermissions},
+		{"Settings", nameGlobalSettings, checkGlobalSettings},
 		{"Settings", "Per-project settings", checkProjectSettings},
-		{"New Code Periods", "Per-project NCD", checkNewCodePeriods},
+		{catNewCodePeriods, "Per-project NCD", checkNewCodePeriods},
 		{"Rules", "Custom rule count", checkCustomRules},
 		{"Permissions", "Project group permissions", checkProjectPermissions},
-		{"ALM Bindings", "Per-project ALM binding", checkALMBindings},
-		{"Portfolios", "Portfolio count", checkPortfolios},
+		{catALMBindings, "Per-project ALM binding", checkALMBindings},
+		{"Portfolios", namePortfolioCount, checkPortfolios},
 		{"Measures", "Key metrics per project", checkMeasures},
-		{"Extract Files", "NDJSON file completeness", checkExtractFiles},
+		{catExtractFiles, "NDJSON file completeness", checkExtractFiles},
 	}
 }
 
@@ -69,14 +108,14 @@ func allChecks() []checkFn {
 func checkProjectCount(ctx context.Context, s *Suite) []CheckResult {
 	sqsCount, err := queryTotal(ctx, s.sqsRaw, "api/projects/search", nil)
 	if err != nil {
-		return []CheckResult{makeError("Projects", "Project count", err)}
+		return []CheckResult{makeError("Projects", nameProjectCount, err)}
 	}
 	scCount, err := queryCount(ctx, s.scRaw, "api/projects/search",
 		urlParams("organization", s.cfg.SCOrg), "components")
 	if err != nil {
-		return []CheckResult{makeError("Projects", "Project count", err)}
+		return []CheckResult{makeError("Projects", nameProjectCount, err)}
 	}
-	return []CheckResult{makeResult("Projects", "Project count", sqsCount, scCount, "Exact")}
+	return []CheckResult{makeResult("Projects", nameProjectCount, sqsCount, scCount, "Exact")}
 }
 
 func checkProjectIdentity(ctx context.Context, s *Suite) []CheckResult {
@@ -204,16 +243,16 @@ func checkHotspotByStatus(status string) func(ctx context.Context, s *Suite) []C
 // ── Quality Profiles ──────────────────────────────────────────────────
 
 func checkProfileCount(ctx context.Context, s *Suite) []CheckResult {
-	sqsCount, err := queryCount(ctx, s.sqsRaw, "api/qualityprofiles/search", nil, "profiles")
+	sqsCount, err := queryCount(ctx, s.sqsRaw, apiProfilesSearch, nil, "profiles")
 	if err != nil {
-		return []CheckResult{makeError("Quality Profiles", "Profile count", err)}
+		return []CheckResult{makeError(catQualityProfiles, nameProfileCount, err)}
 	}
-	scCount, err := queryCount(ctx, s.scRaw, "api/qualityprofiles/search",
+	scCount, err := queryCount(ctx, s.scRaw, apiProfilesSearch,
 		urlParams("organization", s.cfg.SCOrg), "profiles")
 	if err != nil {
-		return []CheckResult{makeError("Quality Profiles", "Profile count", err)}
+		return []CheckResult{makeError(catQualityProfiles, nameProfileCount, err)}
 	}
-	r := makeResult("Quality Profiles", "Profile count", sqsCount, scCount, "SC includes built-ins")
+	r := makeResult(catQualityProfiles, nameProfileCount, sqsCount, scCount, "SC includes built-ins")
 	if scCount >= sqsCount {
 		r.Match = true
 		r.Notes = fmt.Sprintf("SC=%d includes built-ins", scCount)
@@ -222,14 +261,14 @@ func checkProfileCount(ctx context.Context, s *Suite) []CheckResult {
 }
 
 func checkProfileRules(ctx context.Context, s *Suite) []CheckResult {
-	sqsBody, err := queryJSON(ctx, s.sqsRaw, "api/qualityprofiles/search", nil)
+	sqsBody, err := queryJSON(ctx, s.sqsRaw, apiProfilesSearch, nil)
 	if err != nil {
-		return []CheckResult{makeError("Quality Profiles", "Active rules", err)}
+		return []CheckResult{makeError(catQualityProfiles, "Active rules", err)}
 	}
-	scBody, err := queryJSON(ctx, s.scRaw, "api/qualityprofiles/search",
+	scBody, err := queryJSON(ctx, s.scRaw, apiProfilesSearch,
 		urlParams("organization", s.cfg.SCOrg))
 	if err != nil {
-		return []CheckResult{makeError("Quality Profiles", "Active rules", err)}
+		return []CheckResult{makeError(catQualityProfiles, "Active rules", err)}
 	}
 	type profile struct {
 		Name            string `json:"name"`
@@ -251,30 +290,30 @@ func checkProfileRules(ctx context.Context, s *Suite) []CheckResult {
 		scRules, found := scMap[p.Name+"|"+p.Language]
 		if !found {
 			results = append(results, CheckResult{
-				Category: "Quality Profiles",
+				Category: catQualityProfiles,
 				Name:     fmt.Sprintf("Rules: %s (%s)", p.Name, p.Language),
 				SQSValue: strconv.Itoa(p.ActiveRuleCount),
-				SCValue:  "NOT FOUND",
+				SCValue:  notFound,
 				Match:    false,
 				Notes:    "Profile missing on SC",
 			})
 			continue
 		}
-		results = append(results, makeResult("Quality Profiles",
+		results = append(results, makeResult(catQualityProfiles,
 			fmt.Sprintf("Rules: %s (%s)", p.Name, p.Language), p.ActiveRuleCount, scRules, "Exact"))
 	}
 	return results
 }
 
 func checkProfileDefaults(ctx context.Context, s *Suite) []CheckResult {
-	sqsBody, err := queryJSON(ctx, s.sqsRaw, "api/qualityprofiles/search", nil)
+	sqsBody, err := queryJSON(ctx, s.sqsRaw, apiProfilesSearch, nil)
 	if err != nil {
-		return []CheckResult{makeError("Quality Profiles", "Defaults", err)}
+		return []CheckResult{makeError(catQualityProfiles, "Defaults", err)}
 	}
-	scBody, err := queryJSON(ctx, s.scRaw, "api/qualityprofiles/search",
+	scBody, err := queryJSON(ctx, s.scRaw, apiProfilesSearch,
 		urlParams("organization", s.cfg.SCOrg))
 	if err != nil {
-		return []CheckResult{makeError("Quality Profiles", "Defaults", err)}
+		return []CheckResult{makeError(catQualityProfiles, "Defaults", err)}
 	}
 	type profile struct {
 		Name      string `json:"name"`
@@ -299,21 +338,21 @@ func checkProfileDefaults(ctx context.Context, s *Suite) []CheckResult {
 	}
 	var results []CheckResult
 	for lang, sqsName := range sqsDef {
-		results = append(results, makeResultStr("Quality Profiles",
+		results = append(results, makeResultStr(catQualityProfiles,
 			fmt.Sprintf("Default (%s)", lang), sqsName, scDef[lang], "Exact"))
 	}
 	return results
 }
 
 func checkProfileInheritance(ctx context.Context, s *Suite) []CheckResult {
-	sqsBody, err := queryJSON(ctx, s.sqsRaw, "api/qualityprofiles/search", nil)
+	sqsBody, err := queryJSON(ctx, s.sqsRaw, apiProfilesSearch, nil)
 	if err != nil {
-		return []CheckResult{makeError("Quality Profiles", "Inheritance", err)}
+		return []CheckResult{makeError(catQualityProfiles, "Inheritance", err)}
 	}
-	scBody, err := queryJSON(ctx, s.scRaw, "api/qualityprofiles/search",
+	scBody, err := queryJSON(ctx, s.scRaw, apiProfilesSearch,
 		urlParams("organization", s.cfg.SCOrg))
 	if err != nil {
-		return []CheckResult{makeError("Quality Profiles", "Inheritance", err)}
+		return []CheckResult{makeError(catQualityProfiles, "Inheritance", err)}
 	}
 	type profile struct {
 		ParentKey string `json:"parentKey"`
@@ -333,22 +372,22 @@ func checkProfileInheritance(ctx context.Context, s *Suite) []CheckResult {
 			scCount++
 		}
 	}
-	return []CheckResult{makeResult("Quality Profiles", "Profiles with inheritance", sqsCount, scCount, "Exact")}
+	return []CheckResult{makeResult(catQualityProfiles, "Profiles with inheritance", sqsCount, scCount, "Exact")}
 }
 
 // ── Quality Gates ─────────────────────────────────────────────────────
 
 func checkGateCount(ctx context.Context, s *Suite) []CheckResult {
-	sqsCount, err := queryCount(ctx, s.sqsRaw, "api/qualitygates/list", nil, "qualitygates")
+	sqsCount, err := queryCount(ctx, s.sqsRaw, apiGatesList, nil, "qualitygates")
 	if err != nil {
-		return []CheckResult{makeError("Quality Gates", "Gate count", err)}
+		return []CheckResult{makeError(catQualityGates, nameGateCount, err)}
 	}
-	scCount, err := queryCount(ctx, s.scRaw, "api/qualitygates/list",
+	scCount, err := queryCount(ctx, s.scRaw, apiGatesList,
 		urlParams("organization", s.cfg.SCOrg), "qualitygates")
 	if err != nil {
-		return []CheckResult{makeError("Quality Gates", "Gate count", err)}
+		return []CheckResult{makeError(catQualityGates, nameGateCount, err)}
 	}
-	r := makeResult("Quality Gates", "Gate count", sqsCount, scCount, "SC includes built-ins")
+	r := makeResult(catQualityGates, nameGateCount, sqsCount, scCount, "SC includes built-ins")
 	if scCount >= sqsCount {
 		r.Match = true
 		r.Notes = fmt.Sprintf("SC=%d includes built-ins", scCount)
@@ -357,14 +396,14 @@ func checkGateCount(ctx context.Context, s *Suite) []CheckResult {
 }
 
 func checkGateConditions(ctx context.Context, s *Suite) []CheckResult {
-	sqsBody, err := queryJSON(ctx, s.sqsRaw, "api/qualitygates/list", nil)
+	sqsBody, err := queryJSON(ctx, s.sqsRaw, apiGatesList, nil)
 	if err != nil {
-		return []CheckResult{makeError("Quality Gates", "Conditions", err)}
+		return []CheckResult{makeError(catQualityGates, "Conditions", err)}
 	}
-	scBody, err := queryJSON(ctx, s.scRaw, "api/qualitygates/list",
+	scBody, err := queryJSON(ctx, s.scRaw, apiGatesList,
 		urlParams("organization", s.cfg.SCOrg))
 	if err != nil {
-		return []CheckResult{makeError("Quality Gates", "Conditions", err)}
+		return []CheckResult{makeError(catQualityGates, "Conditions", err)}
 	}
 	type gate struct {
 		ID   json.RawMessage `json:"id"`
@@ -389,7 +428,7 @@ func checkGateConditions(ctx context.Context, s *Suite) []CheckResult {
 		}
 		sqDetail, err := queryJSON(ctx, s.sqsRaw, "api/qualitygates/show", sqParams)
 		if err != nil {
-			results = append(results, makeError("Quality Gates", fmt.Sprintf("Conditions: %s", sq.Name), err))
+			results = append(results, makeError(catQualityGates, fmt.Sprintf("Conditions: %s", sq.Name), err))
 			continue
 		}
 		var sqDet struct{ Conditions []json.RawMessage `json:"conditions"` }
@@ -398,20 +437,20 @@ func checkGateConditions(ctx context.Context, s *Suite) []CheckResult {
 		scID, found := scIDs[sq.Name]
 		if !found {
 			results = append(results, CheckResult{
-				Category: "Quality Gates", Name: fmt.Sprintf("Conditions: %s", sq.Name),
-				SQSValue: strconv.Itoa(len(sqDet.Conditions)), SCValue: "NOT FOUND", Match: false,
+				Category: catQualityGates, Name: fmt.Sprintf("Conditions: %s", sq.Name),
+				SQSValue: strconv.Itoa(len(sqDet.Conditions)), SCValue: notFound, Match: false,
 			})
 			continue
 		}
 		scDetail, err := queryJSON(ctx, s.scRaw, "api/qualitygates/show",
 			urlParams("id", strings.Trim(scID, "\""), "organization", s.cfg.SCOrg))
 		if err != nil {
-			results = append(results, makeError("Quality Gates", fmt.Sprintf("Conditions: %s", sq.Name), err))
+			results = append(results, makeError(catQualityGates, fmt.Sprintf("Conditions: %s", sq.Name), err))
 			continue
 		}
 		var scDet struct{ Conditions []json.RawMessage `json:"conditions"` }
 		json.Unmarshal(scDetail, &scDet)
-		results = append(results, makeResult("Quality Gates",
+		results = append(results, makeResult(catQualityGates,
 			fmt.Sprintf("Conditions: %s", sq.Name), len(sqDet.Conditions), len(scDet.Conditions), "Exact"))
 	}
 	return results
@@ -423,13 +462,13 @@ func checkGateDefault(ctx context.Context, s *Suite) []CheckResult {
 		IsDefault bool   `json:"isDefault"`
 	}
 	var sqsResp, scResp struct{ QualityGates []gate `json:"qualitygates"` }
-	sqsBody, err := queryJSON(ctx, s.sqsRaw, "api/qualitygates/list", nil)
+	sqsBody, err := queryJSON(ctx, s.sqsRaw, apiGatesList, nil)
 	if err != nil {
-		return []CheckResult{makeError("Quality Gates", "Default gate", err)}
+		return []CheckResult{makeError(catQualityGates, nameDefaultGate, err)}
 	}
-	scBody, err := queryJSON(ctx, s.scRaw, "api/qualitygates/list", urlParams("organization", s.cfg.SCOrg))
+	scBody, err := queryJSON(ctx, s.scRaw, apiGatesList, urlParams("organization", s.cfg.SCOrg))
 	if err != nil {
-		return []CheckResult{makeError("Quality Gates", "Default gate", err)}
+		return []CheckResult{makeError(catQualityGates, nameDefaultGate, err)}
 	}
 	json.Unmarshal(sqsBody, &sqsResp)
 	json.Unmarshal(scBody, &scResp)
@@ -444,25 +483,25 @@ func checkGateDefault(ctx context.Context, s *Suite) []CheckResult {
 			scDef = g.Name
 		}
 	}
-	return []CheckResult{makeResultStr("Quality Gates", "Default gate", sqsDef, scDef, "Exact")}
+	return []CheckResult{makeResultStr(catQualityGates, nameDefaultGate, sqsDef, scDef, "Exact")}
 }
 
 func checkGateAssociations(ctx context.Context, s *Suite) []CheckResult {
 	projects, err := s.getProjects(ctx)
 	if err != nil {
-		return []CheckResult{makeError("Quality Gates", "Associations", err)}
+		return []CheckResult{makeError(catQualityGates, "Associations", err)}
 	}
 	var results []CheckResult
 	for _, proj := range projects {
 		sqsBody, err := queryJSON(ctx, s.sqsRaw, "api/qualitygates/get_by_project", urlParams("project", proj))
 		if err != nil {
-			results = append(results, makeError("Quality Gates", fmt.Sprintf("Assoc: %s", proj), err))
+			results = append(results, makeError(catQualityGates, fmt.Sprintf("Assoc: %s", proj), err))
 			continue
 		}
 		scBody, err := queryJSON(ctx, s.scRaw, "api/qualitygates/get_by_project",
 			urlParams("project", s.scProjectKey(proj), "organization", s.cfg.SCOrg))
 		if err != nil {
-			results = append(results, makeError("Quality Gates", fmt.Sprintf("Assoc: %s", proj), err))
+			results = append(results, makeError(catQualityGates, fmt.Sprintf("Assoc: %s", proj), err))
 			continue
 		}
 		var sqsG, scG struct {
@@ -470,7 +509,7 @@ func checkGateAssociations(ctx context.Context, s *Suite) []CheckResult {
 		}
 		json.Unmarshal(sqsBody, &sqsG)
 		json.Unmarshal(scBody, &scG)
-		results = append(results, makeResultStr("Quality Gates",
+		results = append(results, makeResultStr(catQualityGates,
 			fmt.Sprintf("Gate: %s", proj), sqsG.QualityGate.Name, scG.QualityGate.Name, "Exact"))
 	}
 	return results
@@ -479,20 +518,20 @@ func checkGateAssociations(ctx context.Context, s *Suite) []CheckResult {
 // ── Groups ────────────────────────────────────────────────────────────
 
 func checkGroupCount(ctx context.Context, s *Suite) []CheckResult {
-	sqsCount, err := queryCount(ctx, s.sqsRaw, "api/user_groups/search", urlParams("ps", "100"), "groups")
+	sqsCount, err := queryCount(ctx, s.sqsRaw, apiUserGroupsSearch, urlParams("ps", "100"), "groups")
 	if err != nil {
-		return []CheckResult{makeError("Groups", "Group count", err)}
+		return []CheckResult{makeError("Groups", nameGroupCount, err)}
 	}
-	scCount, err := queryCount(ctx, s.scRaw, "api/user_groups/search",
+	scCount, err := queryCount(ctx, s.scRaw, apiUserGroupsSearch,
 		urlParams("organization", s.cfg.SCOrg, "ps", "100"), "groups")
 	if err != nil {
-		return []CheckResult{makeError("Groups", "Group count", err)}
+		return []CheckResult{makeError("Groups", nameGroupCount, err)}
 	}
-	return []CheckResult{makeResult("Groups", "Group count", sqsCount, scCount, "Built-in handling may differ")}
+	return []CheckResult{makeResult("Groups", nameGroupCount, sqsCount, scCount, "Built-in handling may differ")}
 }
 
 func checkGroupMembership(ctx context.Context, s *Suite) []CheckResult {
-	sqsBody, err := queryJSON(ctx, s.sqsRaw, "api/user_groups/search", urlParams("ps", "100"))
+	sqsBody, err := queryJSON(ctx, s.sqsRaw, apiUserGroupsSearch, urlParams("ps", "100"))
 	if err != nil {
 		return []CheckResult{makeError("Groups", "Membership", err)}
 	}
@@ -509,7 +548,7 @@ func checkGroupMembership(ctx context.Context, s *Suite) []CheckResult {
 			results = append(results, makeSkipped("Groups", fmt.Sprintf("Members: %s", g.Name), "maps to SC Members"))
 			continue
 		}
-		scBody, err := queryJSON(ctx, s.scRaw, "api/user_groups/search",
+		scBody, err := queryJSON(ctx, s.scRaw, apiUserGroupsSearch,
 			urlParams("organization", s.cfg.SCOrg, "q", g.Name, "ps", "100"))
 		if err != nil {
 			results = append(results, makeError("Groups", fmt.Sprintf("Members: %s", g.Name), err))
@@ -533,22 +572,22 @@ func checkGroupMembership(ctx context.Context, s *Suite) []CheckResult {
 // ── Permission Templates ──────────────────────────────────────────────
 
 func checkTemplateCount(ctx context.Context, s *Suite) []CheckResult {
-	sqsCount, err := queryCount(ctx, s.sqsRaw, "api/permissions/search_templates", nil, "permissionTemplates")
+	sqsCount, err := queryCount(ctx, s.sqsRaw, apiTemplatesSearch, nil, "permissionTemplates")
 	if err != nil {
-		return []CheckResult{makeError("Permission Templates", "Template count", err)}
+		return []CheckResult{makeError(catPermTemplates, nameTemplateCount, err)}
 	}
-	scCount, err := queryCount(ctx, s.scRaw, "api/permissions/search_templates",
+	scCount, err := queryCount(ctx, s.scRaw, apiTemplatesSearch,
 		urlParams("organization", s.cfg.SCOrg), "permissionTemplates")
 	if err != nil {
-		return []CheckResult{makeError("Permission Templates", "Template count", err)}
+		return []CheckResult{makeError(catPermTemplates, nameTemplateCount, err)}
 	}
-	return []CheckResult{makeResult("Permission Templates", "Template count", sqsCount, scCount, "Exact")}
+	return []CheckResult{makeResult(catPermTemplates, nameTemplateCount, sqsCount, scCount, "Exact")}
 }
 
 func checkTemplatePermissions(ctx context.Context, s *Suite) []CheckResult {
-	sqsBody, err := queryJSON(ctx, s.sqsRaw, "api/permissions/search_templates", nil)
+	sqsBody, err := queryJSON(ctx, s.sqsRaw, apiTemplatesSearch, nil)
 	if err != nil {
-		return []CheckResult{makeError("Permission Templates", "Permissions", err)}
+		return []CheckResult{makeError(catPermTemplates, "Permissions", err)}
 	}
 	type tmpl struct {
 		ID   string `json:"id"`
@@ -568,12 +607,12 @@ func checkTemplatePermissions(ctx context.Context, s *Suite) []CheckResult {
 			sqsCount, err := queryCount(ctx, s.sqsRaw, "api/permissions/template_groups",
 				urlParams("templateId", t.ID, "permission", perm, "ps", "100"), "groups")
 			if err != nil {
-				results = append(results, makeError("Permission Templates",
+				results = append(results, makeError(catPermTemplates,
 					fmt.Sprintf("%s/%s", t.Name, perm), err))
 				continue
 			}
 			r := CheckResult{
-				Category: "Permission Templates",
+				Category: catPermTemplates,
 				Name:     fmt.Sprintf("%s/%s groups", t.Name, perm),
 				SQSValue: strconv.Itoa(sqsCount),
 				SCValue:  "N/A",
@@ -599,16 +638,16 @@ func isSubsetMatch(sqsCount, scCount int) bool {
 }
 
 func checkGlobalSettings(ctx context.Context, s *Suite) []CheckResult {
-	sqsCount, err := queryCount(ctx, s.sqsRaw, "api/settings/values", nil, "settings")
+	sqsCount, err := queryCount(ctx, s.sqsRaw, apiSettingsValues, nil, "settings")
 	if err != nil {
-		return []CheckResult{makeError("Settings", "Global settings", err)}
+		return []CheckResult{makeError("Settings", nameGlobalSettings, err)}
 	}
-	scCount, err := queryCount(ctx, s.scRaw, "api/settings/values",
+	scCount, err := queryCount(ctx, s.scRaw, apiSettingsValues,
 		urlParams("component", s.cfg.SCOrg), "settings")
 	if err != nil {
-		return []CheckResult{makeError("Settings", "Global settings", err)}
+		return []CheckResult{makeError("Settings", nameGlobalSettings, err)}
 	}
-	r := makeResult("Settings", "Global settings", sqsCount, scCount, "SC-compatible subset")
+	r := makeResult("Settings", nameGlobalSettings, sqsCount, scCount, scCompatibleSubset)
 	r.Notes = "SC supports subset of SQS settings"
 	// SC's supported setting set is intentionally a subset of SQS, so a
 	// direct equality is not expected. The check passes when SC has at
@@ -624,19 +663,19 @@ func checkProjectSettings(ctx context.Context, s *Suite) []CheckResult {
 	}
 	var results []CheckResult
 	for _, proj := range projects {
-		sqsCount, err := queryCount(ctx, s.sqsRaw, "api/settings/values", urlParams("component", proj), "settings")
+		sqsCount, err := queryCount(ctx, s.sqsRaw, apiSettingsValues, urlParams("component", proj), "settings")
 		if err != nil {
 			results = append(results, makeError("Settings", fmt.Sprintf("Settings: %s", proj), err))
 			continue
 		}
-		scCount, err := queryCount(ctx, s.scRaw, "api/settings/values",
+		scCount, err := queryCount(ctx, s.scRaw, apiSettingsValues,
 			urlParams("component", s.scProjectKey(proj)), "settings")
 		if err != nil {
 			results = append(results, makeError("Settings", fmt.Sprintf("Settings: %s", proj), err))
 			continue
 		}
-		r := makeResult("Settings", fmt.Sprintf("Settings: %s", proj), sqsCount, scCount, "SC-compatible subset")
-		r.Notes = "SC-compatible subset"
+		r := makeResult("Settings", fmt.Sprintf("Settings: %s", proj), sqsCount, scCount, scCompatibleSubset)
+		r.Notes = scCompatibleSubset
 		// Same subset-relationship rule as checkGlobalSettings.
 		r.Match = isSubsetMatch(sqsCount, scCount)
 		results = append(results, r)
@@ -649,19 +688,19 @@ func checkProjectSettings(ctx context.Context, s *Suite) []CheckResult {
 func checkNewCodePeriods(ctx context.Context, s *Suite) []CheckResult {
 	projects, err := s.getProjects(ctx)
 	if err != nil {
-		return []CheckResult{makeError("New Code Periods", "NCD", err)}
+		return []CheckResult{makeError(catNewCodePeriods, "NCD", err)}
 	}
 	var results []CheckResult
 	for _, proj := range projects {
 		sqsBody, err := queryJSON(ctx, s.sqsRaw, "api/new_code_periods/show", urlParams("project", proj))
 		if err != nil {
-			results = append(results, makeError("New Code Periods", fmt.Sprintf("NCD: %s", proj), err))
+			results = append(results, makeError(catNewCodePeriods, fmt.Sprintf("NCD: %s", proj), err))
 			continue
 		}
 		scBody, err := queryJSON(ctx, s.scRaw, "api/new_code_periods/show",
 			urlParams("project", s.scProjectKey(proj)))
 		if err != nil {
-			results = append(results, makeSkipped("New Code Periods",
+			results = append(results, makeSkipped(catNewCodePeriods,
 				fmt.Sprintf("NCD: %s", proj), "SC API may not support read-back"))
 			continue
 		}
@@ -671,7 +710,7 @@ func checkNewCodePeriods(ctx context.Context, s *Suite) []CheckResult {
 		}
 		json.Unmarshal(sqsBody, &sqsNCD)
 		json.Unmarshal(scBody, &scNCD)
-		results = append(results, makeResultStr("New Code Periods",
+		results = append(results, makeResultStr(catNewCodePeriods,
 			fmt.Sprintf("NCD type: %s", proj), sqsNCD.Type, scNCD.Type, "Exact"))
 	}
 	return results
@@ -683,14 +722,14 @@ func checkCustomRules(ctx context.Context, s *Suite) []CheckResult {
 	sqsTotal, err := queryTotal(ctx, s.sqsRaw, "api/rules/search",
 		urlParams("is_template", "false", "include_external", "false"))
 	if err != nil {
-		return []CheckResult{makeError("Rules", "Rule count", err)}
+		return []CheckResult{makeError("Rules", nameRuleCount, err)}
 	}
 	scTotal, err := queryTotal(ctx, s.scRaw, "api/rules/search",
 		urlParams("organization", s.cfg.SCOrg, "is_template", "false"))
 	if err != nil {
-		return []CheckResult{makeError("Rules", "Rule count", err)}
+		return []CheckResult{makeError("Rules", nameRuleCount, err)}
 	}
-	r := makeResult("Rules", "Rule count", sqsTotal, scTotal, "Rule sets may differ")
+	r := makeResult("Rules", nameRuleCount, sqsTotal, scTotal, "Rule sets may differ")
 	r.Notes = "Rule sets may differ between SQS and SC"
 	// Match is left to makeResult's sqsCount == scCount comparison: SC's
 	// rule catalogue is a subset of SQS so equality is rare and a mismatch
@@ -741,13 +780,13 @@ func checkProjectPermissions(ctx context.Context, s *Suite) []CheckResult {
 func checkALMBindings(ctx context.Context, s *Suite) []CheckResult {
 	projects, err := s.getProjects(ctx)
 	if err != nil {
-		return []CheckResult{makeError("ALM Bindings", "Bindings", err)}
+		return []CheckResult{makeError(catALMBindings, "Bindings", err)}
 	}
 	var results []CheckResult
 	for _, proj := range projects {
 		sqsBody, err := queryJSON(ctx, s.sqsRaw, "api/alm_settings/get_binding", urlParams("project", proj))
 		if err != nil {
-			results = append(results, makeSkipped("ALM Bindings", fmt.Sprintf("Binding: %s", proj), "No SQS binding"))
+			results = append(results, makeSkipped(catALMBindings, fmt.Sprintf("Binding: %s", proj), "No SQS binding"))
 			continue
 		}
 		scBody, err := queryJSON(ctx, s.scRaw, "api/alm_settings/get_binding",
@@ -756,15 +795,15 @@ func checkALMBindings(ctx context.Context, s *Suite) []CheckResult {
 			var sqsB struct{ ALM string `json:"alm"` }
 			json.Unmarshal(sqsBody, &sqsB)
 			results = append(results, CheckResult{
-				Category: "ALM Bindings", Name: fmt.Sprintf("Binding: %s", proj),
-				SQSValue: sqsB.ALM, SCValue: "NOT FOUND", Match: false,
+				Category: catALMBindings, Name: fmt.Sprintf("Binding: %s", proj),
+				SQSValue: sqsB.ALM, SCValue: notFound, Match: false,
 			})
 			continue
 		}
 		var sqsB, scB struct{ ALM string `json:"alm"` }
 		json.Unmarshal(sqsBody, &sqsB)
 		json.Unmarshal(scBody, &scB)
-		results = append(results, makeResultStr("ALM Bindings",
+		results = append(results, makeResultStr(catALMBindings,
 			fmt.Sprintf("Binding: %s", proj), sqsB.ALM, scB.ALM, "Exact"))
 	}
 	return results
@@ -775,22 +814,22 @@ func checkALMBindings(ctx context.Context, s *Suite) []CheckResult {
 func checkPortfolios(ctx context.Context, s *Suite) []CheckResult {
 	sqsBody, err := queryJSON(ctx, s.sqsRaw, "api/views/search", urlParams("ps", "100"))
 	if err != nil {
-		return []CheckResult{makeSkipped("Portfolios", "Portfolio count", "Enterprise API unavailable")}
+		return []CheckResult{makeSkipped("Portfolios", namePortfolioCount, "Enterprise API unavailable")}
 	}
 	var sqsResp struct{ Views []json.RawMessage `json:"views"` }
 	if err := json.Unmarshal(sqsBody, &sqsResp); err != nil || len(sqsResp.Views) == 0 {
-		return []CheckResult{makeSkipped("Portfolios", "Portfolio count", "0 portfolios on SQS")}
+		return []CheckResult{makeSkipped("Portfolios", namePortfolioCount, "0 portfolios on SQS")}
 	}
 	scBody, err := queryJSON(ctx, s.scRaw, "api/views/search",
 		urlParams("organization", s.cfg.SCOrg, "ps", "100"))
 	if err != nil {
-		r := makeResult("Portfolios", "Portfolio count", len(sqsResp.Views), 0, "Enterprise only")
+		r := makeResult("Portfolios", namePortfolioCount, len(sqsResp.Views), 0, "Enterprise only")
 		r.Notes = "SC enterprise API may require elevated token"
 		return []CheckResult{r}
 	}
 	var scResp struct{ Views []json.RawMessage `json:"views"` }
 	json.Unmarshal(scBody, &scResp)
-	return []CheckResult{makeResult("Portfolios", "Portfolio count",
+	return []CheckResult{makeResult("Portfolios", namePortfolioCount,
 		len(sqsResp.Views), len(scResp.Views), "Enterprise only")}
 }
 
@@ -857,19 +896,19 @@ func checkExtractFiles(ctx context.Context, s *Suite) []CheckResult {
 	}
 	dirs, err := findExtractDirs(s.cfg.ExportDir)
 	if err != nil || len(dirs) == 0 {
-		return []CheckResult{makeError("Extract Files", "Find extract dirs",
+		return []CheckResult{makeError(catExtractFiles, "Find extract dirs",
 			fmt.Errorf("no extract directories found in %s", s.cfg.ExportDir))}
 	}
 	var results []CheckResult
 	for _, dir := range dirs {
 		for _, name := range expected {
-			matches, _ := filepath.Glob(filepath.Join(dir, "*", name+".ndjson"))
+			matches, _ := filepath.Glob(filepath.Join(dir, "*", name+ndjsonExt))
 			if len(matches) == 0 {
-				matches, _ = filepath.Glob(filepath.Join(dir, name+".ndjson"))
+				matches, _ = filepath.Glob(filepath.Join(dir, name+ndjsonExt))
 			}
 			if len(matches) == 0 {
 				results = append(results, CheckResult{
-					Category: "Extract Files", Name: fmt.Sprintf("%s.ndjson", name),
+					Category: catExtractFiles, Name: fmt.Sprintf("%s.ndjson", name),
 					SQSValue: "expected", SCValue: "MISSING", Match: false,
 				})
 				continue
@@ -877,17 +916,17 @@ func checkExtractFiles(ctx context.Context, s *Suite) []CheckResult {
 			for _, f := range matches {
 				info, err := os.Stat(f)
 				if err != nil {
-					results = append(results, makeError("Extract Files", name+".ndjson", err))
+					results = append(results, makeError(catExtractFiles, name+ndjsonExt, err))
 					continue
 				}
 				if info.Size() == 0 {
 					results = append(results, CheckResult{
-						Category: "Extract Files", Name: fmt.Sprintf("%s.ndjson", name),
+						Category: catExtractFiles, Name: fmt.Sprintf("%s.ndjson", name),
 						SQSValue: "expected non-empty", SCValue: "EMPTY", Match: false,
 					})
 				} else {
 					results = append(results, CheckResult{
-						Category: "Extract Files", Name: fmt.Sprintf("%s.ndjson", name),
+						Category: catExtractFiles, Name: fmt.Sprintf("%s.ndjson", name),
 						SQSValue: fmt.Sprintf("%d bytes", info.Size()), SCValue: "present", Match: true,
 					})
 				}

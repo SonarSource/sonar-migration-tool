@@ -88,6 +88,12 @@ const (
 	outcomeSkipped     = "Skipped"
 )
 
+const (
+	pdfLogoFooterKey = "sonar-logo-footer"
+	pdfWillBeApplied = "will be applied"
+	pdfScanDelimiter = "|scan:"
+)
+
 // RenderPDF builds a PDF document from the migration summary and returns the bytes.
 func RenderPDF(summary *MigrationSummary) ([]byte, error) {
 	pdf := fpdf.New("P", "mm", "Letter", "")
@@ -202,7 +208,7 @@ func registerLogoImages(pdf *fpdf.Fpdf) {
 	pdf.RegisterImageOptionsReader("sonar-logo-header",
 		fpdf.ImageOptions{ImageType: "PNG", ReadDpi: false},
 		bytes.NewReader(sonarLogoHeader))
-	pdf.RegisterImageOptionsReader("sonar-logo-footer",
+	pdf.RegisterImageOptionsReader(pdfLogoFooterKey,
 		fpdf.ImageOptions{ImageType: "PNG", ReadDpi: false},
 		bytes.NewReader(sonarLogoFooter))
 }
@@ -251,14 +257,14 @@ func addPageHeader(pdf *fpdf.Fpdf, runID string, generatedAt time.Time) {
 
 	// Page 2+ header: small Sonar glyph left, Run ID + timestamp right.
 	glyphY := 6.0
-	pdf.ImageOptions("sonar-logo-footer", pageMarginLeft, glyphY,
+	pdf.ImageOptions(pdfLogoFooterKey, pageMarginLeft, glyphY,
 		headerGlyphWidth, 0, false,
 		fpdf.ImageOptions{ImageType: "PNG"}, 0, "")
 
 	pdf.SetFont(pdfFontFamilyBody, "", 8)
 	setColor(pdf, colorDarkGray)
 	rightText := fmt.Sprintf("Run ID: %s  |  Generated: %s",
-		runID, generatedAt.Format("2006-01-02 15:04:05"))
+		runID, generatedAt.Format(dateTimeLayout))
 	textY := glyphY + (headerGlyphWidth-4)/2
 	rightW := pageW - 2*pageMarginRight
 	pdf.SetXY(pageMarginLeft, textY)
@@ -286,7 +292,7 @@ func addPageFooter(pdf *fpdf.Fpdf) {
 	// Sonar glyph, centred vertically in the band, with a small left
 	// inset. h=0 means "preserve aspect ratio".
 	glyphY := bandY + (footerBandH-footerLogoWidth)/2
-	pdf.ImageOptions("sonar-logo-footer", pageMarginLeft, glyphY,
+	pdf.ImageOptions(pdfLogoFooterKey, pageMarginLeft, glyphY,
 		footerLogoWidth, 0, false,
 		fpdf.ImageOptions{ImageType: "PNG"}, 0, "")
 
@@ -367,7 +373,7 @@ func renderTitlePage(pdf *fpdf.Fpdf, summary *MigrationSummary) {
 	setColor(pdf, colorBlack)
 	pdf.SetFont(pdfFontFamilyBody, "", 11)
 	pdf.CellFormat(0, 7, "Run ID: "+summary.RunID, "", 1, "C", false, 0, "")
-	pdf.CellFormat(0, 7, "Generated: "+summary.GeneratedAt.Format("2006-01-02 15:04:05"), "", 1, "C", false, 0, "")
+	pdf.CellFormat(0, 7, "Generated: "+summary.GeneratedAt.Format(dateTimeLayout), "", 1, "C", false, 0, "")
 	pdf.Ln(8)
 
 	renderExecutiveSummary(pdf, summary.Sections, summary.OmitSections)
@@ -1094,9 +1100,9 @@ func toPredictiveTense(s string, predictive bool) string {
 		{"were not ", "will not be "},
 		// Multi-word phrases next.
 		{"Has been applied", "Will be applied"},
-		{"has been applied", "will be applied"},
+		{"has been applied", pdfWillBeApplied},
 		{"Have been applied", "Will be applied"},
-		{"have been applied", "will be applied"},
+		{"have been applied", pdfWillBeApplied},
 		{"has been ", "will be "},
 		{"have been ", "will be "},
 		{"was turned off", "will be turned off"},
@@ -1104,10 +1110,10 @@ func toPredictiveTense(s string, predictive bool) string {
 		{"was disabled", "will be disabled"},
 		{"was enabled", "will be enabled"},
 		{"was changed", "will be changed"},
-		{"was applied", "will be applied"},
+		{"was applied", pdfWillBeApplied},
 		{"was set", "will be set"},
 		{"was migrated", "will be migrated"},
-		{"were applied", "will be applied"},
+		{"were applied", pdfWillBeApplied},
 		{"were migrated", "will be migrated"},
 		{"were disabled", "will be disabled"},
 		{"were enabled", "will be enabled"},
@@ -1375,7 +1381,7 @@ func partialDetails(item EntityItem, predictive, hideCloudKey, labelProjectKey b
 	// rendered on their own lines (exactly like Succeeded rows), instead
 	// of leaving the raw marker embedded inside the bolded project key.
 	// Embedding the raw marker previously left the inline-bold span
-	// unterminated when a downstream renderer re-split on "|scan:" (the
+	// unterminated when a downstream renderer re-split on pdfScanDelimiter (the
 	// Markdown report truncated the closing bold marker and the issue
 	// lines). Then append the per-item issue lines that make the row
 	// Partial / NearPerfect.
@@ -1472,7 +1478,7 @@ func renderTableHeader(pdf *fpdf.Fpdf, headers []string, widths []float64) {
 }
 
 func parseProjectData(detail string) (string, string) {
-	idx := strings.Index(detail, "|scan:")
+	idx := strings.Index(detail, pdfScanDelimiter)
 	if idx < 0 {
 		return detail, ""
 	}
@@ -1506,8 +1512,8 @@ func parseProjectDetailMarkers(detail string) (cloudKey, scan, ncdFallback, sync
 		cloudKey = cloudKey[:idx]
 	}
 	// scan marker.
-	if idx := strings.Index(cloudKey, "|scan:"); idx >= 0 {
-		scan = cloudKey[idx+len("|scan:"):]
+	if idx := strings.Index(cloudKey, pdfScanDelimiter); idx >= 0 {
+		scan = cloudKey[idx+len(pdfScanDelimiter):]
 		cloudKey = cloudKey[:idx]
 	}
 	// NCD fallback marker.
@@ -1774,8 +1780,8 @@ func renderRunMetadata(pdf *fpdf.Fpdf, summary *MigrationSummary) {
 	renderSectionHeading(pdf, "Run metadata")
 
 	rows := [][]string{
-		{"Started", summary.StartedAt.Format("2006-01-02 15:04:05")},
-		{"Completed", summary.CompletedAt.Format("2006-01-02 15:04:05")},
+		{"Started", summary.StartedAt.Format(dateTimeLayout)},
+		{"Completed", summary.CompletedAt.Format(dateTimeLayout)},
 		{"Total elapsed", formatDuration(summary.TotalElapsed)},
 		{"Overall status", summary.OverallStatus},
 	}
