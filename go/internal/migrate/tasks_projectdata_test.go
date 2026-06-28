@@ -299,6 +299,65 @@ func TestEnsureFileSourcesPresent(t *testing.T) {
 	}
 }
 
+// #410 — real per-line SCM blame must be applied to NON-MAIN branches, not
+// just main. The extract captures SCM per branch (getProjectSCMData carries a
+// branch field); buildBranchReport must load it for the branch being migrated
+// and build real changesets (author/date/revision) rather than the synthetic
+// fallback. This locks in the report-build side (the CE rendering is separate).
+func TestNonMainBranchGetsRealSCMChangesets(t *testing.T) {
+	dir := t.TempDir()
+	extractDir := filepath.Join(dir, "extract-01")
+	writeJSON(filepath.Join(extractDir, "extract.json"),
+		map[string]any{"url": testServerURL, "edition": "enterprise"})
+	// A file on the develop (non-main) branch with source + real blame.
+	writeJSONL(filepath.Join(extractDir, "getProjectComponentTree"), []map[string]any{
+		{"key": "proj1:src/App.java", "name": "App.java", "path": "src/App.java",
+			"language": "java", "lines": 3, "projectKey": "proj1", "branch": "develop",
+			"serverUrl": testServerURL},
+	})
+	writeJSONL(filepath.Join(extractDir, "getProjectSourceCode"), []map[string]any{
+		{"key": "proj1:src/App.java", "branch": "develop", "projectKey": "proj1",
+			"source": "a\nb\nc", "serverUrl": testServerURL},
+	})
+	writeJSONL(filepath.Join(extractDir, "getProjectSCMData"), []map[string]any{
+		{"key": "proj1:src/App.java", "branch": "develop", "projectKey": "proj1",
+			"serverUrl": testServerURL,
+			"scm": [][]any{
+				{1, "alice@example.com", "2024-01-01T00:00:00+0000", "rev1"},
+				{2, "bob@example.com", "2024-02-01T00:00:00+0000", "rev2"},
+				{3, "alice@example.com", "2024-01-01T00:00:00+0000", "rev1"},
+			}},
+	})
+
+	e := newProjectDataExecutor(t, dir)
+	comps := loadExtractedComponents(e, testServerURL, "proj1", "develop")
+	srcs := loadExtractedSources(e, testServerURL, "proj1", "develop")
+	scm := loadExtractedSCM(e, testServerURL, "proj1", "develop")
+	if len(scm) == 0 {
+		t.Fatal("expected SCM blame loaded for non-main branch 'develop', got none")
+	}
+
+	_, _, cr := scanreport.BuildComponents("cloud", comps)
+	pbSrc := map[int32]string{}
+	for _, s := range srcs {
+		if ref, ok := cr.Refs()[s.Component]; ok && s.Source != "" {
+			pbSrc[ref] = s.Source
+		}
+	}
+	cs := buildChangesetMap(cr, comps, pbSrc, scm, time.Unix(1700000000, 0))
+	got := cs[cr.Refs()["proj1:src/App.java"]]
+	if got == nil {
+		t.Fatal("no changeset built for App.java on develop")
+	}
+	authors := map[string]bool{}
+	for _, ch := range got.GetChangeset() {
+		authors[ch.GetAuthor()] = true
+	}
+	if !authors["alice@example.com"] || !authors["bob@example.com"] {
+		t.Errorf("non-main branch must carry real SCM blame authors, got %v", authors)
+	}
+}
+
 // --- Data loading function tests (require extract dir setup) ---
 
 func setupProjectDataExtract(t *testing.T, dir string) {
