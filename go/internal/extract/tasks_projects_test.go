@@ -109,6 +109,27 @@ func TestExtractTagsArray(t *testing.T) {
 	}
 }
 
+// newGetProjectsEnv builds the standard Executor for getProjects tests wired to
+// srv, with an in-memory store and stderr logger. def is the getProjects task.
+func newGetProjectsEnv(t *testing.T, srv *httptest.Server) (*Executor, *TaskDef) {
+	t.Helper()
+	dir := t.TempDir()
+	store := NewDataStore(dir)
+	raw := common.NewRawClient(srv.Client(), srv.URL+"/")
+	e := &Executor{
+		Raw:       raw,
+		Store:     store,
+		ServerURL: srv.URL + "/",
+		Logger:    slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Sem:       make(chan struct{}, 1),
+	}
+	def := projectTasks()[0]
+	if def.Name != "getProjects" {
+		t.Fatalf("expected getProjects task, got %s", def.Name)
+	}
+	return e, &def
+}
+
 // TestGetProjectsTaskNoFilter verifies that getProjects sends no `projects`
 // query param when ProjectKeys is empty (full extract).
 func TestGetProjectsTaskNoFilter(t *testing.T) {
@@ -122,20 +143,7 @@ func TestGetProjectsTaskNoFilter(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	dir := t.TempDir()
-	store := NewDataStore(dir)
-	raw := common.NewRawClient(srv.Client(), srv.URL+"/")
-	e := &Executor{
-		Raw:   raw, Store: store,
-		ServerURL: srv.URL + "/",
-		Logger:    slog.New(slog.NewTextHandler(os.Stderr, nil)),
-		Sem:       make(chan struct{}, 1),
-	}
-
-	def := projectTasks()[0] // getProjects is first in the list
-	if def.Name != "getProjects" {
-		t.Fatalf("expected getProjects task, got %s", def.Name)
-	}
+	e, def := newGetProjectsEnv(t, srv)
 	if err := def.Run(context.Background(), e); err != nil {
 		t.Fatalf("getProjects: %v", err)
 	}
@@ -157,21 +165,8 @@ func TestGetProjectsTaskWithFilter(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	dir := t.TempDir()
-	store := NewDataStore(dir)
-	raw := common.NewRawClient(srv.Client(), srv.URL+"/")
-	e := &Executor{
-		Raw:         raw, Store: store,
-		ServerURL:   srv.URL + "/",
-		ProjectKeys: []string{"proj-a", "proj-b"},
-		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
-		Sem:         make(chan struct{}, 1),
-	}
-
-	def := projectTasks()[0]
-	if def.Name != "getProjects" {
-		t.Fatalf("expected getProjects task, got %s", def.Name)
-	}
+	e, def := newGetProjectsEnv(t, srv)
+	e.ProjectKeys = []string{"proj-a", "proj-b"}
 	if err := def.Run(context.Background(), e); err != nil {
 		t.Fatalf("getProjects: %v", err)
 	}
