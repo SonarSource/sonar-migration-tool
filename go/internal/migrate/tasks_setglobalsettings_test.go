@@ -284,10 +284,7 @@ func TestRunSetGlobalSettingsUsesProjectScopeOnlyReasonWhenKeyAtProjectScope(t *
 	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
 		{"key": "sonar.java.file.suffixes", "type": "STRING", "multiValues": false, "defaultValue": ".java"},
 	})
-	writeExtractMetaJSON(t, e.ExportDir, "extract-01", testServerURL)
-	writeTaskJSONL(t, e, "generateOrganizationMappings", []map[string]any{
-		{"sonarcloud_org_key": "org1"},
-	})
+	writeGlobalSettingsOrg(t, e)
 	// createProjects record so loadProjectScopedSettingDefinitionsForOrgs
 	// has a probe project to query SQC with component=.
 	pw, _ := e.Store.Writer("createProjects")
@@ -384,10 +381,7 @@ func TestRunSetGlobalSettingsFallsBackToProjectsOnOrgLevelRejection(t *testing.T
 	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
 		{"key": "sonar.coverage.jacoco.xmlReportPaths", "type": "STRING", "multiValues": true, "defaultValue": ""},
 	})
-	writeExtractMetaJSON(t, e.ExportDir, "extract-01", testServerURL)
-	writeTaskJSONL(t, e, "generateOrganizationMappings", []map[string]any{
-		{"sonarcloud_org_key": "org1"},
-	})
+	writeGlobalSettingsOrg(t, e)
 	// Two projects in the org — both should receive the fan-out call.
 	pw, _ := e.Store.Writer("createProjects")
 	for _, key := range []string{"projA", "projB"} {
@@ -579,10 +573,7 @@ func TestRunSetGlobalSettingsFanOutSkipsPerProjectOverrides(t *testing.T) {
 	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
 		{"key": "sonar.coverage.jacoco.xmlReportPaths", "type": "STRING", "multiValues": true, "defaultValue": ""},
 	})
-	writeExtractMetaJSON(t, e.ExportDir, "extract-01", testServerURL)
-	writeTaskJSONL(t, e, "generateOrganizationMappings", []map[string]any{
-		{"sonarcloud_org_key": "org1"},
-	})
+	writeGlobalSettingsOrg(t, e)
 	pw, _ := e.Store.Writer("createProjects")
 	for _, key := range []string{"projA", "projB"} {
 		b, _ := json.Marshal(map[string]any{
@@ -663,10 +654,7 @@ func TestRunSetGlobalSettingsFanOutRetriesIndexingNotFound(t *testing.T) {
 	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
 		{"key": "sonar.coverage.jacoco.xmlReportPaths", "type": "STRING", "multiValues": true, "defaultValue": ""},
 	})
-	writeExtractMetaJSON(t, e.ExportDir, "extract-01", testServerURL)
-	writeTaskJSONL(t, e, "generateOrganizationMappings", []map[string]any{
-		{"sonarcloud_org_key": "org1"},
-	})
+	writeGlobalSettingsOrg(t, e)
 	pw, _ := e.Store.Writer("createProjects")
 	for _, key := range []string{"projA", "projB"} {
 		b, _ := json.Marshal(map[string]any{
@@ -941,10 +929,7 @@ func TestRunSetGlobalSettingsFanOutAllFailedRendersAsFailed(t *testing.T) {
 	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
 		{"key": "sonar.html.file.suffixes", "type": "STRING", "multiValues": true, "defaultValue": ""},
 	})
-	writeExtractMetaJSON(t, e.ExportDir, "extract-01", testServerURL)
-	writeTaskJSONL(t, e, "generateOrganizationMappings", []map[string]any{
-		{"sonarcloud_org_key": "org1"},
-	})
+	writeGlobalSettingsOrg(t, e)
 	pw, _ := e.Store.Writer("createProjects")
 	for _, key := range []string{"projA", "projB"} {
 		b, _ := json.Marshal(map[string]any{
@@ -1021,10 +1006,7 @@ func TestRunSetGlobalSettingsFanOutPartialRendersAsPartial(t *testing.T) {
 	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
 		{"key": "sonar.html.file.suffixes", "type": "STRING", "multiValues": true, "defaultValue": ""},
 	})
-	writeExtractMetaJSON(t, e.ExportDir, "extract-01", testServerURL)
-	writeTaskJSONL(t, e, "generateOrganizationMappings", []map[string]any{
-		{"sonarcloud_org_key": "org1"},
-	})
+	writeGlobalSettingsOrg(t, e)
 	pw, _ := e.Store.Writer("createProjects")
 	for _, key := range []string{"projA", "projB"} {
 		b, _ := json.Marshal(map[string]any{

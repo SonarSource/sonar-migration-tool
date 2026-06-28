@@ -56,9 +56,7 @@ func runSetGlobalNCDTest(t *testing.T, ncd map[string]any, orgs []map[string]any
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"organizations": out})
 	})
-	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{})
-	})
+	addDefaultCloudHandler(cloudMux)
 	cloudSrv := httptest.NewServer(cloudMux)
 	t.Cleanup(cloudSrv.Close)
 
@@ -175,9 +173,7 @@ func TestRunSetGlobalNewCodePeriodEmitsReportRecord(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"organizations": out})
 	})
-	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{})
-	})
+	addDefaultCloudHandler(cloudMux)
 	cloudSrv := httptest.NewServer(cloudMux)
 	defer cloudSrv.Close()
 
@@ -341,9 +337,7 @@ func TestRunSetNewCodePeriodsTranslatesAndSets(t *testing.T) {
 		mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	})
-	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{})
-	})
+	addDefaultCloudHandler(cloudMux)
 	cloudSrv := httptest.NewServer(cloudMux)
 	defer cloudSrv.Close()
 

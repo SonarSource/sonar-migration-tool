@@ -553,6 +553,30 @@ func newCustomCloudTest(t *testing.T, cloudMux *http.ServeMux) *Executor {
 	return newTestExecutor(cloudSrv, apiSrv, dir)
 }
 
+// newAlreadyExistsTest is like newCreateTest but uses newAlreadyExistsCloudServer
+// instead of newMockCloudServer — covering the already-exists idempotency paths.
+func newAlreadyExistsTest(t *testing.T) (*Executor, string) {
+	t.Helper()
+	cloudSrv := newAlreadyExistsCloudServer()
+	t.Cleanup(cloudSrv.Close)
+	apiSrv := newMockAPIServer()
+	t.Cleanup(apiSrv.Close)
+	dir := t.TempDir()
+	setupExtractData(dir)
+	return newTestExecutor(cloudSrv, apiSrv, dir), dir
+}
+
+// writeGlobalSettingsOrg writes the shared boilerplate needed by custom
+// setGlobalSettings tests: the extract.json metadata for extract-01 and a
+// single generateOrganizationMappings row for org1.
+func writeGlobalSettingsOrg(t *testing.T, e *Executor) {
+	t.Helper()
+	writeExtractMetaJSON(t, e.ExportDir, "extract-01", testServerURL)
+	writeTaskJSONL(t, e, "generateOrganizationMappings", []map[string]any{
+		{"sonarcloud_org_key": "org1"},
+	})
+}
+
 // newDeleteTest wires a test environment for delete/reset tasks: mock servers,
 // extract data, an Executor, and a pre-seeded generateOrganizationMappings row
 // for testCloudOrg. Servers are closed via t.Cleanup.

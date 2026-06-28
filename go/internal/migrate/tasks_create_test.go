@@ -216,30 +216,28 @@ func TestGetOrgRepos(t *testing.T) {
 	runCreateTask(t, "generateOrganizationMappings", "getOrgRepos")
 }
 
+// runAlreadyExistsTask is like runCreateTask but uses the already-exists cloud
+// server — covering re-run idempotency paths where resources already exist.
+func runAlreadyExistsTask(t *testing.T, mappingTask, createTask string) []json.RawMessage {
+	t.Helper()
+	e, dir := newAlreadyExistsTest(t)
+	setupCSVs(t, dir)
+	runTask(t, e, mappingTask)
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg[createTask].Run(context.Background(), e); err != nil {
+		t.Fatalf("%s: %v", createTask, err)
+	}
+	items, _ := e.Store.ReadAll(createTask)
+	if len(items) == 0 {
+		t.Fatalf("expected %s output on re-run", createTask)
+	}
+	return items
+}
+
 // --- Already-exists idempotency tests ---
 
 func TestCreateProjects_AlreadyExists(t *testing.T) {
-	cloudSrv := newAlreadyExistsCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-
-	setupCSVs(t, dir)
-	runTask(t, e, "generateProjectMappings")
-
-	reg := BuildMigrateRegistry(RegisterAll())
-	err := reg["createProjects"].Run(context.Background(), e)
-	if err != nil {
-		t.Fatalf("createProjects: %v", err)
-	}
-
-	items, _ := e.Store.ReadAll("createProjects")
-	if len(items) == 0 {
-		t.Fatal("expected createProjects output on re-run")
-	}
+	items := runAlreadyExistsTask(t, "generateProjectMappings", "createProjects")
 	key := extractField(items[0], "cloud_project_key")
 	if key == "" {
 		t.Error("expected cloud_project_key to be set from derived key")
@@ -298,113 +296,29 @@ func TestCreateProjects_AlreadyExistsInDifferentOrg(t *testing.T) {
 }
 
 func TestCreateProfiles_AlreadyExists(t *testing.T) {
-	cloudSrv := newAlreadyExistsCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-
-	setupCSVs(t, dir)
-	runTask(t, e, "generateProfileMappings")
-
-	reg := BuildMigrateRegistry(RegisterAll())
-	err := reg["createProfiles"].Run(context.Background(), e)
-	if err != nil {
-		t.Fatalf("createProfiles: %v", err)
-	}
-
-	items, _ := e.Store.ReadAll("createProfiles")
-	if len(items) == 0 {
-		t.Fatal("expected createProfiles output on re-run")
-	}
-	profKey := extractField(items[0], "cloud_profile_key")
-	if profKey != "existing-prof-key" {
+	items := runAlreadyExistsTask(t, "generateProfileMappings", "createProfiles")
+	if profKey := extractField(items[0], "cloud_profile_key"); profKey != "existing-prof-key" {
 		t.Errorf("expected existing-prof-key, got %q", profKey)
 	}
 }
 
 func TestCreateGates_AlreadyExists(t *testing.T) {
-	cloudSrv := newAlreadyExistsCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-
-	setupCSVs(t, dir)
-	runTask(t, e, "generateGateMappings")
-
-	reg := BuildMigrateRegistry(RegisterAll())
-	err := reg["createGates"].Run(context.Background(), e)
-	if err != nil {
-		t.Fatalf("createGates: %v", err)
-	}
-
-	items, _ := e.Store.ReadAll("createGates")
-	if len(items) == 0 {
-		t.Fatal("expected createGates output on re-run")
-	}
-	gateID := extractField(items[0], "cloud_gate_id")
-	if gateID != "99" {
+	items := runAlreadyExistsTask(t, "generateGateMappings", "createGates")
+	if gateID := extractField(items[0], "cloud_gate_id"); gateID != "99" {
 		t.Errorf("expected gate ID 99, got %q", gateID)
 	}
 }
 
 func TestCreateGroups_AlreadyExists(t *testing.T) {
-	cloudSrv := newAlreadyExistsCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-
-	setupCSVs(t, dir)
-	runTask(t, e, "generateGroupMappings")
-
-	reg := BuildMigrateRegistry(RegisterAll())
-	err := reg["createGroups"].Run(context.Background(), e)
-	if err != nil {
-		t.Fatalf("createGroups: %v", err)
-	}
-
-	items, _ := e.Store.ReadAll("createGroups")
-	if len(items) == 0 {
-		t.Fatal("expected createGroups output on re-run")
-	}
-	groupID := extractField(items[0], "cloud_group_id")
-	if groupID != "77" {
+	items := runAlreadyExistsTask(t, "generateGroupMappings", "createGroups")
+	if groupID := extractField(items[0], "cloud_group_id"); groupID != "77" {
 		t.Errorf("expected group ID 77, got %q", groupID)
 	}
 }
 
 func TestCreatePermissionTemplates_AlreadyExists(t *testing.T) {
-	cloudSrv := newAlreadyExistsCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-
-	setupCSVs(t, dir)
-	runTask(t, e, "generateTemplateMappings")
-
-	reg := BuildMigrateRegistry(RegisterAll())
-	err := reg["createPermissionTemplates"].Run(context.Background(), e)
-	if err != nil {
-		t.Fatalf("createPermissionTemplates: %v", err)
-	}
-
-	items, _ := e.Store.ReadAll("createPermissionTemplates")
-	if len(items) == 0 {
-		t.Fatal("expected createPermissionTemplates output on re-run")
-	}
-	tplID := extractField(items[0], "cloud_template_id")
-	if tplID != "existing-tpl-id" {
+	items := runAlreadyExistsTask(t, "generateTemplateMappings", "createPermissionTemplates")
+	if tplID := extractField(items[0], "cloud_template_id"); tplID != "existing-tpl-id" {
 		t.Errorf("expected existing-tpl-id, got %q", tplID)
 	}
 }

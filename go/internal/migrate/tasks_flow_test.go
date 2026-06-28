@@ -367,16 +367,8 @@ func TestGrantMigrationUserProjectPermissions(t *testing.T) {
 		mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	})
-	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{})
-	})
-	cloudSrv := httptest.NewServer(cloudMux)
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	addDefaultCloudHandler(cloudMux)
+	e := newCustomCloudTest(t, cloudMux)
 	// getMigrationUser → login.
 	uw, _ := e.Store.Writer("getMigrationUser")
 	uw.WriteOne([]byte(`{"login":"migration-bot","name":"Migration Bot"}`))

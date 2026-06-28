@@ -95,21 +95,24 @@ func TestLookupMetricReplacement(t *testing.T) {
 	}
 }
 
-// TestAddGateConditionsAppliesMetricMapping exercises the end-to-end path:
-// source conditions on mapped/unmapped/dropped metrics, asserting the
-// CreateCondition payloads (metric + op + threshold) the migrator actually
-// sends to SQC.
-func TestAddGateConditionsAppliesMetricMapping(t *testing.T) {
-	type call struct{ metric, op, errVal string }
+// conditionCall captures a single POST /api/qualitygates/create_condition
+// request for assertion.
+type conditionCall struct{ metric, op, errVal string }
+
+// mountCreateConditionCapture installs a create_condition handler that records
+// every call into the returned slice (guarded by the returned mutex), and
+// returns a fresh Executor wired to that mux.
+func mountCreateConditionCapture(t *testing.T) (*Executor, *sync.Mutex, *[]conditionCall) {
+	t.Helper()
 	var (
 		mu       sync.Mutex
-		recorded []call
+		recorded []conditionCall
 	)
 	cloudMux := http.NewServeMux()
 	cloudMux.HandleFunc("POST /api/qualitygates/create_condition", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		mu.Lock()
-		recorded = append(recorded, call{
+		recorded = append(recorded, conditionCall{
 			metric: r.FormValue("metric"),
 			op:     r.FormValue("op"),
 			errVal: r.FormValue("error"),
@@ -118,7 +121,11 @@ func TestAddGateConditionsAppliesMetricMapping(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(types.QualityGateCondition{ID: 1, Metric: r.FormValue("metric")})
 	})
 	addDefaultCloudHandler(cloudMux)
-	e := newCustomCloudTest(t, cloudMux)
+	return newCustomCloudTest(t, cloudMux), &mu, &recorded
+}
+
+func TestAddGateConditionsAppliesMetricMapping(t *testing.T) {
+	e, mu, recPtr := mountCreateConditionCapture(t)
 
 	// Mix of source metrics:
 	//  - coverage (unmapped, pass-through, preserves source op/error)
@@ -147,6 +154,7 @@ func TestAddGateConditionsAppliesMetricMapping(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
+	recorded := *recPtr
 
 	// Expected: 1 (coverage, LT 80) + 1 (new_security_rating, inherited GT 1)
 	//         + 2 (security_rating GT 4, reliability_rating GT 4)
@@ -155,7 +163,7 @@ func TestAddGateConditionsAppliesMetricMapping(t *testing.T) {
 		t.Fatalf("expected 4 create_condition calls, got %d: %+v", len(recorded), recorded)
 	}
 
-	want := map[string]call{
+	want := map[string]conditionCall{
 		"coverage":            {metric: "coverage", op: "LT", errVal: "80"},
 		"new_security_rating": {metric: "new_security_rating", op: "GT", errVal: "1"},
 		"security_rating":     {metric: "security_rating", op: "GT", errVal: "4"},
@@ -249,25 +257,7 @@ func TestIsObviousMetricRemap(t *testing.T) {
 //   - security_rating GT 2     (medium beats blocker)
 //   - reliability_rating GT 2  (direct == medium, ties — first wins; same value)
 func TestAddGateConditionsCollapsesCollisions(t *testing.T) {
-	type call struct{ metric, op, errVal string }
-	var (
-		mu       sync.Mutex
-		recorded []call
-	)
-	cloudMux := http.NewServeMux()
-	cloudMux.HandleFunc("POST /api/qualitygates/create_condition", func(w http.ResponseWriter, r *http.Request) {
-		_ = r.ParseForm()
-		mu.Lock()
-		recorded = append(recorded, call{
-			metric: r.FormValue("metric"),
-			op:     r.FormValue("op"),
-			errVal: r.FormValue("error"),
-		})
-		mu.Unlock()
-		_ = json.NewEncoder(w).Encode(types.QualityGateCondition{ID: 1, Metric: r.FormValue("metric")})
-	})
-	addDefaultCloudHandler(cloudMux)
-	e := newCustomCloudTest(t, cloudMux)
+	e, mu, recPtr := mountCreateConditionCapture(t)
 
 	w, _ := e.Store.Writer("getGateConditions")
 	payload := map[string]any{
@@ -290,11 +280,12 @@ func TestAddGateConditionsCollapsesCollisions(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
+	recorded := *recPtr
 
 	if len(recorded) != 2 {
 		t.Fatalf("expected 2 create_condition calls after collapse, got %d: %+v", len(recorded), recorded)
 	}
-	want := map[string]call{
+	want := map[string]conditionCall{
 		"security_rating":    {metric: "security_rating", op: "GT", errVal: "2"},
 		"reliability_rating": {metric: "reliability_rating", op: "GT", errVal: "2"},
 	}
