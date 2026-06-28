@@ -14,6 +14,22 @@ import (
 	"testing"
 )
 
+// newFlowTest creates a complete test environment: mock servers, extract
+// data, and an Executor pre-loaded with the standard create* outputs.
+// The servers are closed automatically via t.Cleanup.
+func newFlowTest(t *testing.T) *Executor {
+	t.Helper()
+	cloudSrv := newMockCloudServer()
+	t.Cleanup(cloudSrv.Close)
+	apiSrv := newMockAPIServer()
+	t.Cleanup(apiSrv.Close)
+	dir := t.TempDir()
+	setupExtractData(dir)
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	setupCreateOutputs(t, e)
+	return e
+}
+
 // setupCreateOutputs populates the Store with mock createX outputs
 // that downstream tasks depend on.
 func setupCreateOutputs(t *testing.T, e *Executor) {
@@ -74,14 +90,7 @@ func setupCreateOutputs(t *testing.T, e *Executor) {
 }
 
 func TestSetProfileParent(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	setupCreateOutputs(t, e)
+	e := newFlowTest(t)
 
 	reg := BuildMigrateRegistry(RegisterAll())
 	err := reg["setProfileParent"].Run(context.Background(), e)
@@ -91,14 +100,7 @@ func TestSetProfileParent(t *testing.T) {
 }
 
 func TestSetDefaultProfiles(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	setupCreateOutputs(t, e)
+	e := newFlowTest(t)
 
 	// restoreProfiles is a dependency — stub it.
 	w, _ := e.Store.Writer("restoreProfiles")
@@ -112,14 +114,7 @@ func TestSetDefaultProfiles(t *testing.T) {
 }
 
 func TestSetDefaultGates(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	setupCreateOutputs(t, e)
+	e := newFlowTest(t)
 
 	// addGateConditions dependency.
 	w, _ := e.Store.Writer("addGateConditions")
@@ -133,14 +128,7 @@ func TestSetDefaultGates(t *testing.T) {
 }
 
 func TestSetDefaultTemplates(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	setupCreateOutputs(t, e)
+	e := newFlowTest(t)
 
 	reg := BuildMigrateRegistry(RegisterAll())
 	err := reg["setDefaultTemplates"].Run(context.Background(), e)
@@ -150,14 +138,7 @@ func TestSetDefaultTemplates(t *testing.T) {
 }
 
 func TestAddGateConditions(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	setupCreateOutputs(t, e)
+	e := newFlowTest(t)
 
 	// getGateConditions dependency — write mock data with conditions.
 	w, _ := e.Store.Writer("getGateConditions")
@@ -172,14 +153,7 @@ func TestAddGateConditions(t *testing.T) {
 }
 
 func TestRestoreProfiles(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	setupCreateOutputs(t, e)
+	e := newFlowTest(t)
 
 	// setProfileParent dependency.
 	w, _ := e.Store.Writer("setProfileParent")
@@ -198,14 +172,7 @@ func TestRestoreProfiles(t *testing.T) {
 }
 
 func TestSetProjectProfiles(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	setupCreateOutputs(t, e)
+	e := newFlowTest(t)
 
 	reg := BuildMigrateRegistry(RegisterAll())
 	err := reg["setProjectProfiles"].Run(context.Background(), e)
@@ -318,14 +285,7 @@ func TestSetProjectProfilesUsesExplicitAssignmentsOnly(t *testing.T) {
 }
 
 func TestSetProjectGates(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	setupCreateOutputs(t, e)
+	e := newFlowTest(t)
 
 	reg := BuildMigrateRegistry(RegisterAll())
 	err := reg["setProjectGates"].Run(context.Background(), e)
@@ -335,14 +295,7 @@ func TestSetProjectGates(t *testing.T) {
 }
 
 func TestSetProjectGroupPermissions(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	setupCreateOutputs(t, e)
+	e := newFlowTest(t)
 
 	reg := BuildMigrateRegistry(RegisterAll())
 	err := reg["setProjectGroupPermissions"].Run(context.Background(), e)
@@ -352,14 +305,7 @@ func TestSetProjectGroupPermissions(t *testing.T) {
 }
 
 func TestSetProjectSettings(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	setupCreateOutputs(t, e)
+	e := newFlowTest(t)
 
 	reg := BuildMigrateRegistry(RegisterAll())
 	err := reg["setProjectSettings"].Run(context.Background(), e)
@@ -369,14 +315,7 @@ func TestSetProjectSettings(t *testing.T) {
 }
 
 func TestSetProjectTags(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	setupCreateOutputs(t, e)
+	e := newFlowTest(t)
 
 	reg := BuildMigrateRegistry(RegisterAll())
 	err := reg["setProjectTags"].Run(context.Background(), e)
@@ -386,14 +325,7 @@ func TestSetProjectTags(t *testing.T) {
 }
 
 func TestCreateMigrationGroups(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	setupCreateOutputs(t, e)
+	e := newFlowTest(t)
 
 	reg := BuildMigrateRegistry(RegisterAll())
 	err := reg["createMigrationGroups"].Run(context.Background(), e)
@@ -538,14 +470,7 @@ func TestGrantMigrationUserIsAPrerequisiteForPerProjectTasks(t *testing.T) {
 }
 
 func TestAddMigrationUserToGroups(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	setupCreateOutputs(t, e)
+	e := newFlowTest(t)
 
 	reg := BuildMigrateRegistry(RegisterAll())
 	err := reg["addMigrationUserToMigrationGroups"].Run(context.Background(), e)
@@ -555,14 +480,7 @@ func TestAddMigrationUserToGroups(t *testing.T) {
 }
 
 func TestAddMigrationGroupToTemplates(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	setupCreateOutputs(t, e)
+	e := newFlowTest(t)
 
 	reg := BuildMigrateRegistry(RegisterAll())
 	err := reg["addMigrationGroupToTemplates"].Run(context.Background(), e)
@@ -572,14 +490,7 @@ func TestAddMigrationGroupToTemplates(t *testing.T) {
 }
 
 func TestSetOrgGroupPermissions(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	setupCreateOutputs(t, e)
+	e := newFlowTest(t)
 
 	reg := BuildMigrateRegistry(RegisterAll())
 	err := reg["setOrgGroupPermissions"].Run(context.Background(), e)
@@ -589,14 +500,7 @@ func TestSetOrgGroupPermissions(t *testing.T) {
 }
 
 func TestSetProfileGroupPermissions(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	setupCreateOutputs(t, e)
+	e := newFlowTest(t)
 
 	reg := BuildMigrateRegistry(RegisterAll())
 	err := reg["setProfileGroupPermissions"].Run(context.Background(), e)
@@ -606,14 +510,7 @@ func TestSetProfileGroupPermissions(t *testing.T) {
 }
 
 func TestUpdateRuleTags(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	setupCreateOutputs(t, e)
+	e := newFlowTest(t)
 
 	reg := BuildMigrateRegistry(RegisterAll())
 	err := reg["updateRuleTags"].Run(context.Background(), e)
@@ -628,14 +525,7 @@ func TestUpdateRuleTags(t *testing.T) {
 }
 
 func TestUpdateRuleDescriptions(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	setupCreateOutputs(t, e)
+	e := newFlowTest(t)
 
 	reg := BuildMigrateRegistry(RegisterAll())
 	err := reg["updateRuleDescriptions"].Run(context.Background(), e)
@@ -743,14 +633,7 @@ func TestApplyOrgPermissions(t *testing.T) {
 }
 
 func TestDeleteTasks(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	setupCreateOutputs(t, e)
+	e := newFlowTest(t)
 
 	// getCreatedProjects dependency for deleteProjects.
 	w, _ := e.Store.Writer("getCreatedProjects")
@@ -804,14 +687,7 @@ func TestDeletePortfolios(t *testing.T) {
 }
 
 func TestMatchProjectReposAndBind(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	setupCreateOutputs(t, e)
+	e := newFlowTest(t)
 
 	// getProjectIds dependency.
 	writeItem := func(task string, data map[string]any) {
@@ -852,14 +728,7 @@ func TestMatchProjectReposAndBind(t *testing.T) {
 }
 
 func TestSetPortfolioProjects(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	setupCreateOutputs(t, e)
+	e := newFlowTest(t)
 
 	// createPortfolios dependency.
 	w, _ := e.Store.Writer("createPortfolios")

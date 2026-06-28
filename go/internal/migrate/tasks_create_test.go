@@ -17,14 +17,22 @@ import (
 	"testing"
 )
 
-func TestCreateProjects(t *testing.T) {
+// newCreateTest creates a complete test environment for create-task tests:
+// mock servers, extract data, and a fresh Executor. The servers are closed
+// via t.Cleanup. Returns the executor and its export directory.
+func newCreateTest(t *testing.T) (*Executor, string) {
+	t.Helper()
 	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
+	t.Cleanup(cloudSrv.Close)
 	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
+	t.Cleanup(apiSrv.Close)
 	dir := t.TempDir()
 	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	return newTestExecutor(cloudSrv, apiSrv, dir), dir
+}
+
+func TestCreateProjects(t *testing.T) {
+	e, dir := newCreateTest(t)
 
 	// Run setup task first.
 	setupCSVs(t, dir)
@@ -49,13 +57,7 @@ func TestCreateProjects(t *testing.T) {
 }
 
 func TestCreateProfiles(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	e, dir := newCreateTest(t)
 
 	setupCSVs(t, dir)
 	runTask(t, e, "generateProfileMappings")
@@ -77,13 +79,7 @@ func TestCreateProfiles(t *testing.T) {
 }
 
 func TestCreateGates(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	e, dir := newCreateTest(t)
 
 	setupCSVs(t, dir)
 	runTask(t, e, "generateGateMappings")
@@ -105,13 +101,7 @@ func TestCreateGates(t *testing.T) {
 }
 
 func TestCreateGroups(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	e, dir := newCreateTest(t)
 
 	setupCSVs(t, dir)
 	runTask(t, e, "generateGroupMappings")
@@ -129,13 +119,7 @@ func TestCreateGroups(t *testing.T) {
 }
 
 func TestCreatePermissionTemplates(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	e, dir := newCreateTest(t)
 
 	setupCSVs(t, dir)
 	runTask(t, e, "generateTemplateMappings")
@@ -157,13 +141,7 @@ func TestCreatePermissionTemplates(t *testing.T) {
 }
 
 func TestCreatePortfolios(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	e, dir := newCreateTest(t)
 
 	setupCSVs(t, dir)
 	runTask(t, e, "generatePortfolioMappings")
@@ -262,13 +240,7 @@ func TestCreatePortfoliosReusesExisting(t *testing.T) {
 }
 
 func TestGetMigrationUser(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	e, dir := newCreateTest(t)
 
 	setupCSVs(t, dir)
 	runTask(t, e, "generateOrganizationMappings")
@@ -290,13 +262,7 @@ func TestGetMigrationUser(t *testing.T) {
 }
 
 func TestGetEnterprises(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	e, dir := newCreateTest(t)
 
 	setupCSVs(t, dir)
 	runTask(t, e, "generateOrganizationMappings")
@@ -314,13 +280,7 @@ func TestGetEnterprises(t *testing.T) {
 }
 
 func TestGetProjectIds(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	e, _ := newCreateTest(t)
 
 	// Write createProjects dependency.
 	w, _ := e.Store.Writer("createProjects")
@@ -339,13 +299,7 @@ func TestGetProjectIds(t *testing.T) {
 }
 
 func TestGetOrgRepos(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	e, dir := newCreateTest(t)
 
 	setupCSVs(t, dir)
 	runTask(t, e, "generateOrganizationMappings")

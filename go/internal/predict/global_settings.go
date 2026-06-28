@@ -396,21 +396,30 @@ func predictedAiCodeFixOutcome(org string, row migrate.AiCodeFixRowOutcome) map[
 	}
 }
 
-// jsonStringField pulls a top-level string field out of a JSON object
-// blob without allocating a full map per call. Returns "" when missing
-// or non-string.
-func jsonStringField(raw json.RawMessage, key string) string {
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return ""
+// jsonStringField extracts a top-level string field from a JSON object.
+// Alias of common.ExtractField so the implementation lives in one place.
+var jsonStringField = common.ExtractField
+
+// jsonBoolField extracts a top-level bool field from a JSON object.
+// Alias of common.ExtractBool so the implementation lives in one place.
+var jsonBoolField = common.ExtractBool
+
+// projID identifies a project by its originating server URL and source key.
+// Used as a map key when joining extract items back to createProjects rows.
+type projID struct{ serverURL, sourceKey string }
+
+// buildCloudByProject indexes a slice of createProjects JSONL rows into a
+// (serverURL, sourceKey) → cloud_project_key map for O(1) lookup.
+func buildCloudByProject(projects []json.RawMessage) map[projID]string {
+	out := make(map[projID]string, len(projects))
+	for _, p := range projects {
+		sourceKey := jsonStringField(p, "key")
+		serverURL := jsonStringField(p, "server_url")
+		cloudKey := jsonStringField(p, "cloud_project_key")
+		if cloudKey == "" || sourceKey == "" {
+			continue
+		}
+		out[projID{serverURL, sourceKey}] = cloudKey
 	}
-	v, ok := obj[key]
-	if !ok {
-		return ""
-	}
-	var s string
-	if err := json.Unmarshal(v, &s); err != nil {
-		return ""
-	}
-	return s
+	return out
 }

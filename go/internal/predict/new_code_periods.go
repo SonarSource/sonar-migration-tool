@@ -50,17 +50,7 @@ func synthesizeSetNewCodePeriods(exportDir, runDir string, extractMapping struct
 	}
 
 	// Index (server_url, source key) → cloud_project_key.
-	type projID struct{ serverURL, sourceKey string }
-	cloudByProject := make(map[projID]string, len(projects))
-	for _, p := range projects {
-		sourceKey := jsonStringField(p, "key")
-		serverURL := jsonStringField(p, "server_url")
-		cloudKey := jsonStringField(p, "cloud_project_key")
-		if cloudKey == "" || sourceKey == "" {
-			continue
-		}
-		cloudByProject[projID{serverURL, sourceKey}] = cloudKey
-	}
+	cloudByProject := buildCloudByProject(projects)
 
 	w, err := store.Writer("setNewCodePeriods")
 	if err != nil {
@@ -124,18 +114,3 @@ func synthesizeSetNewCodePeriods(exportDir, runDir string, extractMapping struct
 	return nil
 }
 
-// jsonBoolField extracts a top-level bool field from a raw JSON
-// message. Returns false on missing/unparseable values.
-func jsonBoolField(raw json.RawMessage, key string) bool {
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return false
-	}
-	v, ok := obj[key]
-	if !ok {
-		return false
-	}
-	var b bool
-	_ = json.Unmarshal(v, &b)
-	return b
-}

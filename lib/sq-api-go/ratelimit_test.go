@@ -121,6 +121,16 @@ func TestParseRetryAfter(t *testing.T) {
 	}
 }
 
+// doGet performs a GET to url using client, closes the response body, and
+// returns the response. It fatals if the request fails.
+func doGet(t *testing.T, client *http.Client, url string) *http.Response {
+	t.Helper()
+	resp, err := client.Get(url)
+	require.NoError(t, err)
+	resp.Body.Close()
+	return resp
+}
+
 func TestRetryTransportSQCBackoff(t *testing.T) {
 	var attempts atomic.Int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -144,9 +154,7 @@ func TestRetryTransportSQCBackoff(t *testing.T) {
 	})
 
 	client := &http.Client{Transport: transport}
-	resp, err := client.Get(ts.URL)
-	require.NoError(t, err)
-	resp.Body.Close()
+	resp := doGet(t, client, ts.URL)
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, int32(2), attempts.Load(), "should retry once after the 429")
@@ -172,9 +180,7 @@ func TestRetryTransportFailFastForCloudflare(t *testing.T) {
 	})
 
 	client := &http.Client{Transport: transport}
-	resp, err := client.Get(ts.URL)
-	require.NoError(t, err)
-	resp.Body.Close()
+	resp := doGet(t, client, ts.URL)
 
 	assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
 	assert.Equal(t, int32(2), attempts.Load(),
@@ -202,10 +208,8 @@ func TestRetryTransportRetryAfterHonored(t *testing.T) {
 
 	start := time.Now()
 	client := &http.Client{Transport: transport}
-	resp, err := client.Get(ts.URL)
+	resp := doGet(t, client, ts.URL)
 	elapsed := time.Since(start)
-	require.NoError(t, err)
-	resp.Body.Close()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.GreaterOrEqual(t, elapsed, 1*time.Second,
@@ -246,9 +250,7 @@ func TestRetryTransportRecoveryFiresAfter429(t *testing.T) {
 	})
 
 	client := &http.Client{Transport: transport}
-	resp, err := client.Get(ts.URL)
-	require.NoError(t, err)
-	resp.Body.Close()
+	resp := doGet(t, client, ts.URL)
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Len(t, calls, 1, "recovery must fire exactly once when a 429 clears")
@@ -277,9 +279,7 @@ func TestRetryTransportRecoveryNotFiredFor5xx(t *testing.T) {
 	})
 
 	client := &http.Client{Transport: transport}
-	resp, err := client.Get(ts.URL)
-	require.NoError(t, err)
-	resp.Body.Close()
+	resp := doGet(t, client, ts.URL)
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, int32(0), fired.Load(), "5xx retries are not rate limiting — recovery must not fire")
@@ -305,9 +305,7 @@ func TestRetryTransportRecoveryNotFiredWhenScheduleExhausted(t *testing.T) {
 	})
 
 	client := &http.Client{Transport: transport}
-	resp, err := client.Get(ts.URL)
-	require.NoError(t, err)
-	resp.Body.Close()
+	resp := doGet(t, client, ts.URL)
 
 	assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
 	assert.Equal(t, int32(0), fired.Load(), "a request that never clears the 429 has not recovered")
@@ -329,9 +327,7 @@ func TestRetryTransportRecoveryNotFiredOnImmediateSuccess(t *testing.T) {
 	})
 
 	client := &http.Client{Transport: transport}
-	resp, err := client.Get(ts.URL)
-	require.NoError(t, err)
-	resp.Body.Close()
+	resp := doGet(t, client, ts.URL)
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, int32(0), fired.Load(), "a request that was never throttled has not recovered")

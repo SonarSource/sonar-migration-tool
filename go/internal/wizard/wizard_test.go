@@ -521,8 +521,6 @@ func writeExtractMeta(t *testing.T, dir string) {
 // always come from the seed because the on-disk state never carries
 // them (json:"-").
 func TestMergeSeed(t *testing.T) {
-	strPtr := func(s string) *string { return &s }
-
 	cases := []struct {
 		name  string
 		state WizardState
@@ -615,7 +613,6 @@ func TestMergeSeed(t *testing.T) {
 // .wizard_state.json — they're json:"-" so Save() drops them. Resume
 // reloads the file and gets nil tokens.
 func TestWizardState_TokensNotPersisted(t *testing.T) {
-	strPtr := func(s string) *string { return &s }
 	dir := t.TempDir()
 	state := &WizardState{
 		SourceURL:   strPtr("https://sq"),
