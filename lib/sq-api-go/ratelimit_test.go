@@ -19,6 +19,22 @@ import (
 	sqapi "github.com/sonar-solutions/sq-api-go"
 )
 
+// newFiredTransport builds a RetryTransport with a minimal Backoff schedule and
+// a Recovery hook that increments the returned counter. Use this for tests
+// that assert recovery does NOT fire — the counter stays at zero on success.
+func newFiredTransport(t *testing.T) (http.RoundTripper, *atomic.Int32) {
+	t.Helper()
+	var fired atomic.Int32
+	transport := sqapi.NewRetryTransportFull(sqapi.RetryTransportConfig{
+		Inner:   http.DefaultTransport,
+		Backoff: []time.Duration{0},
+		Recovery: func(_, _ string, _ int, _ time.Duration) {
+			fired.Add(1)
+		},
+	})
+	return transport, &fired
+}
+
 func TestClassify429(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -269,20 +285,13 @@ func TestRetryTransportRecoveryNotFiredFor5xx(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	var fired atomic.Int32
-	transport := sqapi.NewRetryTransportFull(sqapi.RetryTransportConfig{
-		Inner:   http.DefaultTransport,
-		Backoff: []time.Duration{0},
-		Recovery: func(_, _ string, _ int, _ time.Duration) {
-			fired.Add(1)
-		},
-	})
+	transport, firedPtr := newFiredTransport(t)
 
 	client := &http.Client{Transport: transport}
 	resp := doGet(t, client, ts.URL)
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, int32(0), fired.Load(), "5xx retries are not rate limiting — recovery must not fire")
+	assert.Equal(t, int32(0), firedPtr.Load(), "5xx retries are not rate limiting — recovery must not fire")
 }
 
 func TestRetryTransportRecoveryNotFiredWhenScheduleExhausted(t *testing.T) {
@@ -317,20 +326,13 @@ func TestRetryTransportRecoveryNotFiredOnImmediateSuccess(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	var fired atomic.Int32
-	transport := sqapi.NewRetryTransportFull(sqapi.RetryTransportConfig{
-		Inner:   http.DefaultTransport,
-		Backoff: []time.Duration{0},
-		Recovery: func(_, _ string, _ int, _ time.Duration) {
-			fired.Add(1)
-		},
-	})
+	transport, firedPtr := newFiredTransport(t)
 
 	client := &http.Client{Transport: transport}
 	resp := doGet(t, client, ts.URL)
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, int32(0), fired.Load(), "a request that was never throttled has not recovered")
+	assert.Equal(t, int32(0), firedPtr.Load(), "a request that was never throttled has not recovered")
 }
 
 func TestRateLimitGateExtend(t *testing.T) {
