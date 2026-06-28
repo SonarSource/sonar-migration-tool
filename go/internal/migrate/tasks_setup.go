@@ -6,50 +6,26 @@ package migrate
 
 import "context"
 
+// csvMappingTask builds a TaskDef that loads a CSV file into JSONL under the
+// given task name. All generate*Mappings tasks share this structure.
+func csvMappingTask(name, csvFile string) TaskDef {
+	return TaskDef{
+		Name: name,
+		Run: func(ctx context.Context, e *Executor) error {
+			return loadCSVToJSONL(e, name, csvFile)
+		},
+	}
+}
+
 // setupTasks returns tasks that load CSV mappings into JSONL for the migrate pipeline.
 func setupTasks() []TaskDef {
 	return []TaskDef{
-		{
-			Name: "generateProjectMappings",
-			Run: func(ctx context.Context, e *Executor) error {
-				return loadCSVToJSONL(e, "generateProjectMappings", "projects.csv")
-			},
-		},
-		{
-			Name: "generateProfileMappings",
-			Run: func(ctx context.Context, e *Executor) error {
-				return loadCSVToJSONL(e, "generateProfileMappings", "profiles.csv")
-			},
-		},
-		{
-			Name: "generateGateMappings",
-			Run: func(ctx context.Context, e *Executor) error {
-				return loadCSVToJSONL(e, "generateGateMappings", "gates.csv")
-			},
-		},
-		{
-			Name: "generateGroupMappings",
-			Run: func(ctx context.Context, e *Executor) error {
-				return loadCSVToJSONL(e, "generateGroupMappings", "groups.csv")
-			},
-		},
-		{
-			Name: "generateTemplateMappings",
-			Run: func(ctx context.Context, e *Executor) error {
-				return loadCSVToJSONL(e, "generateTemplateMappings", "templates.csv")
-			},
-		},
-		{
-			Name: "generatePortfolioMappings",
-			Run: func(ctx context.Context, e *Executor) error {
-				return loadCSVToJSONL(e, "generatePortfolioMappings", "portfolios.csv")
-			},
-		},
-		{
-			Name: "generateOrganizationMappings",
-			Run: func(ctx context.Context, e *Executor) error {
-				return loadCSVToJSONL(e, "generateOrganizationMappings", "organizations.csv")
-			},
-		},
+		csvMappingTask("generateProjectMappings", "projects.csv"),
+		csvMappingTask("generateProfileMappings", "profiles.csv"),
+		csvMappingTask("generateGateMappings", "gates.csv"),
+		csvMappingTask("generateGroupMappings", "groups.csv"),
+		csvMappingTask("generateTemplateMappings", "templates.csv"),
+		csvMappingTask("generatePortfolioMappings", "portfolios.csv"),
+		csvMappingTask("generateOrganizationMappings", "organizations.csv"),
 	}
 }

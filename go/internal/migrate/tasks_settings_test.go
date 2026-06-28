@@ -97,16 +97,9 @@ func TestRunSetProjectSettingsDispatchesByShape(t *testing.T) {
 	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{})
 	})
-	cloudSrv := httptest.NewServer(cloudMux)
-	defer cloudSrv.Close()
+	e := newCustomCloudTest(t, cloudMux)
 
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-
-	extractDir := filepath.Join(dir, "extract-01", "getProjectSettings")
+	extractDir := filepath.Join(e.ExportDir, "extract-01", "getProjectSettings")
 	if err := os.MkdirAll(extractDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -212,16 +205,9 @@ func TestRunSetProjectSettingsRespectsSQCDefinitions(t *testing.T) {
 	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{})
 	})
-	cloudSrv := httptest.NewServer(cloudMux)
-	defer cloudSrv.Close()
+	e := newCustomCloudTest(t, cloudMux)
 
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-
-	extractDir := filepath.Join(dir, "extract-01", "getProjectSettings")
+	extractDir := filepath.Join(e.ExportDir, "extract-01", "getProjectSettings")
 	if err := os.MkdirAll(extractDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -314,19 +300,12 @@ func TestRunSetProjectSettingsWarnsOnUnmappedProject(t *testing.T) {
 	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{})
 	})
-	cloudSrv := httptest.NewServer(cloudMux)
-	defer cloudSrv.Close()
-
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	e := newCustomCloudTest(t, cloudMux)
 	// Capture Warn output so the test can assert on it.
 	var buf bytes.Buffer
 	e.Logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
-	extractDir := filepath.Join(dir, "extract-01", "getProjectSettings")
+	extractDir := filepath.Join(e.ExportDir, "extract-01", "getProjectSettings")
 	if err := os.MkdirAll(extractDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
