@@ -47,3 +47,43 @@ func TestFindCloudIssueCandidatesPassesBranch(t *testing.T) {
 		t.Errorf("expected single candidate iss-1, got %+v", got)
 	}
 }
+
+// A cloud-search failure during issue resolution is reported as a lookup
+// error (and not a silent skip), exercising the branch-aware call site.
+func TestResolveAndSyncIssueLookupError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/issues/search", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	cloudSrv := httptest.NewServer(mux)
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+	e := newTestExecutor(cloudSrv, apiSrv, t.TempDir())
+
+	src := matchableIssue{Key: "s1", Rule: "java:S100", Component: "src-proj:src/app.go", Line: 10, Branch: "develop"}
+	got := resolveAndSyncIssue(context.Background(), e, "cloud-proj", "cloud-org", "", "src-proj", src, nil)
+	if got != syncOutcomeLookupError {
+		t.Fatalf("want syncOutcomeLookupError, got %v", got)
+	}
+}
+
+// A cloud-search failure during hotspot resolution is reported as a lookup
+// error, exercising the branch-aware call site.
+func TestResolveAndSyncHotspotLookupError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/hotspots/search", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	cloudSrv := httptest.NewServer(mux)
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+	e := newTestExecutor(cloudSrv, apiSrv, t.TempDir())
+
+	src := matchableHotspot{Key: "h1", RuleKey: "rk1", Component: "src-proj:src/app.go", Line: 10, Branch: "develop"}
+	got := resolveAndSyncHotspot(context.Background(), e, "cloud-proj", "cloud-org", "", "src-proj", src, nil)
+	if got != syncOutcomeLookupError {
+		t.Fatalf("want syncOutcomeLookupError, got %v", got)
+	}
+}
