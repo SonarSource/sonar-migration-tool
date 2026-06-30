@@ -266,7 +266,20 @@ func TestEnsureFileSourcesPresent(t *testing.T) {
 	}
 	sources := map[int32]string{4: "real\nsource"}
 
-	ensureFileSourcesPresent(fileComps, sources)
+	purged := ensureFileSourcesPresent(fileComps, sources)
+
+	// The function must report exactly the three purged refs (1, 2, 3).
+	if len(purged) != 3 {
+		t.Fatalf("want 3 purged refs, got %d: %v", len(purged), purged)
+	}
+	for _, ref := range []int32{1, 2, 3} {
+		if _, ok := purged[int32(ref)]; !ok {
+			t.Errorf("ref %d must be in purged set", ref)
+		}
+	}
+	if _, ok := purged[4]; ok {
+		t.Error("ref 4 (has real source) must NOT be in purged set")
+	}
 
 	if len(sources) != 4 {
 		t.Fatalf("want a source entry per file (4), got %d", len(sources))
@@ -1477,5 +1490,48 @@ func TestStripNullBytes(t *testing.T) {
 				t.Errorf("stripNullBytes(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestZeroOffsetsForPurgedComponents verifies that issues on components whose
+// source was purged have their column offsets zeroed while their line numbers
+// are preserved. Issues on components with real source are left untouched.
+// This prevents the SonarCloud CE "Visit of Component failed" error that occurs
+// when placeholder source (empty lines) is submitted for purged-source files and
+// an issue references a column offset beyond the empty line length.
+func TestZeroOffsetsForPurgedComponents(t *testing.T) {
+	cr := scanreport.NewComponentRef()
+	cr.Get("purged-file:App.php")  // ref 1 — will be in purgedRefs
+	cr.Get("real-file:Foo.java")   // ref 2 — not purged
+
+	purgedRefs := map[int32]struct{}{1: {}}
+
+	issues := []scanreport.IssueInput{
+		// Issue on purged file: offsets should be zeroed, line preserved.
+		{Component: "purged-file:App.php", StartLine: 10, EndLine: 10, StartOff: 5, EndOff: 20},
+		// Issue on real file: left completely unchanged.
+		{Component: "real-file:Foo.java", StartLine: 3, EndLine: 5, StartOff: 2, EndOff: 8},
+		// Issue with no component key: unchanged (unmapped).
+		{Component: "unknown:Other.php", StartLine: 1, EndLine: 1, StartOff: 0, EndOff: 10},
+	}
+
+	out := zeroOffsetsForPurgedComponents(issues, purgedRefs, cr)
+
+	// Purged file: line preserved, offsets zeroed.
+	if out[0].StartLine != 10 || out[0].EndLine != 10 {
+		t.Errorf("purged issue: line must be preserved, got %d-%d", out[0].StartLine, out[0].EndLine)
+	}
+	if out[0].StartOff != 0 || out[0].EndOff != 0 {
+		t.Errorf("purged issue: offsets must be zeroed, got start=%d end=%d", out[0].StartOff, out[0].EndOff)
+	}
+
+	// Real file: completely untouched.
+	if out[1].StartOff != 2 || out[1].EndOff != 8 {
+		t.Errorf("real-file issue: offsets must be unchanged, got start=%d end=%d", out[1].StartOff, out[1].EndOff)
+	}
+
+	// Original slice is not mutated.
+	if issues[0].StartOff != 5 {
+		t.Error("original issues slice must not be mutated")
 	}
 }
