@@ -459,7 +459,16 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	// them with blank placeholder source. The branch then lands with its
 	// measures and issues, matching the source server's own post-purge state;
 	// the purged files simply render as empty.
-	ensureFileSourcesPresent(fileComps, pbSources)
+	//
+	// purgedRefs is the set of file component refs that received placeholder
+	// source (i.e. source was unavailable). These refs need special treatment
+	// for issues: their placeholder source consists of empty lines (just "\n"
+	// characters), so any issue whose text range carries a non-zero column
+	// offset would be rejected by the CE with "offset out of range". We zero
+	// out the offsets for those issues below while preserving their line numbers.
+	purgedRefs := ensureFileSourcesPresent(fileComps, pbSources)
+	issues = zeroOffsetsForPurgedComponents(issues, purgedRefs, cr)
+	hotspotIssues = zeroOffsetsForPurgedComponents(hotspotIssues, purgedRefs, cr)
 
 	changesets := buildChangesetMap(cr, components, pbSources, scmByComponent, now)
 
@@ -568,11 +577,17 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 // line — for any file missing real source. Used for #425 purged-source
 // branches: the SonarCloud CE rejects a report containing a file with no
 // source text, so each source-less file is given just enough (empty) lines
-// for the report to be accepted and any issue anchors to fall in range.
+// for the report to be accepted and any issue line anchors to fall in range.
 // Files that already have real source are left untouched; the declared line
 // count of a filled file is clamped to at least 1 so the placeholder source
 // and the component agree. No-op for branches whose files all carry source.
-func ensureFileSourcesPresent(fileComps []*pb.Component, sources map[int32]string) {
+//
+// Returns the set of component refs that received placeholder source. Callers
+// use this to zero out column offsets on issues for those components — the CE
+// validates offsets against the actual source line width and rejects any offset
+// that exceeds the (empty) placeholder line length.
+func ensureFileSourcesPresent(fileComps []*pb.Component, sources map[int32]string) map[int32]struct{} {
+	purged := make(map[int32]struct{})
 	for _, fc := range fileComps {
 		if _, has := sources[fc.GetRef()]; has {
 			continue
@@ -581,7 +596,34 @@ func ensureFileSourcesPresent(fileComps []*pb.Component, sources map[int32]strin
 			fc.Lines = 1
 		}
 		sources[fc.GetRef()] = strings.Repeat("\n", int(fc.Lines)-1)
+		purged[fc.GetRef()] = struct{}{}
 	}
+	return purged
+}
+
+// zeroOffsetsForPurgedComponents returns a copy of issues with StartOff and
+// EndOff set to 0 for any issue whose component has purged (placeholder) source.
+// The CE validates column offsets against the actual source line content; when
+// placeholder source is used every line is empty, so any non-zero offset would
+// cause "Visit of Component failed". Zeroing the offsets preserves line-level
+// positioning while avoiding the out-of-range rejection.
+func zeroOffsetsForPurgedComponents(issues []scanreport.IssueInput, purgedRefs map[int32]struct{}, cr *scanreport.ComponentRef) []scanreport.IssueInput {
+	if len(purgedRefs) == 0 {
+		return issues
+	}
+	out := make([]scanreport.IssueInput, len(issues))
+	copy(out, issues)
+	for i := range out {
+		ref, ok := cr.Refs()[out[i].Component]
+		if !ok {
+			continue
+		}
+		if _, isPurged := purgedRefs[ref]; isPurged {
+			out[i].StartOff = 0
+			out[i].EndOff = 0
+		}
+	}
+	return out
 }
 
 // fixComponentLineCounts sets each component's line count to the best available
