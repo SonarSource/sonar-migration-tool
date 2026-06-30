@@ -198,7 +198,7 @@
 | sonar-users |  | Skipped | Built-in group on SonarQube Server; replaced by the implicit 'Members' group on SonarQube Cloud. |
 
 ## Portfolios
-15 succeeded, 2 near full migration, 6 partial migration, 0 failed
+15 succeeded, 2 near full migration, 6 partial migration, 0 failed, 5 skipped (empty portfolios)
 | Name | Outcome | Details |
 |:---|:---|:---|
 | My favorite projects | Full Migration |  |
