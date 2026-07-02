@@ -276,6 +276,8 @@ Output: `<export_directory>/predictive_migration_summary.pdf`. The `--config` fl
 
 The Global Settings section is included with the SQS-only settings predicted to be Skipped (Setting Key column, sorted alphabetically). SonarQube Cloud API errors or rate-limiting cannot be predicted ahead of time, so they have no row in the Failed bucket.
 
+**Sample report:** [`examples/predictive_migration_summary.pdf`](../examples/predictive_migration_summary.pdf)
+
 ### `analysis_report` — summarize a migration run
 
 Parse `requests.log` into a CSV summary of API call outcomes:
@@ -346,9 +348,9 @@ sonar-migration-tool reset <TOKEN> <ENTERPRISE_KEY> --export_directory ./files/
 | `groups.csv` | Group mappings |
 | `templates.csv` | Permission Template mappings |
 | `portfolios.csv` | Portfolio mappings |
-| `predictive_migration_summary.pdf` | Output of the `predictive-report` command |
-| `migration_summary.pdf` | Migration summary (PDF), written to the run directory on completion |
-| `migration_summary.md` | Migration summary (Markdown), written alongside the PDF on completion |
+| `predictive_migration_summary.pdf` | Output of the `predictive-report` command — [sample](../examples/predictive_migration_summary.pdf) |
+| `migration_summary.pdf` | Migration summary (PDF), written to the run directory on completion — [sample](../examples/migration_summary.pdf) |
+| `migration_summary.md` | Migration summary (Markdown), written alongside the PDF on completion — [sample](../examples/migration_summary.md) |
 | `run_meta.json` | Per-phase / per-task timing and `overall_status` (`success` \| `partial` \| `failed`); written on completion, including failed runs |
 | `run_events.jsonl` | JSON Lines stream of run events mirrored from the logger by the tee slog handler; parsed by the summary collector |
 | `<export_directory>/<run_id>/requests.log` | Per-run request log for migrations |
