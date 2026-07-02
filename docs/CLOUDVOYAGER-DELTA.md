@@ -256,7 +256,7 @@ the component tree in SQ's API) but it's discarded.
 <!-- updated: 2026-06-04_12:00:00 -->
 
 **File**: [go/internal/migrate/tasks_projectdata.go:218](../go/internal/migrate/tasks_projectdata.go#L218)
-**Tracking**: [GitHub Issue #106](https://github.com/sonar-solutions/sonar-migration-tool/issues/106) — **Implementation plan**: [PLAN-FIX-106.md](../PLAN-FIX-106.md)
+**Tracking**: [GitHub Issue #106](https://github.com/SonarSource/sonar-migration-tool/issues/106)
 
 `reportData.Measures` is initialized as `make(map[int32][]*pb.Measure)` (empty map) and
 never populated. There is no `loadExtractedMeasures()` function. The protobuf infrastructure
@@ -270,7 +270,7 @@ by component ref. Uses a `STRING_METRICS` allowlist and int32/int64 range splitt
 **Impact**: All code metrics (lines of code, coverage, complexity, etc.) in SC will be zero
 or absent after migration — only live scans will populate them.
 
-**Fix summary** (see [PLAN-FIX-106.md](../PLAN-FIX-106.md) for full details):
+**Fix summary**:
 1. Expand `projectComponentTreeTask()` to request ~35 metric keys (not just `ncloc`)
 2. Fix `buildMeasureValue()` for LongValue and string metric handling
 3. Add `loadExtractedComponentMeasures()` in migrate phase

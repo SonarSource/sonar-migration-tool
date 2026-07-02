@@ -44,11 +44,11 @@ The tool ships as a single static binary. No installer, no runtime dependencies.
 * User accounts & auth
 * User Permissions on users
 * Analysis history
+* Coverage and Duplication data
 * Applications
 * Portfolio hierarchies
 * Issue assignments
 * CI/CD pipelines
-
 
 ---
 
@@ -270,9 +270,7 @@ For the complete list of **every configuration field and CLI flag** — its role
 
 - 📘 [Architecture overview](docs/ARCHITECTURE.md) — how the tool is built.
 - ⚙️ [Advanced configuration reference](docs/ADVANCED-CONFIG.md) — every config field and CLI flag, plus legacy config shapes.
-- 🔐 [Security best practices](docs/SECURITY.md) — keeping your tokens safe.
 - 🧪 [Regression testing protocol](docs/REGRESSION-TESTING.md) — verify changes against live SonarQube + SonarQube Cloud.
-- 🐛 [CloudVoyager delta audit](docs/CLOUDVOYAGER-DELTA.md) — known behavior differences from the reference implementation.
 
 ---
 
