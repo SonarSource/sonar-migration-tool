@@ -7,6 +7,7 @@ jobs:
   test-and-analyze:
     runs-on: ubuntu-latest
     permissions:
+      id-token: write
       contents: read
     timeout-minutes: 15
 
@@ -29,7 +30,15 @@ jobs:
         working-directory: go
         run: go test $(go list ./... | grep -v '/cmd$') -coverprofile=coverage.out -count=1
 
+      - name: Fetch Vault secrets
+        id: secrets
+        uses: SonarSource/vault-action-wrapper@v3
+        with:
+          secrets: |
+            development/kv/data/sonarcloud token | SONAR_TOKEN;
+
       - name: SonarQube Cloud Scan
-        uses: sonarsource/sonarqube-scan-action@v7
+        uses: SonarSource/sonarqube-scan-action@v8
         env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          # Reference the token from Vault
+          SONAR_TOKEN: ${{ fromJSON(steps.secrets.outputs.vault).SONAR_TOKEN }}
