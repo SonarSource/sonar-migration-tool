@@ -235,7 +235,7 @@ Fine-grained control over which entities are included in or excluded from migrat
 
 Migration of non-main branches and their associated analysis data.
 
-**Status: Implemented.** Non-main branches migrate as **long-lived branches with full issue history** via SonarQube Cloud's "Create analysis" handshake (`POST {api-host}/analysis/analyses` → `analysisUuid` stamped into report `metadata.analysis_uuid`); see [CLOUDVOYAGER-DELTA.md](CLOUDVOYAGER-DELTA.md) BUG-17. All migrated branches are registered as long-lived so SonarQube Cloud's automatic pruning of short-lived branches (after ~30 days) never discards migrated history.
+**Status: Implemented.** Non-main branches migrate as **long-lived branches with full issue history** via SonarQube Cloud's "Create analysis" handshake (`POST {api-host}/analysis/analyses` → `analysisUuid` stamped into report `metadata.analysis_uuid`). All migrated branches are registered as long-lived so SonarQube Cloud's automatic pruning of short-lived branches (after ~30 days) never discards migrated history.
 
 **What it migrates:**
 - Per-branch issues, hotspots, and measures (each branch's full project data)

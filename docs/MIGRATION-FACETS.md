@@ -66,7 +66,7 @@ The **Caveats / NOT carried** column is load-bearing — read it before relying 
 
 | Item | Status | Spec |
 |---|---|---|
-| **BUG-02** — active rule **params (regex/thresholds), impacts, timestamps** missing from the scanner-report `activerules.pb` path (the XML restore path *does* carry them into the profile definition) | Real, partial | 001 / CLOUDVOYAGER-DELTA |
+| **BUG-02** — active rule **params (regex/thresholds), impacts, timestamps** missing from the scanner-report `activerules.pb` path (the XML restore path *does* carry them into the profile definition) | Real, partial | 001 |
 | **BUG-05** — issue **assignee** extracted but the assign call is never invoked (no Cloud assign API) | Real | 010 |
 | **BUG-06** — no source-link / back-reference comment to the original Server issue/hotspot is added | Real | 008/009 |
 | Hotspot resolution **ACKNOWLEDGED** is downgraded to SAFE on Cloud | Real | 009 |
