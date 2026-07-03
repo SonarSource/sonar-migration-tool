@@ -19,7 +19,7 @@ env:
 jobs:
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: sonar-xs
     permissions:
       id-token: write
       contents: read
@@ -56,7 +56,7 @@ jobs:
     name: Build All Binaries
     needs: test
     if: env.IS_RELEASE_BRANCH == 'true'
-    runs-on: ubuntu-latest
+    runs-on: sonar-xs
     permissions:
       id-token: write   # Vault OIDC
       contents: read
@@ -234,7 +234,7 @@ jobs:
     name: Sign Windows Binaries
     needs: build-binaries
     if: env.IS_RELEASE_BRANCH == 'true'
-    runs-on: ubuntu-latest
+    runs-on: sonar-xs
     permissions:
       id-token: write   # Azure Artifact Signing OIDC
       contents: read
@@ -296,7 +296,7 @@ jobs:
     name: Publish Release
     needs: [build-binaries, sign-macos, sign-windows]
     if: env.IS_MAIN_RELEASE == 'true'
-    runs-on: ubuntu-latest
+    runs-on: sonar-xs
     permissions:
       contents: write
     steps:
