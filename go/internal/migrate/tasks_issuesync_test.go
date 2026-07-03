@@ -243,6 +243,11 @@ func equalStrings(a, b []string) bool {
 // SonarQube component identifier. The substitution is essential for
 // the targeted cloud search: we send componentKeys=<cloudKey>:<file>
 // derived from the source's <sourceKey>:<file> string.
+//
+// For multi-module (monorepo) projects the component key has TWO
+// colon-separated prefixes: "projectKey:moduleKey:filePath". SonarCloud
+// has no module layer, so both prefixes must be stripped to obtain the
+// bare file path that matches the cloud component key.
 func TestStripProjectKeyPrefix(t *testing.T) {
 	tests := []struct {
 		name string
@@ -250,7 +255,8 @@ func TestStripProjectKeyPrefix(t *testing.T) {
 		want string
 	}{
 		{name: "leading project key", in: "myproject:src/main/java/Foo.java", want: "src/main/java/Foo.java"},
-		{name: "nested colon stays after first", in: "myproject:com:foo/Bar.java", want: "com:foo/Bar.java"},
+		{name: "monorepo: project + module key both stripped", in: "myproject:mymodule:src/main/java/Foo.java", want: "src/main/java/Foo.java"},
+		{name: "monorepo: real-world github-actions example", in: "github-actions-monorepo:github-actions-mono-gradle:src/main/java/com/acme/App.java", want: "src/main/java/com/acme/App.java"},
 		{name: "no project prefix", in: "src/main/java/Foo.java", want: "src/main/java/Foo.java"},
 		{name: "empty", in: "", want: ""},
 		{name: "colon only", in: "myproject:", want: ""},

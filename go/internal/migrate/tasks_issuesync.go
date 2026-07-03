@@ -20,6 +20,8 @@ import (
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
+const resolutionFalsePositive = "FALSE-POSITIVE"
+
 // issueMetadataSyncTasks returns the task definition for synchronising
 // issue metadata (status transitions, comments, tags) from the extracted
 // SonarQube Server data to the newly-created SonarQube Cloud issues.
@@ -105,14 +107,33 @@ type issuePair struct {
 // Matching helpers
 // ---------------------------------------------------------------------------
 
-// stripProjectKeyPrefix removes the leading "projectKey:" segment from a
-// SonarQube component path, returning the bare file path. SonarQube
-// formats components as "projectKey:src/main/java/Foo.java"; the
-// project key is environment-specific but the file path part is the
-// same on source and cloud.
+// stripProjectKeyPrefix removes all leading colon-separated key segments
+// from a SonarQube component path, returning the bare file path. SonarQube
+// formats components as either:
+//
+//   - "projectKey:src/main/java/Foo.java"              (single-module), or
+//   - "projectKey:moduleKey:src/main/java/Foo.java"    (multi-module / monorepo)
+//
+// SonarCloud has no module layer, so the cloud componentKeys search parameter
+// must use only the bare file path. Segments are stripped left-to-right as
+// long as the part before the ":" contains no "/" — a "/" means we have
+// already reached the file path, which always starts with a directory name.
+// This fixes matching failures for monorepo projects where the SQS extract
+// records the module key as part of the component identifier but SonarCloud
+// stores the issue at the plain file path.
 func stripProjectKeyPrefix(component string) string {
-	if idx := strings.Index(component, ":"); idx >= 0 {
-		return component[idx+1:]
+	for {
+		idx := strings.Index(component, ":")
+		if idx < 0 {
+			break
+		}
+		prefix := component[:idx]
+		if strings.Contains(prefix, "/") {
+			// Reached the file path — the prefix is a directory segment, stop.
+			break
+		}
+		// prefix looks like a project/module key (no path separators); strip it.
+		component = component[idx+1:]
 	}
 	return component
 }
@@ -173,7 +194,7 @@ func getFallbackTransition(issueStatus, resolution, status string) string {
 	// modern accepted issues never reach here because issueStatus is
 	// checked first.
 	switch strings.ToUpper(resolution) {
-	case "FALSE-POSITIVE":
+	case resolutionFalsePositive:
 		return "falsepositive"
 	case "WONTFIX":
 		return "wontfix"
@@ -261,7 +282,7 @@ func hasManualChanges(iss matchableIssue) bool {
 	if status == "ACCEPTED" || status == "FALSE_POSITIVE" {
 		return true
 	}
-	if resolution == "FALSE-POSITIVE" || resolution == "WONTFIX" {
+	if resolution == resolutionFalsePositive || resolution == "WONTFIX" {
 		return true
 	}
 	if iss.ManualSeverity {
@@ -297,7 +318,7 @@ func classifyActionableReasons(actionable []matchableIssue) actionableReasonBrea
 		issueStatus := strings.ToUpper(iss.IssueStatus)
 		if issueStatus == "ACCEPTED" || issueStatus == "FALSE_POSITIVE" ||
 			status == "ACCEPTED" || status == "FALSE_POSITIVE" ||
-			resolution == "FALSE-POSITIVE" || resolution == "WONTFIX" {
+			resolution == resolutionFalsePositive || resolution == "WONTFIX" {
 			b.acceptedOrFP++
 		}
 		if len(iss.Tags) > 0 {
@@ -573,10 +594,10 @@ func resolveAndSyncIssue(ctx context.Context, e *Executor, cloudKey, orgKey, bas
 		e.Logger.Debug("syncIssueMetadata: source issue not matchable", "key", src.Key, "rule", src.Rule, "component", src.Component, "line", src.Line)
 		return syncOutcomeNotFound
 	}
-	candidates, err := findCloudIssueCandidates(ctx, e, cloudKey, orgKey, filePath, src.Rule)
+	candidates, err := findCloudIssueCandidates(ctx, e, cloudKey, orgKey, filePath, src.Rule, src.Branch)
 	if err != nil {
 		logAPIWarn(e.Logger, "syncIssueMetadata: cloud candidate lookup failed", err,
-			"project", cloudKey, "source_key", src.Key, "rule", src.Rule, "file", filePath)
+			"project", cloudKey, "source_key", src.Key, "rule", src.Rule, "file", filePath, "branch", src.Branch)
 		return syncOutcomeLookupError
 	}
 	target, outcome := classifyIssueCandidatesByLine(candidates, src.Line)
@@ -624,14 +645,24 @@ func classifyIssueCandidatesByLine(candidates []matchableIssue, sourceLine int) 
 }
 
 // findCloudIssueCandidates queries /api/issues/search for cloud issues
-// matching the given file path + rule. Typical result set is 1–3
-// issues; pagination cost is dwarfed by the savings from no longer
-// fetching every issue in the project.
-func findCloudIssueCandidates(ctx context.Context, e *Executor, cloudKey, orgKey, filePath, ruleKey string) ([]matchableIssue, error) {
+// matching the given file path + rule on the given branch. Typical result
+// set is 1–3 issues; pagination cost is dwarfed by the savings from no
+// longer fetching every issue in the project.
+//
+// The branch parameter is essential for multi-branch projects: without it
+// /api/issues/search resolves against the project's main branch only, so
+// issues on non-main branches never find their cloud counterpart and go
+// unsynced. Source and target branch names match 1:1 (the main branch is
+// renamed to the source name on import — #428), so the source branch name
+// is the correct cloud branch to search.
+func findCloudIssueCandidates(ctx context.Context, e *Executor, cloudKey, orgKey, filePath, ruleKey, branch string) ([]matchableIssue, error) {
 	params := url.Values{}
 	params.Set("componentKeys", cloudKey+":"+filePath)
 	params.Set("organization", orgKey)
 	params.Set("rules", ruleKey)
+	if branch != "" {
+		params.Set("branch", branch)
+	}
 	// Same statuses we already use on the source side — we want to be
 	// idempotent against issues that were already migrated in a prior
 	// run (the cloud counterpart may be in ACCEPTED / FALSE_POSITIVE

@@ -145,6 +145,12 @@ func BuildPredictiveRun(exportDir string) (string, error) {
 		if err := synthesizeSyncHotspotMetadata(exportDir, runDir, extractMapping); err != nil {
 			return "", fmt.Errorf("synthesizing syncHotspotMetadata: %w", err)
 		}
+		// #425 — predict which branches will migrate without their source
+		// (purged on the source server). Must run after the createProjects
+		// synthesis above so it can join on the synthetic cloud_project_key.
+		if err := synthesizeBranchSourcePurged(exportDir, runDir, extractMapping); err != nil {
+			return "", fmt.Errorf("synthesizing branch source-purged: %w", err)
+		}
 	}
 
 	return runDir, nil

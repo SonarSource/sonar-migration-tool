@@ -14,6 +14,17 @@ import (
 	"testing"
 )
 
+// captureSlogDefault swaps the process-wide slog logger for one that writes
+// to the returned buffer at Debug level, and restores the original on cleanup.
+func captureSlogDefault(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
 // With cfg.Debug=true, baseSDKOptions installs the HTTP debug logger so
 // every API request the SDK makes emits a Debug slog entry. Verify by
 // hitting an httptest server and checking the captured log output.
@@ -23,12 +34,7 @@ func TestBaseSDKOptions_DebugTrueEmitsHTTPLog(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	// Swap the slog default for one writing into a buffer so the debug
-	// transport's output is observable.
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	buf := captureSlogDefault(t)
 
 	cfg := ExtractConfig{
 		URL:   srv.URL + "/",
@@ -59,10 +65,7 @@ func TestBaseSDKOptions_DebugFalseSuppressesHTTPLog(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	buf := captureSlogDefault(t)
 
 	cfg := ExtractConfig{
 		URL:   srv.URL + "/",

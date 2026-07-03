@@ -44,6 +44,7 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 	ncdFallbackMap := collectNCDFallback(store)
 	ncdBranchOverrideSet := collectNCDBranchOverrides(store)
 	syncStatsMap := collectSyncStats(store)
+	branchSourcePurgedMap := collectBranchSourcePurged(store)
 	extractMapping, _ := structure.GetUniqueExtracts(exportDir)
 	// #353 — per-object dropped-user-permission counts: SonarQube Cloud
 	// has no API to grant permissions to individual users, so any user
@@ -81,6 +82,13 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 			attachSyncStats(section.Succeeded, syncStatsMap)
 			attachSyncStats(section.NearPerfect, syncStatsMap)
 			attachSyncStats(section.Partial, syncStatsMap)
+			// #425 — note branches migrated without their source (purged
+			// on the source server) in each affected project's Details
+			// column. Applied to all routed buckets; the outcome itself
+			// is unchanged (the branch still imports measures + issues).
+			attachBranchSourcePurged(section.Succeeded, branchSourcePurgedMap)
+			attachBranchSourcePurged(section.NearPerfect, branchSourcePurgedMap)
+			attachBranchSourcePurged(section.Partial, branchSourcePurgedMap)
 		}
 		// #353 — attach the dropped-user-permission count marker to
 		// every entity in every routed bucket so the per-row Details
@@ -591,7 +599,7 @@ func collectSection(store *common.DataStore, def sectionDef,
 	// Gates with any dropped condition — no SQC equivalent — are Partial
 	// (orange, #227). The per-condition decisions are written by
 	// addGateConditions to a sidecar JSONL.
-	if def.Name == "Quality Gates" {
+	if def.Name == sectionQualityGates {
 		notes := collectGateMappingNotes(store.BaseDir())
 		succeeded, nearPerfect, partial = applyGateMappingNotes(succeeded, nearPerfect, partial, notes)
 	}
@@ -599,7 +607,7 @@ func collectSection(store *common.DataStore, def sectionDef,
 	// Quality profiles flagged by analyzeProfileRules (#226 yellow
 	// criteria) move from Succeeded into NearPerfect with per-rule
 	// Issues. Orange (Partial) dominates yellow per the #224 rule.
-	if def.Name == "Quality Profiles" {
+	if def.Name == sectionQualityProfiles {
 		findings := collectProfileFindings(store)
 		succeeded, nearPerfect, partial = applyProfileFindings(succeeded, nearPerfect, partial, findings)
 	}
@@ -774,14 +782,14 @@ func buildMappedKeys(def sectionDef, store *common.DataStore) map[string]bool {
 }
 
 func mappedKeyFor(def sectionDef, name, language string) string {
-	if def.Name == "Quality Profiles" {
+	if def.Name == sectionQualityProfiles {
 		return name + "|" + language
 	}
 	return name
 }
 
 func extractKeyFor(def sectionDef, name, language, serverURL string) string {
-	if def.Name == "Quality Profiles" {
+	if def.Name == sectionQualityProfiles {
 		return serverURL + "|" + name + "|" + language
 	}
 	return serverURL + "|" + name
@@ -813,6 +821,12 @@ type projectDataOutcome struct {
 	// State=="skipped" / "failed". Empty when the state is success
 	// or when no signal could be derived.
 	Reason string
+	// NeverAnalyzed is true for the specific skip case where the source
+	// project was created but never analyzed (no components on any
+	// branch). Per #432 this must NOT degrade the project outcome to
+	// Partial — its non-analysis settings still migrate — and the Details
+	// note is informational rather than a "migration skipped" warning.
+	NeverAnalyzed bool
 }
 
 // collectProjectData reads importProjectData JSONL and returns the
@@ -858,7 +872,19 @@ func collectProjectData(store *common.DataStore) map[string]projectDataOutcome {
 		case len(a.states["failed"]) > 0:
 			result[key] = projectDataOutcome{State: "failed", Reason: projectDataFailureReason(a.errs["failed"])}
 		case len(a.states["skipped"]) > 0:
-			result[key] = projectDataOutcome{State: "skipped", Reason: projectDataSkipReason(a.errs["skipped"])}
+			skipErr := a.errs["skipped"]
+			if skipErr == "" {
+				// #432 — provisioned but never analyzed: the project's
+				// settings still migrate and the outcome must NOT be
+				// degraded. Carry an informational note instead.
+				result[key] = projectDataOutcome{
+					State:         "skipped",
+					Reason:        "Source project was provisioned but never analyzed, project settings migrated anyway",
+					NeverAnalyzed: true,
+				}
+			} else {
+				result[key] = projectDataOutcome{State: "skipped", Reason: projectDataSkipReason(skipErr)}
+			}
 		case len(a.states["success"]) > 0:
 			result[key] = projectDataOutcome{State: "success"}
 		default:
@@ -920,7 +946,14 @@ func attachProjectData(projects []EntityItem, scanMap map[string]projectDataOutc
 		if !ok || outcome.State == "" {
 			continue
 		}
-		marker := outcome.State
+		// #432 — the never-analyzed case uses a distinct marker state so the
+		// renderer shows an informational note (not a "migration skipped"
+		// warning) and does not treat it as a degraded outcome.
+		markerState := outcome.State
+		if outcome.NeverAnalyzed {
+			markerState = "noanalysis"
+		}
+		marker := markerState
 		if outcome.Reason != "" {
 			marker += ":" + outcome.Reason
 		}
@@ -990,7 +1023,7 @@ func collectDroppedUserPermsBySection(exportDir string, mapping structure.Extrac
 	// reserved for use by the input mappings — so we translate via
 	// source_profile_key → cloud_profile_key.
 	if profMap := buildSourceToCloudMap(store, "createProfiles", "source_profile_key", "cloud_profile_key"); len(profMap) > 0 {
-		out["Quality Profiles"] = aggregateUserPermsByEntity(exportDir, mapping,
+		out[sectionQualityProfiles] = aggregateUserPermsByEntity(exportDir, mapping,
 			[]string{"getProfileUsers"}, "profileKey", profMap)
 	}
 
@@ -1008,7 +1041,7 @@ func collectDroppedUserPermsBySection(exportDir string, mapping structure.Extrac
 	// same string the EntityItem.Name field holds — no translation
 	// needed. The identity map below routes the lookup straight
 	// through gate name.
-	out["Quality Gates"] = aggregateUserPermsByEntity(exportDir, mapping,
+	out[sectionQualityGates] = aggregateUserPermsByEntity(exportDir, mapping,
 		[]string{"getGateUsers"}, "gateName", nil)
 
 	return out
@@ -1091,7 +1124,7 @@ func aggregateUserPermsByEntity(exportDir string, mapping structure.ExtractMappi
 
 // attachDroppedUserPerms stamps a |userPerms:N marker on each
 // EntityItem whose lookup key carries N > 0 dropped user permissions.
-// The lookup key is the EntityItem.Name for the "Quality Gates"
+// The lookup key is the EntityItem.Name for the sectionQualityGates
 // section (gate names match directly) and the stripped cloud
 // identifier from Detail for the other sections.
 func attachDroppedUserPerms(items []EntityItem, perms map[string]int, sectionName string) {
@@ -1100,7 +1133,7 @@ func attachDroppedUserPerms(items []EntityItem, perms map[string]int, sectionNam
 	}
 	for i := range items {
 		var key string
-		if sectionName == "Quality Gates" {
+		if sectionName == sectionQualityGates {
 			key = items[i].Name
 		} else {
 			key = projectCloudKey(items[i].Detail)
@@ -1206,6 +1239,61 @@ func encodeSyncStats(c projectSyncCounts) string {
 		parts = append(parts, fmt.Sprintf("ack=%d", c.HotspotAckDemoted))
 	}
 	return strings.Join(parts, ",")
+}
+
+// collectBranchSourcePurged reads importProjectData JSONL and returns,
+// per cloud project key, the ordered list of branch names whose source
+// text was purged on the source server and were therefore migrated
+// without it (issue #425). Branches are de-duplicated and kept in
+// first-seen order so the report lists each affected branch once.
+func collectBranchSourcePurged(store *common.DataStore) map[string][]string {
+	items, err := store.ReadAll("importProjectData")
+	if err != nil || len(items) == 0 {
+		return nil
+	}
+	result := make(map[string][]string)
+	seen := make(map[string]bool)
+	for _, item := range items {
+		if !jsonBool(item, "source_purged") {
+			continue
+		}
+		key := jsonStr(item, "cloud_project_key")
+		branch := jsonStr(item, "branch")
+		if key == "" || branch == "" {
+			continue
+		}
+		dedupKey := key + "\x00" + branch
+		if seen[dedupKey] {
+			continue
+		}
+		seen[dedupKey] = true
+		result[key] = append(result[key], branch)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+// attachBranchSourcePurged appends a "|srcPurged:branchA,branchB" marker
+// to each affected project's Detail field. The renderer turns it into a
+// one-line "Source code of branch(es) X, Y is missing (likely purged in
+// SQS). Migration is executed without the sources." note in the Details
+// column, shown in both the actual and predictive reports (#425). The
+// project's outcome is unchanged — the branches still migrate their
+// measures and issues.
+func attachBranchSourcePurged(projects []EntityItem, purgedMap map[string][]string) {
+	if len(purgedMap) == 0 || len(projects) == 0 {
+		return
+	}
+	for i := range projects {
+		key := projectCloudKey(projects[i].Detail)
+		branches, ok := purgedMap[key]
+		if !ok || len(branches) == 0 {
+			continue
+		}
+		projects[i].Detail = projects[i].Detail + "|srcPurged:" + strings.Join(branches, ",")
+	}
 }
 
 // collectNCDFallback reads the setNewCodePeriods JSONL and returns a

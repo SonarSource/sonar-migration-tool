@@ -110,6 +110,30 @@ func fetchSCMainBranch(ctx context.Context, e *Executor, cloudKey string) string
 	return ""
 }
 
+// renameSCMainBranchToSource renames the project's SonarCloud main branch to
+// the source project's main branch name (#428). SonarCloud always creates the
+// first/main branch under its own default name (typically "master"), so unless
+// the source main branch already carries that name its name would be lost.
+// No-op when the Cloud client is unavailable, the source name is empty, the
+// current main name can't be determined, or it already matches. A rename
+// failure is logged but not fatal — the branch content has already migrated.
+func renameSCMainBranchToSource(ctx context.Context, e *Executor, cloudKey, sourceMainName string) {
+	if e.Cloud == nil || e.Cloud.Branches == nil || sourceMainName == "" {
+		return
+	}
+	current := fetchSCMainBranch(ctx, e, cloudKey)
+	if current == "" || current == sourceMainName {
+		return
+	}
+	if err := e.Cloud.Branches.Rename(ctx, cloudKey, sourceMainName); err != nil {
+		logAPIWarn(e.Logger, "failed to rename SonarCloud main branch to match source", err,
+			"project", cloudKey, "from", current, "to", sourceMainName)
+		return
+	}
+	e.Logger.Info("renamed SonarCloud main branch to match source",
+		"project", cloudKey, "from", current, "to", sourceMainName)
+}
+
 // importProjectBranches imports project data for every branch of one project.
 // Main branch is imported first; if it fails, remaining branches are skipped.
 func importProjectBranches(ctx context.Context, e *Executor, proj json.RawMessage,
@@ -162,6 +186,14 @@ func importProjectBranches(ctx context.Context, e *Executor, proj json.RawMessag
 			}
 			return fmt.Errorf("main branch CE failed for %s: %w", cloudKey, err)
 		}
+		// #428 — SonarCloud creates the project's main branch under its own
+		// default name (typically "master"), discarding the source main branch
+		// name. Rename it to match the source now — BEFORE the non-main branches
+		// are imported, because they reference the main branch as their merge
+		// branch (bctx.MainTargetName == the source main name) and because the
+		// rename frees the old default name in case a non-main branch uses it
+		// (e.g. a source "master" branch when "develop" is the main branch).
+		renameSCMainBranchToSource(ctx, e, cloudKey, mainBranch.Name)
 	}
 
 	// Phase 2: import non-main branches sequentially.
@@ -173,16 +205,16 @@ func importProjectBranches(ctx context.Context, e *Executor, proj json.RawMessag
 
 // resolveMainTargetName returns the project's main branch name on the target,
 // used as the reference/merge branch for non-main branch imports. It prefers
-// the SonarCloud main branch name (which may have been renamed during project
-// creation) and falls back to the source main branch name.
+// the SOURCE main branch name: #428 renames the SonarCloud main branch to match
+// the source right after the main branch is migrated, so by the time non-main
+// branches are imported the main branch carries the source name. It falls back
+// to the SonarCloud main branch name only when the source main branch is
+// unknown (no branch data was extracted for the project).
 func resolveMainTargetName(scMainBranch string, mainBranch *branchInfo) string {
-	if scMainBranch != "" {
-		return scMainBranch
-	}
-	if mainBranch != nil {
+	if mainBranch != nil && mainBranch.Name != "" {
 		return mainBranch.Name
 	}
-	return ""
+	return scMainBranch
 }
 
 type branchImportContext struct {
@@ -192,7 +224,8 @@ type branchImportContext struct {
 	ServerKey    string
 	SCMainBranch string
 	// MainTargetName is the project's main branch name on the SonarCloud target
-	// (the SC main branch if known, else the SQ main branch name). Non-main
+	// (the source main branch name, which the SC main branch is renamed to per
+	// #428; the SC main branch name only when no source main is known). Non-main
 	// branches use it as their reference/merge branch on submit.
 	MainTargetName string
 	Completed      map[string]bool
@@ -241,6 +274,7 @@ func recordBranchResult(w *common.ChunkWriter, cloudKey, branchName string, resu
 		"status":            result.Status,
 		"task_id":           result.TaskID,
 		"error":             result.Error,
+		"source_purged":     result.SourcePurged,
 	})
 	w.WriteOne(record) //nolint:errcheck
 }
@@ -260,6 +294,12 @@ type importResult struct {
 	Status string
 	TaskID string
 	Error  string
+	// SourcePurged is true when the branch was migrated without its source
+	// text because SonarQube housekeeping purged it (issue #425). The branch
+	// still imports its measures and issues (status stays "success"); this
+	// flag drives the per-project "source code of branch X is missing" note
+	// in the migration report.
+	SourcePurged bool
 }
 
 func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*importResult, error) {
@@ -308,13 +348,17 @@ func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*i
 		return nil, fmt.Errorf("CE task failed: %w", err)
 	}
 
-	return &importResult{Status: "success", TaskID: result.TaskID}, nil
+	return &importResult{Status: "success", TaskID: result.TaskID, SourcePurged: report.SourcePurged}, nil
 }
 
 // branchReport is a packaged scanner report for one branch, ready to submit.
 type branchReport struct {
 	ZIP            []byte
 	ProjectVersion string
+	// SourcePurged is true when this branch's source text was unavailable
+	// (purged by housekeeping) so the report carries measures + issues but no
+	// source. Propagated to the importResult for #425 reporting.
+	SourcePurged bool
 }
 
 // buildBranchReport loads the extracted data for one branch, applies the
@@ -335,6 +379,9 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	// view shows no author/date per line.
 	componentMeasures := loadComponentMeasures(e, input.ServerURL, input.ServerKey, input.Branch)
 	scmByComponent := loadExtractedSCM(e, input.ServerURL, input.ServerKey, input.Branch)
+	// Per-line syntax highlighting (colors in the Code view); without it the
+	// migrated source renders as raw, uncolored text (issue #420).
+	syntaxHighlighting := loadExtractedSyntaxHighlighting(e, input.ServerURL, input.ServerKey, input.Branch)
 
 	if len(components) == 0 {
 		return nil, &importResult{Status: "skipped"}, nil
@@ -343,16 +390,26 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	// The source server returns no source TEXT for this branch even though line
 	// measures may still exist (SonarQube housekeeping purges source/SCM data
 	// for old or inactive branches while keeping aggregate measures and issues;
-	// /api/sources/{raw,lines} then return empty). Without source, issues cannot
-	// be anchored to real lines: the report would declare N-line files with
-	// empty source, and the SonarCloud CE rejects that inconsistency. Skip
-	// rather than submit a doomed report. (The main branch is actively analyzed
-	// and always carries source, so it is unaffected.)
-	if (len(issues)+len(hotspotIssues)+len(extIssues)) > 0 && totalSourceLen(sources) == 0 {
-		e.Logger.Warn("skipping branch: source code not retrievable (line measures may remain, but source text is gone — likely purged by housekeeping for an inactive branch; re-analyze the branch to restore it)",
+	// /api/sources/{raw,lines} then return empty). Rather than skip the branch
+	// (which dropped it from the target and downgraded the whole project to
+	// "Partial"), migrate it without real source: the measures and issues
+	// still land, matching the source server's own post-purge state (issue
+	// #425). The SonarCloud CE rejects any report containing a FILE component
+	// with no source text — whether or not the file carries issues — so
+	// ensureFileSourcesPresent (below, after the components are built) attaches
+	// blank placeholder source for every source-less file. The purge is
+	// surfaced per-project in the report via the SourcePurged flag. (The main
+	// branch is actively analyzed and always carries source, so it is
+	// unaffected.)
+	//
+	// len(sources)>0 means source extraction ran for this branch (it writes one
+	// record per file, empty when purged); totalSourceLen==0 means every record
+	// came back empty — the whole branch's source is gone.
+	sourcePurged := len(sources) > 0 && totalSourceLen(sources) == 0
+	if sourcePurged {
+		e.Logger.Warn("migrating branch without source: source code not retrievable (line measures may remain, but source text is gone — likely purged by housekeeping for an inactive branch; re-analyze the branch on the source server to restore it)",
 			"project", input.CloudKey, "branch", input.Branch,
 			"findings", len(issues)+len(hotspotIssues)+len(extIssues))
-		return nil, &importResult{Status: "skipped", Error: "source code not retrievable for this branch (line measures may remain, but source text is gone — likely purged by SonarQube housekeeping); re-analyze the branch on the source server to migrate it"}, nil
 	}
 
 	// Fix component line counts (see fixComponentLineCounts).
@@ -396,9 +453,34 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	pbSources := make(map[int32]string)
 	for _, s := range sources {
 		if ref, ok := cr.Refs()[s.Component]; ok && s.Source != "" {
-			pbSources[ref] = s.Source
+			// Sanitize source text before embedding in the scanner report.
+			// Files like RCE-demo PHP scripts may contain null bytes (U+0000)
+			// used in null-byte injection exploits. The SonarCloud CE's Java
+			// component visitor and the underlying database both reject null
+			// bytes in text, producing "Visit of Component failed" / "Fail to
+			// process issues of component" CE task failures. Strip them here so
+			// the file still migrates with its issues and measures intact.
+			pbSources[ref] = stripNullBytes(s.Source)
 		}
 	}
+	// #425 — the SonarCloud CE rejects any report containing a FILE component
+	// with no source text (it fails with "There was an issue whilst processing
+	// the report"), regardless of whether the file carries issues — every
+	// successful report has source for all of its files. When source was purged
+	// the loop above leaves some (or all) files without a source entry, so fill
+	// them with blank placeholder source. The branch then lands with its
+	// measures and issues, matching the source server's own post-purge state;
+	// the purged files simply render as empty.
+	//
+	// purgedRefs is the set of file component refs that received placeholder
+	// source (i.e. source was unavailable). These refs need special treatment
+	// for issues: their placeholder source consists of empty lines (just "\n"
+	// characters), so any issue whose text range carries a non-zero column
+	// offset would be rejected by the CE with "offset out of range". We zero
+	// out the offsets for those issues below while preserving their line numbers.
+	purgedRefs := ensureFileSourcesPresent(fileComps, pbSources)
+	issues = zeroOffsetsForPurgedComponents(issues, purgedRefs, cr)
+	hotspotIssues = zeroOffsetsForPurgedComponents(hotspotIssues, purgedRefs, cr)
 
 	changesets := buildChangesetMap(cr, components, pbSources, scmByComponent, now)
 
@@ -460,15 +542,16 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 			FileCountByExt:      countFilesByExt(components),
 			AnalysisUUID:        analysisUUID,
 		}, root.Ref),
-		RootComponent:  root,
-		FileComponents: fileComps,
-		Issues:         scanreport.BuildIssues(issues, cr),
-		ExternalIssues: scanreport.BuildExternalIssues(extIssues, cr),
-		Measures:       scanreport.BuildMeasures(componentMeasures, cr),
-		Changesets:     changesets,
-		ActiveRules:    scanreport.BuildActiveRules(activeRules, now.UnixMilli()),
-		AdHocRules:     scanreport.BuildAdHocRules(adHocRules),
-		Sources:        pbSources,
+		RootComponent:      root,
+		FileComponents:     fileComps,
+		Issues:             scanreport.BuildIssues(issues, cr),
+		ExternalIssues:     scanreport.BuildExternalIssues(extIssues, cr),
+		Measures:           scanreport.BuildMeasures(componentMeasures, cr),
+		Changesets:         changesets,
+		ActiveRules:        scanreport.BuildActiveRules(activeRules, now.UnixMilli()),
+		AdHocRules:         scanreport.BuildAdHocRules(adHocRules),
+		Sources:            pbSources,
+		SyntaxHighlighting: scanreport.BuildSyntaxHighlighting(syntaxHighlighting, pbSources, cr),
 	}
 
 	zipBytes, err := scanreport.PackageReport(reportData)
@@ -498,7 +581,61 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 		"activeRules", len(activeRules),
 	)
 
-	return &branchReport{ZIP: zipBytes, ProjectVersion: projectVersion}, nil, nil
+	return &branchReport{ZIP: zipBytes, ProjectVersion: projectVersion, SourcePurged: sourcePurged}, nil, nil
+}
+
+// ensureFileSourcesPresent guarantees every FILE component has a source
+// entry, supplying blank placeholder source — one empty line per declared
+// line — for any file missing real source. Used for #425 purged-source
+// branches: the SonarCloud CE rejects a report containing a file with no
+// source text, so each source-less file is given just enough (empty) lines
+// for the report to be accepted and any issue line anchors to fall in range.
+// Files that already have real source are left untouched; the declared line
+// count of a filled file is clamped to at least 1 so the placeholder source
+// and the component agree. No-op for branches whose files all carry source.
+//
+// Returns the set of component refs that received placeholder source. Callers
+// use this to zero out column offsets on issues for those components — the CE
+// validates offsets against the actual source line width and rejects any offset
+// that exceeds the (empty) placeholder line length.
+func ensureFileSourcesPresent(fileComps []*pb.Component, sources map[int32]string) map[int32]struct{} {
+	purged := make(map[int32]struct{})
+	for _, fc := range fileComps {
+		if _, has := sources[fc.GetRef()]; has {
+			continue
+		}
+		if fc.Lines < 1 {
+			fc.Lines = 1
+		}
+		sources[fc.GetRef()] = strings.Repeat("\n", int(fc.Lines)-1)
+		purged[fc.GetRef()] = struct{}{}
+	}
+	return purged
+}
+
+// zeroOffsetsForPurgedComponents returns a copy of issues with StartOff and
+// EndOff set to 0 for any issue whose component has purged (placeholder) source.
+// The CE validates column offsets against the actual source line content; when
+// placeholder source is used every line is empty, so any non-zero offset would
+// cause "Visit of Component failed". Zeroing the offsets preserves line-level
+// positioning while avoiding the out-of-range rejection.
+func zeroOffsetsForPurgedComponents(issues []scanreport.IssueInput, purgedRefs map[int32]struct{}, cr *scanreport.ComponentRef) []scanreport.IssueInput {
+	if len(purgedRefs) == 0 {
+		return issues
+	}
+	out := make([]scanreport.IssueInput, len(issues))
+	copy(out, issues)
+	for i := range out {
+		ref, ok := cr.Refs()[out[i].Component]
+		if !ok {
+			continue
+		}
+		if _, isPurged := purgedRefs[ref]; isPurged {
+			out[i].StartOff = 0
+			out[i].EndOff = 0
+		}
+	}
+	return out
 }
 
 // fixComponentLineCounts sets each component's line count to the best available
@@ -642,6 +779,44 @@ func loadExtractedSources(e *Executor, serverURL, serverKey, branch string) []so
 		})
 	}
 	return sources
+}
+
+// loadExtractedSyntaxHighlighting reads the per-line highlighted HTML captured
+// alongside source code (getProjectSourceCode → "highlightedLines") for the
+// given branch, returning one HighlightInput per file. The highlighting is
+// parsed into protobuf rules later by scanreport.BuildSyntaxHighlighting so the
+// migrated Code view renders with colors (issue #420).
+func loadExtractedSyntaxHighlighting(e *Executor, serverURL, serverKey, branch string) []scanreport.HighlightInput {
+	items, err := readExtractItems(e, "getProjectSourceCode")
+	if err != nil {
+		return nil
+	}
+	var inputs []scanreport.HighlightInput
+	for _, item := range items {
+		if item.ServerURL != serverURL {
+			continue
+		}
+		var rec struct {
+			Key              string   `json:"key"`
+			ProjectKey       string   `json:"projectKey"`
+			Branch           string   `json:"branch"`
+			HighlightedLines []string `json:"highlightedLines"`
+		}
+		if err := json.Unmarshal(item.Data, &rec); err != nil {
+			continue
+		}
+		if rec.ProjectKey != serverKey || rec.Branch != branch || rec.Key == "" {
+			continue
+		}
+		if len(rec.HighlightedLines) == 0 {
+			continue
+		}
+		inputs = append(inputs, scanreport.HighlightInput{
+			Component: rec.Key,
+			Lines:     rec.HighlightedLines,
+		})
+	}
+	return inputs
 }
 
 func loadExtractedIssues(e *Executor, serverURL, serverKey, branch string) []scanreport.IssueInput {
@@ -1561,6 +1736,20 @@ func filterProfilesByLanguage(profiles []scanreport.QProfileInfo, langs map[stri
 		}
 	}
 	return filtered
+}
+
+// stripNullBytes removes all NUL characters (U+0000) from a source text string.
+// PHP and other languages used in security-research projects (e.g. RCE / null-byte
+// injection demo files) may embed NUL bytes deliberately. The SonarCloud Compute
+// Engine cannot process source-<ref>.txt files that contain NULs: Java's string
+// operations and the underlying database both reject them, producing
+// "Visit of Component failed" CE task errors. Stripping NULs preserves the rest
+// of the file content so issues and measures still migrate correctly.
+func stripNullBytes(s string) string {
+	if !strings.ContainsRune(s, 0) {
+		return s // fast path — most files have no NUL bytes
+	}
+	return strings.ReplaceAll(s, "\x00", "")
 }
 
 // filterRulesByLanguage keeps only active rules whose language is in the project.

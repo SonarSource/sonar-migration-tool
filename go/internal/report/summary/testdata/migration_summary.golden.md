@@ -8,18 +8,18 @@
 - Overall status: partial
 
 ## Executive Summary
-| Objects | Perfect | Near Perfect | Partial | Failed | Skipped |
+| Objects | Full Migration | Near Full Migration | Partial Migration | Failed | Skipped |
 |:---|:---|:---|:---|:---|:---|
 | Projects | 1 | 1 | 1 | 1 | 1 |
 | Total | 1 | 1 | 1 | 1 | 1 |
 
 ## Projects
-1 succeeded, 1 near perfect, 1 partial, 1 failed, 1 skipped (1 organization skipped)
+1 succeeded, 1 near full migration, 1 partial migration, 1 failed, 1 skipped (1 organization skipped)
 | Name | Organization | Outcome | Details |
 |:---|:---|:---|:---|
-| Proj Perfect | org1 | Perfect | New Project Key: **org1_perfect** |
-| Proj Near | org1 | Near Perfect | New Project Key: **org1_near**<br>new_security_rating_with_aica <= A --> new_security_rating <= A |
-| Proj Partial | org1 | Partial | New Project Key: **org1_partial**<br>The new-code definition (reference branch) was replaced by the org default |
+| Proj Perfect | org1 | Full Migration | New Project Key: **org1_perfect** |
+| Proj Near | org1 | Near Full Migration | New Project Key: **org1_near**<br>new_security_rating_with_aica <= A --> new_security_rating <= A |
+| Proj Partial | org1 | Partial Migration | New Project Key: **org1_partial**<br>The new-code definition (reference branch) was replaced by the org default |
 | Proj Failed | org1 | Failed | create failed: boom \| already exists |
 | Proj Skipped | org1 | Skipped | org was skipped by the wizard |
 

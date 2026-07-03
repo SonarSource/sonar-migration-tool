@@ -57,22 +57,22 @@ print_warning() {
 }
 
 # Validate required variables
-if [ "$SONARQUBE_TOKEN" = "your-sonarqube-token-here" ]; then
+if [[ "$SONARQUBE_TOKEN" = "your-sonarqube-token-here" ]]; then
     print_error "Please set SONARQUBE_TOKEN in the script"
     exit 1
 fi
 
-if [ "$SONARCLOUD_TOKEN" = "your-sonarcloud-token-here" ]; then
+if [[ "$SONARCLOUD_TOKEN" = "your-sonarcloud-token-here" ]]; then
     print_error "Please set SONARCLOUD_TOKEN in the script"
     exit 1
 fi
 
-if [ "$SONARCLOUD_ENTERPRISE_KEY" = "your-enterprise-key" ]; then
+if [[ "$SONARCLOUD_ENTERPRISE_KEY" = "your-enterprise-key" ]]; then
     print_error "Please set SONARCLOUD_ENTERPRISE_KEY in the script"
     exit 1
 fi
 
-if [ "$SONARCLOUD_ORG_KEY" = "your-target-org" ]; then
+if [[ "$SONARCLOUD_ORG_KEY" = "your-target-org" ]]; then
     print_error "Please set SONARCLOUD_ORG_KEY in the script"
     exit 1
 fi
@@ -139,7 +139,7 @@ print_step "Step 3: Updating organizations.csv"
 
 ORGS_FILE="${EXPORT_DIR_ABS}/organizations.csv"
 
-if [ ! -f "$ORGS_FILE" ]; then
+if [[ ! -f "$ORGS_FILE" ]]; then
     print_error "organizations.csv not found at $ORGS_FILE"
     exit 1
 fi

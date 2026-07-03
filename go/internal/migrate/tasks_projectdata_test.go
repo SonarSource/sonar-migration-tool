@@ -12,11 +12,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/scanreport"
+	pb "github.com/sonar-solutions/sonar-migration-tool/internal/scanreport/proto"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 )
 
@@ -250,6 +252,125 @@ func TestBuildChangesetMap(t *testing.T) {
 	}
 }
 
+// #425 — ensureFileSourcesPresent gives every source-less FILE component a
+// blank placeholder source (one empty line per declared line) so the CE
+// accepts the report, while leaving files that already have real source
+// untouched. A zero/negative line count is clamped up to a single empty
+// line and the component's declared line count is bumped to match.
+func TestEnsureFileSourcesPresent(t *testing.T) {
+	fileComps := []*pb.Component{
+		{Ref: 1, Type: pb.Component_FILE, Lines: 10}, // purged -> 10 blank lines
+		{Ref: 2, Type: pb.Component_FILE, Lines: 1},  // purged -> 1 blank line
+		{Ref: 3, Type: pb.Component_FILE, Lines: 0},  // purged, no measure -> clamp to 1
+		{Ref: 4, Type: pb.Component_FILE, Lines: 2},  // already has real source -> untouched
+	}
+	sources := map[int32]string{4: "real\nsource"}
+
+	purged := ensureFileSourcesPresent(fileComps, sources)
+
+	// The function must report exactly the three purged refs (1, 2, 3).
+	if len(purged) != 3 {
+		t.Fatalf("want 3 purged refs, got %d: %v", len(purged), purged)
+	}
+	for _, ref := range []int32{1, 2, 3} {
+		if _, ok := purged[int32(ref)]; !ok {
+			t.Errorf("ref %d must be in purged set", ref)
+		}
+	}
+	if _, ok := purged[4]; ok {
+		t.Error("ref 4 (has real source) must NOT be in purged set")
+	}
+
+	if len(sources) != 4 {
+		t.Fatalf("want a source entry per file (4), got %d", len(sources))
+	}
+	check := func(ref int32, wantLines int, wantBlank bool) {
+		src, ok := sources[ref]
+		if !ok {
+			t.Errorf("ref %d: missing source", ref)
+			return
+		}
+		if gotLines := strings.Count(src, "\n") + 1; gotLines != wantLines {
+			t.Errorf("ref %d: want %d lines, got %d", ref, wantLines, gotLines)
+		}
+		if wantBlank && strings.TrimRight(src, "\n") != "" {
+			t.Errorf("ref %d: placeholder source must be blank, got %q", ref, src)
+		}
+	}
+	check(1, 10, true)
+	check(2, 1, true)
+	check(3, 1, true)
+	if fileComps[2].Lines != 1 {
+		t.Errorf("zero-line file must be clamped to Lines=1, got %d", fileComps[2].Lines)
+	}
+	// File that already had real source is left exactly as-is.
+	if sources[4] != "real\nsource" {
+		t.Errorf("file with real source must be untouched, got %q", sources[4])
+	}
+	if fileComps[3].Lines != 2 {
+		t.Errorf("file with real source must keep its line count, got %d", fileComps[3].Lines)
+	}
+}
+
+// #410 — real per-line SCM blame must be applied to NON-MAIN branches, not
+// just main. The extract captures SCM per branch (getProjectSCMData carries a
+// branch field); buildBranchReport must load it for the branch being migrated
+// and build real changesets (author/date/revision) rather than the synthetic
+// fallback. This locks in the report-build side (the CE rendering is separate).
+func TestNonMainBranchGetsRealSCMChangesets(t *testing.T) {
+	dir := t.TempDir()
+	extractDir := filepath.Join(dir, "extract-01")
+	writeJSON(filepath.Join(extractDir, "extract.json"),
+		map[string]any{"url": testServerURL, "edition": "enterprise"})
+	// A file on the develop (non-main) branch with source + real blame.
+	writeJSONL(filepath.Join(extractDir, "getProjectComponentTree"), []map[string]any{
+		{"key": "proj1:src/App.java", "name": "App.java", "path": "src/App.java",
+			"language": "java", "lines": 3, "projectKey": "proj1", "branch": "develop",
+			"serverUrl": testServerURL},
+	})
+	writeJSONL(filepath.Join(extractDir, "getProjectSourceCode"), []map[string]any{
+		{"key": "proj1:src/App.java", "branch": "develop", "projectKey": "proj1",
+			"source": "a\nb\nc", "serverUrl": testServerURL},
+	})
+	writeJSONL(filepath.Join(extractDir, "getProjectSCMData"), []map[string]any{
+		{"key": "proj1:src/App.java", "branch": "develop", "projectKey": "proj1",
+			"serverUrl": testServerURL,
+			"scm": [][]any{
+				{1, "alice@example.com", "2024-01-01T00:00:00+0000", "rev1"},
+				{2, "bob@example.com", "2024-02-01T00:00:00+0000", "rev2"},
+				{3, "alice@example.com", "2024-01-01T00:00:00+0000", "rev1"},
+			}},
+	})
+
+	e := newProjectDataExecutor(t, dir)
+	comps := loadExtractedComponents(e, testServerURL, "proj1", "develop")
+	srcs := loadExtractedSources(e, testServerURL, "proj1", "develop")
+	scm := loadExtractedSCM(e, testServerURL, "proj1", "develop")
+	if len(scm) == 0 {
+		t.Fatal("expected SCM blame loaded for non-main branch 'develop', got none")
+	}
+
+	_, _, cr := scanreport.BuildComponents("cloud", comps)
+	pbSrc := map[int32]string{}
+	for _, s := range srcs {
+		if ref, ok := cr.Refs()[s.Component]; ok && s.Source != "" {
+			pbSrc[ref] = s.Source
+		}
+	}
+	cs := buildChangesetMap(cr, comps, pbSrc, scm, time.Unix(1700000000, 0))
+	got := cs[cr.Refs()["proj1:src/App.java"]]
+	if got == nil {
+		t.Fatal("no changeset built for App.java on develop")
+	}
+	authors := map[string]bool{}
+	for _, ch := range got.GetChangeset() {
+		authors[ch.GetAuthor()] = true
+	}
+	if !authors["alice@example.com"] || !authors["bob@example.com"] {
+		t.Errorf("non-main branch must carry real SCM blame authors, got %v", authors)
+	}
+}
+
 // --- Data loading function tests (require extract dir setup) ---
 
 func setupProjectDataExtract(t *testing.T, dir string) {
@@ -363,14 +484,18 @@ func TestCollectBranchInfo(t *testing.T) {
 
 func TestResolveMainTargetName(t *testing.T) {
 	master := branchInfo{Name: "master", IsMain: true}
+	main := branchInfo{Name: "main", IsMain: true}
 	cases := []struct {
 		name         string
 		scMainBranch string
 		mainBranch   *branchInfo
 		want         string
 	}{
-		{"prefers SC main branch name", "main", &master, "main"},
-		{"falls back to SQ main when SC unknown", "", &master, "master"},
+		// #428: the source main branch name wins — the SC main branch is
+		// renamed to match it, so non-main branches must reference it.
+		{"prefers source main over SC name", "master", &main, "main"},
+		{"uses source main when SC unknown", "", &master, "master"},
+		{"falls back to SC main when source unknown", "develop", nil, "develop"},
 		{"empty when no main known", "", nil, ""},
 	}
 	for _, tc := range cases {
@@ -1338,5 +1463,75 @@ func TestImportSkipsCompletedBranches(t *testing.T) {
 		if branch == "main" {
 			t.Error("main branch should have been skipped (already completed)")
 		}
+	}
+}
+
+// TestStripNullBytes verifies that NUL characters are removed from source text
+// (PHP/other security-demo files may embed NUL bytes; the SonarCloud CE rejects
+// source files containing them with "Visit of Component failed").
+func TestStripNullBytes(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "no NULs — fast path unchanged", in: "normal source\nno issues", want: "normal source\nno issues"},
+		{name: "single NUL stripped", in: "before\x00after", want: "beforeafter"},
+		{name: "multiple NULs stripped", in: "\x00a\x00b\x00", want: "ab"},
+		{name: "PHP null-byte injection demo", in: "<?php\ninclude $_GET[\"f\"]\x00\".php\";\n?>", want: "<?php\ninclude $_GET[\"f\"]\".php\";\n?>"},
+		{name: "empty string unchanged", in: "", want: ""},
+		{name: "only NULs becomes empty", in: "\x00\x00\x00", want: ""},
+		{name: "newlines and tabs preserved", in: "line1\n\tindented\r\nline3", want: "line1\n\tindented\r\nline3"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stripNullBytes(tc.in)
+			if got != tc.want {
+				t.Errorf("stripNullBytes(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestZeroOffsetsForPurgedComponents verifies that issues on components whose
+// source was purged have their column offsets zeroed while their line numbers
+// are preserved. Issues on components with real source are left untouched.
+// This prevents the SonarCloud CE "Visit of Component failed" error that occurs
+// when placeholder source (empty lines) is submitted for purged-source files and
+// an issue references a column offset beyond the empty line length.
+func TestZeroOffsetsForPurgedComponents(t *testing.T) {
+	cr := scanreport.NewComponentRef()
+	cr.Get("purged-file:App.php")  // ref 1 — will be in purgedRefs
+	cr.Get("real-file:Foo.java")   // ref 2 — not purged
+
+	purgedRefs := map[int32]struct{}{1: {}}
+
+	issues := []scanreport.IssueInput{
+		// Issue on purged file: offsets should be zeroed, line preserved.
+		{Component: "purged-file:App.php", StartLine: 10, EndLine: 10, StartOff: 5, EndOff: 20},
+		// Issue on real file: left completely unchanged.
+		{Component: "real-file:Foo.java", StartLine: 3, EndLine: 5, StartOff: 2, EndOff: 8},
+		// Issue with no component key: unchanged (unmapped).
+		{Component: "unknown:Other.php", StartLine: 1, EndLine: 1, StartOff: 0, EndOff: 10},
+	}
+
+	out := zeroOffsetsForPurgedComponents(issues, purgedRefs, cr)
+
+	// Purged file: line preserved, offsets zeroed.
+	if out[0].StartLine != 10 || out[0].EndLine != 10 {
+		t.Errorf("purged issue: line must be preserved, got %d-%d", out[0].StartLine, out[0].EndLine)
+	}
+	if out[0].StartOff != 0 || out[0].EndOff != 0 {
+		t.Errorf("purged issue: offsets must be zeroed, got start=%d end=%d", out[0].StartOff, out[0].EndOff)
+	}
+
+	// Real file: completely untouched.
+	if out[1].StartOff != 2 || out[1].EndOff != 8 {
+		t.Errorf("real-file issue: offsets must be unchanged, got start=%d end=%d", out[1].StartOff, out[1].EndOff)
+	}
+
+	// Original slice is not mutated.
+	if issues[0].StartOff != 5 {
+		t.Error("original issues slice must not be mutated")
 	}
 }

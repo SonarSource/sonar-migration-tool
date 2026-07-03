@@ -98,17 +98,28 @@ func applyGlobalGroupPermFailures(runDir string,
 	return keep, partial
 }
 
+// openRequestsLogScanner opens requests.log under runDir and returns a line
+// scanner ready for iteration. The caller must invoke the returned close func
+// when done. Returns (nil, nop, false) when the file cannot be opened.
+func openRequestsLogScanner(runDir string) (*bufio.Scanner, func(), bool) {
+	f, err := os.Open(filepath.Join(runDir, "requests.log"))
+	if err != nil {
+		return nil, func() {}, false
+	}
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+	return sc, func() { f.Close() }, true
+}
+
 // scanRequestsLogForFailedTemplateIDs returns the set of templateId
 // request-body values from failed POSTs to the given URL suffix.
 func scanRequestsLogForFailedTemplateIDs(runDir, urlSuffix string) map[string]bool {
 	out := map[string]bool{}
-	f, err := os.Open(filepath.Join(runDir, "requests.log"))
-	if err != nil {
+	scanner, close, ok := openRequestsLogScanner(runDir)
+	if !ok {
 		return out
 	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+	defer close()
 	for scanner.Scan() {
 		entry, ok := parseConfigLogLine(scanner.Text())
 		if !ok {
@@ -135,13 +146,11 @@ func scanRequestsLogForFailedTemplateIDs(runDir, urlSuffix string) map[string]bo
 func scanRequestsLogForFailedGlobalGroupPerms(runDir string) map[string][]string {
 	out := map[string][]string{}
 	seen := map[string]bool{}
-	f, err := os.Open(filepath.Join(runDir, "requests.log"))
-	if err != nil {
+	scanner, close, ok := openRequestsLogScanner(runDir)
+	if !ok {
 		return out
 	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+	defer close()
 	for scanner.Scan() {
 		entry, ok := parseConfigLogLine(scanner.Text())
 		if !ok {

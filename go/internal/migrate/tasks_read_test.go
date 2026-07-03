@@ -13,14 +13,7 @@ import (
 )
 
 func TestGetGateConditions(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	setupCreateOutputs(t, e)
+	e := newFlowTest(t)
 
 	reg := BuildMigrateRegistry(RegisterAll())
 	err := reg["getGateConditions"].Run(context.Background(), e)
@@ -35,14 +28,7 @@ func TestGetGateConditions(t *testing.T) {
 }
 
 func TestGetProfileBackups(t *testing.T) {
-	cloudSrv := newMockCloudServer()
-	defer cloudSrv.Close()
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-	dir := t.TempDir()
-	setupExtractData(dir)
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-	setupCreateOutputs(t, e)
+	e := newFlowTest(t)
 
 	reg := BuildMigrateRegistry(RegisterAll())
 	err := reg["getProfileBackups"].Run(context.Background(), e)

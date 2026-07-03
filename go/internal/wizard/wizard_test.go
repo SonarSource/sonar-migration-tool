@@ -170,12 +170,7 @@ func TestDetermineStartingPhaseInit(t *testing.T) {
 	state := NewWizardState()
 	p := &MockPrompter{}
 	phase, ok := determineStartingPhase(p, state, t.TempDir())
-	if !ok {
-		t.Fatal(testOKTrue)
-	}
-	if phase != PhaseExtract {
-		t.Errorf(errExpectExtract, phase)
-	}
+	assertExtractPhase(t, phase, ok)
 }
 
 func TestDetermineStartingPhaseComplete(t *testing.T) {
@@ -185,12 +180,7 @@ func TestDetermineStartingPhaseComplete(t *testing.T) {
 	}
 	dir := t.TempDir()
 	phase, ok := determineStartingPhase(p, state, dir)
-	if !ok {
-		t.Fatal(testOKTrue)
-	}
-	if phase != PhaseExtract {
-		t.Errorf(errExpectExtract, phase)
-	}
+	assertExtractPhase(t, phase, ok)
 }
 
 func TestDetermineStartingPhaseCompleteDecline(t *testing.T) {
@@ -250,13 +240,7 @@ func TestRunContextCancellation(t *testing.T) {
 
 func TestRunPhaseHandlerValidate(t *testing.T) {
 	dir := t.TempDir()
-	orgHeaders := []string{"sonarqube_org_key", "sonarcloud_org_key"}
-	writeCSV(t, dir, fileOrganizations, orgHeaders, [][]string{{"org-1", "cloud-1"}})
-	writeCSV(t, dir, fileProjects, []string{"key"}, [][]string{{"p1"}})
-	writeCSV(t, dir, fileTemplates, []string{"name"}, [][]string{{"t1"}})
-	writeCSV(t, dir, fileProfiles, []string{"name"}, [][]string{{"pr1"}})
-	writeCSV(t, dir, fileGates, []string{"name"}, [][]string{{"g1"}})
-	writeCSV(t, dir, fileGroups, []string{"name"}, [][]string{{"gr1"}})
+	writeMinimalCSVs(t, dir)
 
 	state := &WizardState{Phase: PhaseValidate}
 	p := &MockPrompter{}
@@ -374,12 +358,7 @@ func TestOfferPhaseRestartAccepted(t *testing.T) {
 		ChoiceResponses:  []int{0},
 	}
 	phase, ok := offerPhaseRestart(p, PhaseOrgMapping)
-	if !ok {
-		t.Fatal(testOKTrue)
-	}
-	if phase != PhaseExtract {
-		t.Errorf(errExpectExtract, phase)
-	}
+	assertExtractPhase(t, phase, ok)
 }
 
 func TestOfferPhaseRestartPickLater(t *testing.T) {
@@ -446,13 +425,7 @@ func TestRunWithSkippedProjects(t *testing.T) {
 
 	dir := t.TempDir()
 
-	orgHeaders := []string{"sonarqube_org_key", "sonarcloud_org_key"}
-	writeCSV(t, dir, fileOrganizations, orgHeaders, [][]string{{"org-1", "cloud-1"}})
-	writeCSV(t, dir, fileProjects, []string{"key"}, [][]string{{"p1"}})
-	writeCSV(t, dir, fileTemplates, []string{"name"}, [][]string{{"t1"}})
-	writeCSV(t, dir, fileProfiles, []string{"name"}, [][]string{{"pr1"}})
-	writeCSV(t, dir, fileGates, []string{"name"}, [][]string{{"g1"}})
-	writeCSV(t, dir, fileGroups, []string{"name"}, [][]string{{"gr1"}})
+	writeMinimalCSVs(t, dir)
 
 	state := &WizardState{
 		Phase:           PhaseValidate,
@@ -484,7 +457,33 @@ func TestRunWithSkippedProjects(t *testing.T) {
 	}
 }
 
-// --- Helper to create CSV fixture ---
+// --- Helpers ---
+
+// writeMinimalCSVs writes the six minimal CSV stubs needed by Validate-phase
+// tests: one org row plus single-row stubs for projects, templates, profiles,
+// gates, and groups.
+func writeMinimalCSVs(t *testing.T, dir string) {
+	t.Helper()
+	orgHeaders := []string{"sonarqube_org_key", "sonarcloud_org_key"}
+	writeCSV(t, dir, fileOrganizations, orgHeaders, [][]string{{"org-1", "cloud-1"}})
+	writeCSV(t, dir, fileProjects, []string{"key"}, [][]string{{"p1"}})
+	writeCSV(t, dir, fileTemplates, []string{"name"}, [][]string{{"t1"}})
+	writeCSV(t, dir, fileProfiles, []string{"name"}, [][]string{{"pr1"}})
+	writeCSV(t, dir, fileGates, []string{"name"}, [][]string{{"g1"}})
+	writeCSV(t, dir, fileGroups, []string{"name"}, [][]string{{"gr1"}})
+}
+
+// assertExtractPhase asserts that determineStartingPhase returned ok=true and
+// phase==PhaseExtract; fatals with the pre-defined error constants otherwise.
+func assertExtractPhase(t *testing.T, phase WizardPhase, ok bool) {
+	t.Helper()
+	if !ok {
+		t.Fatal(testOKTrue)
+	}
+	if phase != PhaseExtract {
+		t.Errorf(errExpectExtract, phase)
+	}
+}
 
 func writeCSV(t *testing.T, dir, name string, headers []string, rows [][]string) {
 	t.Helper()
@@ -521,8 +520,6 @@ func writeExtractMeta(t *testing.T, dir string) {
 // always come from the seed because the on-disk state never carries
 // them (json:"-").
 func TestMergeSeed(t *testing.T) {
-	strPtr := func(s string) *string { return &s }
-
 	cases := []struct {
 		name  string
 		state WizardState
@@ -615,7 +612,6 @@ func TestMergeSeed(t *testing.T) {
 // .wizard_state.json — they're json:"-" so Save() drops them. Resume
 // reloads the file and gets nil tokens.
 func TestWizardState_TokensNotPersisted(t *testing.T) {
-	strPtr := func(s string) *string { return &s }
 	dir := t.TempDir()
 	state := &WizardState{
 		SourceURL:   strPtr("https://sq"),

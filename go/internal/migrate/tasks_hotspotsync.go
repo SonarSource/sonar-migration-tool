@@ -371,19 +371,19 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 // hotspot's file, then resolves by (ruleKey, line). Returns the case
 // a/b/c/lookup outcome.
 func resolveAndSyncHotspot(ctx context.Context, e *Executor, cloudKey, orgKey, baseURL, sourceKey string, src matchableHotspot, counter *TaskCounter) syncOutcome {
-	filePath := src.Component
-	prefix := sourceKey + ":"
-	if strings.HasPrefix(filePath, prefix) {
-		filePath = filePath[len(prefix):]
-	}
+	// Strip "projectKey:" and any trailing "moduleKey:" segments so the bare
+	// file path can be used in the cloud search. Multi-module (monorepo)
+	// projects add a module key after the project key; SonarCloud has no
+	// module layer so only the plain file path matches the cloud component.
+	filePath := stripProjectKeyPrefix(src.Component)
 	if filePath == "" || src.RuleKey == "" || src.Line <= 0 {
 		e.Logger.Debug("syncHotspotMetadata: source hotspot not matchable", "key", src.Key, "rule", src.RuleKey, "component", src.Component, "line", src.Line)
 		return syncOutcomeNotFound
 	}
-	candidates, err := findCloudHotspotCandidates(ctx, e, cloudKey, orgKey, filePath)
+	candidates, err := findCloudHotspotCandidates(ctx, e, cloudKey, orgKey, filePath, src.Branch)
 	if err != nil {
 		logAPIWarn(e.Logger, "syncHotspotMetadata: cloud candidate lookup failed", err,
-			"project", cloudKey, "source_key", src.Key, "file", filePath)
+			"project", cloudKey, "source_key", src.Key, "file", filePath, "branch", src.Branch)
 		return syncOutcomeLookupError
 	}
 	target, outcome := classifyHotspotCandidatesByLine(candidates, src.RuleKey, src.Line, src.Offset)
@@ -527,13 +527,23 @@ func classifyHotspotCandidatesByLine(candidates []matchableHotspot, sourceRule s
 //
 // Uses e.Raw (the cloud-side raw client) because the typed
 // HotspotsClient's SearchAll doesn't expose a per-file filter.
-func findCloudHotspotCandidates(ctx context.Context, e *Executor, cloudKey, orgKey, filePath string) ([]matchableHotspot, error) {
+//
+// The branch parameter is essential for multi-branch projects: without it
+// /api/hotspots/search resolves against the project's main branch only, so
+// hotspots on non-main branches never find their cloud counterpart and go
+// unsynced. Source and target branch names match 1:1 (the main branch is
+// renamed to the source name on import — #428), so the source branch name
+// is the correct cloud branch to search.
+func findCloudHotspotCandidates(ctx context.Context, e *Executor, cloudKey, orgKey, filePath, branch string) ([]matchableHotspot, error) {
 	baseParams := func() url.Values {
 		p := url.Values{}
 		p.Set("projectKey", cloudKey)
 		p.Set("files", filePath)
 		if orgKey != "" {
 			p.Set("organization", orgKey)
+		}
+		if branch != "" {
+			p.Set("branch", branch)
 		}
 		return p
 	}

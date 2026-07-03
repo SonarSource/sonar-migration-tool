@@ -250,6 +250,14 @@ type EntityItem struct {
 // row carries a single section-level note (Organization is left
 // blank) and is rendered last in the Skipped bucket so it appears at
 // the bottom of the section.
+// Section name constants used across multiple files in this package.
+const (
+	sectionQualityGates    = "Quality Gates"
+	sectionQualityProfiles = "Quality Profiles"
+	// dateTimeLayout is the timestamp format used in PDF and markdown reports.
+	dateTimeLayout = "2006-01-02 15:04:05"
+)
+
 const (
 	SkipReasonOrgSkipped   = "org-skipped"
 	SkipReasonBuiltIn      = "built-in"
@@ -275,7 +283,7 @@ type sectionDef struct {
 // sectionDefs defines the sections in report order.
 var sectionDefs = []sectionDef{
 	{
-		Name:           "Quality Gates",
+		Name:           sectionQualityGates,
 		InputTask:      "generateGateMappings",
 		OutputTask:     "createGates",
 		AnalysisEntity: "Quality Gate",
@@ -284,7 +292,7 @@ var sectionDefs = []sectionDef{
 		ExtractTask:    "getGates",
 	},
 	{
-		Name:           "Quality Profiles",
+		Name:           sectionQualityProfiles,
 		InputTask:      "generateProfileMappings",
 		OutputTask:     "createProfiles",
 		AnalysisEntity: "Quality Profile",

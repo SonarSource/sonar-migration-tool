@@ -1424,8 +1424,10 @@ func TestCollectProjectDataOutcomes(t *testing.T) {
 		{"cloud_project_key": "proj-never-analyzed", "branch": "main", "status": "skipped"},
 		// proj-permission — skipped branch with a permission-shaped error.
 		{"cloud_project_key": "proj-permission", "branch": "main", "status": "skipped", "error": "403 Forbidden: insufficient privileges"},
-		// proj-source-purged — skipped branch with a free-text error.
-		{"cloud_project_key": "proj-source-purged", "branch": "feat-1", "status": "skipped", "error": "source code not retrievable for this branch (purged by SonarQube housekeeping)"},
+		// proj-freetext-skip — skipped branch with an arbitrary free-text
+		// error (verbatim passthrough). Note: purged source is no longer a
+		// skip as of #425 — it migrates without source and stays success.
+		{"cloud_project_key": "proj-freetext-skip", "branch": "feat-1", "status": "skipped", "error": "some unmapped extraction error"},
 		// proj-mixed — main failed, secondary skipped. Failed wins.
 		{"cloud_project_key": "proj-mixed", "branch": "main", "status": "failed", "error": "CE task failed: HTTP 500"},
 		{"cloud_project_key": "proj-mixed", "branch": "develop", "status": "skipped", "error": "skipped: main branch CE failed"},
@@ -1436,9 +1438,9 @@ func TestCollectProjectDataOutcomes(t *testing.T) {
 
 	want := map[string]projectDataOutcome{
 		"proj-success":        {State: "success"},
-		"proj-never-analyzed": {State: "skipped", Reason: "Source project was provisioned but never analyzed"},
+		"proj-never-analyzed": {State: "skipped", Reason: "Source project was provisioned but never analyzed, project settings migrated anyway", NeverAnalyzed: true},
 		"proj-permission":     {State: "skipped", Reason: "Not enough permission on the source project to extract data"},
-		"proj-source-purged":  {State: "skipped", Reason: "source code not retrievable for this branch (purged by SonarQube housekeeping)"},
+		"proj-freetext-skip":  {State: "skipped", Reason: "some unmapped extraction error"},
 		"proj-mixed":          {State: "failed", Reason: "API error when migrating project data: CE task failed: HTTP 500"},
 	}
 	for k, w := range want {

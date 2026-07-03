@@ -19,6 +19,22 @@ import (
 	sqapi "github.com/sonar-solutions/sq-api-go"
 )
 
+// newFiredTransport builds a RetryTransport with a minimal Backoff schedule and
+// a Recovery hook that increments the returned counter. Use this for tests
+// that assert recovery does NOT fire — the counter stays at zero on success.
+func newFiredTransport(t *testing.T) (http.RoundTripper, *atomic.Int32) {
+	t.Helper()
+	var fired atomic.Int32
+	transport := sqapi.NewRetryTransportFull(sqapi.RetryTransportConfig{
+		Inner:   http.DefaultTransport,
+		Backoff: []time.Duration{0},
+		Recovery: func(_, _ string, _ int, _ time.Duration) {
+			fired.Add(1)
+		},
+	})
+	return transport, &fired
+}
+
 func TestClassify429(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -121,6 +137,16 @@ func TestParseRetryAfter(t *testing.T) {
 	}
 }
 
+// doGet performs a GET to url using client, closes the response body, and
+// returns the response. It fatals if the request fails.
+func doGet(t *testing.T, client *http.Client, url string) *http.Response {
+	t.Helper()
+	resp, err := client.Get(url)
+	require.NoError(t, err)
+	resp.Body.Close()
+	return resp
+}
+
 func TestRetryTransportSQCBackoff(t *testing.T) {
 	var attempts atomic.Int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -144,9 +170,7 @@ func TestRetryTransportSQCBackoff(t *testing.T) {
 	})
 
 	client := &http.Client{Transport: transport}
-	resp, err := client.Get(ts.URL)
-	require.NoError(t, err)
-	resp.Body.Close()
+	resp := doGet(t, client, ts.URL)
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, int32(2), attempts.Load(), "should retry once after the 429")
@@ -172,9 +196,7 @@ func TestRetryTransportFailFastForCloudflare(t *testing.T) {
 	})
 
 	client := &http.Client{Transport: transport}
-	resp, err := client.Get(ts.URL)
-	require.NoError(t, err)
-	resp.Body.Close()
+	resp := doGet(t, client, ts.URL)
 
 	assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
 	assert.Equal(t, int32(2), attempts.Load(),
@@ -202,10 +224,8 @@ func TestRetryTransportRetryAfterHonored(t *testing.T) {
 
 	start := time.Now()
 	client := &http.Client{Transport: transport}
-	resp, err := client.Get(ts.URL)
+	resp := doGet(t, client, ts.URL)
 	elapsed := time.Since(start)
-	require.NoError(t, err)
-	resp.Body.Close()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.GreaterOrEqual(t, elapsed, 1*time.Second,
@@ -246,9 +266,7 @@ func TestRetryTransportRecoveryFiresAfter429(t *testing.T) {
 	})
 
 	client := &http.Client{Transport: transport}
-	resp, err := client.Get(ts.URL)
-	require.NoError(t, err)
-	resp.Body.Close()
+	resp := doGet(t, client, ts.URL)
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Len(t, calls, 1, "recovery must fire exactly once when a 429 clears")
@@ -267,22 +285,13 @@ func TestRetryTransportRecoveryNotFiredFor5xx(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	var fired atomic.Int32
-	transport := sqapi.NewRetryTransportFull(sqapi.RetryTransportConfig{
-		Inner:   http.DefaultTransport,
-		Backoff: []time.Duration{0},
-		Recovery: func(_, _ string, _ int, _ time.Duration) {
-			fired.Add(1)
-		},
-	})
+	transport, firedPtr := newFiredTransport(t)
 
 	client := &http.Client{Transport: transport}
-	resp, err := client.Get(ts.URL)
-	require.NoError(t, err)
-	resp.Body.Close()
+	resp := doGet(t, client, ts.URL)
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, int32(0), fired.Load(), "5xx retries are not rate limiting — recovery must not fire")
+	assert.Equal(t, int32(0), firedPtr.Load(), "5xx retries are not rate limiting — recovery must not fire")
 }
 
 func TestRetryTransportRecoveryNotFiredWhenScheduleExhausted(t *testing.T) {
@@ -305,9 +314,7 @@ func TestRetryTransportRecoveryNotFiredWhenScheduleExhausted(t *testing.T) {
 	})
 
 	client := &http.Client{Transport: transport}
-	resp, err := client.Get(ts.URL)
-	require.NoError(t, err)
-	resp.Body.Close()
+	resp := doGet(t, client, ts.URL)
 
 	assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
 	assert.Equal(t, int32(0), fired.Load(), "a request that never clears the 429 has not recovered")
@@ -319,22 +326,13 @@ func TestRetryTransportRecoveryNotFiredOnImmediateSuccess(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	var fired atomic.Int32
-	transport := sqapi.NewRetryTransportFull(sqapi.RetryTransportConfig{
-		Inner:   http.DefaultTransport,
-		Backoff: []time.Duration{0},
-		Recovery: func(_, _ string, _ int, _ time.Duration) {
-			fired.Add(1)
-		},
-	})
+	transport, firedPtr := newFiredTransport(t)
 
 	client := &http.Client{Transport: transport}
-	resp, err := client.Get(ts.URL)
-	require.NoError(t, err)
-	resp.Body.Close()
+	resp := doGet(t, client, ts.URL)
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, int32(0), fired.Load(), "a request that was never throttled has not recovered")
+	assert.Equal(t, int32(0), firedPtr.Load(), "a request that was never throttled has not recovered")
 }
 
 func TestRateLimitGateExtend(t *testing.T) {

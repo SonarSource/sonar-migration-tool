@@ -14,6 +14,9 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v6
         with:
@@ -32,18 +35,28 @@ jobs:
         run: |
           sed 's|github.com/sonar-solutions/sonar-migration-tool/|go/|g' go/coverage.out > go/coverage.sonar.out
           sed 's|github.com/sonar-solutions/sq-api-go/|lib/sq-api-go/|g' lib/sq-api-go/coverage.out > lib/sq-api-go/coverage.sonar.out
+      - name: Fetch Vault secrets
+        id: secrets
+        uses: SonarSource/vault-action-wrapper@v3
+        with:
+          secrets: |
+            development/kv/data/sonarcloud token | SONAR_TOKEN;
       - name: SonarQube Scan
-        uses: SonarSource/sonarqube-scan-action@v7
+        uses: SonarSource/sonarqube-scan-action@v8
         env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_TOKEN: ${{ fromJSON(steps.secrets.outputs.vault).SONAR_TOKEN }}
 
-  release:
-    name: Release Binaries
+  # Cross-compile every platform binary on Linux and GPG-sign each one, mirroring
+  # the `build-binaries` job in SonarSource/sonarqube-cli. macOS binaries are
+  # re-signed after notarization in the sign-macos job below.
+  build-binaries:
+    name: Build All Binaries
     needs: test
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      id-token: write   # Vault OIDC
+      contents: read
     strategy:
       matrix:
         include:
@@ -78,7 +91,152 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: '0'
         run: go build -o ../sonar-migration-tool-${{ matrix.suffix }} .
-      - name: Upload release artifact
+
+      - name: Vault Secrets
+        id: secrets
+        uses: SonarSource/vault-action-wrapper@v3
+        with:
+          secrets: |
+            development/kv/data/sign key | GPG_SIGNING_KEY;
+            development/kv/data/sign passphrase | GPG_SIGNING_PASSPHRASE;
+
+      - name: GPG-sign binary
+        env:
+          GPG_SIGNING_KEY: ${{ fromJSON(steps.secrets.outputs.vault).GPG_SIGNING_KEY }}
+          GPG_SIGNING_PASSPHRASE: ${{ fromJSON(steps.secrets.outputs.vault).GPG_SIGNING_PASSPHRASE }}
+        run: .github/scripts/gpg-sign.sh sonar-migration-tool-${{ matrix.suffix }}
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: binary-${{ matrix.suffix }}
+          path: |
+            sonar-migration-tool-${{ matrix.suffix }}
+            sonar-migration-tool-${{ matrix.suffix }}.asc
+          if-no-files-found: error
+
+  # Code-sign + notarize the macOS binaries on an Apple runner, then re-GPG-sign
+  # them (codesign mutates the binary, invalidating the earlier signature).
+  # Mirrors the `sign-macos` job in SonarSource/sonarqube-cli.
+  sign-macos:
+    name: Sign and Notarize macOS Binaries
+    needs: build-binaries
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-latest-xlarge
+    permissions:
+      id-token: write   # Vault OIDC
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      # GitHub-hosted macOS runners reach internal Vault via Cloudflare WARP.
+      - name: Setup Cloudflare WARP
+        uses: SonarSource/gh-action_setup-cloudflare-warp@fe31a2b2f31595cffdef290985700732cb3469d6 # v2.1.0
+
+      - name: Download macOS binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: binary-darwin-*
+          path: dist/
+          merge-multiple: true
+
+      - name: Vault Secrets
+        id: secrets
+        uses: SonarSource/vault-action-wrapper@v3
+        with:
+          # NOTE: confirm "sonar-migration-tool" is the correct project segment for
+          # this repo's Vault policy (mirrors development/kv/data/sign/sonarqube-cli).
+          secrets: |
+            development/kv/data/sign/sonar-migration-tool CERTIFICATE | CERTIFICATE;
+            development/kv/data/sign/sonar-migration-tool CSC_KEY_PASSWORD | CSC_KEY_PASSWORD;
+            development/kv/data/sign/sonar-migration-tool APPLE_TEAM_ID | APPLE_TEAM_ID;
+            development/kv/data/sign/sonar-migration-tool APPLE_ID | APPLE_ID;
+            development/kv/data/sign/sonar-migration-tool APPLE_APP_SPECIFIC_PASSWORD | APPLE_APP_SPECIFIC_PASSWORD;
+            development/kv/data/sign key | GPG_SIGNING_KEY;
+            development/kv/data/sign passphrase | GPG_SIGNING_PASSPHRASE;
+
+      - name: Code-sign and notarize macOS binaries
+        env:
+          CERTIFICATE: ${{ fromJSON(steps.secrets.outputs.vault).CERTIFICATE }}
+          CSC_KEY_PASSWORD: ${{ fromJSON(steps.secrets.outputs.vault).CSC_KEY_PASSWORD }}
+          APPLE_TEAM_ID: ${{ fromJSON(steps.secrets.outputs.vault).APPLE_TEAM_ID }}
+          APPLE_ID: ${{ fromJSON(steps.secrets.outputs.vault).APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ fromJSON(steps.secrets.outputs.vault).APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          echo "$CERTIFICATE" | base64 --decode > /tmp/certificate.p12
+          security create-keychain -p "" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "" build.keychain
+          security import /tmp/certificate.p12 -k build.keychain -P "$CSC_KEY_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" build.keychain
+          rm /tmp/certificate.p12
+
+          sign_macos_binary() {
+            local binary="$1"
+            local archive="/tmp/$(basename "$binary").zip"
+
+            codesign --sign "Developer ID Application: SonarSource SA ($APPLE_TEAM_ID)" --identifier sonar-migration-tool --options runtime --timestamp "$binary"
+            codesign --verify --verbose "$binary"
+
+            zip "$archive" "$binary"
+            xcrun notarytool submit "$archive" --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+            rm "$archive"
+          }
+
+          while IFS= read -r -d '' binary; do
+            sign_macos_binary "$binary"
+          done < <(find dist -maxdepth 1 -type f -name 'sonar-migration-tool-darwin-*' ! -name '*.asc' -print0)
+
+      - name: Clean up build keychain
+        if: always()
+        run: |
+          security default-keychain -s ~/Library/Keychains/login.keychain-db 2>/dev/null || true
+          security delete-keychain build.keychain 2>/dev/null || true
+
+      - name: Re-GPG-sign macOS binaries
+        env:
+          GPG_SIGNING_KEY: ${{ fromJSON(steps.secrets.outputs.vault).GPG_SIGNING_KEY }}
+          GPG_SIGNING_PASSPHRASE: ${{ fromJSON(steps.secrets.outputs.vault).GPG_SIGNING_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' binary; do
+            .github/scripts/gpg-sign.sh "$binary"
+          done < <(find dist -maxdepth 1 -type f -name 'sonar-migration-tool-darwin-*' ! -name '*.asc' -print0)
+
+      - name: Upload signed macOS binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: binaries-macos-signed
+          path: dist/sonar-migration-tool-darwin-*
+          if-no-files-found: error
+
+  # Collect all artifacts (with the signed macOS binaries overwriting the
+  # unsigned ones) and attach them to the GitHub Release for the tag.
+  publish:
+    name: Publish Release
+    needs: [build-binaries, sign-macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create/update the GitHub Release
+    steps:
+      - name: Download all binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: binary-*
+          path: dist/
+          merge-multiple: true
+
+      # Overwrites the unsigned macOS binaries + signatures from the step above.
+      - name: Download signed macOS binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: binaries-macos-signed
+          path: dist/
+
+      - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: sonar-migration-tool-${{ matrix.suffix }}
+          files: dist/sonar-migration-tool-*

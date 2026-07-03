@@ -17,6 +17,19 @@ import (
 // is skipped entirely on those servers (issue #372).
 var aiCodeFixV2Available = common.MustParseVersion("2025.3")
 
+// serverArrayTask builds a TaskDef that fetches a paginated API array and
+// enriches each record with the server URL. Covers the common pattern of
+// system-level endpoints that return a named array and need serverUrl tracking.
+func serverArrayTask(name, path, resultKey string) TaskDef {
+	return TaskDef{
+		Name:     name,
+		Editions: AllEditions,
+		Run: func(ctx context.Context, e *Executor) error {
+			return fetchAndWriteArray(ctx, e, name, path, resultKey, nil, map[string]any{"serverUrl": e.ServerURL})
+		},
+	}
+}
+
 func systemTasks() []TaskDef {
 	return []TaskDef{
 		{
@@ -26,24 +39,12 @@ func systemTasks() []TaskDef {
 				return fetchAndWriteSingle(ctx, e, "getServerInfo", "api/system/info", nil, "", map[string]any{"serverUrl": e.ServerURL})
 			},
 		},
-		{
-			Name:     "getServerSettings",
-			Editions: AllEditions,
-			Run: func(ctx context.Context, e *Executor) error {
-				return fetchAndWriteArray(ctx, e, "getServerSettings", "api/settings/values", "settings", nil, map[string]any{"serverUrl": e.ServerURL})
-			},
-		},
-		{
-			// Companion to getServerSettings: extracts the SQS-side
-			// setting definitions (key, type, multiValues, defaultValue)
-			// so the migrate phase can decide which global settings have
-			// been customized (value != defaultValue — issue #186).
-			Name:     "getServerSettingsDefinitions",
-			Editions: AllEditions,
-			Run: func(ctx context.Context, e *Executor) error {
-				return fetchAndWriteArray(ctx, e, "getServerSettingsDefinitions", "api/settings/list_definitions", "definitions", nil, map[string]any{"serverUrl": e.ServerURL})
-			},
-		},
+		serverArrayTask("getServerSettings", "api/settings/values", "settings"),
+		// Companion to getServerSettings: extracts the SQS-side setting
+		// definitions (key, type, multiValues, defaultValue) so the migrate
+		// phase can decide which global settings have been customized
+		// (value != defaultValue — issue #186).
+		serverArrayTask("getServerSettingsDefinitions", "api/settings/list_definitions", "definitions"),
 		{
 			Name:     "getPlugins",
 			Editions: AllEditions,
@@ -59,13 +60,7 @@ func systemTasks() []TaskDef {
 				return fetchAndWriteArray(ctx, e, "getUsage", "api/projects/license_usage", "projects", nil, nil)
 			},
 		},
-		{
-			Name:     "getBindings",
-			Editions: AllEditions,
-			Run: func(ctx context.Context, e *Executor) error {
-				return fetchAndWriteArray(ctx, e, "getBindings", "api/alm_settings/list", "almSettings", nil, map[string]any{"serverUrl": e.ServerURL})
-			},
-		},
+		serverArrayTask("getBindings", "api/alm_settings/list", "almSettings"),
 		{
 			// AI Code Fix configuration (issue #251). Single JSON
 			// object exposing the global enablement state, the list

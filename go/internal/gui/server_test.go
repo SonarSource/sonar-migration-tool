@@ -62,26 +62,29 @@ func TestServerStartAndShutdown(t *testing.T) {
 	}
 }
 
-func TestServerAPIRoutes(t *testing.T) {
+// startTestServerWithRun creates a server backed by an export dir that already
+// contains one run directory (04-20-2026-01) with an extract.json stub.
+// The context is cancelled via t.Cleanup. Returns the server's base URL.
+func startTestServerWithRun(t *testing.T) string {
+	t.Helper()
 	wp := NewWebPrompter(context.Background(), func(ServerMessage) {})
 	hub := NewHub(wp)
 	tmpl := mustParseTemplates(t)
-
 	exportDir := t.TempDir()
-
-	// Create a run directory for the API to find.
 	runDir := filepath.Join(exportDir, "04-20-2026-01")
 	os.MkdirAll(runDir, 0o755)
 	os.WriteFile(filepath.Join(runDir, "extract.json"),
 		[]byte(`{"url":"https://test.com/"}`), 0o644)
-
 	srv := NewServer("localhost:0", exportDir, hub, tmpl)
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+	t.Cleanup(cancel)
 	go srv.Start(ctx)
 	<-srv.Ready()
-	base := srv.URL()
+	return srv.URL()
+}
+
+func TestServerAPIRoutes(t *testing.T) {
+	base := startTestServerWithRun(t)
 
 	// Test /api/runs.
 	resp, err := http.Get(base + "/api/runs")
@@ -115,24 +118,7 @@ func TestServerAPIRoutes(t *testing.T) {
 }
 
 func TestServerPageRoutes(t *testing.T) {
-	wp := NewWebPrompter(context.Background(), func(ServerMessage) {})
-	hub := NewHub(wp)
-	tmpl := mustParseTemplates(t)
-
-	exportDir := t.TempDir()
-
-	runDir := filepath.Join(exportDir, "04-20-2026-01")
-	os.MkdirAll(runDir, 0o755)
-	os.WriteFile(filepath.Join(runDir, "extract.json"),
-		[]byte(`{"url":"https://test.com/"}`), 0o644)
-
-	srv := NewServer("localhost:0", exportDir, hub, tmpl)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go srv.Start(ctx)
-	<-srv.Ready()
-	base := srv.URL()
+	base := startTestServerWithRun(t)
 
 	routes := []struct {
 		path       string

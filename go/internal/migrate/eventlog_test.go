@@ -21,13 +21,20 @@ func newTestLogger(buf *bytes.Buffer, c *eventCollector, level slog.Level) *slog
 	return slog.New(newEventHandler(base, c))
 }
 
+// newEventLogger creates a logger + buffer + collector wired at LevelInfo — the
+// common setup shared by all eventlog tests.
+func newEventLogger(t *testing.T) (*slog.Logger, *bytes.Buffer, *eventCollector) {
+	t.Helper()
+	var buf bytes.Buffer
+	c := &eventCollector{}
+	return newTestLogger(&buf, c, slog.LevelInfo), &buf, c
+}
+
 // TestEventHandler_Passthrough asserts that an Info log is both forwarded to
 // the inner TextHandler (visible in the buffer) AND captured exactly once by
 // the collector.
 func TestEventHandler_Passthrough(t *testing.T) {
-	var buf bytes.Buffer
-	c := &eventCollector{}
-	logger := newTestLogger(&buf, c, slog.LevelInfo)
+	logger, buf, c := newEventLogger(t)
 
 	logger.Info("hello world", "k", "v")
 
@@ -61,9 +68,7 @@ func TestEventHandler_Passthrough(t *testing.T) {
 // is captured by neither the inner handler nor the collector — the teeing
 // handler delegates Enabled() to the inner handler, so the filter is shared.
 func TestEventHandler_LevelFilterParity(t *testing.T) {
-	var buf bytes.Buffer
-	c := &eventCollector{}
-	logger := newTestLogger(&buf, c, slog.LevelInfo)
+	logger, buf, c := newEventLogger(t)
 
 	logger.Debug("this should be dropped", "k", "v")
 
@@ -95,9 +100,7 @@ func TestEventHandler_Concurrency(t *testing.T) {
 		expectedTotal = goroutines * perGoroutine
 	)
 
-	var buf bytes.Buffer
-	c := &eventCollector{}
-	logger := newTestLogger(&buf, c, slog.LevelInfo)
+	logger, _, c := newEventLogger(t)
 
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
@@ -149,9 +152,7 @@ func TestEventHandler_Concurrency(t *testing.T) {
 // WithAttrs) still tees into the same collector and that the bound attrs
 // appear on the captured events.
 func TestEventHandler_WithAttrsTees(t *testing.T) {
-	var buf bytes.Buffer
-	c := &eventCollector{}
-	logger := newTestLogger(&buf, c, slog.LevelInfo)
+	logger, buf, c := newEventLogger(t)
 
 	derived := logger.With("k", "v")
 	derived.Info("derived message", "extra", "payload")

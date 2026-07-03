@@ -334,6 +334,12 @@ func collectProjectSyncSkips(store *common.DataStore, scanMap map[string]project
 		if key == "" || status == "success" || seenSkipped[key] {
 			continue
 		}
+		// #432 — a project that was provisioned but never analyzed on the
+		// source must keep whatever outcome the other migration steps gave
+		// it (its settings still migrated); do not route it to Partial.
+		if o, ok := scanMap[key]; ok && o.NeverAnalyzed {
+			continue
+		}
 		seenSkipped[key] = true
 		out = append(out, projectFailure{
 			CloudProjectKey: key,

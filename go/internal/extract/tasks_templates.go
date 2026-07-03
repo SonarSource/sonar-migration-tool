@@ -10,22 +10,22 @@ import (
 	"net/url"
 )
 
+// searchTemplatesTask builds a TaskDef that fetches one result key from
+// /api/permissions/search_templates, enriching records with serverUrl.
+func searchTemplatesTask(name, resultKey string) TaskDef {
+	return TaskDef{
+		Name:     name,
+		Editions: AllEditions,
+		Run: func(ctx context.Context, e *Executor) error {
+			return fetchAndWriteArray(ctx, e, name, "api/permissions/search_templates", resultKey, nil, map[string]any{"serverUrl": e.ServerURL})
+		},
+	}
+}
+
 func templateTasks() []TaskDef {
 	return []TaskDef{
-		{
-			Name:     "getTemplates",
-			Editions: AllEditions,
-			Run: func(ctx context.Context, e *Executor) error {
-				return fetchAndWriteArray(ctx, e, "getTemplates", "api/permissions/search_templates", "permissionTemplates", nil, map[string]any{"serverUrl": e.ServerURL})
-			},
-		},
-		{
-			Name:     "getDefaultTemplates",
-			Editions: AllEditions,
-			Run: func(ctx context.Context, e *Executor) error {
-				return fetchAndWriteArray(ctx, e, "getDefaultTemplates", "api/permissions/search_templates", "defaultTemplates", nil, map[string]any{"serverUrl": e.ServerURL})
-			},
-		},
+		searchTemplatesTask("getTemplates", "permissionTemplates"),
+		searchTemplatesTask("getDefaultTemplates", "defaultTemplates"),
 		{
 			Name:         "getTemplateGroupsScanners",
 			Editions:     AllEditions,

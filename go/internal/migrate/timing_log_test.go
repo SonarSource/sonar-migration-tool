@@ -12,12 +12,21 @@ import (
 	"testing"
 )
 
+// newTimingTestEnv creates the shared executor + log buffer + RunTimings used
+// by all timing_log tests.
+func newTimingTestEnv(t *testing.T) (*Executor, *bytes.Buffer, *RunTimings) {
+	t.Helper()
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	e := &Executor{Sem: make(chan struct{}, 4), Logger: logger}
+	return e, &buf, &RunTimings{}
+}
+
 // Issue #311: runPhase must emit a "Task <name>: Duration hh:mm:ss.xxx"
 // INFO line at the end of every task, on both the success and failure
 // paths.
 func TestRunPhaseEmitsTaskDurationLog(t *testing.T) {
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	e, buf, tm := newTimingTestEnv(t)
 
 	registry := map[string]*TaskDef{
 		"quickTask": {
@@ -27,12 +36,6 @@ func TestRunPhaseEmitsTaskDurationLog(t *testing.T) {
 			},
 		},
 	}
-
-	e := &Executor{
-		Sem:    make(chan struct{}, 4),
-		Logger: logger,
-	}
-	tm := &RunTimings{}
 
 	if err := runPhase(context.Background(), e, []string{"quickTask"}, registry, 1, tm); err != nil {
 		t.Fatalf("runPhase: %v", err)
@@ -49,8 +52,7 @@ func TestRunPhaseEmitsTaskDurationLog(t *testing.T) {
 // emits one combined "task summary" line carrying counts + duration
 // instead of the previous separate summary + duration pair.
 func TestRunPhaseEmitsMergedSummaryWhenCounterRecorded(t *testing.T) {
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	e, buf, tm := newTimingTestEnv(t)
 
 	registry := map[string]*TaskDef{
 		"countingTask": {
@@ -64,12 +66,6 @@ func TestRunPhaseEmitsMergedSummaryWhenCounterRecorded(t *testing.T) {
 			},
 		},
 	}
-
-	e := &Executor{
-		Sem:    make(chan struct{}, 4),
-		Logger: logger,
-	}
-	tm := &RunTimings{}
 
 	if err := runPhase(context.Background(), e, []string{"countingTask"}, registry, 1, tm); err != nil {
 		t.Fatalf("runPhase: %v", err)
@@ -97,8 +93,7 @@ func TestRunPhaseEmitsMergedSummaryWhenCounterRecorded(t *testing.T) {
 // On failure the task still gets a closing duration line — the
 // log bookend must not depend on success.
 func TestRunPhaseEmitsTaskDurationLogOnFailure(t *testing.T) {
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	e, buf, tm := newTimingTestEnv(t)
 
 	registry := map[string]*TaskDef{
 		"failingTask": {
@@ -108,12 +103,6 @@ func TestRunPhaseEmitsTaskDurationLogOnFailure(t *testing.T) {
 			},
 		},
 	}
-
-	e := &Executor{
-		Sem:    make(chan struct{}, 4),
-		Logger: logger,
-	}
-	tm := &RunTimings{}
 
 	// Expect runPhase to surface the error.
 	if err := runPhase(context.Background(), e, []string{"failingTask"}, registry, 1, tm); err == nil {

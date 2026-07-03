@@ -453,6 +453,14 @@ func TestSuccessDetailsProjectData(t *testing.T) {
 			want:       "proj1",
 			mustNot:    []string{"Project data", "skipped"},
 		},
+		{
+			// #432 — never-analyzed renders an informational note, NOT a
+			// "migration skipped" warning.
+			name:    "never analyzed — informational note, no skip framing",
+			detail:  "proj1|scan:noanalysis:Source project was provisioned but never analyzed, project settings migrated anyway",
+			want:    "proj1\nSource project was provisioned but never analyzed, project settings migrated anyway",
+			mustNot: []string{"migration skipped", "Project data migration"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -346,6 +346,17 @@ func newMockServer() *httptest.Server {
 	return httptest.NewServer(mux)
 }
 
+// firstExtractDir returns the path of the first subdirectory created under dir
+// by a RunExtract call, fataling if none exists. This is the extract run dir.
+func firstExtractDir(t *testing.T, dir string) string {
+	t.Helper()
+	entries, _ := os.ReadDir(dir)
+	if len(entries) == 0 {
+		t.Fatal("expected extract run directory under export dir")
+	}
+	return filepath.Join(dir, entries[0].Name())
+}
+
 // TestRunExtractIntegration runs a small extract with a mock SonarQube server.
 func TestRunExtractIntegration(t *testing.T) {
 	srv := newMockServer()
@@ -362,11 +373,7 @@ func TestRunExtractIntegration(t *testing.T) {
 		t.Fatalf("RunExtract failed: %v", err)
 	}
 
-	entries, _ := os.ReadDir(dir)
-	if len(entries) == 0 {
-		t.Fatal("expected extract directory to be created")
-	}
-	extractDir := filepath.Join(dir, entries[0].Name())
+	extractDir := firstExtractDir(t, dir)
 
 	// Verify extract.json metadata.
 	metaData, err := os.ReadFile(filepath.Join(extractDir, "extract.json"))
@@ -405,11 +412,7 @@ func TestRunExtractFull(t *testing.T) {
 		t.Fatalf("RunExtract (full) failed: %v", err)
 	}
 
-	entries, _ := os.ReadDir(dir)
-	if len(entries) == 0 {
-		t.Fatal("expected extract directory")
-	}
-	extractDir := filepath.Join(dir, entries[0].Name())
+	extractDir := firstExtractDir(t, dir)
 
 	// Verify key task output directories exist.
 	expectedTasks := []string{
@@ -572,11 +575,7 @@ func TestRunExtractAiCodeFixSkippedOnOldSQS(t *testing.T) {
 		t.Error("api/v2/fix-suggestions/feature-enablements was called; task should skip on SQS < 2025.3")
 	}
 
-	entries, _ := os.ReadDir(dir)
-	if len(entries) == 0 {
-		t.Fatal("expected extract run directory")
-	}
-	extractDir := filepath.Join(dir, entries[0].Name())
+	extractDir := firstExtractDir(t, dir)
 	if _, err := os.Stat(filepath.Join(extractDir, "getAiCodeFixConfig")); !os.IsNotExist(err) {
 		t.Errorf("getAiCodeFixConfig directory should not exist on SQS < 2025.3, got err=%v", err)
 	}

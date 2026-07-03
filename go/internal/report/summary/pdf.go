@@ -77,13 +77,21 @@ var skipReasonOrder = []struct {
 	{SkipReasonDefaultValue, "Left at default value on SonarQube Server"},
 }
 
-// Outcome labels used in the unified per-section table.
+// Outcome labels used in the unified per-section table. The migration-
+// outcome wording deliberately avoids "Perfect"/"Near Perfect" (issue #426,
+// legal): the green/yellow/orange colours are unchanged, only the text.
 const (
-	outcomeSuccess     = "Perfect"
-	outcomeNearPerfect = "Near Perfect"
-	outcomePartial     = "Partial"
+	outcomeSuccess     = "Full Migration"
+	outcomeNearPerfect = "Near Full Migration"
+	outcomePartial     = "Partial Migration"
 	outcomeFailed      = "Failed"
 	outcomeSkipped     = "Skipped"
+)
+
+const (
+	pdfLogoFooterKey = "sonar-logo-footer"
+	pdfWillBeApplied = "will be applied"
+	pdfScanDelimiter = "|scan:"
 )
 
 // RenderPDF builds a PDF document from the migration summary and returns the bytes.
@@ -200,7 +208,7 @@ func registerLogoImages(pdf *fpdf.Fpdf) {
 	pdf.RegisterImageOptionsReader("sonar-logo-header",
 		fpdf.ImageOptions{ImageType: "PNG", ReadDpi: false},
 		bytes.NewReader(sonarLogoHeader))
-	pdf.RegisterImageOptionsReader("sonar-logo-footer",
+	pdf.RegisterImageOptionsReader(pdfLogoFooterKey,
 		fpdf.ImageOptions{ImageType: "PNG", ReadDpi: false},
 		bytes.NewReader(sonarLogoFooter))
 }
@@ -249,14 +257,14 @@ func addPageHeader(pdf *fpdf.Fpdf, runID string, generatedAt time.Time) {
 
 	// Page 2+ header: small Sonar glyph left, Run ID + timestamp right.
 	glyphY := 6.0
-	pdf.ImageOptions("sonar-logo-footer", pageMarginLeft, glyphY,
+	pdf.ImageOptions(pdfLogoFooterKey, pageMarginLeft, glyphY,
 		headerGlyphWidth, 0, false,
 		fpdf.ImageOptions{ImageType: "PNG"}, 0, "")
 
 	pdf.SetFont(pdfFontFamilyBody, "", 8)
 	setColor(pdf, colorDarkGray)
 	rightText := fmt.Sprintf("Run ID: %s  |  Generated: %s",
-		runID, generatedAt.Format("2006-01-02 15:04:05"))
+		runID, generatedAt.Format(dateTimeLayout))
 	textY := glyphY + (headerGlyphWidth-4)/2
 	rightW := pageW - 2*pageMarginRight
 	pdf.SetXY(pageMarginLeft, textY)
@@ -284,7 +292,7 @@ func addPageFooter(pdf *fpdf.Fpdf) {
 	// Sonar glyph, centred vertically in the band, with a small left
 	// inset. h=0 means "preserve aspect ratio".
 	glyphY := bandY + (footerBandH-footerLogoWidth)/2
-	pdf.ImageOptions("sonar-logo-footer", pageMarginLeft, glyphY,
+	pdf.ImageOptions(pdfLogoFooterKey, pageMarginLeft, glyphY,
 		footerLogoWidth, 0, false,
 		fpdf.ImageOptions{ImageType: "PNG"}, 0, "")
 
@@ -365,31 +373,33 @@ func renderTitlePage(pdf *fpdf.Fpdf, summary *MigrationSummary) {
 	setColor(pdf, colorBlack)
 	pdf.SetFont(pdfFontFamilyBody, "", 11)
 	pdf.CellFormat(0, 7, "Run ID: "+summary.RunID, "", 1, "C", false, 0, "")
-	pdf.CellFormat(0, 7, "Generated: "+summary.GeneratedAt.Format("2006-01-02 15:04:05"), "", 1, "C", false, 0, "")
+	pdf.CellFormat(0, 7, "Generated: "+summary.GeneratedAt.Format(dateTimeLayout), "", 1, "C", false, 0, "")
 	pdf.Ln(8)
 
 	renderExecutiveSummary(pdf, summary.Sections, summary.OmitSections)
 }
 
 // renderExecutiveSummary renders the six-column summary table at the top of
-// the report: Objects | Perfect | Near Perfect | Partial | Failed | Skipped.
-// The five status buckets follow the green/yellow/orange/red/grey taxonomy
-// defined in issues #224 and #227; colours are conveyed by the count cells.
-// Sections present in `omit` are skipped entirely (predictive reports
-// omit "Global Settings", #235).
+// the report: Objects | Full Migration | Near Full Migration | Partial
+// Migration | Failed | Skipped. The five status buckets follow the
+// green/yellow/orange/red/grey taxonomy defined in issues #224 and #227;
+// colours are conveyed by the count cells. Sections present in `omit` are
+// skipped entirely (predictive reports omit "Global Settings", #235).
 func renderExecutiveSummary(pdf *fpdf.Fpdf, sections []Section, omit map[string]bool) {
-	headers := []string{"Objects", "Perfect", "Near Perfect", "Partial", "Failed", "Skipped"}
+	headers := []string{"Objects", outcomeSuccess, outcomeNearPerfect, outcomePartial, outcomeFailed, outcomeSkipped}
 	const (
 		objectsWidth = 45.0
 		countWidth   = 30.0
 	)
 	widths := []float64{objectsWidth, countWidth, countWidth, countWidth, countWidth, countWidth}
 
-	// Header row — Poppins Bold on the Sonar primary background (#167).
+	// Header row — Poppins Bold on the Sonar primary background (#167). Font
+	// size 8 so the longest label ("Near Full Migration", ~27mm at 8pt) fits
+	// the 30mm count columns (#426).
 	pdf.SetDrawColor(colorSonarGrey[0], colorSonarGrey[1], colorSonarGrey[2])
 	setFillColor(pdf, colorSonarBlue)
 	pdf.SetTextColor(255, 255, 255)
-	pdf.SetFont(pdfFontFamilyHeading, "B", 10)
+	pdf.SetFont(pdfFontFamilyHeading, "B", 8)
 	for i, h := range headers {
 		align := "C"
 		if i == 0 {
@@ -535,18 +545,18 @@ func renderUnifiedTable(pdf *fpdf.Fpdf, section Section, predictive bool) {
 	switch {
 	case isGlobalSettings && hideOrg:
 		// Predictive Global Settings: narrower Setting Key, wider Details.
-		widths = []float64{72, 25, 99}
+		widths = []float64{72, 30, 94}
 	case isGlobalSettings:
-		widths = []float64{55, 35, 25, 81}
+		widths = []float64{55, 35, 30, 76}
 	case predictive:
 		// Predict always drops the Organization column.
-		widths = []float64{60, 25, 111}
+		widths = []float64{60, 30, 106}
 	case hideOrg:
 		// Real-migrate Portfolios — narrower Name, wider Details.
-		widths = []float64{63, 25, 108}
+		widths = []float64{63, 30, 103}
 	default:
 		// Real-migrate standard 4-column layout.
-		widths = []float64{55, 35, 25, 81}
+		widths = []float64{55, 35, 30, 76}
 	}
 	if hideOrg {
 		headers = []string{nameHeader, "Outcome", "Details"}
@@ -1090,9 +1100,9 @@ func toPredictiveTense(s string, predictive bool) string {
 		{"were not ", "will not be "},
 		// Multi-word phrases next.
 		{"Has been applied", "Will be applied"},
-		{"has been applied", "will be applied"},
+		{"has been applied", pdfWillBeApplied},
 		{"Have been applied", "Will be applied"},
-		{"have been applied", "will be applied"},
+		{"have been applied", pdfWillBeApplied},
 		{"has been ", "will be "},
 		{"have been ", "will be "},
 		{"was turned off", "will be turned off"},
@@ -1100,10 +1110,10 @@ func toPredictiveTense(s string, predictive bool) string {
 		{"was disabled", "will be disabled"},
 		{"was enabled", "will be enabled"},
 		{"was changed", "will be changed"},
-		{"was applied", "will be applied"},
+		{"was applied", pdfWillBeApplied},
 		{"was set", "will be set"},
 		{"was migrated", "will be migrated"},
-		{"were applied", "will be applied"},
+		{"were applied", pdfWillBeApplied},
 		{"were migrated", "will be migrated"},
 		{"were disabled", "will be disabled"},
 		{"were enabled", "will be enabled"},
@@ -1160,7 +1170,7 @@ const (
 // bold markers so the PDF renderer can stress it. Other sections keep
 // the bare cloud key as-is.
 func successDetails(item EntityItem, predictive, hideCloudKey, labelProjectKey bool) string {
-	cloudKey, scan, ncdFallback, syncStats, userPerms := parseProjectDetailMarkers(item.Detail)
+	cloudKey, scan, ncdFallback, syncStats, userPerms, srcPurged := parseProjectDetailMarkers(item.Detail)
 	if hideCloudKey || (predictive && strings.HasPrefix(cloudKey, "predict:")) {
 		cloudKey = ""
 	}
@@ -1182,7 +1192,13 @@ func successDetails(item EntityItem, predictive, hideCloudKey, labelProjectKey b
 	// pre-migration extract).
 	state, reason := parseScanMarker(scan)
 	dataSkipped := state == "skipped" || state == "failed"
-	if !predictive && dataSkipped {
+	switch {
+	case state == "noanalysis":
+		// #432 — provisioned but never analyzed: the outcome is not degraded
+		// and the project's settings still migrated. Surface the reason as an
+		// informational note (no "migration skipped" framing).
+		parts = append(parts, reason)
+	case !predictive && dataSkipped:
 		parts = append(parts, formatProjectDataSkipped(reason))
 	}
 	// #356 / #323 — render the per-project "x% of items with manual
@@ -1207,7 +1223,40 @@ func successDetails(item EntityItem, predictive, hideCloudKey, labelProjectKey b
 	if line := renderDroppedUserPermsLine(userPerms, predictive); line != "" {
 		parts = append(parts, line)
 	}
+	// #425 — branches whose source was purged on the source server are
+	// migrated without their source (measures + issues only). Surface the
+	// affected branches once per project, in both actual and predictive
+	// reports.
+	if line := renderBranchSourcePurgedLine(srcPurged); line != "" {
+		parts = append(parts, line)
+	}
 	return strings.Join(parts, "\n")
+}
+
+// renderBranchSourcePurgedLine turns a |srcPurged:branchA,branchB marker
+// payload into the operator-facing line for issue #425. Branch names are
+// stressed with inline bold; the noun is singular for one branch. Empty
+// payload yields "" so callers can skip appending.
+func renderBranchSourcePurgedLine(payload string) string {
+	if payload == "" {
+		return ""
+	}
+	var branches []string
+	for _, b := range strings.Split(payload, ",") {
+		if b = strings.TrimSpace(b); b != "" {
+			branches = append(branches, inlineBoldStart+b+inlineBoldEnd)
+		}
+	}
+	if len(branches) == 0 {
+		return ""
+	}
+	noun := "branches"
+	if len(branches) == 1 {
+		noun = "branch"
+	}
+	return fmt.Sprintf(
+		"Source code of %s %s is missing (likely purged in SQS). Migration is executed without the sources.",
+		noun, strings.Join(branches, ", "))
 }
 
 // renderDroppedUserPermsLine turns a |userPerms:N marker payload into
@@ -1332,7 +1381,7 @@ func partialDetails(item EntityItem, predictive, hideCloudKey, labelProjectKey b
 	// rendered on their own lines (exactly like Succeeded rows), instead
 	// of leaving the raw marker embedded inside the bolded project key.
 	// Embedding the raw marker previously left the inline-bold span
-	// unterminated when a downstream renderer re-split on "|scan:" (the
+	// unterminated when a downstream renderer re-split on pdfScanDelimiter (the
 	// Markdown report truncated the closing bold marker and the issue
 	// lines). Then append the per-item issue lines that make the row
 	// Partial / NearPerfect.
@@ -1376,10 +1425,10 @@ func sectionCountSummary(section Section) string {
 		fmt.Sprintf("%d succeeded", len(section.Succeeded)),
 	}
 	if len(section.NearPerfect) > 0 {
-		parts = append(parts, fmt.Sprintf("%d near perfect", len(section.NearPerfect)))
+		parts = append(parts, fmt.Sprintf("%d near full migration", len(section.NearPerfect)))
 	}
 	if len(section.Partial) > 0 {
-		parts = append(parts, fmt.Sprintf("%d partial", len(section.Partial)))
+		parts = append(parts, fmt.Sprintf("%d partial migration", len(section.Partial)))
 	}
 	parts = append(parts, fmt.Sprintf("%d failed", len(section.Failed)))
 
@@ -1429,7 +1478,7 @@ func renderTableHeader(pdf *fpdf.Fpdf, headers []string, widths []float64) {
 }
 
 func parseProjectData(detail string) (string, string) {
-	idx := strings.Index(detail, "|scan:")
+	idx := strings.Index(detail, pdfScanDelimiter)
 	if idx < 0 {
 		return detail, ""
 	}
@@ -1443,12 +1492,18 @@ func parseProjectData(detail string) (string, string) {
 // #353 dropped-user-permissions count payload (or empty). Markers
 // are stripped in reverse-attachment order so trailing payloads
 // don't get absorbed into earlier ones' suffix matching.
-func parseProjectDetailMarkers(detail string) (cloudKey, scan, ncdFallback, syncStats, userPerms string) {
+func parseProjectDetailMarkers(detail string) (cloudKey, scan, ncdFallback, syncStats, userPerms, srcPurged string) {
 	cloudKey = detail
 	// userPerms marker (always last when present — attachDroppedUserPerms
-	// runs after attachSyncStats / attachProjectData / etc.).
+	// runs after attachSyncStats / attachBranchSourcePurged / etc.).
 	if idx := strings.Index(cloudKey, "|userPerms:"); idx >= 0 {
 		userPerms = cloudKey[idx+len("|userPerms:"):]
+		cloudKey = cloudKey[:idx]
+	}
+	// srcPurged marker (#425 — branches migrated without their purged
+	// source; attached after syncStats, before userPerms).
+	if idx := strings.Index(cloudKey, "|srcPurged:"); idx >= 0 {
+		srcPurged = cloudKey[idx+len("|srcPurged:"):]
 		cloudKey = cloudKey[:idx]
 	}
 	// syncStats marker.
@@ -1457,8 +1512,8 @@ func parseProjectDetailMarkers(detail string) (cloudKey, scan, ncdFallback, sync
 		cloudKey = cloudKey[:idx]
 	}
 	// scan marker.
-	if idx := strings.Index(cloudKey, "|scan:"); idx >= 0 {
-		scan = cloudKey[idx+len("|scan:"):]
+	if idx := strings.Index(cloudKey, pdfScanDelimiter); idx >= 0 {
+		scan = cloudKey[idx+len(pdfScanDelimiter):]
 		cloudKey = cloudKey[:idx]
 	}
 	// NCD fallback marker.
@@ -1466,7 +1521,7 @@ func parseProjectDetailMarkers(detail string) (cloudKey, scan, ncdFallback, sync
 		ncdFallback = cloudKey[idx+len("|ncdFallback:"):]
 		cloudKey = cloudKey[:idx]
 	}
-	return cloudKey, scan, ncdFallback, syncStats, userPerms
+	return cloudKey, scan, ncdFallback, syncStats, userPerms, srcPurged
 }
 
 func checkPageBreak(pdf *fpdf.Fpdf, h float64) {
@@ -1725,8 +1780,8 @@ func renderRunMetadata(pdf *fpdf.Fpdf, summary *MigrationSummary) {
 	renderSectionHeading(pdf, "Run metadata")
 
 	rows := [][]string{
-		{"Started", summary.StartedAt.Format("2006-01-02 15:04:05")},
-		{"Completed", summary.CompletedAt.Format("2006-01-02 15:04:05")},
+		{"Started", summary.StartedAt.Format(dateTimeLayout)},
+		{"Completed", summary.CompletedAt.Format(dateTimeLayout)},
 		{"Total elapsed", formatDuration(summary.TotalElapsed)},
 		{"Overall status", summary.OverallStatus},
 	}

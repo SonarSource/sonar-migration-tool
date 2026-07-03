@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"testing"
 
 	sqapi "github.com/sonar-solutions/sq-api-go"
 	"github.com/sonar-solutions/sq-api-go/cloud"
@@ -527,6 +528,71 @@ func writeJSON(path string, data any) {
 	os.MkdirAll(filepath.Dir(path), 0o755)
 	b, _ := json.Marshal(data)
 	os.WriteFile(path, b, 0o644)
+}
+
+// addDefaultCloudHandler installs a catch-all GET handler that responds with an
+// empty JSON object. Mount this on a cloudMux after all specific handlers so
+// that any unexpected endpoint gets a safe no-op response instead of a 404.
+func addDefaultCloudHandler(mux *http.ServeMux) {
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	})
+}
+
+// newCustomCloudTest wires a test environment with a caller-supplied cloudMux,
+// a fresh mock API server, a temp export dir, and a new Executor. It does NOT
+// call setupExtractData — use this for tasks whose extract data is written
+// inline by the test. Servers are closed via t.Cleanup.
+func newCustomCloudTest(t *testing.T, cloudMux *http.ServeMux) *Executor {
+	t.Helper()
+	cloudSrv := httptest.NewServer(cloudMux)
+	t.Cleanup(cloudSrv.Close)
+	apiSrv := newMockAPIServer()
+	t.Cleanup(apiSrv.Close)
+	dir := t.TempDir()
+	return newTestExecutor(cloudSrv, apiSrv, dir)
+}
+
+// newAlreadyExistsTest is like newCreateTest but uses newAlreadyExistsCloudServer
+// instead of newMockCloudServer — covering the already-exists idempotency paths.
+func newAlreadyExistsTest(t *testing.T) (*Executor, string) {
+	t.Helper()
+	cloudSrv := newAlreadyExistsCloudServer()
+	t.Cleanup(cloudSrv.Close)
+	apiSrv := newMockAPIServer()
+	t.Cleanup(apiSrv.Close)
+	dir := t.TempDir()
+	setupExtractData(dir)
+	return newTestExecutor(cloudSrv, apiSrv, dir), dir
+}
+
+// writeGlobalSettingsOrg writes the shared boilerplate needed by custom
+// setGlobalSettings tests: the extract.json metadata for extract-01 and a
+// single generateOrganizationMappings row for org1.
+func writeGlobalSettingsOrg(t *testing.T, e *Executor) {
+	t.Helper()
+	writeExtractMetaJSON(t, e.ExportDir, "extract-01", testServerURL)
+	writeTaskJSONL(t, e, "generateOrganizationMappings", []map[string]any{
+		{"sonarcloud_org_key": "org1"},
+	})
+}
+
+// newDeleteTest wires a test environment for delete/reset tasks: mock servers,
+// extract data, an Executor, and a pre-seeded generateOrganizationMappings row
+// for testCloudOrg. Servers are closed via t.Cleanup.
+func newDeleteTest(t *testing.T, mux *http.ServeMux) *Executor {
+	t.Helper()
+	cloudSrv := httptest.NewServer(mux)
+	t.Cleanup(cloudSrv.Close)
+	apiSrv := newMockAPIServer()
+	t.Cleanup(apiSrv.Close)
+	dir := t.TempDir()
+	setupExtractData(dir)
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	writeTaskJSONL(t, e, "generateOrganizationMappings", []map[string]any{
+		{"sonarqube_org_key": "org1", "sonarcloud_org_key": testCloudOrg},
+	})
+	return e
 }
 
 func writeJSONL(taskDir string, items []map[string]any) {

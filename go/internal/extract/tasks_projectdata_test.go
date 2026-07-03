@@ -207,24 +207,15 @@ func TestForEachProjectBranchError(t *testing.T) {
 }
 
 func TestProjectIssuesFullTask(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv, e := newSrvExecutor(t, func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"issues": []map[string]any{
 				{"key": "issue-1", "rule": "java:S100"},
 			},
 			"paging": map[string]any{"total": 1, "pageIndex": 1, "pageSize": 500},
 		})
-	}))
+	})
 	defer srv.Close()
-
-	e := newTestExecutor(t)
-	e.ServerURL = "http://test/"
-	e.Raw = NewRawClient(srv.Client(), srv.URL+"/")
-
-	w, _ := e.Store.Writer("getProjects")
-	b, _ := json.Marshal(map[string]any{"key": "p1"})
-	w.WriteOne(b)
-	e.Store.Writer("getBranches")
 
 	fn := projectIssuesFullTask()
 	err := fn(ctx(t), e)
@@ -251,7 +242,7 @@ func TestProjectIssuesFullTaskUsesComponentKeysParam(t *testing.T) {
 		mu   sync.Mutex
 		urls []string
 	)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv, e := newSrvExecutor(t, func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		urls = append(urls, r.URL.RawQuery)
 		mu.Unlock()
@@ -261,17 +252,8 @@ func TestProjectIssuesFullTaskUsesComponentKeysParam(t *testing.T) {
 			},
 			"paging": map[string]any{"total": 1, "pageIndex": 1, "pageSize": 500},
 		})
-	}))
+	})
 	defer srv.Close()
-
-	e := newTestExecutor(t)
-	e.ServerURL = "http://test/"
-	e.Raw = NewRawClient(srv.Client(), srv.URL+"/")
-
-	w, _ := e.Store.Writer("getProjects")
-	b, _ := json.Marshal(map[string]any{"key": "p1"})
-	w.WriteOne(b)
-	e.Store.Writer("getBranches")
 
 	if err := projectIssuesFullTask()(ctx(t), e); err != nil {
 		t.Fatalf("projectIssuesFullTask: %v", err)
@@ -302,7 +284,7 @@ func TestProjectIssuesFullTaskSkipIssueSync(t *testing.T) {
 		mu     sync.Mutex
 		params []string
 	)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv, e := newSrvExecutor(t, func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		params = append(params, r.URL.Query().Get("additionalFields"))
 		mu.Unlock()
@@ -312,18 +294,9 @@ func TestProjectIssuesFullTaskSkipIssueSync(t *testing.T) {
 			},
 			"paging": map[string]any{"total": 1, "pageIndex": 1, "pageSize": 500},
 		})
-	}))
+	})
 	defer srv.Close()
-
-	e := newTestExecutor(t)
-	e.ServerURL = "http://test/"
-	e.Raw = NewRawClient(srv.Client(), srv.URL+"/")
 	e.SkipIssueSync = true
-
-	w, _ := e.Store.Writer("getProjects")
-	b, _ := json.Marshal(map[string]any{"key": "p1"})
-	w.WriteOne(b)
-	e.Store.Writer("getBranches")
 
 	if err := projectIssuesFullTask()(ctx(t), e); err != nil {
 		t.Fatalf("projectIssuesFullTask: %v", err)
@@ -350,7 +323,7 @@ func TestProjectHotspotsFullTaskSkipsDetailEnrichment(t *testing.T) {
 		mu       sync.Mutex
 		showHits int
 	)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv, e := newSrvExecutor(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/hotspots/search":
 			status := r.URL.Query().Get("status")
@@ -375,18 +348,9 @@ func TestProjectHotspotsFullTaskSkipsDetailEnrichment(t *testing.T) {
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
-	}))
+	})
 	defer srv.Close()
-
-	e := newTestExecutor(t)
-	e.ServerURL = "http://test/"
-	e.Raw = NewRawClient(srv.Client(), srv.URL+"/")
 	e.SkipIssueSync = true
-
-	pw, _ := e.Store.Writer("getProjects")
-	b, _ := json.Marshal(map[string]any{"key": "p1"})
-	pw.WriteOne(b)
-	e.Store.Writer("getBranches")
 
 	if err := projectHotspotsFullTask()(ctx(t), e); err != nil {
 		t.Fatalf("projectHotspotsFullTask: %v", err)
@@ -409,7 +373,7 @@ func TestProjectHotspotsFullTaskQueriesBothStatuses(t *testing.T) {
 		mu     sync.Mutex
 		seen   []string
 	)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv, e := newSrvExecutor(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/hotspots/search" {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -436,17 +400,8 @@ func TestProjectHotspotsFullTaskQueriesBothStatuses(t *testing.T) {
 		default:
 			t.Errorf("unexpected status param: %q", status)
 		}
-	}))
+	})
 	defer srv.Close()
-
-	e := newTestExecutor(t)
-	e.ServerURL = "http://test/"
-	e.Raw = NewRawClient(srv.Client(), srv.URL+"/")
-
-	pw, _ := e.Store.Writer("getProjects")
-	b, _ := json.Marshal(map[string]any{"key": "p1"})
-	pw.WriteOne(b)
-	e.Store.Writer("getBranches")
 
 	fn := projectHotspotsFullTask()
 	if err := fn(ctx(t), e); err != nil {
@@ -470,24 +425,15 @@ func TestProjectHotspotsFullTaskQueriesBothStatuses(t *testing.T) {
 }
 
 func TestProjectComponentTreeTask(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv, e := newSrvExecutor(t, func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"components": []map[string]any{
 				{"key": "p1:src/Main.java", "name": "Main.java", "language": "java"},
 			},
 			"paging": map[string]any{"total": 1, "pageIndex": 1, "pageSize": 500},
 		})
-	}))
+	})
 	defer srv.Close()
-
-	e := newTestExecutor(t)
-	e.ServerURL = "http://test/"
-	e.Raw = NewRawClient(srv.Client(), srv.URL+"/")
-
-	w, _ := e.Store.Writer("getProjects")
-	b, _ := json.Marshal(map[string]any{"key": "p1"})
-	w.WriteOne(b)
-	e.Store.Writer("getBranches")
 
 	fn := projectComponentTreeTask()
 	err := fn(ctx(t), e)
@@ -609,19 +555,10 @@ func TestProjectSCMDataTask(t *testing.T) {
 }
 
 func TestProjectComponentTreeTaskNonFatal(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv, e := newSrvExecutor(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(403)
-	}))
+	})
 	defer srv.Close()
-
-	e := newTestExecutor(t)
-	e.ServerURL = "http://test/"
-	e.Raw = NewRawClient(srv.Client(), srv.URL+"/")
-
-	w, _ := e.Store.Writer("getProjects")
-	b, _ := json.Marshal(map[string]any{"key": "p1"})
-	w.WriteOne(b)
-	e.Store.Writer("getBranches")
 
 	fn := projectComponentTreeTask()
 	err := fn(ctx(t), e)
@@ -755,9 +692,26 @@ func TestProjectSCMDataTaskNonFatal(t *testing.T) {
 	}
 }
 
-func TestProjectIssuesFullTaskNonFatal(t *testing.T) {
+// #410: SonarQube returns 404 from api/sources/scm for some files (notably on
+// non-main branches) even though api/sources/lines serves the file and carries
+// per-line blame. fetchSCMData must reconstruct the blame from sources/lines so
+// those files migrate with real SCM instead of synthetic changesets.
+func TestProjectSCMDataTaskFallsBackToLines(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(403)
+		switch r.URL.Path {
+		case "/api/sources/scm":
+			w.WriteHeader(404) // mirror SonarQube's behavior for these files
+		case "/api/sources/lines":
+			json.NewEncoder(w).Encode(map[string]any{
+				"sources": []map[string]any{
+					{"line": 1, "code": "a", "scmAuthor": "alice@example.com", "scmDate": "2024-01-01T00:00:00+0000", "scmRevision": "rev1"},
+					{"line": 2, "code": "b", "scmAuthor": "bob@example.com", "scmDate": "2024-02-01T00:00:00+0000", "scmRevision": "rev2"},
+					{"line": 3, "code": "", "scmAuthor": "", "scmDate": "", "scmRevision": ""}, // no blame -> dropped
+				},
+			})
+		default:
+			w.WriteHeader(404)
+		}
 	}))
 	defer srv.Close()
 
@@ -765,10 +719,42 @@ func TestProjectIssuesFullTaskNonFatal(t *testing.T) {
 	e.ServerURL = "http://test/"
 	e.Raw = NewRawClient(srv.Client(), srv.URL+"/")
 
-	w, _ := e.Store.Writer("getProjects")
-	b, _ := json.Marshal(map[string]any{"key": "p1"})
+	w, _ := e.Store.Writer("getProjectComponentTree")
+	b, _ := json.Marshal(map[string]any{"key": "p1:cli/audit.py", "branch": "release-3.x", "projectKey": "p1"})
 	w.WriteOne(b)
-	e.Store.Writer("getBranches")
+
+	if err := projectSCMDataTask()(ctx(t), e); err != nil {
+		t.Fatalf("projectSCMDataTask: %v", err)
+	}
+
+	items, _ := e.Store.ReadAll("getProjectSCMData")
+	if len(items) != 1 {
+		t.Fatalf("expected 1 reconstructed SCM record, got %d", len(items))
+	}
+	var rec struct {
+		Key    string  `json:"key"`
+		Branch string  `json:"branch"`
+		Scm    [][]any `json:"scm"`
+	}
+	if err := json.Unmarshal(items[0], &rec); err != nil {
+		t.Fatalf("unmarshal record: %v", err)
+	}
+	if rec.Key != "p1:cli/audit.py" || rec.Branch != "release-3.x" {
+		t.Errorf("wrong key/branch: %+v", rec)
+	}
+	if len(rec.Scm) != 2 { // line 3 had no blame -> dropped
+		t.Fatalf("expected 2 blame rows, got %d: %v", len(rec.Scm), rec.Scm)
+	}
+	if rec.Scm[0][1] != "alice@example.com" || rec.Scm[1][1] != "bob@example.com" {
+		t.Errorf("authors not carried into blame rows: %v", rec.Scm)
+	}
+}
+
+func TestProjectIssuesFullTaskNonFatal(t *testing.T) {
+	srv, e := newSrvExecutor(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(403)
+	})
+	defer srv.Close()
 
 	fn := projectIssuesFullTask()
 	err := fn(ctx(t), e)
@@ -778,7 +764,7 @@ func TestProjectIssuesFullTaskNonFatal(t *testing.T) {
 }
 
 func TestProjectVersionsTask(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv, e := newSrvExecutor(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/navigation/component" {
 			json.NewEncoder(w).Encode(map[string]any{
 				"key":     r.URL.Query().Get("component"),
@@ -788,17 +774,8 @@ func TestProjectVersionsTask(t *testing.T) {
 			return
 		}
 		w.WriteHeader(404)
-	}))
+	})
 	defer srv.Close()
-
-	e := newTestExecutor(t)
-	e.ServerURL = "http://test/"
-	e.Raw = NewRawClient(srv.Client(), srv.URL+"/")
-
-	w, _ := e.Store.Writer("getProjects")
-	b, _ := json.Marshal(map[string]any{"key": "p1"})
-	w.WriteOne(b)
-	e.Store.Writer("getBranches")
 
 	fn := projectVersionsTask()
 	err := fn(ctx(t), e)
@@ -825,19 +802,10 @@ func TestProjectVersionsTask(t *testing.T) {
 }
 
 func TestProjectVersionsTaskNonFatal(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv, e := newSrvExecutor(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(403)
-	}))
+	})
 	defer srv.Close()
-
-	e := newTestExecutor(t)
-	e.ServerURL = "http://test/"
-	e.Raw = NewRawClient(srv.Client(), srv.URL+"/")
-
-	w, _ := e.Store.Writer("getProjects")
-	b, _ := json.Marshal(map[string]any{"key": "p1"})
-	w.WriteOne(b)
-	e.Store.Writer("getBranches")
 
 	fn := projectVersionsTask()
 	err := fn(ctx(t), e)
@@ -849,4 +817,20 @@ func TestProjectVersionsTaskNonFatal(t *testing.T) {
 func ctx(t *testing.T) context.Context {
 	t.Helper()
 	return context.Background()
+}
+
+// newSrvExecutor creates an httptest server with handler, hooks a new executor's
+// Raw client to it, seeds a single project "p1" into getProjects, and opens an
+// empty getBranches writer. Callers must defer srv.Close().
+func newSrvExecutor(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *Executor) {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	e := newTestExecutor(t)
+	e.ServerURL = "http://test/"
+	e.Raw = NewRawClient(srv.Client(), srv.URL+"/")
+	w, _ := e.Store.Writer("getProjects")
+	b, _ := json.Marshal(map[string]any{"key": "p1"})
+	w.WriteOne(b)
+	e.Store.Writer("getBranches")
+	return srv, e
 }

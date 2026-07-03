@@ -94,19 +94,10 @@ func TestRunSetProjectSettingsDispatchesByShape(t *testing.T) {
 	// Empty definitions registry so EVERY setting falls back to extract
 	// shape — that's exactly what this test exercises.
 	mountSettingsDefinitions(cloudMux)
-	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{})
-	})
-	cloudSrv := httptest.NewServer(cloudMux)
-	defer cloudSrv.Close()
+	addDefaultCloudHandler(cloudMux)
+	e := newCustomCloudTest(t, cloudMux)
 
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-
-	extractDir := filepath.Join(dir, "extract-01", "getProjectSettings")
+	extractDir := filepath.Join(e.ExportDir, "extract-01", "getProjectSettings")
 	if err := os.MkdirAll(extractDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -209,19 +200,10 @@ func TestRunSetProjectSettingsRespectsSQCDefinitions(t *testing.T) {
 		map[string]any{"key": "sonar.exclusions", "type": "STRING", "multiValues": true},
 		map[string]any{"key": "sonar.issue.ignore.allfile", "type": "PROPERTY_SET", "multiValues": false},
 	)
-	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{})
-	})
-	cloudSrv := httptest.NewServer(cloudMux)
-	defer cloudSrv.Close()
+	addDefaultCloudHandler(cloudMux)
+	e := newCustomCloudTest(t, cloudMux)
 
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
-
-	extractDir := filepath.Join(dir, "extract-01", "getProjectSettings")
+	extractDir := filepath.Join(e.ExportDir, "extract-01", "getProjectSettings")
 	if err := os.MkdirAll(extractDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -311,22 +293,13 @@ func TestRunSetProjectSettingsRespectsSQCDefinitions(t *testing.T) {
 func TestRunSetProjectSettingsWarnsOnUnmappedProject(t *testing.T) {
 	cloudMux := http.NewServeMux()
 	mountSettingsDefinitions(cloudMux)
-	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{})
-	})
-	cloudSrv := httptest.NewServer(cloudMux)
-	defer cloudSrv.Close()
-
-	apiSrv := newMockAPIServer()
-	defer apiSrv.Close()
-
-	dir := t.TempDir()
-	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	addDefaultCloudHandler(cloudMux)
+	e := newCustomCloudTest(t, cloudMux)
 	// Capture Warn output so the test can assert on it.
 	var buf bytes.Buffer
 	e.Logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
-	extractDir := filepath.Join(dir, "extract-01", "getProjectSettings")
+	extractDir := filepath.Join(e.ExportDir, "extract-01", "getProjectSettings")
 	if err := os.MkdirAll(extractDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -389,9 +362,7 @@ func runProjectSettingsPropagationTest(t *testing.T,
 	cloudMux := http.NewServeMux()
 	muHits, hitsPtr := mountSettingsSetCapture(cloudMux)
 	mountSettingsDefinitionsScoped(cloudMux, orgDefs, projectDefs)
-	cloudMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{})
-	})
+	addDefaultCloudHandler(cloudMux)
 	cloudSrv := httptest.NewServer(cloudMux)
 	t.Cleanup(cloudSrv.Close)
 

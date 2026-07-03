@@ -13,6 +13,8 @@ import (
 	"github.com/sonar-solutions/sq-api-go/types"
 )
 
+const apiSettingsSet = "api/settings/set"
+
 // SettingsClient provides write-path methods for SonarQube Cloud project settings.
 type SettingsClient struct{ baseClient }
 
@@ -69,7 +71,7 @@ func (s *SettingsClient) Set(ctx context.Context, projectKey, settingKey, value,
 	form.Set("key", settingKey)
 	form.Set("value", value)
 	addSettingsScope(form, projectKey, organization)
-	return s.postForm(ctx, "api/settings/set", form, nil)
+	return s.postForm(ctx, apiSettingsSet, form, nil)
 }
 
 // SetValues sets a multi-value project setting via /api/settings/set.
@@ -83,7 +85,7 @@ func (s *SettingsClient) SetValues(ctx context.Context, projectKey, settingKey s
 		form.Add("values", v)
 	}
 	addSettingsScope(form, projectKey, organization)
-	return s.postForm(ctx, "api/settings/set", form, nil)
+	return s.postForm(ctx, apiSettingsSet, form, nil)
 }
 
 // SetFieldValues sets a property-set (multi-field) project setting via
@@ -101,7 +103,7 @@ func (s *SettingsClient) SetFieldValues(ctx context.Context, projectKey, setting
 		form.Add("fieldValues", string(encoded))
 	}
 	addSettingsScope(form, projectKey, organization)
-	return s.postForm(ctx, "api/settings/set", form, nil)
+	return s.postForm(ctx, apiSettingsSet, form, nil)
 }
 
 // Values returns settings explicitly set at the given scope. Settings

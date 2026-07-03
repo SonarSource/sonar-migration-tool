@@ -4,7 +4,7 @@ set -euo pipefail
 # Default config is config.json at project root; pass a path as $1 to override.
 CONFIG_FILE="${1:-$(cd "$(dirname "$0")" && pwd)/../config.json}"
 
-if [ ! -f "$CONFIG_FILE" ]; then
+if [[ ! -f "$CONFIG_FILE" ]]; then
   echo "Error: config not found at $CONFIG_FILE"
   echo "Usage: $0 [path/to/config.json]"
   exit 1
@@ -31,7 +31,7 @@ while true; do
 
   KEYS=$(echo "$SC_RESPONSE" | jq -r '.components[].key // empty')
 
-  if [ -z "$KEYS" ]; then
+  if [[ -z "$KEYS" ]]; then
     break
   fi
 
@@ -40,7 +40,7 @@ while true; do
   done <<< "$KEYS"
 
   SC_TOTAL=$(echo "$SC_RESPONSE" | jq -r '.paging.total // 0')
-  if [ "${#SC_KEYS[@]}" -ge "$SC_TOTAL" ]; then
+  if [[ "${#SC_KEYS[@]}" -ge "$SC_TOTAL" ]]; then
     break
   fi
 
@@ -50,7 +50,7 @@ done
 echo "Found ${#SC_KEYS[@]} project(s) in SonarCloud."
 echo ""
 
-if [ "${#SC_KEYS[@]}" -eq 0 ]; then
+if [[ "${#SC_KEYS[@]}" -eq 0 ]]; then
   echo "No projects found. Nothing to delete."
   exit 0
 fi
@@ -62,7 +62,7 @@ done
 echo ""
 
 read -r -p "Are you sure you want to permanently delete ALL ${#SC_KEYS[@]} project(s)? [yes/N] " CONFIRM
-if [ "$CONFIRM" != "yes" ]; then
+if [[ "$CONFIRM" != "yes" ]]; then
   echo "Aborted."
   exit 0
 fi
@@ -78,7 +78,7 @@ for KEY in "${SC_KEYS[@]}"; do
       -H "Authorization: Bearer $SC_TOKEN" \
       "$SC_URL/api/projects/delete?project=$KEY")
 
-    if [ "$HTTP_STATUS" = "204" ] || [ "$HTTP_STATUS" = "200" ]; then
+    if [[ "$HTTP_STATUS" = "204" || "$HTTP_STATUS" = "200" ]]; then
       echo "[DELETED] $KEY"
       touch "$WORK_DIR/deleted_${$}_$RANDOM"
     else

@@ -88,11 +88,11 @@ func renderMarkdownTitle(sb *strings.Builder, summary *MigrationSummary) {
 	}
 
 	fmt.Fprintf(sb, "- Run ID: %s\n", summary.RunID)
-	fmt.Fprintf(sb, "- Generated: %s\n", summary.GeneratedAt.Format("2006-01-02 15:04:05"))
+	fmt.Fprintf(sb, "- Generated: %s\n", summary.GeneratedAt.Format(dateTimeLayout))
 
 	if !summary.Predictive && !summary.StartedAt.IsZero() {
-		fmt.Fprintf(sb, "- Started: %s\n", summary.StartedAt.Format("2006-01-02 15:04:05"))
-		fmt.Fprintf(sb, "- Completed: %s\n", summary.CompletedAt.Format("2006-01-02 15:04:05"))
+		fmt.Fprintf(sb, "- Started: %s\n", summary.StartedAt.Format(dateTimeLayout))
+		fmt.Fprintf(sb, "- Completed: %s\n", summary.CompletedAt.Format(dateTimeLayout))
 		fmt.Fprintf(sb, "- Total elapsed: %s\n", fmtDuration(summary.TotalElapsed))
 		fmt.Fprintf(sb, "- Overall status: %s\n", summary.OverallStatus)
 	}
@@ -104,11 +104,12 @@ func renderMarkdownTitle(sb *strings.Builder, summary *MigrationSummary) {
 func renderMarkdownExecutiveSummary(sb *strings.Builder, summary *MigrationSummary) {
 	columns := []report.Column{
 		{Header: "Objects", Key: "objects"},
-		{Header: "Perfect", Key: "perfect"},
-		{Header: "Near Perfect", Key: "nearPerfect"},
-		{Header: "Partial", Key: "partial"},
-		{Header: "Failed", Key: "failed"},
-		{Header: "Skipped", Key: "skipped"},
+		// Outcome wording per #426 (legal); shared with the PDF renderer.
+		{Header: outcomeSuccess, Key: "perfect"},
+		{Header: outcomeNearPerfect, Key: "nearPerfect"},
+		{Header: outcomePartial, Key: "partial"},
+		{Header: outcomeFailed, Key: "failed"},
+		{Header: outcomeSkipped, Key: "skipped"},
 	}
 
 	var rows []map[string]any

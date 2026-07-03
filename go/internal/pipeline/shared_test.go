@@ -84,11 +84,19 @@ func TestStandardExtractHotspots(t *testing.T) {
 	}
 }
 
-func TestStandardExtractHotspotsError(t *testing.T) {
+// new403Server returns an httptest.Server that replies HTTP 403 to every
+// request. The server is closed via t.Cleanup.
+func new403Server(t *testing.T) *httptest.Server {
+	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 	}))
-	defer srv.Close()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestStandardExtractHotspotsError(t *testing.T) {
+	srv := new403Server(t)
 
 	p := newSQ99(newTestClient(t, srv.URL))
 	_, err := p.ExtractHotspots(context.Background(), "proj")
@@ -135,10 +143,7 @@ func TestStandardExtractGroups(t *testing.T) {
 }
 
 func TestStandardExtractGroupsError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-	}))
-	defer srv.Close()
+	srv := new403Server(t)
 
 	p := newSQ100(newTestClient(t, srv.URL))
 	_, err := p.ExtractGroups(context.Background())

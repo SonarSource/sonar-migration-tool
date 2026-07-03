@@ -51,6 +51,26 @@ func fetchAllIssues(ctx context.Context, client *sqapi.Client, projectKey, param
 	})
 }
 
+// doPageGET executes a GET request for the given URL and returns the open
+// response. The caller is responsible for closing the body. Returns an error
+// when the request cannot be built, the transport fails, or the status is
+// not HTTP 200.
+func doPageGET(ctx context.Context, client *sqapi.Client, u string, page int) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("building request for page %d: %w", page, err)
+	}
+	resp, err := client.HTTPClient().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetching page %d: %w", page, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("API returned HTTP %d (page %d)", resp.StatusCode, page)
+	}
+	return resp, nil
+}
+
 func fetchIssuesPage(ctx context.Context, client *sqapi.Client, projectKey, paramName string, statusValues []string, page, pageSize int) ([]Issue, int, error) {
 	params := url.Values{
 		"componentKeys": {projectKey},
@@ -58,19 +78,11 @@ func fetchIssuesPage(ctx context.Context, client *sqapi.Client, projectKey, para
 		"p":             {strconv.Itoa(page)},
 		"ps":            {strconv.Itoa(pageSize)},
 	}
-	u := client.BaseURL() + "api/issues/search?" + params.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	resp, err := doPageGET(ctx, client, client.BaseURL()+"api/issues/search?"+params.Encode(), page)
 	if err != nil {
-		return nil, 0, fmt.Errorf("building issues request: %w", err)
-	}
-	resp, err := client.HTTPClient().Do(req)
-	if err != nil {
-		return nil, 0, fmt.Errorf("fetching issues page %d: %w", page, err)
+		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, 0, fmt.Errorf("issues/search returned HTTP %d", resp.StatusCode)
-	}
 	var result struct {
 		Paging pagingResult `json:"paging"`
 		Issues []Issue      `json:"issues"`
@@ -95,19 +107,11 @@ func fetchHotspotsPage(ctx context.Context, client *sqapi.Client, projectKey str
 		"p":          {strconv.Itoa(page)},
 		"ps":         {strconv.Itoa(pageSize)},
 	}
-	u := client.BaseURL() + "api/hotspots/search?" + params.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	resp, err := doPageGET(ctx, client, client.BaseURL()+"api/hotspots/search?"+params.Encode(), page)
 	if err != nil {
-		return nil, 0, fmt.Errorf("building hotspots request: %w", err)
-	}
-	resp, err := client.HTTPClient().Do(req)
-	if err != nil {
-		return nil, 0, fmt.Errorf("fetching hotspots page %d: %w", page, err)
+		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, 0, fmt.Errorf("hotspots/search returned HTTP %d", resp.StatusCode)
-	}
 	var result struct {
 		Paging   pagingResult `json:"paging"`
 		Hotspots []Hotspot    `json:"hotspots"`
@@ -193,19 +197,11 @@ func fetchComponentMetricsPage(ctx context.Context, client *sqapi.Client, projec
 		"p":          {strconv.Itoa(page)},
 		"ps":         {strconv.Itoa(pageSize)},
 	}
-	u := client.BaseURL() + "api/measures/component_tree?" + params.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	resp, err := doPageGET(ctx, client, client.BaseURL()+"api/measures/component_tree?"+params.Encode(), page)
 	if err != nil {
-		return nil, 0, fmt.Errorf("building metrics request: %w", err)
-	}
-	resp, err := client.HTTPClient().Do(req)
-	if err != nil {
-		return nil, 0, fmt.Errorf("fetching metrics page %d: %w", page, err)
+		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, 0, fmt.Errorf("measures/component_tree returned HTTP %d", resp.StatusCode)
-	}
 	var result struct {
 		Paging     pagingResult `json:"paging"`
 		Components []struct {
@@ -236,19 +232,11 @@ func fetchGroupsPage(ctx context.Context, client *sqapi.Client, page, pageSize i
 		"p":  {strconv.Itoa(page)},
 		"ps": {strconv.Itoa(pageSize)},
 	}
-	u := client.BaseURL() + "api/user_groups/search?" + params.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	resp, err := doPageGET(ctx, client, client.BaseURL()+"api/user_groups/search?"+params.Encode(), page)
 	if err != nil {
-		return nil, 0, fmt.Errorf("building groups request: %w", err)
-	}
-	resp, err := client.HTTPClient().Do(req)
-	if err != nil {
-		return nil, 0, fmt.Errorf("fetching groups page %d: %w", page, err)
+		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, 0, fmt.Errorf("user_groups/search returned HTTP %d", resp.StatusCode)
-	}
 	var result struct {
 		Paging pagingResult `json:"paging"`
 		Groups []Group      `json:"groups"`

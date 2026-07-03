@@ -18,7 +18,7 @@ import (
 // These represent partial migrations: the parent entity exists on SQC, but a
 // follow-up configuration step did not complete successfully.
 type configFailure struct {
-	Section      string // "Quality Gates" or "Quality Profiles"
+	Section      string // sectionQualityGates or sectionQualityProfiles
 	Operation    string // human-readable label for the failed operation
 	EntityName   string // gate/profile name (best-effort, may be empty)
 	Organization string
@@ -35,14 +35,14 @@ type configFailureMatcher struct {
 }
 
 var configFailureMatchers = []configFailureMatcher{
-	{URLSuffix: "/api/qualitygates/create_condition", Section: "Quality Gates", Operation: "Add condition"},
-	{URLSuffix: "/api/qualitygates/set_as_default", Section: "Quality Gates", Operation: "Set as default"},
-	{URLSuffix: "/api/qualitygates/select", Section: "Quality Gates", Operation: "Assign to project"},
-	{URLSuffix: "/api/qualityprofiles/restore", Section: "Quality Profiles", Operation: "Restore rules from backup"},
-	{URLSuffix: "/api/qualityprofiles/change_parent", Section: "Quality Profiles", Operation: "Set parent profile"},
-	{URLSuffix: "/api/qualityprofiles/set_default", Section: "Quality Profiles", Operation: "Set as default"},
-	{URLSuffix: "/api/qualityprofiles/add_project", Section: "Quality Profiles", Operation: "Assign to project"},
-	{URLSuffix: "/api/qualityprofiles/add_group", Section: "Quality Profiles", Operation: "Grant group permission"},
+	{URLSuffix: "/api/qualitygates/create_condition", Section: sectionQualityGates, Operation: "Add condition"},
+	{URLSuffix: "/api/qualitygates/set_as_default", Section: sectionQualityGates, Operation: "Set as default"},
+	{URLSuffix: "/api/qualitygates/select", Section: sectionQualityGates, Operation: "Assign to project"},
+	{URLSuffix: "/api/qualityprofiles/restore", Section: sectionQualityProfiles, Operation: "Restore rules from backup"},
+	{URLSuffix: "/api/qualityprofiles/change_parent", Section: sectionQualityProfiles, Operation: "Set parent profile"},
+	{URLSuffix: "/api/qualityprofiles/set_default", Section: sectionQualityProfiles, Operation: "Set as default"},
+	{URLSuffix: "/api/qualityprofiles/add_project", Section: sectionQualityProfiles, Operation: "Assign to project"},
+	{URLSuffix: "/api/qualityprofiles/add_group", Section: sectionQualityProfiles, Operation: "Grant group permission"},
 }
 
 // collectConfigFailures re-parses requests.log and returns failures from

@@ -18,6 +18,8 @@ import (
 	sqcTypes "github.com/sonar-solutions/sq-api-go/types"
 )
 
+const orgCSVFileName = "organizations.csv"
+
 // applyOrgMapping checks organizations.csv has at least one row with a
 // non-empty sonarcloud_org_key. A migrate run with all rows unmapped
 // used to exit 0 with nothing migrated, which silently looked like a
@@ -38,11 +40,11 @@ import (
 // default; this drives the message variant produced by
 // validateOrgsExist for issue #283.
 func applyOrgMapping(exportDir, defaultOrg string, logger *slog.Logger) (appliedDefault bool, err error) {
-	rows, loadErr := structure.LoadCSV(exportDir, "organizations.csv")
+	rows, loadErr := structure.LoadCSV(exportDir, orgCSVFileName)
 	if loadErr != nil {
 		return false, fmt.Errorf("loading organizations.csv: %w", loadErr)
 	}
-	csvPath := filepath.Join(exportDir, "organizations.csv")
+	csvPath := filepath.Join(exportDir, orgCSVFileName)
 
 	if len(rows) == 0 {
 		// No file at all → cannot synthesize even with defaultOrg
@@ -152,7 +154,7 @@ type orgLookup interface {
 //
 // Returns an *common.ExitCodeError with code 3 on failure.
 func validateOrgsExist(ctx context.Context, lookup orgLookup, exportDir, enterpriseKey, defaultOrg string, appliedDefault bool) error {
-	csvPath := filepath.Join(exportDir, "organizations.csv")
+	csvPath := filepath.Join(exportDir, orgCSVFileName)
 
 	if appliedDefault {
 		if defaultOrg == "" {
@@ -168,7 +170,7 @@ func validateOrgsExist(ctx context.Context, lookup orgLookup, exportDir, enterpr
 		return nil
 	}
 
-	rows, err := structure.LoadCSV(exportDir, "organizations.csv")
+	rows, err := structure.LoadCSV(exportDir, orgCSVFileName)
 	if err != nil {
 		return fmt.Errorf("loading organizations.csv: %w", err)
 	}

@@ -36,6 +36,24 @@ func ratingWorseThan(metric string, letter string) ReplacementCondition {
 	return ReplacementCondition{Metric: metric, Op: "GT", Error: v}
 }
 
+// secRelPair returns a [security_rating, reliability_rating] composite where
+// both thresholds are "worse than letter". Used for the software_quality_*_issues
+// composite conditions that expand into two rating conditions.
+func secRelPair(letter string) []ReplacementCondition {
+	return []ReplacementCondition{
+		ratingWorseThan("security_rating", letter),
+		ratingWorseThan("reliability_rating", letter),
+	}
+}
+
+// newSecRelPair is like secRelPair but targets the new_* metrics (issue #232).
+func newSecRelPair(letter string) []ReplacementCondition {
+	return []ReplacementCondition{
+		ratingWorseThan("new_security_rating", letter),
+		ratingWorseThan("new_reliability_rating", letter),
+	}
+}
+
 // metricMapping maps a SonarQube Server quality-gate metric to one or more
 // SonarQube Cloud conditions, following the table maintained in issue #143.
 //
@@ -113,26 +131,11 @@ var metricMapping = map[string][]ReplacementCondition{
 	// unrelated to issue counts — so a source gate with a single
 	// software_quality_blocker_issues condition ended up with a spurious
 	// "Security Review Rating worse than D" on SQC (#232).
-	"software_quality_blocker_issues": {
-		ratingWorseThan("security_rating", "D"),
-		ratingWorseThan("reliability_rating", "D"),
-	},
-	"software_quality_high_issues": {
-		ratingWorseThan("security_rating", "C"),
-		ratingWorseThan("reliability_rating", "C"),
-	},
-	"software_quality_medium_issues": {
-		ratingWorseThan("security_rating", "B"),
-		ratingWorseThan("reliability_rating", "B"),
-	},
-	"software_quality_low_issues": {
-		ratingWorseThan("security_rating", "A"),
-		ratingWorseThan("reliability_rating", "A"),
-	},
-	"software_quality_info_issues": {
-		ratingWorseThan("security_rating", "A"),
-		ratingWorseThan("reliability_rating", "A"),
-	},
+	"software_quality_blocker_issues": secRelPair("D"),
+	"software_quality_high_issues":    secRelPair("C"),
+	"software_quality_medium_issues":  secRelPair("B"),
+	"software_quality_low_issues":     secRelPair("A"),
+	"software_quality_info_issues":    secRelPair("A"),
 
 	// new_software_quality_*_issues — same semantics as the overall-code
 	// composites above, applied to the new_* rating metrics. The earlier
@@ -140,26 +143,11 @@ var metricMapping = map[string][]ReplacementCondition{
 	// is the hotspot-review-percentage metric (unrelated to issue counts)
 	// and a duplicate metric on the same gate is rejected by SQC anyway.
 	// Pair new_security_rating with new_reliability_rating instead (#232).
-	"new_software_quality_blocker_issues": {
-		ratingWorseThan("new_security_rating", "D"),
-		ratingWorseThan("new_reliability_rating", "D"),
-	},
-	"new_software_quality_high_issues": {
-		ratingWorseThan("new_security_rating", "C"),
-		ratingWorseThan("new_reliability_rating", "C"),
-	},
-	"new_software_quality_medium_issues": {
-		ratingWorseThan("new_security_rating", "B"),
-		ratingWorseThan("new_reliability_rating", "B"),
-	},
-	"new_software_quality_low_issues": {
-		ratingWorseThan("new_security_rating", "A"),
-		ratingWorseThan("new_reliability_rating", "A"),
-	},
-	"new_software_quality_info_issues": {
-		ratingWorseThan("new_security_rating", "A"),
-		ratingWorseThan("new_reliability_rating", "A"),
-	},
+	"new_software_quality_blocker_issues": newSecRelPair("D"),
+	"new_software_quality_high_issues":    newSecRelPair("C"),
+	"new_software_quality_medium_issues":  newSecRelPair("B"),
+	"new_software_quality_low_issues":     newSecRelPair("A"),
+	"new_software_quality_info_issues":    newSecRelPair("A"),
 
 	// SonarQube Server 9.9 named the "accepted" issue metric
 	// wont_fix_issues; SQC (and SQS 10.2+) renamed it accepted_issues.

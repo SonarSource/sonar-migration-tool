@@ -40,19 +40,8 @@ func synthesizeSyncHotspotMetadata(exportDir, runDir string, extractMapping stru
 		return nil
 	}
 
-	// Index (server_url, source key) → cloud_project_key (mirrors
-	// new_code_periods.go).
-	type projID struct{ serverURL, sourceKey string }
-	cloudByProject := make(map[projID]string, len(projects))
-	for _, p := range projects {
-		sourceKey := jsonStringField(p, "key")
-		serverURL := jsonStringField(p, "server_url")
-		cloudKey := jsonStringField(p, "cloud_project_key")
-		if cloudKey == "" || sourceKey == "" {
-			continue
-		}
-		cloudByProject[projID{serverURL, sourceKey}] = cloudKey
-	}
+	// Index (server_url, source key) → cloud_project_key.
+	cloudByProject := buildCloudByProject(projects)
 
 	type counts struct {
 		actionable int

@@ -123,6 +123,23 @@ func setupPredictiveFixture(t *testing.T) string {
 	return exportDir
 }
 
+// findPredictiveRunDir returns the predictive run directory created under
+// exportDir by GeneratePredictiveReport, or fatals if none is found.
+func findPredictiveRunDir(t *testing.T, exportDir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(exportDir)
+	if err != nil {
+		t.Fatalf("readdir exportDir: %v", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() && strings.HasPrefix(e.Name(), "predictive-") {
+			return filepath.Join(exportDir, e.Name())
+		}
+	}
+	t.Fatal("no predictive run directory found under exportDir")
+	return ""
+}
+
 // findSection returns the named section from a summary, or nil.
 func findSection(s *summary.MigrationSummary, name string) *summary.Section {
 	for i := range s.Sections {
@@ -150,20 +167,7 @@ func TestGeneratePredictiveReport_HappyPath(t *testing.T) {
 	// Walk the predictive run dir so we can re-collect the summary and
 	// inspect the section contents directly (the PDF itself is binary
 	// and not worth parsing in a unit test).
-	entries, err := os.ReadDir(exportDir)
-	if err != nil {
-		t.Fatalf("readdir exportDir: %v", err)
-	}
-	var runDir string
-	for _, e := range entries {
-		if e.IsDir() && strings.HasPrefix(e.Name(), "predictive-") {
-			runDir = filepath.Join(exportDir, e.Name())
-			break
-		}
-	}
-	if runDir == "" {
-		t.Fatal("no predictive run directory found under exportDir")
-	}
+	runDir := findPredictiveRunDir(t, exportDir)
 
 	mig, err := summary.CollectSummary(runDir, exportDir)
 	if err != nil {
@@ -302,20 +306,7 @@ func TestGeneratePredictiveReport_ConsolidatesSonarAuth(t *testing.T) {
 		t.Fatalf("GeneratePredictiveReport: %v", err)
 	}
 
-	entries, err := os.ReadDir(exportDir)
-	if err != nil {
-		t.Fatalf("readdir: %v", err)
-	}
-	var runDir string
-	for _, e := range entries {
-		if e.IsDir() && strings.HasPrefix(e.Name(), "predictive-") {
-			runDir = filepath.Join(exportDir, e.Name())
-			break
-		}
-	}
-	if runDir == "" {
-		t.Fatal("no predictive run directory found")
-	}
+	runDir := findPredictiveRunDir(t, exportDir)
 
 	mig, err := summary.CollectSummary(runDir, exportDir)
 	if err != nil {
@@ -388,20 +379,7 @@ func TestGeneratePredictiveReport_HotspotAcknowledgedDemotion(t *testing.T) {
 		t.Fatalf("GeneratePredictiveReport: %v", err)
 	}
 
-	entries, err := os.ReadDir(exportDir)
-	if err != nil {
-		t.Fatalf("readdir: %v", err)
-	}
-	var runDir string
-	for _, e := range entries {
-		if e.IsDir() && strings.HasPrefix(e.Name(), "predictive-") {
-			runDir = filepath.Join(exportDir, e.Name())
-			break
-		}
-	}
-	if runDir == "" {
-		t.Fatal("no predictive run directory found")
-	}
+	runDir := findPredictiveRunDir(t, exportDir)
 
 	mig, err := summary.CollectSummary(runDir, exportDir)
 	if err != nil {

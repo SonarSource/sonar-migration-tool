@@ -19,13 +19,17 @@ type ReportData struct {
 	Metadata       *pb.Metadata
 	RootComponent  *pb.Component
 	FileComponents []*pb.Component
-	Issues         map[int32][]*pb.Issue          // ref -> issues
-	ExternalIssues map[int32][]*pb.ExternalIssue  // ref -> external issues
-	Measures       map[int32][]*pb.Measure        // ref -> measures
-	Changesets     map[int32]*pb.Changesets        // ref -> changesets
+	Issues         map[int32][]*pb.Issue         // ref -> issues
+	ExternalIssues map[int32][]*pb.ExternalIssue // ref -> external issues
+	Measures       map[int32][]*pb.Measure       // ref -> measures
+	Changesets     map[int32]*pb.Changesets      // ref -> changesets
 	ActiveRules    []*pb.ActiveRule
 	AdHocRules     []*pb.AdHocRule
-	Sources        map[int32]string               // ref -> source code text
+	Sources        map[int32]string // ref -> source code text
+	// SyntaxHighlighting maps a component ref to its ordered syntax-highlighting
+	// rules. Written as syntax-highlightings-<ref>.pb so the migrated Code view
+	// renders with colors instead of raw text (issue #420).
+	SyntaxHighlighting map[int32][]*pb.SyntaxHighlightingRule
 }
 
 // PackageReport assembles a scanner-report.zip from the given report data.
@@ -58,6 +62,9 @@ func PackageReport(data *ReportData) ([]byte, error) {
 		return nil, err
 	}
 	if err := addSources(zw, data.Sources); err != nil {
+		return nil, err
+	}
+	if err := addSyntaxHighlighting(zw, data.SyntaxHighlighting); err != nil {
 		return nil, err
 	}
 	if err := addEmptyContextProps(zw); err != nil {
@@ -169,6 +176,28 @@ func addAdHocRules(zw *zip.Writer, rules []*pb.AdHocRule) error {
 func addSources(zw *zip.Writer, sources map[int32]string) error {
 	for ref, src := range sources {
 		if err := addBytes(zw, fmt.Sprintf("source-%d.txt", ref), []byte(src)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// addSyntaxHighlighting writes one syntax-highlightings-<ref>.pb per component,
+// each a length-delimited stream of SyntaxHighlightingRule messages — the same
+// framing the native scanner uses and CE expects. Refs with no rules are
+// skipped (the scanner omits the file entirely rather than writing an empty one).
+func addSyntaxHighlighting(zw *zip.Writer, highlighting map[int32][]*pb.SyntaxHighlightingRule) error {
+	for ref, rules := range highlighting {
+		if len(rules) == 0 {
+			continue
+		}
+		var buf bytes.Buffer
+		for _, r := range rules {
+			if err := writeDelimited(&buf, r); err != nil {
+				return err
+			}
+		}
+		if err := addBytes(zw, fmt.Sprintf("syntax-highlightings-%d.pb", ref), buf.Bytes()); err != nil {
 			return err
 		}
 	}

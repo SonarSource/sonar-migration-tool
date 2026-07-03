@@ -318,22 +318,33 @@ func fetchSourceCode(ctx context.Context, e *Executor, item json.RawMessage, w *
 			return err
 		}
 	}
-	if len(raw) == 0 {
+	// Always fetch the per-line highlighted HTML from api/sources/lines. Its
+	// "code" field carries the syntax highlighting that api/sources/raw lacks
+	// (issue #420), and it doubles as a source-text fallback when raw has been
+	// purged. Highlighting failures are non-fatal — source still migrates.
+	highlightedLines, hErr := fetchHighlightedLines(ctx, e, fileKey, branch)
+	if hErr != nil {
+		e.Logger.Warn("getProjectSourceCode: syntax highlighting unavailable",
+			"file", fileKey, "branch", branch, "err", hErr)
+	}
+
+	if len(raw) == 0 && len(highlightedLines) > 0 {
 		// api/sources/raw returned empty — SonarQube housekeeping may have purged the
 		// raw_source_data column while the data column (used by the Code view UI) remains.
-		// Try api/sources/lines as a fallback to recover the source text.
-		if fallback, fErr := fetchSourceFromLines(ctx, e, fileKey, branch); fErr == nil && len(fallback) > 0 {
+		// Reconstruct plain source text from the highlighted lines we just fetched.
+		if fallback := plainTextFromHighlighted(highlightedLines); fallback != "" {
 			e.Logger.Info("getProjectSourceCode: recovered source via sources/lines fallback",
 				"file", fileKey, "branch", branch, "bytes", len(fallback))
 			raw = []byte(fallback)
 		}
 	}
 	record := map[string]any{
-		"key":        fileKey,
-		"branch":     branch,
-		"projectKey": extractField(item, "projectKey"),
-		"source":     string(raw),
-		"serverUrl":  e.ServerURL,
+		"key":              fileKey,
+		"branch":           branch,
+		"projectKey":       extractField(item, "projectKey"),
+		"source":           string(raw),
+		"highlightedLines": highlightedLines,
+		"serverUrl":        e.ServerURL,
 	}
 	b, err := json.Marshal(record)
 	if err != nil {
@@ -342,29 +353,53 @@ func fetchSourceCode(ctx context.Context, e *Executor, item json.RawMessage, w *
 	return w.WriteOne(b)
 }
 
-// fetchSourceFromLines retrieves plain source text via api/sources/lines when
-// api/sources/raw returns empty. The lines endpoint reads the 'data' column
-// (used by the SonarQube Code view UI), which housekeeping leaves intact even
-// after purging raw_source_data. HTML tags are stripped and HTML entities are
-// unescaped from the code field to reconstruct plain source text.
-func fetchSourceFromLines(ctx context.Context, e *Executor, fileKey, branch string) (string, error) {
+// fetchHighlightedLines retrieves the per-line highlighted HTML ("code" field)
+// from api/sources/lines. The returned slice is indexed by line-1; any line the
+// API omits is left as an empty string so indices keep matching line numbers.
+// The lines endpoint reads the 'data' column (behind the SonarQube Code view),
+// which housekeeping leaves intact even after purging raw_source_data. This HTML
+// is the only place the source server still exposes syntax highlighting.
+func fetchHighlightedLines(ctx context.Context, e *Executor, fileKey, branch string) ([]string, error) {
 	resp, err := e.Raw.Get(ctx, "api/sources/lines", fileParams(fileKey, branch))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	var result struct {
 		Sources []struct {
+			Line int    `json:"line"`
 			Code string `json:"code"`
 		} `json:"sources"`
 	}
 	if err := json.Unmarshal(resp, &result); err != nil {
-		return "", fmt.Errorf("parsing sources/lines response: %w", err)
+		return nil, fmt.Errorf("parsing sources/lines response: %w", err)
 	}
-	lines := make([]string, 0, len(result.Sources))
+	maxLine := 0
 	for _, s := range result.Sources {
-		lines = append(lines, html.UnescapeString(htmlTagRe.ReplaceAllString(s.Code, "")))
+		if s.Line > maxLine {
+			maxLine = s.Line
+		}
 	}
-	return strings.Join(lines, "\n"), nil
+	if maxLine == 0 {
+		return nil, nil
+	}
+	lines := make([]string, maxLine)
+	for _, s := range result.Sources {
+		if s.Line >= 1 && s.Line <= maxLine {
+			lines[s.Line-1] = s.Code
+		}
+	}
+	return lines, nil
+}
+
+// plainTextFromHighlighted reconstructs plain source text from highlighted HTML
+// lines by stripping tags and unescaping entities. Used as a fallback when
+// api/sources/raw returns empty.
+func plainTextFromHighlighted(lines []string) string {
+	plain := make([]string, len(lines))
+	for i, code := range lines {
+		plain[i] = html.UnescapeString(htmlTagRe.ReplaceAllString(code, ""))
+	}
+	return strings.Join(plain, "\n")
 }
 
 // projectSCMDataTask extracts SCM blame data for each file component.
@@ -387,16 +422,86 @@ func fetchSCMData(ctx context.Context, e *Executor, item json.RawMessage, w *Chu
 		e.Logger.Warn("getProjectSCMData skipped: component has no branch field", "file", fileKey)
 		return nil
 	}
-	raw, err := e.Raw.Get(ctx, "api/sources/scm", fileParams(fileKey, branch))
-	if err != nil {
-		return handleNonFatal(e, "getProjectSCMData", fileKey, err)
-	}
-	return w.WriteOne(EnrichRaw(raw, map[string]any{
+	meta := map[string]any{
 		"key":        fileKey,
 		"branch":     branch,
 		"projectKey": extractField(item, "projectKey"),
 		"serverUrl":  e.ServerURL,
-	}))
+	}
+	raw, err := e.Raw.Get(ctx, "api/sources/scm", fileParams(fileKey, branch))
+	if err == nil && scmResponseHasData(raw) {
+		return w.WriteOne(EnrichRaw(raw, meta))
+	}
+	if err != nil && !isNonFatalHTTPErr(err) {
+		return err
+	}
+	// api/sources/scm is missing (404 "component not found") or empty for this
+	// file even though its source — and its per-line blame — are available via
+	// api/sources/lines. SonarQube does this for some files, notably on
+	// non-main branches where /sources/scm 404s while /sources/{raw,lines}
+	// return 200. Reconstruct the blame from api/sources/lines (which carries
+	// scmAuthor/scmDate/scmRevision per line) so these files migrate with real
+	// SCM instead of the synthetic fallback (#410).
+	linesRaw, lerr := e.Raw.Get(ctx, "api/sources/lines", fileParams(fileKey, branch))
+	if lerr != nil {
+		if err != nil {
+			return handleNonFatal(e, "getProjectSCMData", fileKey, err)
+		}
+		return handleNonFatal(e, "getProjectSCMData", fileKey, lerr)
+	}
+	rows := scmRowsFromLines(linesRaw)
+	if len(rows) == 0 {
+		return nil // no blame available for this file on this branch
+	}
+	e.Logger.Debug("getProjectSCMData: recovered blame via sources/lines fallback",
+		"file", fileKey, "branch", branch, "lines", len(rows))
+	meta["scm"] = rows
+	b, mErr := json.Marshal(meta)
+	if mErr != nil {
+		return mErr
+	}
+	return w.WriteOne(b)
+}
+
+// scmResponseHasData reports whether an api/sources/scm response carries at
+// least one blame row. An empty/200 response triggers the sources/lines
+// fallback in fetchSCMData (#410).
+func scmResponseHasData(raw json.RawMessage) bool {
+	var obj struct {
+		Scm [][]json.RawMessage `json:"scm"`
+	}
+	if json.Unmarshal(raw, &obj) != nil {
+		return false
+	}
+	return len(obj.Scm) > 0
+}
+
+// scmRowsFromLines extracts per-line SCM (author, date, revision) from an
+// api/sources/lines response into the [line, author, date, revision] row
+// format used by api/sources/scm, keeping only lines that carry blame (#410).
+func scmRowsFromLines(raw json.RawMessage) [][]any {
+	var result struct {
+		Sources []struct {
+			Line        int    `json:"line"`
+			ScmAuthor   string `json:"scmAuthor"`
+			ScmDate     string `json:"scmDate"`
+			ScmRevision string `json:"scmRevision"`
+		} `json:"sources"`
+	}
+	if json.Unmarshal(raw, &result) != nil {
+		return nil
+	}
+	rows := make([][]any, 0, len(result.Sources))
+	for _, s := range result.Sources {
+		if s.Line <= 0 {
+			continue
+		}
+		if s.ScmAuthor == "" && s.ScmRevision == "" && s.ScmDate == "" {
+			continue
+		}
+		rows = append(rows, []any{s.Line, s.ScmAuthor, s.ScmDate, s.ScmRevision})
+	}
+	return rows
 }
 
 // projectVersionsTask extracts the current project version per branch via
