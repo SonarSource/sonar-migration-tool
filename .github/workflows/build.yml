@@ -4,11 +4,15 @@ on:
   push:
     branches:
       - main
+      - branch-*
       - kilo
-    tags:
-      - 'v*'
   pull_request:
     types: [opened, synchronize, reopened]
+
+# Branch-based release pipeline (aligned with sonarqube-cli / Azure Artifact Signing).
+# build-binaries + signing run on main and branch-* pushes; GitHub Release publish on main only.
+env:
+  SIGNING_PROFILE: ${{ (github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'branch-'))) && 'release' || 'test' }}
 
 jobs:
   test:
@@ -46,13 +50,13 @@ jobs:
         env:
           SONAR_TOKEN: ${{ fromJSON(steps.secrets.outputs.vault).SONAR_TOKEN }}
 
-  # Cross-compile every platform binary on Linux and GPG-sign each one, mirroring
-  # the `build-binaries` job in SonarSource/sonarqube-cli. macOS binaries are
-  # re-signed after notarization in the sign-macos job below.
+  # Cross-compile every platform binary on Linux and GPG-sign each one.
+  # macOS and Windows binaries are re-signed after platform-specific signing below.
   build-binaries:
     name: Build All Binaries
     needs: test
-    if: startsWith(github.ref, 'refs/tags/v')
+    # env context is unavailable in job-level if; inline the expression directly.
+    if: github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'branch-'))
     runs-on: github-ubuntu-latest-s
     permissions:
       id-token: write   # Vault OIDC
@@ -110,7 +114,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${VAULT_SECRETS:-}" ]; then
-            echo "::error::No secrets returned from Vault — cannot GPG-sign. The repo's Vault role (github-SonarSource-sonar-migration-tool-protected) likely lacks read access to development/kv/data/sign. See docs/RELEASE-SIGNING-SETUP.md."
+            echo "::error::No secrets returned from Vault — cannot GPG-sign. The repo's Vault role likely lacks read access to development/kv/data/sign. See docs/RELEASE-SIGNING-SETUP.md."
             exit 1
           fi
           GPG_SIGNING_KEY="$(jq -er '.GPG_SIGNING_KEY' <<<"$VAULT_SECRETS")"
@@ -129,11 +133,11 @@ jobs:
 
   # Code-sign + notarize the macOS binaries on an Apple runner, then re-GPG-sign
   # them (codesign mutates the binary, invalidating the earlier signature).
-  # Mirrors the `sign-macos` job in SonarSource/sonarqube-cli.
   sign-macos:
     name: Sign and Notarize macOS Binaries
     needs: build-binaries
-    if: startsWith(github.ref, 'refs/tags/v')
+    # env context is unavailable in job-level if; inline the expression directly.
+    if: github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'branch-'))
     runs-on: macos-latest-xlarge
     permissions:
       id-token: write   # Vault OIDC
@@ -176,7 +180,7 @@ jobs:
           # `fromJSON(...)` in `env:` — an inline `fromJSON('')` on an empty Vault
           # response raises an opaque "template is not valid" error. Fail clearly.
           if [ -z "${VAULT_SECRETS:-}" ]; then
-            echo "::error::No secrets returned from Vault — cannot code-sign/notarize. The repo's Vault role (github-SonarSource-sonar-migration-tool-protected) likely lacks read access to development/kv/data/sign/apple and/or development/kv/data/cloudflare/warp-github-runner. See docs/RELEASE-SIGNING-SETUP.md."
+            echo "::error::No secrets returned from Vault — cannot code-sign/notarize. See docs/RELEASE-SIGNING-SETUP.md."
             exit 1
           fi
           CERTIFICATE="$(jq -er '.CERTIFICATE' <<<"$VAULT_SECRETS")"
@@ -240,16 +244,88 @@ jobs:
           path: dist/sonar-migration-tool-darwin-*
           if-no-files-found: error
 
-  # Collect all artifacts (with the signed macOS binaries overwriting the
-  # unsigned ones) and attach them to the GitHub Release for the tag.
+  # Authenticode-sign the Windows binaries via Azure Artifact Signing, then re-GPG-sign.
+  sign-windows:
+    name: Sign Windows Binaries
+    needs: build-binaries
+    # env context is unavailable in job-level if; inline the expression directly.
+    if: github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'branch-'))
+    runs-on: github-ubuntu-latest-s
+    permissions:
+      id-token: write   # Azure Artifact Signing OIDC
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Download Windows binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: binary-windows-*
+          path: dist/
+          merge-multiple: true
+
+      - name: Authenticode-sign Windows binaries
+        uses: SonarSource/gh-action_azure-artifact-signing@v1
+        with:
+          files: |
+            dist/sonar-migration-tool-windows-*.exe
+          signing-profile: ${{ env.SIGNING_PROFILE }}
+
+      - name: Vault Secrets
+        id: secrets
+        uses: SonarSource/vault-action-wrapper@v3
+        with:
+          secrets: |
+            development/kv/data/sign key | GPG_SIGNING_KEY;
+            development/kv/data/sign passphrase | GPG_SIGNING_PASSPHRASE;
+
+      - name: Re-GPG-sign Windows binaries
+        env:
+          VAULT_SECRETS: ${{ steps.secrets.outputs.vault }}
+        run: |
+          set -euo pipefail
+          if [ -z "${VAULT_SECRETS:-}" ]; then
+            echo "::error::No secrets returned from Vault — cannot GPG-sign. See docs/RELEASE-SIGNING-SETUP.md."
+            exit 1
+          fi
+          GPG_SIGNING_KEY="$(jq -er '.GPG_SIGNING_KEY' <<<"$VAULT_SECRETS")"
+          GPG_SIGNING_PASSPHRASE="$(jq -er '.GPG_SIGNING_PASSPHRASE' <<<"$VAULT_SECRETS")"
+          export GPG_SIGNING_KEY GPG_SIGNING_PASSPHRASE
+          while IFS= read -r -d '' binary; do
+            .github/scripts/gpg-sign.sh "$binary"
+          done < <(find dist -maxdepth 1 -type f -name 'sonar-migration-tool-windows-*.exe' ! -name '*.asc' -print0)
+
+      - name: Upload signed Windows binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: binaries-windows-signed
+          path: dist/sonar-migration-tool-windows-*
+          if-no-files-found: error
+
+  # Collect all artifacts (with signed macOS/Windows binaries overwriting the
+  # unsigned ones) and attach them to a date-based GitHub Release.
   publish:
     name: Publish Release
-    needs: [build-binaries, sign-macos]
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+    needs: [build-binaries, sign-macos, sign-windows]
+    # env context is unavailable in job-level if; inline the expression directly.
+    if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
+    runs-on: github-ubuntu-latest-s
     permissions:
       contents: write   # create/update the GitHub Release
     steps:
+      - name: Set release tag
+        id: release
+        run: |
+          TAG="v$(date -u +%Y.%m.%d)-${GITHUB_RUN_NUMBER}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Release tag: ${TAG}"
+
       - name: Download all binaries
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -257,14 +333,23 @@ jobs:
           path: dist/
           merge-multiple: true
 
-      # Overwrites the unsigned macOS binaries + signatures from the step above.
       - name: Download signed macOS binaries
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: binaries-macos-signed
           path: dist/
 
+      - name: Download signed Windows binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: binaries-windows-signed
+          path: dist/
+
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.release.outputs.tag }}
+          name: ${{ steps.release.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
           files: dist/sonar-migration-tool-*
