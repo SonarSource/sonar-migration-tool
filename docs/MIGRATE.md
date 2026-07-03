@@ -35,7 +35,7 @@ The `migrate` command is the **final phase** of a six-phase pipeline. You run it
 | **SonarQube Server** | Administer System, Quality Gates (read/write), Quality Profiles (read/write), Browse on all projects you want to migrate |
 | **SonarQube Cloud** | Enterprise-level access, Admin on all target organizations |
 
-For detailed token setup, see [SECURITY.md](SECURITY.md).
+
 
 ---
 

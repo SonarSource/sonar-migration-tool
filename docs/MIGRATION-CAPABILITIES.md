@@ -75,7 +75,7 @@ Migration of source code snapshots and version control blame data.
 - SCM blame/changeset data (author, revision, date per line)
 - Syntax highlighting (token colors in the Code view), reconstructed from
   `/api/sources/lines` into `syntax-highlightings-<ref>.pb` — see
-  [SYNTAX-HIGHLIGHTING-MIGRATION.md](SYNTAX-HIGHLIGHTING-MIGRATION.md) (issue #420)
+  [GitHub issue #420](https://github.com/SonarSource/sonar-migration-tool/issues/420)
 - Line hashes for duplicate detection
 - File-level metadata (language, encoding)
 - Changeset backdating to preserve accurate issue creation dates within SonarQube Cloud
@@ -235,7 +235,7 @@ Fine-grained control over which entities are included in or excluded from migrat
 
 Migration of non-main branches and their associated analysis data.
 
-**Status: Implemented.** Non-main branches migrate as **long-lived branches with full issue history** via SonarQube Cloud's "Create analysis" handshake (`POST {api-host}/analysis/analyses` → `analysisUuid` stamped into report `metadata.analysis_uuid`); see [CLOUDVOYAGER-DELTA.md](CLOUDVOYAGER-DELTA.md) BUG-17. All migrated branches are registered as long-lived so SonarQube Cloud's automatic pruning of short-lived branches (after ~30 days) never discards migrated history.
+**Status: Implemented.** Non-main branches migrate as **long-lived branches with full issue history** via SonarQube Cloud's "Create analysis" handshake (`POST {api-host}/analysis/analyses` → `analysisUuid` stamped into report `metadata.analysis_uuid`). All migrated branches are registered as long-lived so SonarQube Cloud's automatic pruning of short-lived branches (after ~30 days) never discards migrated history.
 
 **What it migrates:**
 - Per-branch issues, hotspots, and measures (each branch's full project data)

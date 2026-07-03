@@ -3,16 +3,21 @@
 ## Active Workflows
 
 ### 1. `build.yml` - Test + Release
+
 **Triggers:**
-- Push to `main` or `kilo` branches — runs tests and SonarQube scan
-- Push of a version tag (`v*`) — runs tests, then builds and publishes cross-platform binaries
+- Push to `main` or `branch-*` — tests, build, sign, and (on `main` only) GitHub Release publish
+- Push to `kilo` — tests and SonarQube scan only
+- Pull requests — tests and SonarQube scan only
 
 **What it does:**
 - Runs Go library and migration tool tests with coverage
 - Runs SonarQube Cloud analysis
-- On tagged releases: builds static binaries for 6 platform/arch combinations and uploads them as GitHub Release assets
+- On `main` / `branch-*` pushes: cross-compiles 6 platform binaries, GPG-signs all,
+  Apple code-signs + notarizes macOS, Authenticode-signs Windows (Azure Artifact Signing),
+  and publishes a GitHub Release on **`main` only**
 
-**Release binaries produced:**
+**Release binaries:**
+
 | Platform | Architecture | Filename |
 |----------|-------------|----------|
 | Linux    | x64         | `sonar-migration-tool-linux-amd64` |
@@ -22,6 +27,11 @@
 | Windows  | x64         | `sonar-migration-tool-windows-amd64.exe` |
 | Windows  | ARM64       | `sonar-migration-tool-windows-arm64.exe` |
 
+Each binary has a matching `.asc` GPG signature.
+
+See [docs/RELEASE-SIGNING-SETUP.md](../../docs/RELEASE-SIGNING-SETUP.md) for Vault and Azure onboarding.
+
 ### 2. `test.yml` - Manual Test Run
-**Trigger:** Manual dispatch (`workflow_dispatch`)
+
+**Trigger:** Manual dispatch (`workflow_dispatch`)  
 **Purpose:** On-demand test run with SonarQube Cloud scan

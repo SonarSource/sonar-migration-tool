@@ -12,12 +12,14 @@ on:
 # Branch-based release pipeline (aligned with sonarqube-cli / Azure Artifact Signing).
 # build-binaries + signing run on main and branch-* pushes; GitHub Release publish on main only.
 env:
+  IS_RELEASE_BRANCH: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'branch-')) }}
+  IS_MAIN_RELEASE: ${{ github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch }}
   SIGNING_PROFILE: ${{ (github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'branch-'))) && 'release' || 'test' }}
 
 jobs:
   test:
     name: Test
-    runs-on: github-ubuntu-latest-s
+    runs-on: sonar-xs
     permissions:
       id-token: write
       contents: read
@@ -57,7 +59,7 @@ jobs:
     needs: test
     # env context is unavailable in job-level if; inline the expression directly.
     if: github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'branch-'))
-    runs-on: github-ubuntu-latest-s
+    runs-on: sonar-xs
     permissions:
       id-token: write   # Vault OIDC
       contents: read
@@ -104,10 +106,6 @@ jobs:
             development/kv/data/sign key | GPG_SIGNING_KEY;
             development/kv/data/sign passphrase | GPG_SIGNING_PASSPHRASE;
 
-      # Read secrets from the raw Vault JSON via jq inside the script rather than
-      # inlining `fromJSON(...)` in `env:`. When Vault access is denied the JSON is
-      # empty, and an inline `fromJSON('')` raises an opaque "template is not valid"
-      # error; this guard fails with an actionable message instead.
       - name: GPG-sign binary
         env:
           VAULT_SECRETS: ${{ steps.secrets.outputs.vault }}
@@ -131,12 +129,9 @@ jobs:
             sonar-migration-tool-${{ matrix.suffix }}.asc
           if-no-files-found: error
 
-  # Code-sign + notarize the macOS binaries on an Apple runner, then re-GPG-sign
-  # them (codesign mutates the binary, invalidating the earlier signature).
   sign-macos:
     name: Sign and Notarize macOS Binaries
     needs: build-binaries
-    # env context is unavailable in job-level if; inline the expression directly.
     if: github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'branch-'))
     runs-on: macos-latest-xlarge
     permissions:
@@ -145,7 +140,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # GitHub-hosted macOS runners reach internal Vault via Cloudflare WARP.
       - name: Setup Cloudflare WARP
         uses: SonarSource/gh-action_setup-cloudflare-warp@fe31a2b2f31595cffdef290985700732cb3469d6 # v2.1.0
 
@@ -160,7 +154,6 @@ jobs:
         id: secrets
         uses: SonarSource/vault-action-wrapper@v3
         with:
-          # Shared Apple signing credentials (development/kv/data/sign/apple).
           secrets: |
             development/kv/data/sign/apple CERTIFICATE | CERTIFICATE;
             development/kv/data/sign/apple CSC_KEY_PASSWORD | CSC_KEY_PASSWORD;
@@ -175,10 +168,6 @@ jobs:
           VAULT_SECRETS: ${{ steps.secrets.outputs.vault }}
         run: |
           set -euo pipefail
-
-          # Extract secrets from the raw Vault JSON via jq rather than inlining
-          # `fromJSON(...)` in `env:` — an inline `fromJSON('')` on an empty Vault
-          # response raises an opaque "template is not valid" error. Fail clearly.
           if [ -z "${VAULT_SECRETS:-}" ]; then
             echo "::error::No secrets returned from Vault — cannot code-sign/notarize. See docs/RELEASE-SIGNING-SETUP.md."
             exit 1
@@ -250,7 +239,7 @@ jobs:
     needs: build-binaries
     # env context is unavailable in job-level if; inline the expression directly.
     if: github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'branch-'))
-    runs-on: github-ubuntu-latest-s
+    runs-on: sonar-xs
     permissions:
       id-token: write   # Azure Artifact Signing OIDC
       contents: read
@@ -315,9 +304,9 @@ jobs:
     needs: [build-binaries, sign-macos, sign-windows]
     # env context is unavailable in job-level if; inline the expression directly.
     if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
-    runs-on: github-ubuntu-latest-s
+    runs-on: sonar-xs
     permissions:
-      contents: write   # create/update the GitHub Release
+      contents: write
     steps:
       - name: Set release tag
         id: release
