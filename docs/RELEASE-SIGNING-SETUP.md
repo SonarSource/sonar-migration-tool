@@ -13,13 +13,13 @@ Cloudflare WARP.
 | Path | Purpose |
 |------|---------|
 | `development/kv/data/cloudflare/warp-github-runner` | WARP tunnel (macOS runner → Vault) |
-| `development/kv/data/sign/sonarqube-cli` | Apple Developer ID + notarization (shared with `sonarqube-cli`) |
+| `development/kv/data/sign/apple` | Apple Developer ID + notarization (shared) |
 | `development/kv/data/sign` | GPG signing key + passphrase |
 | `development/kv/data/sonarcloud` | SonarQube scan token (`test` job) |
 
-macOS code-signing reuses the **same Apple credentials** as
-`SonarSource/sonarqube-cli` (`development/kv/data/sign/sonarqube-cli`). The
-binary is still signed with identifier `sonar-migration-tool`.
+macOS code-signing uses the shared Apple credentials at
+`development/kv/data/sign/apple`. The binary is still signed with identifier
+`sonar-migration-tool`.
 
 Vault policy is managed in
 [`re-terraform-aws-vault`](https://github.com/SonarSource/re-terraform-aws-vault)
