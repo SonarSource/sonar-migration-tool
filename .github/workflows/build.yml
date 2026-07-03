@@ -13,7 +13,7 @@ on:
 jobs:
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: github-ubuntu-latest-s
     permissions:
       id-token: write
       contents: read
@@ -53,7 +53,7 @@ jobs:
     name: Build All Binaries
     needs: test
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+    runs-on: github-ubuntu-latest-s
     permissions:
       id-token: write   # Vault OIDC
       contents: read
