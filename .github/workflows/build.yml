@@ -156,14 +156,13 @@ jobs:
         id: secrets
         uses: SonarSource/vault-action-wrapper@v3
         with:
-          # NOTE: confirm "sonar-migration-tool" is the correct project segment for
-          # this repo's Vault policy (mirrors development/kv/data/sign/sonarqube-cli).
+          # Reuse the shared Apple signing credentials from sonarqube-cli.
           secrets: |
-            development/kv/data/sign/sonar-migration-tool CERTIFICATE | CERTIFICATE;
-            development/kv/data/sign/sonar-migration-tool CSC_KEY_PASSWORD | CSC_KEY_PASSWORD;
-            development/kv/data/sign/sonar-migration-tool APPLE_TEAM_ID | APPLE_TEAM_ID;
-            development/kv/data/sign/sonar-migration-tool APPLE_ID | APPLE_ID;
-            development/kv/data/sign/sonar-migration-tool APPLE_APP_SPECIFIC_PASSWORD | APPLE_APP_SPECIFIC_PASSWORD;
+            development/kv/data/sign/sonarqube-cli CERTIFICATE | CERTIFICATE;
+            development/kv/data/sign/sonarqube-cli CSC_KEY_PASSWORD | CSC_KEY_PASSWORD;
+            development/kv/data/sign/sonarqube-cli APPLE_TEAM_ID | APPLE_TEAM_ID;
+            development/kv/data/sign/sonarqube-cli APPLE_ID | APPLE_ID;
+            development/kv/data/sign/sonarqube-cli APPLE_APP_SPECIFIC_PASSWORD | APPLE_APP_SPECIFIC_PASSWORD;
             development/kv/data/sign key | GPG_SIGNING_KEY;
             development/kv/data/sign passphrase | GPG_SIGNING_PASSPHRASE;
 
@@ -177,7 +176,7 @@ jobs:
           # `fromJSON(...)` in `env:` — an inline `fromJSON('')` on an empty Vault
           # response raises an opaque "template is not valid" error. Fail clearly.
           if [ -z "${VAULT_SECRETS:-}" ]; then
-            echo "::error::No secrets returned from Vault — cannot code-sign/notarize. The repo's Vault role (github-SonarSource-sonar-migration-tool-protected) likely lacks read access to development/kv/data/sign/sonar-migration-tool and/or development/kv/data/cloudflare/warp-github-runner. See docs/RELEASE-SIGNING-SETUP.md."
+            echo "::error::No secrets returned from Vault — cannot code-sign/notarize. The repo's Vault role (github-SonarSource-sonar-migration-tool-protected) likely lacks read access to development/kv/data/sign/sonarqube-cli and/or development/kv/data/cloudflare/warp-github-runner. See docs/RELEASE-SIGNING-SETUP.md."
             exit 1
           fi
           CERTIFICATE="$(jq -er '.CERTIFICATE' <<<"$VAULT_SECRETS")"
