@@ -100,11 +100,23 @@ jobs:
             development/kv/data/sign key | GPG_SIGNING_KEY;
             development/kv/data/sign passphrase | GPG_SIGNING_PASSPHRASE;
 
+      # Read secrets from the raw Vault JSON via jq inside the script rather than
+      # inlining `fromJSON(...)` in `env:`. When Vault access is denied the JSON is
+      # empty, and an inline `fromJSON('')` raises an opaque "template is not valid"
+      # error; this guard fails with an actionable message instead.
       - name: GPG-sign binary
         env:
-          GPG_SIGNING_KEY: ${{ fromJSON(steps.secrets.outputs.vault).GPG_SIGNING_KEY }}
-          GPG_SIGNING_PASSPHRASE: ${{ fromJSON(steps.secrets.outputs.vault).GPG_SIGNING_PASSPHRASE }}
-        run: .github/scripts/gpg-sign.sh sonar-migration-tool-${{ matrix.suffix }}
+          VAULT_SECRETS: ${{ steps.secrets.outputs.vault }}
+        run: |
+          set -euo pipefail
+          if [ -z "${VAULT_SECRETS:-}" ]; then
+            echo "::error::No secrets returned from Vault — cannot GPG-sign. The repo's Vault role (github-SonarSource-sonar-migration-tool-protected) likely lacks read access to development/kv/data/sign. See docs/RELEASE-SIGNING-SETUP.md."
+            exit 1
+          fi
+          GPG_SIGNING_KEY="$(jq -er '.GPG_SIGNING_KEY' <<<"$VAULT_SECRETS")"
+          GPG_SIGNING_PASSPHRASE="$(jq -er '.GPG_SIGNING_PASSPHRASE' <<<"$VAULT_SECRETS")"
+          export GPG_SIGNING_KEY GPG_SIGNING_PASSPHRASE
+          .github/scripts/gpg-sign.sh sonar-migration-tool-${{ matrix.suffix }}
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -157,13 +169,22 @@ jobs:
 
       - name: Code-sign and notarize macOS binaries
         env:
-          CERTIFICATE: ${{ fromJSON(steps.secrets.outputs.vault).CERTIFICATE }}
-          CSC_KEY_PASSWORD: ${{ fromJSON(steps.secrets.outputs.vault).CSC_KEY_PASSWORD }}
-          APPLE_TEAM_ID: ${{ fromJSON(steps.secrets.outputs.vault).APPLE_TEAM_ID }}
-          APPLE_ID: ${{ fromJSON(steps.secrets.outputs.vault).APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ fromJSON(steps.secrets.outputs.vault).APPLE_APP_SPECIFIC_PASSWORD }}
+          VAULT_SECRETS: ${{ steps.secrets.outputs.vault }}
         run: |
           set -euo pipefail
+
+          # Extract secrets from the raw Vault JSON via jq rather than inlining
+          # `fromJSON(...)` in `env:` — an inline `fromJSON('')` on an empty Vault
+          # response raises an opaque "template is not valid" error. Fail clearly.
+          if [ -z "${VAULT_SECRETS:-}" ]; then
+            echo "::error::No secrets returned from Vault — cannot code-sign/notarize. The repo's Vault role (github-SonarSource-sonar-migration-tool-protected) likely lacks read access to development/kv/data/sign/sonar-migration-tool and/or development/kv/data/cloudflare/warp-github-runner. See docs/RELEASE-SIGNING-SETUP.md."
+            exit 1
+          fi
+          CERTIFICATE="$(jq -er '.CERTIFICATE' <<<"$VAULT_SECRETS")"
+          CSC_KEY_PASSWORD="$(jq -er '.CSC_KEY_PASSWORD' <<<"$VAULT_SECRETS")"
+          APPLE_TEAM_ID="$(jq -er '.APPLE_TEAM_ID' <<<"$VAULT_SECRETS")"
+          APPLE_ID="$(jq -er '.APPLE_ID' <<<"$VAULT_SECRETS")"
+          APPLE_APP_SPECIFIC_PASSWORD="$(jq -er '.APPLE_APP_SPECIFIC_PASSWORD' <<<"$VAULT_SECRETS")"
 
           echo "$CERTIFICATE" | base64 --decode > /tmp/certificate.p12
           security create-keychain -p "" build.keychain
@@ -197,10 +218,16 @@ jobs:
 
       - name: Re-GPG-sign macOS binaries
         env:
-          GPG_SIGNING_KEY: ${{ fromJSON(steps.secrets.outputs.vault).GPG_SIGNING_KEY }}
-          GPG_SIGNING_PASSPHRASE: ${{ fromJSON(steps.secrets.outputs.vault).GPG_SIGNING_PASSPHRASE }}
+          VAULT_SECRETS: ${{ steps.secrets.outputs.vault }}
         run: |
           set -euo pipefail
+          if [ -z "${VAULT_SECRETS:-}" ]; then
+            echo "::error::No secrets returned from Vault — cannot GPG-sign. See docs/RELEASE-SIGNING-SETUP.md."
+            exit 1
+          fi
+          GPG_SIGNING_KEY="$(jq -er '.GPG_SIGNING_KEY' <<<"$VAULT_SECRETS")"
+          GPG_SIGNING_PASSPHRASE="$(jq -er '.GPG_SIGNING_PASSPHRASE' <<<"$VAULT_SECRETS")"
+          export GPG_SIGNING_KEY GPG_SIGNING_PASSPHRASE
           while IFS= read -r -d '' binary; do
             .github/scripts/gpg-sign.sh "$binary"
           done < <(find dist -maxdepth 1 -type f -name 'sonar-migration-tool-darwin-*' ! -name '*.asc' -print0)
