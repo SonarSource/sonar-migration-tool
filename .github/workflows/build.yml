@@ -12,8 +12,6 @@ on:
 # Branch-based release pipeline (aligned with sonarqube-cli / Azure Artifact Signing).
 # build-binaries + signing run on main and branch-* pushes; GitHub Release publish on main only.
 env:
-  IS_RELEASE_BRANCH: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'branch-')) }}
-  IS_MAIN_RELEASE: ${{ github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch }}
   SIGNING_PROFILE: ${{ (github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'branch-'))) && 'release' || 'test' }}
 
 jobs:
