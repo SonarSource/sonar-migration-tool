@@ -12,8 +12,6 @@ on:
 # Branch-based release pipeline (aligned with sonarqube-cli / Azure Artifact Signing).
 # build-binaries + signing run on main and branch-* pushes; GitHub Release publish on main only.
 env:
-  IS_RELEASE_BRANCH: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'branch-')) }}
-  IS_MAIN_RELEASE: ${{ github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch }}
   SIGNING_PROFILE: ${{ (github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'branch-'))) && 'release' || 'test' }}
 
 jobs:
@@ -52,10 +50,13 @@ jobs:
         env:
           SONAR_TOKEN: ${{ fromJSON(steps.secrets.outputs.vault).SONAR_TOKEN }}
 
+  # Cross-compile every platform binary on Linux and GPG-sign each one.
+  # macOS and Windows binaries are re-signed after platform-specific signing below.
   build-binaries:
     name: Build All Binaries
     needs: test
-    if: env.IS_RELEASE_BRANCH == 'true'
+    # env context is unavailable in job-level if; inline the expression directly.
+    if: github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'branch-'))
     runs-on: sonar-xs
     permissions:
       id-token: write   # Vault OIDC
@@ -129,7 +130,7 @@ jobs:
   sign-macos:
     name: Sign and Notarize macOS Binaries
     needs: build-binaries
-    if: env.IS_RELEASE_BRANCH == 'true'
+    if: github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'branch-'))
     runs-on: macos-latest-xlarge
     permissions:
       id-token: write   # Vault OIDC
@@ -230,10 +231,12 @@ jobs:
           path: dist/sonar-migration-tool-darwin-*
           if-no-files-found: error
 
+  # Authenticode-sign the Windows binaries via Azure Artifact Signing, then re-GPG-sign.
   sign-windows:
     name: Sign Windows Binaries
     needs: build-binaries
-    if: env.IS_RELEASE_BRANCH == 'true'
+    # env context is unavailable in job-level if; inline the expression directly.
+    if: github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'branch-'))
     runs-on: sonar-xs
     permissions:
       id-token: write   # Azure Artifact Signing OIDC
@@ -292,10 +295,13 @@ jobs:
           path: dist/sonar-migration-tool-windows-*
           if-no-files-found: error
 
+  # Collect all artifacts (with signed macOS/Windows binaries overwriting the
+  # unsigned ones) and attach them to a date-based GitHub Release.
   publish:
     name: Publish Release
     needs: [build-binaries, sign-macos, sign-windows]
-    if: env.IS_MAIN_RELEASE == 'true'
+    # env context is unavailable in job-level if; inline the expression directly.
+    if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
     runs-on: sonar-xs
     permissions:
       contents: write
