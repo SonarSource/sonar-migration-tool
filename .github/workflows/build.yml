@@ -189,8 +189,6 @@ jobs:
             zip "$archive" "$binary"
             xcrun notarytool submit "$archive" --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
             rm "$archive"
-            xcrun stapler staple "$binary"
-            xcrun stapler validate "$binary"
           }
 
           while IFS= read -r -d '' binary; do
