@@ -484,7 +484,7 @@ func (x Component_ComponentType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Component_ComponentType.Descriptor instead.
 func (Component_ComponentType) EnumDescriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{3, 0}
+	return file_scanner_report_proto_rawDescGZIP(), []int{4, 0}
 }
 
 type Component_FileStatus int32
@@ -536,7 +536,7 @@ func (x Component_FileStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Component_FileStatus.Descriptor instead.
 func (Component_FileStatus) EnumDescriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{3, 1}
+	return file_scanner_report_proto_rawDescGZIP(), []int{4, 1}
 }
 
 type ComponentLink_ComponentLinkType int32
@@ -594,7 +594,7 @@ func (x ComponentLink_ComponentLinkType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ComponentLink_ComponentLinkType.Descriptor instead.
 func (ComponentLink_ComponentLinkType) EnumDescriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{4, 0}
+	return file_scanner_report_proto_rawDescGZIP(), []int{5, 0}
 }
 
 type SyntaxHighlightingRule_HighlightingType int32
@@ -661,7 +661,7 @@ func (x SyntaxHighlightingRule_HighlightingType) Number() protoreflect.EnumNumbe
 
 // Deprecated: Use SyntaxHighlightingRule_HighlightingType.Descriptor instead.
 func (SyntaxHighlightingRule_HighlightingType) EnumDescriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{18, 0}
+	return file_scanner_report_proto_rawDescGZIP(), []int{19, 0}
 }
 
 type Metadata struct {
@@ -916,6 +916,61 @@ func (x *ContextProperty) GetValue() string {
 	return ""
 }
 
+// Analytics is CE-mandatory telemetry (see FileStructure#analyticsFile in
+// sonar-scanner-engine). We only populate ci_name to identify migrated
+// analyses; multiValueProperties is unused but kept for schema parity.
+type Analytics struct {
+	state                protoimpl.MessageState       `protogen:"open.v1"`
+	Property             map[string]string            `protobuf:"bytes,1,rep,name=property,proto3" json:"property,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	MultiValueProperties map[string]*Analytics_Values `protobuf:"bytes,2,rep,name=multiValueProperties,proto3" json:"multiValueProperties,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
+}
+
+func (x *Analytics) Reset() {
+	*x = Analytics{}
+	mi := &file_scanner_report_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Analytics) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Analytics) ProtoMessage() {}
+
+func (x *Analytics) ProtoReflect() protoreflect.Message {
+	mi := &file_scanner_report_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Analytics.ProtoReflect.Descriptor instead.
+func (*Analytics) Descriptor() ([]byte, []int) {
+	return file_scanner_report_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *Analytics) GetProperty() map[string]string {
+	if x != nil {
+		return x.Property
+	}
+	return nil
+}
+
+func (x *Analytics) GetMultiValueProperties() map[string]*Analytics_Values {
+	if x != nil {
+		return x.MultiValueProperties
+	}
+	return nil
+}
+
 type ActiveRule struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	RuleRepository string                 `protobuf:"bytes,1,opt,name=rule_repository,json=ruleRepository,proto3" json:"rule_repository,omitempty"`
@@ -932,7 +987,7 @@ type ActiveRule struct {
 
 func (x *ActiveRule) Reset() {
 	*x = ActiveRule{}
-	mi := &file_scanner_report_proto_msgTypes[2]
+	mi := &file_scanner_report_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -944,7 +999,7 @@ func (x *ActiveRule) String() string {
 func (*ActiveRule) ProtoMessage() {}
 
 func (x *ActiveRule) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[2]
+	mi := &file_scanner_report_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -957,7 +1012,7 @@ func (x *ActiveRule) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ActiveRule.ProtoReflect.Descriptor instead.
 func (*ActiveRule) Descriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{2}
+	return file_scanner_report_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ActiveRule) GetRuleRepository() string {
@@ -1038,7 +1093,7 @@ type Component struct {
 
 func (x *Component) Reset() {
 	*x = Component{}
-	mi := &file_scanner_report_proto_msgTypes[3]
+	mi := &file_scanner_report_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1050,7 +1105,7 @@ func (x *Component) String() string {
 func (*Component) ProtoMessage() {}
 
 func (x *Component) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[3]
+	mi := &file_scanner_report_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1063,7 +1118,7 @@ func (x *Component) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Component.ProtoReflect.Descriptor instead.
 func (*Component) Descriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{3}
+	return file_scanner_report_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *Component) GetRef() int32 {
@@ -1174,7 +1229,7 @@ type ComponentLink struct {
 
 func (x *ComponentLink) Reset() {
 	*x = ComponentLink{}
-	mi := &file_scanner_report_proto_msgTypes[4]
+	mi := &file_scanner_report_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1186,7 +1241,7 @@ func (x *ComponentLink) String() string {
 func (*ComponentLink) ProtoMessage() {}
 
 func (x *ComponentLink) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[4]
+	mi := &file_scanner_report_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1199,7 +1254,7 @@ func (x *ComponentLink) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ComponentLink.ProtoReflect.Descriptor instead.
 func (*ComponentLink) Descriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{4}
+	return file_scanner_report_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ComponentLink) GetType() ComponentLink_ComponentLinkType {
@@ -1233,7 +1288,7 @@ type Measure struct {
 
 func (x *Measure) Reset() {
 	*x = Measure{}
-	mi := &file_scanner_report_proto_msgTypes[5]
+	mi := &file_scanner_report_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1245,7 +1300,7 @@ func (x *Measure) String() string {
 func (*Measure) ProtoMessage() {}
 
 func (x *Measure) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[5]
+	mi := &file_scanner_report_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1258,7 +1313,7 @@ func (x *Measure) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Measure.ProtoReflect.Descriptor instead.
 func (*Measure) Descriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{5}
+	return file_scanner_report_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Measure) GetMetricKey() string {
@@ -1375,7 +1430,7 @@ type Issue struct {
 
 func (x *Issue) Reset() {
 	*x = Issue{}
-	mi := &file_scanner_report_proto_msgTypes[6]
+	mi := &file_scanner_report_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1387,7 +1442,7 @@ func (x *Issue) String() string {
 func (*Issue) ProtoMessage() {}
 
 func (x *Issue) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[6]
+	mi := &file_scanner_report_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1400,7 +1455,7 @@ func (x *Issue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Issue.ProtoReflect.Descriptor instead.
 func (*Issue) Descriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{6}
+	return file_scanner_report_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *Issue) GetRuleRepository() string {
@@ -1513,7 +1568,7 @@ type ExternalIssue struct {
 
 func (x *ExternalIssue) Reset() {
 	*x = ExternalIssue{}
-	mi := &file_scanner_report_proto_msgTypes[7]
+	mi := &file_scanner_report_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1525,7 +1580,7 @@ func (x *ExternalIssue) String() string {
 func (*ExternalIssue) ProtoMessage() {}
 
 func (x *ExternalIssue) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[7]
+	mi := &file_scanner_report_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1538,7 +1593,7 @@ func (x *ExternalIssue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExternalIssue.ProtoReflect.Descriptor instead.
 func (*ExternalIssue) Descriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{7}
+	return file_scanner_report_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ExternalIssue) GetEngineId() string {
@@ -1634,7 +1689,7 @@ type AdHocRule struct {
 
 func (x *AdHocRule) Reset() {
 	*x = AdHocRule{}
-	mi := &file_scanner_report_proto_msgTypes[8]
+	mi := &file_scanner_report_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1646,7 +1701,7 @@ func (x *AdHocRule) String() string {
 func (*AdHocRule) ProtoMessage() {}
 
 func (x *AdHocRule) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[8]
+	mi := &file_scanner_report_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1659,7 +1714,7 @@ func (x *AdHocRule) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AdHocRule.ProtoReflect.Descriptor instead.
 func (*AdHocRule) Descriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{8}
+	return file_scanner_report_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *AdHocRule) GetEngineId() string {
@@ -1730,7 +1785,7 @@ type IssueLocation struct {
 
 func (x *IssueLocation) Reset() {
 	*x = IssueLocation{}
-	mi := &file_scanner_report_proto_msgTypes[9]
+	mi := &file_scanner_report_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1742,7 +1797,7 @@ func (x *IssueLocation) String() string {
 func (*IssueLocation) ProtoMessage() {}
 
 func (x *IssueLocation) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[9]
+	mi := &file_scanner_report_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1755,7 +1810,7 @@ func (x *IssueLocation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueLocation.ProtoReflect.Descriptor instead.
 func (*IssueLocation) Descriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{9}
+	return file_scanner_report_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *IssueLocation) GetComponentRef() int32 {
@@ -1797,7 +1852,7 @@ type MessageFormatting struct {
 
 func (x *MessageFormatting) Reset() {
 	*x = MessageFormatting{}
-	mi := &file_scanner_report_proto_msgTypes[10]
+	mi := &file_scanner_report_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1809,7 +1864,7 @@ func (x *MessageFormatting) String() string {
 func (*MessageFormatting) ProtoMessage() {}
 
 func (x *MessageFormatting) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[10]
+	mi := &file_scanner_report_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1822,7 +1877,7 @@ func (x *MessageFormatting) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MessageFormatting.ProtoReflect.Descriptor instead.
 func (*MessageFormatting) Descriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{10}
+	return file_scanner_report_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *MessageFormatting) GetStart() int32 {
@@ -1857,7 +1912,7 @@ type Flow struct {
 
 func (x *Flow) Reset() {
 	*x = Flow{}
-	mi := &file_scanner_report_proto_msgTypes[11]
+	mi := &file_scanner_report_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1869,7 +1924,7 @@ func (x *Flow) String() string {
 func (*Flow) ProtoMessage() {}
 
 func (x *Flow) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[11]
+	mi := &file_scanner_report_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1882,7 +1937,7 @@ func (x *Flow) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Flow.ProtoReflect.Descriptor instead.
 func (*Flow) Descriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{11}
+	return file_scanner_report_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *Flow) GetLocation() []*IssueLocation {
@@ -1918,7 +1973,7 @@ type Changesets struct {
 
 func (x *Changesets) Reset() {
 	*x = Changesets{}
-	mi := &file_scanner_report_proto_msgTypes[12]
+	mi := &file_scanner_report_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1930,7 +1985,7 @@ func (x *Changesets) String() string {
 func (*Changesets) ProtoMessage() {}
 
 func (x *Changesets) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[12]
+	mi := &file_scanner_report_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1943,7 +1998,7 @@ func (x *Changesets) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Changesets.ProtoReflect.Descriptor instead.
 func (*Changesets) Descriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{12}
+	return file_scanner_report_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *Changesets) GetComponentRef() int32 {
@@ -1984,7 +2039,7 @@ type Duplicate struct {
 
 func (x *Duplicate) Reset() {
 	*x = Duplicate{}
-	mi := &file_scanner_report_proto_msgTypes[13]
+	mi := &file_scanner_report_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1996,7 +2051,7 @@ func (x *Duplicate) String() string {
 func (*Duplicate) ProtoMessage() {}
 
 func (x *Duplicate) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[13]
+	mi := &file_scanner_report_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2009,7 +2064,7 @@ func (x *Duplicate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Duplicate.ProtoReflect.Descriptor instead.
 func (*Duplicate) Descriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{13}
+	return file_scanner_report_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *Duplicate) GetOtherFileRef() int32 {
@@ -2036,7 +2091,7 @@ type Duplication struct {
 
 func (x *Duplication) Reset() {
 	*x = Duplication{}
-	mi := &file_scanner_report_proto_msgTypes[14]
+	mi := &file_scanner_report_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2048,7 +2103,7 @@ func (x *Duplication) String() string {
 func (*Duplication) ProtoMessage() {}
 
 func (x *Duplication) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[14]
+	mi := &file_scanner_report_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2061,7 +2116,7 @@ func (x *Duplication) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Duplication.ProtoReflect.Descriptor instead.
 func (*Duplication) Descriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{14}
+	return file_scanner_report_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *Duplication) GetOriginPosition() *TextRange {
@@ -2090,7 +2145,7 @@ type TextRange struct {
 
 func (x *TextRange) Reset() {
 	*x = TextRange{}
-	mi := &file_scanner_report_proto_msgTypes[15]
+	mi := &file_scanner_report_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2102,7 +2157,7 @@ func (x *TextRange) String() string {
 func (*TextRange) ProtoMessage() {}
 
 func (x *TextRange) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[15]
+	mi := &file_scanner_report_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2115,7 +2170,7 @@ func (x *TextRange) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TextRange.ProtoReflect.Descriptor instead.
 func (*TextRange) Descriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{15}
+	return file_scanner_report_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *TextRange) GetStartLine() int32 {
@@ -2156,7 +2211,7 @@ type Symbol struct {
 
 func (x *Symbol) Reset() {
 	*x = Symbol{}
-	mi := &file_scanner_report_proto_msgTypes[16]
+	mi := &file_scanner_report_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2168,7 +2223,7 @@ func (x *Symbol) String() string {
 func (*Symbol) ProtoMessage() {}
 
 func (x *Symbol) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[16]
+	mi := &file_scanner_report_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2181,7 +2236,7 @@ func (x *Symbol) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Symbol.ProtoReflect.Descriptor instead.
 func (*Symbol) Descriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{16}
+	return file_scanner_report_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *Symbol) GetDeclaration() *TextRange {
@@ -2216,7 +2271,7 @@ type LineCoverage struct {
 
 func (x *LineCoverage) Reset() {
 	*x = LineCoverage{}
-	mi := &file_scanner_report_proto_msgTypes[17]
+	mi := &file_scanner_report_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2228,7 +2283,7 @@ func (x *LineCoverage) String() string {
 func (*LineCoverage) ProtoMessage() {}
 
 func (x *LineCoverage) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[17]
+	mi := &file_scanner_report_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2241,7 +2296,7 @@ func (x *LineCoverage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LineCoverage.ProtoReflect.Descriptor instead.
 func (*LineCoverage) Descriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{17}
+	return file_scanner_report_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *LineCoverage) GetLine() int32 {
@@ -2320,7 +2375,7 @@ type SyntaxHighlightingRule struct {
 
 func (x *SyntaxHighlightingRule) Reset() {
 	*x = SyntaxHighlightingRule{}
-	mi := &file_scanner_report_proto_msgTypes[18]
+	mi := &file_scanner_report_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2332,7 +2387,7 @@ func (x *SyntaxHighlightingRule) String() string {
 func (*SyntaxHighlightingRule) ProtoMessage() {}
 
 func (x *SyntaxHighlightingRule) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[18]
+	mi := &file_scanner_report_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2345,7 +2400,7 @@ func (x *SyntaxHighlightingRule) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyntaxHighlightingRule.ProtoReflect.Descriptor instead.
 func (*SyntaxHighlightingRule) Descriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{18}
+	return file_scanner_report_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *SyntaxHighlightingRule) GetRange() *TextRange {
@@ -2372,7 +2427,7 @@ type AnalysisWarning struct {
 
 func (x *AnalysisWarning) Reset() {
 	*x = AnalysisWarning{}
-	mi := &file_scanner_report_proto_msgTypes[19]
+	mi := &file_scanner_report_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2384,7 +2439,7 @@ func (x *AnalysisWarning) String() string {
 func (*AnalysisWarning) ProtoMessage() {}
 
 func (x *AnalysisWarning) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[19]
+	mi := &file_scanner_report_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2397,7 +2452,7 @@ func (x *AnalysisWarning) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AnalysisWarning.ProtoReflect.Descriptor instead.
 func (*AnalysisWarning) Descriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{19}
+	return file_scanner_report_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *AnalysisWarning) GetText() string {
@@ -2424,7 +2479,7 @@ type Impact struct {
 
 func (x *Impact) Reset() {
 	*x = Impact{}
-	mi := &file_scanner_report_proto_msgTypes[20]
+	mi := &file_scanner_report_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2436,7 +2491,7 @@ func (x *Impact) String() string {
 func (*Impact) ProtoMessage() {}
 
 func (x *Impact) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[20]
+	mi := &file_scanner_report_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2449,7 +2504,7 @@ func (x *Impact) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Impact.ProtoReflect.Descriptor instead.
 func (*Impact) Descriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{20}
+	return file_scanner_report_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *Impact) GetSoftwareQuality() SoftwareQuality {
@@ -2478,7 +2533,7 @@ type Metadata_QProfile struct {
 
 func (x *Metadata_QProfile) Reset() {
 	*x = Metadata_QProfile{}
-	mi := &file_scanner_report_proto_msgTypes[25]
+	mi := &file_scanner_report_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2490,7 +2545,7 @@ func (x *Metadata_QProfile) String() string {
 func (*Metadata_QProfile) ProtoMessage() {}
 
 func (x *Metadata_QProfile) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[25]
+	mi := &file_scanner_report_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2544,7 +2599,7 @@ type Metadata_Plugin struct {
 
 func (x *Metadata_Plugin) Reset() {
 	*x = Metadata_Plugin{}
-	mi := &file_scanner_report_proto_msgTypes[26]
+	mi := &file_scanner_report_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2556,7 +2611,7 @@ func (x *Metadata_Plugin) String() string {
 func (*Metadata_Plugin) ProtoMessage() {}
 
 func (x *Metadata_Plugin) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[26]
+	mi := &file_scanner_report_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2586,6 +2641,50 @@ func (x *Metadata_Plugin) GetUpdatedAt() int64 {
 	return 0
 }
 
+type Analytics_Values struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Values        []string               `protobuf:"bytes,1,rep,name=values,proto3" json:"values,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Analytics_Values) Reset() {
+	*x = Analytics_Values{}
+	mi := &file_scanner_report_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Analytics_Values) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Analytics_Values) ProtoMessage() {}
+
+func (x *Analytics_Values) ProtoReflect() protoreflect.Message {
+	mi := &file_scanner_report_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Analytics_Values.ProtoReflect.Descriptor instead.
+func (*Analytics_Values) Descriptor() ([]byte, []int) {
+	return file_scanner_report_proto_rawDescGZIP(), []int{2, 0}
+}
+
+func (x *Analytics_Values) GetValues() []string {
+	if x != nil {
+		return x.Values
+	}
+	return nil
+}
+
 type Measure_BoolValue struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Value         bool                   `protobuf:"varint,1,opt,name=value,proto3" json:"value,omitempty"`
@@ -2596,7 +2695,7 @@ type Measure_BoolValue struct {
 
 func (x *Measure_BoolValue) Reset() {
 	*x = Measure_BoolValue{}
-	mi := &file_scanner_report_proto_msgTypes[28]
+	mi := &file_scanner_report_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2608,7 +2707,7 @@ func (x *Measure_BoolValue) String() string {
 func (*Measure_BoolValue) ProtoMessage() {}
 
 func (x *Measure_BoolValue) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[28]
+	mi := &file_scanner_report_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2621,7 +2720,7 @@ func (x *Measure_BoolValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Measure_BoolValue.ProtoReflect.Descriptor instead.
 func (*Measure_BoolValue) Descriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{5, 0}
+	return file_scanner_report_proto_rawDescGZIP(), []int{6, 0}
 }
 
 func (x *Measure_BoolValue) GetValue() bool {
@@ -2648,7 +2747,7 @@ type Measure_IntValue struct {
 
 func (x *Measure_IntValue) Reset() {
 	*x = Measure_IntValue{}
-	mi := &file_scanner_report_proto_msgTypes[29]
+	mi := &file_scanner_report_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2660,7 +2759,7 @@ func (x *Measure_IntValue) String() string {
 func (*Measure_IntValue) ProtoMessage() {}
 
 func (x *Measure_IntValue) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[29]
+	mi := &file_scanner_report_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2673,7 +2772,7 @@ func (x *Measure_IntValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Measure_IntValue.ProtoReflect.Descriptor instead.
 func (*Measure_IntValue) Descriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{5, 1}
+	return file_scanner_report_proto_rawDescGZIP(), []int{6, 1}
 }
 
 func (x *Measure_IntValue) GetValue() int32 {
@@ -2700,7 +2799,7 @@ type Measure_LongValue struct {
 
 func (x *Measure_LongValue) Reset() {
 	*x = Measure_LongValue{}
-	mi := &file_scanner_report_proto_msgTypes[30]
+	mi := &file_scanner_report_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2712,7 +2811,7 @@ func (x *Measure_LongValue) String() string {
 func (*Measure_LongValue) ProtoMessage() {}
 
 func (x *Measure_LongValue) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[30]
+	mi := &file_scanner_report_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2725,7 +2824,7 @@ func (x *Measure_LongValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Measure_LongValue.ProtoReflect.Descriptor instead.
 func (*Measure_LongValue) Descriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{5, 2}
+	return file_scanner_report_proto_rawDescGZIP(), []int{6, 2}
 }
 
 func (x *Measure_LongValue) GetValue() int64 {
@@ -2752,7 +2851,7 @@ type Measure_DoubleValue struct {
 
 func (x *Measure_DoubleValue) Reset() {
 	*x = Measure_DoubleValue{}
-	mi := &file_scanner_report_proto_msgTypes[31]
+	mi := &file_scanner_report_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2764,7 +2863,7 @@ func (x *Measure_DoubleValue) String() string {
 func (*Measure_DoubleValue) ProtoMessage() {}
 
 func (x *Measure_DoubleValue) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[31]
+	mi := &file_scanner_report_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2777,7 +2876,7 @@ func (x *Measure_DoubleValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Measure_DoubleValue.ProtoReflect.Descriptor instead.
 func (*Measure_DoubleValue) Descriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{5, 3}
+	return file_scanner_report_proto_rawDescGZIP(), []int{6, 3}
 }
 
 func (x *Measure_DoubleValue) GetValue() float64 {
@@ -2803,7 +2902,7 @@ type Measure_StringValue struct {
 
 func (x *Measure_StringValue) Reset() {
 	*x = Measure_StringValue{}
-	mi := &file_scanner_report_proto_msgTypes[32]
+	mi := &file_scanner_report_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2815,7 +2914,7 @@ func (x *Measure_StringValue) String() string {
 func (*Measure_StringValue) ProtoMessage() {}
 
 func (x *Measure_StringValue) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[32]
+	mi := &file_scanner_report_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2828,7 +2927,7 @@ func (x *Measure_StringValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Measure_StringValue.ProtoReflect.Descriptor instead.
 func (*Measure_StringValue) Descriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{5, 4}
+	return file_scanner_report_proto_rawDescGZIP(), []int{6, 4}
 }
 
 func (x *Measure_StringValue) GetValue() string {
@@ -2849,7 +2948,7 @@ type Changesets_Changeset struct {
 
 func (x *Changesets_Changeset) Reset() {
 	*x = Changesets_Changeset{}
-	mi := &file_scanner_report_proto_msgTypes[33]
+	mi := &file_scanner_report_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2861,7 +2960,7 @@ func (x *Changesets_Changeset) String() string {
 func (*Changesets_Changeset) ProtoMessage() {}
 
 func (x *Changesets_Changeset) ProtoReflect() protoreflect.Message {
-	mi := &file_scanner_report_proto_msgTypes[33]
+	mi := &file_scanner_report_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2874,7 +2973,7 @@ func (x *Changesets_Changeset) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Changesets_Changeset.ProtoReflect.Descriptor instead.
 func (*Changesets_Changeset) Descriptor() ([]byte, []int) {
-	return file_scanner_report_proto_rawDescGZIP(), []int{12, 0}
+	return file_scanner_report_proto_rawDescGZIP(), []int{13, 0}
 }
 
 func (x *Changesets_Changeset) GetRevision() string {
@@ -2957,7 +3056,18 @@ const file_scanner_report_proto_rawDesc = "" +
 	"\fPULL_REQUEST\x10\x02J\x04\b\x04\x10\x05J\x04\b\x0f\x10\x10J\x04\b\x14\x10\x15\"9\n" +
 	"\x0fContextProperty\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value\"\x9d\x03\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value\"\xf7\x02\n" +
+	"\tAnalytics\x12?\n" +
+	"\bproperty\x18\x01 \x03(\v2#.scanreport.Analytics.PropertyEntryR\bproperty\x12c\n" +
+	"\x14multiValueProperties\x18\x02 \x03(\v2/.scanreport.Analytics.MultiValuePropertiesEntryR\x14multiValueProperties\x1a \n" +
+	"\x06Values\x12\x16\n" +
+	"\x06values\x18\x01 \x03(\tR\x06values\x1a;\n" +
+	"\rPropertyEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1ae\n" +
+	"\x19MultiValuePropertiesEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x122\n" +
+	"\x05value\x18\x02 \x01(\v2\x1c.scanreport.Analytics.ValuesR\x05value:\x028\x01\"\x9d\x03\n" +
 	"\n" +
 	"ActiveRule\x12'\n" +
 	"\x0frule_repository\x18\x01 \x01(\tR\x0eruleRepository\x12\x19\n" +
@@ -3209,7 +3319,7 @@ func file_scanner_report_proto_rawDescGZIP() []byte {
 }
 
 var file_scanner_report_proto_enumTypes = make([]protoimpl.EnumInfo, 11)
-var file_scanner_report_proto_msgTypes = make([]protoimpl.MessageInfo, 34)
+var file_scanner_report_proto_msgTypes = make([]protoimpl.MessageInfo, 38)
 var file_scanner_report_proto_goTypes = []any{
 	(CleanCodeAttribute)(0),                      // 0: scanreport.CleanCodeAttribute
 	(IssueType)(0),                               // 1: scanreport.IssueType
@@ -3224,96 +3334,103 @@ var file_scanner_report_proto_goTypes = []any{
 	(SyntaxHighlightingRule_HighlightingType)(0), // 10: scanreport.SyntaxHighlightingRule.HighlightingType
 	(*Metadata)(nil),                             // 11: scanreport.Metadata
 	(*ContextProperty)(nil),                      // 12: scanreport.ContextProperty
-	(*ActiveRule)(nil),                           // 13: scanreport.ActiveRule
-	(*Component)(nil),                            // 14: scanreport.Component
-	(*ComponentLink)(nil),                        // 15: scanreport.ComponentLink
-	(*Measure)(nil),                              // 16: scanreport.Measure
-	(*Issue)(nil),                                // 17: scanreport.Issue
-	(*ExternalIssue)(nil),                        // 18: scanreport.ExternalIssue
-	(*AdHocRule)(nil),                            // 19: scanreport.AdHocRule
-	(*IssueLocation)(nil),                        // 20: scanreport.IssueLocation
-	(*MessageFormatting)(nil),                    // 21: scanreport.MessageFormatting
-	(*Flow)(nil),                                 // 22: scanreport.Flow
-	(*Changesets)(nil),                           // 23: scanreport.Changesets
-	(*Duplicate)(nil),                            // 24: scanreport.Duplicate
-	(*Duplication)(nil),                          // 25: scanreport.Duplication
-	(*TextRange)(nil),                            // 26: scanreport.TextRange
-	(*Symbol)(nil),                               // 27: scanreport.Symbol
-	(*LineCoverage)(nil),                         // 28: scanreport.LineCoverage
-	(*SyntaxHighlightingRule)(nil),               // 29: scanreport.SyntaxHighlightingRule
-	(*AnalysisWarning)(nil),                      // 30: scanreport.AnalysisWarning
-	(*Impact)(nil),                               // 31: scanreport.Impact
-	nil,                                          // 32: scanreport.Metadata.QprofilesPerLanguageEntry
-	nil,                                          // 33: scanreport.Metadata.PluginsByKeyEntry
-	nil,                                          // 34: scanreport.Metadata.AnalyzedIndexedFileCountPerTypeEntry
-	nil,                                          // 35: scanreport.Metadata.NotAnalyzedIndexedFileCountPerTypeEntry
-	(*Metadata_QProfile)(nil),                    // 36: scanreport.Metadata.QProfile
-	(*Metadata_Plugin)(nil),                      // 37: scanreport.Metadata.Plugin
-	nil,                                          // 38: scanreport.ActiveRule.ParamsByKeyEntry
-	(*Measure_BoolValue)(nil),                    // 39: scanreport.Measure.BoolValue
-	(*Measure_IntValue)(nil),                     // 40: scanreport.Measure.IntValue
-	(*Measure_LongValue)(nil),                    // 41: scanreport.Measure.LongValue
-	(*Measure_DoubleValue)(nil),                  // 42: scanreport.Measure.DoubleValue
-	(*Measure_StringValue)(nil),                  // 43: scanreport.Measure.StringValue
-	(*Changesets_Changeset)(nil),                 // 44: scanreport.Changesets.Changeset
-	(Severity)(0),                                // 45: scanreport.Severity
+	(*Analytics)(nil),                            // 13: scanreport.Analytics
+	(*ActiveRule)(nil),                           // 14: scanreport.ActiveRule
+	(*Component)(nil),                            // 15: scanreport.Component
+	(*ComponentLink)(nil),                        // 16: scanreport.ComponentLink
+	(*Measure)(nil),                              // 17: scanreport.Measure
+	(*Issue)(nil),                                // 18: scanreport.Issue
+	(*ExternalIssue)(nil),                        // 19: scanreport.ExternalIssue
+	(*AdHocRule)(nil),                            // 20: scanreport.AdHocRule
+	(*IssueLocation)(nil),                        // 21: scanreport.IssueLocation
+	(*MessageFormatting)(nil),                    // 22: scanreport.MessageFormatting
+	(*Flow)(nil),                                 // 23: scanreport.Flow
+	(*Changesets)(nil),                           // 24: scanreport.Changesets
+	(*Duplicate)(nil),                            // 25: scanreport.Duplicate
+	(*Duplication)(nil),                          // 26: scanreport.Duplication
+	(*TextRange)(nil),                            // 27: scanreport.TextRange
+	(*Symbol)(nil),                               // 28: scanreport.Symbol
+	(*LineCoverage)(nil),                         // 29: scanreport.LineCoverage
+	(*SyntaxHighlightingRule)(nil),               // 30: scanreport.SyntaxHighlightingRule
+	(*AnalysisWarning)(nil),                      // 31: scanreport.AnalysisWarning
+	(*Impact)(nil),                               // 32: scanreport.Impact
+	nil,                                          // 33: scanreport.Metadata.QprofilesPerLanguageEntry
+	nil,                                          // 34: scanreport.Metadata.PluginsByKeyEntry
+	nil,                                          // 35: scanreport.Metadata.AnalyzedIndexedFileCountPerTypeEntry
+	nil,                                          // 36: scanreport.Metadata.NotAnalyzedIndexedFileCountPerTypeEntry
+	(*Metadata_QProfile)(nil),                    // 37: scanreport.Metadata.QProfile
+	(*Metadata_Plugin)(nil),                      // 38: scanreport.Metadata.Plugin
+	(*Analytics_Values)(nil),                     // 39: scanreport.Analytics.Values
+	nil,                                          // 40: scanreport.Analytics.PropertyEntry
+	nil,                                          // 41: scanreport.Analytics.MultiValuePropertiesEntry
+	nil,                                          // 42: scanreport.ActiveRule.ParamsByKeyEntry
+	(*Measure_BoolValue)(nil),                    // 43: scanreport.Measure.BoolValue
+	(*Measure_IntValue)(nil),                     // 44: scanreport.Measure.IntValue
+	(*Measure_LongValue)(nil),                    // 45: scanreport.Measure.LongValue
+	(*Measure_DoubleValue)(nil),                  // 46: scanreport.Measure.DoubleValue
+	(*Measure_StringValue)(nil),                  // 47: scanreport.Measure.StringValue
+	(*Changesets_Changeset)(nil),                 // 48: scanreport.Changesets.Changeset
+	(Severity)(0),                                // 49: scanreport.Severity
 }
 var file_scanner_report_proto_depIdxs = []int32{
-	32, // 0: scanreport.Metadata.qprofiles_per_language:type_name -> scanreport.Metadata.QprofilesPerLanguageEntry
-	33, // 1: scanreport.Metadata.plugins_by_key:type_name -> scanreport.Metadata.PluginsByKeyEntry
+	33, // 0: scanreport.Metadata.qprofiles_per_language:type_name -> scanreport.Metadata.QprofilesPerLanguageEntry
+	34, // 1: scanreport.Metadata.plugins_by_key:type_name -> scanreport.Metadata.PluginsByKeyEntry
 	6,  // 2: scanreport.Metadata.branch_type:type_name -> scanreport.Metadata.BranchType
-	34, // 3: scanreport.Metadata.analyzed_indexed_file_count_per_type:type_name -> scanreport.Metadata.AnalyzedIndexedFileCountPerTypeEntry
-	35, // 4: scanreport.Metadata.not_analyzed_indexed_file_count_per_type:type_name -> scanreport.Metadata.NotAnalyzedIndexedFileCountPerTypeEntry
-	45, // 5: scanreport.ActiveRule.severity:type_name -> scanreport.Severity
-	38, // 6: scanreport.ActiveRule.params_by_key:type_name -> scanreport.ActiveRule.ParamsByKeyEntry
-	31, // 7: scanreport.ActiveRule.impacts:type_name -> scanreport.Impact
-	7,  // 8: scanreport.Component.type:type_name -> scanreport.Component.ComponentType
-	15, // 9: scanreport.Component.link:type_name -> scanreport.ComponentLink
-	8,  // 10: scanreport.Component.status:type_name -> scanreport.Component.FileStatus
-	9,  // 11: scanreport.ComponentLink.type:type_name -> scanreport.ComponentLink.ComponentLinkType
-	39, // 12: scanreport.Measure.boolean_value:type_name -> scanreport.Measure.BoolValue
-	40, // 13: scanreport.Measure.int_value:type_name -> scanreport.Measure.IntValue
-	41, // 14: scanreport.Measure.long_value:type_name -> scanreport.Measure.LongValue
-	42, // 15: scanreport.Measure.double_value:type_name -> scanreport.Measure.DoubleValue
-	43, // 16: scanreport.Measure.string_value:type_name -> scanreport.Measure.StringValue
-	45, // 17: scanreport.Issue.overriddenSeverity:type_name -> scanreport.Severity
-	26, // 18: scanreport.Issue.text_range:type_name -> scanreport.TextRange
-	22, // 19: scanreport.Issue.flow:type_name -> scanreport.Flow
-	21, // 20: scanreport.Issue.msgFormatting:type_name -> scanreport.MessageFormatting
-	31, // 21: scanreport.Issue.overriddenImpacts:type_name -> scanreport.Impact
-	45, // 22: scanreport.ExternalIssue.severity:type_name -> scanreport.Severity
-	26, // 23: scanreport.ExternalIssue.text_range:type_name -> scanreport.TextRange
-	22, // 24: scanreport.ExternalIssue.flow:type_name -> scanreport.Flow
-	1,  // 25: scanreport.ExternalIssue.type:type_name -> scanreport.IssueType
-	21, // 26: scanreport.ExternalIssue.msgFormatting:type_name -> scanreport.MessageFormatting
-	31, // 27: scanreport.ExternalIssue.impacts:type_name -> scanreport.Impact
-	0,  // 28: scanreport.ExternalIssue.cleanCodeAttribute:type_name -> scanreport.CleanCodeAttribute
-	45, // 29: scanreport.AdHocRule.severity:type_name -> scanreport.Severity
-	1,  // 30: scanreport.AdHocRule.type:type_name -> scanreport.IssueType
-	0,  // 31: scanreport.AdHocRule.cleanCodeAttribute:type_name -> scanreport.CleanCodeAttribute
-	31, // 32: scanreport.AdHocRule.defaultImpacts:type_name -> scanreport.Impact
-	26, // 33: scanreport.IssueLocation.text_range:type_name -> scanreport.TextRange
-	21, // 34: scanreport.IssueLocation.msgFormatting:type_name -> scanreport.MessageFormatting
-	2,  // 35: scanreport.MessageFormatting.type:type_name -> scanreport.MessageFormattingType
-	20, // 36: scanreport.Flow.location:type_name -> scanreport.IssueLocation
-	3,  // 37: scanreport.Flow.type:type_name -> scanreport.FlowType
-	44, // 38: scanreport.Changesets.changeset:type_name -> scanreport.Changesets.Changeset
-	26, // 39: scanreport.Duplicate.range:type_name -> scanreport.TextRange
-	26, // 40: scanreport.Duplication.origin_position:type_name -> scanreport.TextRange
-	24, // 41: scanreport.Duplication.duplicate:type_name -> scanreport.Duplicate
-	26, // 42: scanreport.Symbol.declaration:type_name -> scanreport.TextRange
-	26, // 43: scanreport.Symbol.reference:type_name -> scanreport.TextRange
-	26, // 44: scanreport.SyntaxHighlightingRule.range:type_name -> scanreport.TextRange
-	10, // 45: scanreport.SyntaxHighlightingRule.type:type_name -> scanreport.SyntaxHighlightingRule.HighlightingType
-	5,  // 46: scanreport.Impact.software_quality:type_name -> scanreport.SoftwareQuality
-	4,  // 47: scanreport.Impact.severity:type_name -> scanreport.ImpactSeverity
-	36, // 48: scanreport.Metadata.QprofilesPerLanguageEntry.value:type_name -> scanreport.Metadata.QProfile
-	37, // 49: scanreport.Metadata.PluginsByKeyEntry.value:type_name -> scanreport.Metadata.Plugin
-	50, // [50:50] is the sub-list for method output_type
-	50, // [50:50] is the sub-list for method input_type
-	50, // [50:50] is the sub-list for extension type_name
-	50, // [50:50] is the sub-list for extension extendee
-	0,  // [0:50] is the sub-list for field type_name
+	35, // 3: scanreport.Metadata.analyzed_indexed_file_count_per_type:type_name -> scanreport.Metadata.AnalyzedIndexedFileCountPerTypeEntry
+	36, // 4: scanreport.Metadata.not_analyzed_indexed_file_count_per_type:type_name -> scanreport.Metadata.NotAnalyzedIndexedFileCountPerTypeEntry
+	40, // 5: scanreport.Analytics.property:type_name -> scanreport.Analytics.PropertyEntry
+	41, // 6: scanreport.Analytics.multiValueProperties:type_name -> scanreport.Analytics.MultiValuePropertiesEntry
+	49, // 7: scanreport.ActiveRule.severity:type_name -> scanreport.Severity
+	42, // 8: scanreport.ActiveRule.params_by_key:type_name -> scanreport.ActiveRule.ParamsByKeyEntry
+	32, // 9: scanreport.ActiveRule.impacts:type_name -> scanreport.Impact
+	7,  // 10: scanreport.Component.type:type_name -> scanreport.Component.ComponentType
+	16, // 11: scanreport.Component.link:type_name -> scanreport.ComponentLink
+	8,  // 12: scanreport.Component.status:type_name -> scanreport.Component.FileStatus
+	9,  // 13: scanreport.ComponentLink.type:type_name -> scanreport.ComponentLink.ComponentLinkType
+	43, // 14: scanreport.Measure.boolean_value:type_name -> scanreport.Measure.BoolValue
+	44, // 15: scanreport.Measure.int_value:type_name -> scanreport.Measure.IntValue
+	45, // 16: scanreport.Measure.long_value:type_name -> scanreport.Measure.LongValue
+	46, // 17: scanreport.Measure.double_value:type_name -> scanreport.Measure.DoubleValue
+	47, // 18: scanreport.Measure.string_value:type_name -> scanreport.Measure.StringValue
+	49, // 19: scanreport.Issue.overriddenSeverity:type_name -> scanreport.Severity
+	27, // 20: scanreport.Issue.text_range:type_name -> scanreport.TextRange
+	23, // 21: scanreport.Issue.flow:type_name -> scanreport.Flow
+	22, // 22: scanreport.Issue.msgFormatting:type_name -> scanreport.MessageFormatting
+	32, // 23: scanreport.Issue.overriddenImpacts:type_name -> scanreport.Impact
+	49, // 24: scanreport.ExternalIssue.severity:type_name -> scanreport.Severity
+	27, // 25: scanreport.ExternalIssue.text_range:type_name -> scanreport.TextRange
+	23, // 26: scanreport.ExternalIssue.flow:type_name -> scanreport.Flow
+	1,  // 27: scanreport.ExternalIssue.type:type_name -> scanreport.IssueType
+	22, // 28: scanreport.ExternalIssue.msgFormatting:type_name -> scanreport.MessageFormatting
+	32, // 29: scanreport.ExternalIssue.impacts:type_name -> scanreport.Impact
+	0,  // 30: scanreport.ExternalIssue.cleanCodeAttribute:type_name -> scanreport.CleanCodeAttribute
+	49, // 31: scanreport.AdHocRule.severity:type_name -> scanreport.Severity
+	1,  // 32: scanreport.AdHocRule.type:type_name -> scanreport.IssueType
+	0,  // 33: scanreport.AdHocRule.cleanCodeAttribute:type_name -> scanreport.CleanCodeAttribute
+	32, // 34: scanreport.AdHocRule.defaultImpacts:type_name -> scanreport.Impact
+	27, // 35: scanreport.IssueLocation.text_range:type_name -> scanreport.TextRange
+	22, // 36: scanreport.IssueLocation.msgFormatting:type_name -> scanreport.MessageFormatting
+	2,  // 37: scanreport.MessageFormatting.type:type_name -> scanreport.MessageFormattingType
+	21, // 38: scanreport.Flow.location:type_name -> scanreport.IssueLocation
+	3,  // 39: scanreport.Flow.type:type_name -> scanreport.FlowType
+	48, // 40: scanreport.Changesets.changeset:type_name -> scanreport.Changesets.Changeset
+	27, // 41: scanreport.Duplicate.range:type_name -> scanreport.TextRange
+	27, // 42: scanreport.Duplication.origin_position:type_name -> scanreport.TextRange
+	25, // 43: scanreport.Duplication.duplicate:type_name -> scanreport.Duplicate
+	27, // 44: scanreport.Symbol.declaration:type_name -> scanreport.TextRange
+	27, // 45: scanreport.Symbol.reference:type_name -> scanreport.TextRange
+	27, // 46: scanreport.SyntaxHighlightingRule.range:type_name -> scanreport.TextRange
+	10, // 47: scanreport.SyntaxHighlightingRule.type:type_name -> scanreport.SyntaxHighlightingRule.HighlightingType
+	5,  // 48: scanreport.Impact.software_quality:type_name -> scanreport.SoftwareQuality
+	4,  // 49: scanreport.Impact.severity:type_name -> scanreport.ImpactSeverity
+	37, // 50: scanreport.Metadata.QprofilesPerLanguageEntry.value:type_name -> scanreport.Metadata.QProfile
+	38, // 51: scanreport.Metadata.PluginsByKeyEntry.value:type_name -> scanreport.Metadata.Plugin
+	39, // 52: scanreport.Analytics.MultiValuePropertiesEntry.value:type_name -> scanreport.Analytics.Values
+	53, // [53:53] is the sub-list for method output_type
+	53, // [53:53] is the sub-list for method input_type
+	53, // [53:53] is the sub-list for extension type_name
+	53, // [53:53] is the sub-list for extension extendee
+	0,  // [0:53] is the sub-list for field type_name
 }
 
 func init() { file_scanner_report_proto_init() }
@@ -3322,17 +3439,17 @@ func file_scanner_report_proto_init() {
 		return
 	}
 	file_constants_proto_init()
-	file_scanner_report_proto_msgTypes[5].OneofWrappers = []any{
+	file_scanner_report_proto_msgTypes[6].OneofWrappers = []any{
 		(*Measure_BooleanValue)(nil),
 		(*Measure_IntValue_)(nil),
 		(*Measure_LongValue_)(nil),
 		(*Measure_DoubleValue_)(nil),
 		(*Measure_StringValue_)(nil),
 	}
-	file_scanner_report_proto_msgTypes[6].OneofWrappers = []any{}
 	file_scanner_report_proto_msgTypes[7].OneofWrappers = []any{}
 	file_scanner_report_proto_msgTypes[8].OneofWrappers = []any{}
-	file_scanner_report_proto_msgTypes[17].OneofWrappers = []any{
+	file_scanner_report_proto_msgTypes[9].OneofWrappers = []any{}
+	file_scanner_report_proto_msgTypes[18].OneofWrappers = []any{
 		(*LineCoverage_Hits)(nil),
 		(*LineCoverage_CoveredConditions)(nil),
 	}
@@ -3342,7 +3459,7 @@ func file_scanner_report_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_scanner_report_proto_rawDesc), len(file_scanner_report_proto_rawDesc)),
 			NumEnums:      11,
-			NumMessages:   34,
+			NumMessages:   38,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
