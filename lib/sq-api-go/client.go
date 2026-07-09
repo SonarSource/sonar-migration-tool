@@ -112,7 +112,7 @@ func newClient(baseURL, token string, version float64, opts ...Option) *Client {
 
 // buildTransport constructs the layered RoundTripper stack:
 //
-//	authTransport → retryTransport → http.Transport (with optional TLS)
+//	authTransport → retryTransport → userAgentTransport → http.Transport (with optional TLS)
 func buildTransport(cfg *clientConfig, token string, version float64) http.RoundTripper {
 	tlsCfg := cfg.tlsConfig
 	if tlsCfg == nil {
@@ -127,8 +127,10 @@ func buildTransport(cfg *clientConfig, token string, version float64) http.Round
 		IdleConnTimeout: 90 * time.Second,
 	}
 
+	ua := &userAgentTransport{inner: base}
+
 	retry := &retryTransport{
-		inner:         base,
+		inner:         ua,
 		backoff:       defaultBackoff,
 		sqcBackoff:    sqc429Backoff,
 		nonSQCBackoff: nonSQC429Backoff,
