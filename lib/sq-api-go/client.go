@@ -112,7 +112,14 @@ func newClient(baseURL, token string, version float64, opts ...Option) *Client {
 
 // buildTransport constructs the layered RoundTripper stack:
 //
-//	authTransport → retryTransport → userAgentTransport → http.Transport (with optional TLS)
+//	authTransport → userAgentTransport → debugTransport (optional) → retryTransport → http.Transport (with optional TLS)
+//
+// authTransport and userAgentTransport sit outside debugTransport (rather
+// than the other way around) because both inject their header by cloning
+// the request and setting it on the clone — a clone debugTransport would
+// never see if it wrapped them from the outside. Retry sits innermost so
+// debugTransport still logs exactly once per logical call, using the
+// final response after any retries.
 func buildTransport(cfg *clientConfig, token string, version float64) http.RoundTripper {
 	tlsCfg := cfg.tlsConfig
 	if tlsCfg == nil {
@@ -127,10 +134,8 @@ func buildTransport(cfg *clientConfig, token string, version float64) http.Round
 		IdleConnTimeout: 90 * time.Second,
 	}
 
-	ua := &userAgentTransport{inner: base}
-
 	retry := &retryTransport{
-		inner:         ua,
+		inner:         base,
 		backoff:       defaultBackoff,
 		sqcBackoff:    sqc429Backoff,
 		nonSQCBackoff: nonSQC429Backoff,
@@ -140,12 +145,14 @@ func buildTransport(cfg *clientConfig, token string, version float64) http.Round
 		gate:          &rateLimitGate{},
 	}
 
-	var rt http.RoundTripper = &authTransport{
-		inner:  retry,
-		header: buildAuthHeader(token, version),
-	}
+	var rt http.RoundTripper = retry
 	if cfg.debugLogFn != nil {
 		rt = &debugTransport{inner: rt, fn: cfg.debugLogFn}
+	}
+	rt = &userAgentTransport{inner: rt}
+	rt = &authTransport{
+		inner:  rt,
+		header: buildAuthHeader(token, version),
 	}
 	return rt
 }

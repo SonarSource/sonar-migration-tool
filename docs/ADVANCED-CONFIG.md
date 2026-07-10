@@ -12,6 +12,7 @@ This page lists **every** option `sonar-migration-tool` accepts — JSON config 
 - [Project key renaming strategy](#project-key-renaming-strategy)
 - [Per-command CLI flags](#per-command-cli-flags)
 - [SonarQube Cloud API rate limiting handling](#sonarqube-cloud-api-rate-limiting-handling)
+- [HTTP User-Agent](#http-user-agent)
 - [Legacy config shapes](#legacy-config-shapes)
 - [Security tips](#security-tips)
 
@@ -432,6 +433,18 @@ it paused. An amber rate-limit notice is shown only when rate limiting was *not*
 - a task failed with `429` as its terminal status (re-run with `--run-id` to resume), or
 - a non-standard `429` (Cloudflare / WAF / unclassified) was seen, which may need operator
   action even if it resolved on its own.
+
+---
+
+## HTTP User-Agent
+
+Every API call the tool makes to SonarQube Server or SonarQube Cloud is sent with a fixed
+`User-Agent: sonar-migration-tool` header, instead of Go's default (`Go-http-client/1.1` or
+`/2.0`). This makes the tool's traffic easy to pick out from other API clients in
+server-side/audit logs when diagnosing a migration. The header is not configurable.
+
+When `--debug` is enabled, the request headers logged for each call include this `User-Agent`
+value alongside the (redacted) `Authorization` header.
 
 ---
 
