@@ -47,6 +47,25 @@ func TestHTTPClientMakesRequest(t *testing.T) {
 	assert.Equal(t, "Bearer my-token", gotAuth)
 }
 
+func TestHTTPClientSetsUserAgent(t *testing.T) {
+	var gotUA string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	c := sqapi.NewServerClient(ts.URL, "my-token", 10.7)
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/ping", nil)
+	require.NoError(t, err)
+	resp, err := c.HTTPClient().Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	assert.Equal(t, sqapi.UserAgent, gotUA)
+	assert.Equal(t, "sonar-migration-tool", gotUA)
+}
+
 // ---- APIError ----
 
 func TestAPIErrorErrorString(t *testing.T) {
