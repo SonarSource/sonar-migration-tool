@@ -15,9 +15,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	sqapi "github.com/sonar-solutions/sq-api-go"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
+	sqapi "github.com/sonar-solutions/sq-api-go"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -44,6 +44,7 @@ type sortSpec struct {
 var taskSortSpecs = map[string]sortSpec{
 	// Migrate-driven (records carry sonarcloud_org_key).
 	"createProjects":            {orgField: "sonarcloud_org_key", sortField: "cloud_project_key"},
+	"setProjectSourceLink":      {orgField: "sonarcloud_org_key", sortField: "cloud_project_key"},
 	"setProjectGates":           {orgField: "sonarcloud_org_key", sortField: "cloud_project_key"},
 	"setProjectBinding":         {orgField: "sonarcloud_org_key", sortField: "cloud_project_key"},
 	"createProfiles":            {orgField: "sonarcloud_org_key", sortField: "name"},
