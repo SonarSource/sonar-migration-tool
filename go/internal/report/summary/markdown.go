@@ -192,7 +192,7 @@ func renderMarkdownSections(sb *strings.Builder, summary *MigrationSummary) {
 		mdRows := make([]map[string]any, 0, len(rows))
 		for _, r := range rows {
 			row := map[string]any{
-				"name":    mdCell(r.displayName()),
+				"name":    mdDetail(r.nameCellMarkdown()),
 				"outcome": r.outcome,
 				"details": mdDetail(r.details),
 			}

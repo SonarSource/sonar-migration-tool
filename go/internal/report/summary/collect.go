@@ -560,6 +560,7 @@ func collectSection(store *common.DataStore, def sectionDef,
 	succeeded := collectSucceeded(store, def)
 	skipped := collectSkipped(store, def)
 	failed := collectFailed(failuresByType, def)
+	attachFailedSourceKeys(failed, store, def)
 	partial := collectPartial(def, configFailures, succeeded)
 	var nearPerfect []EntityItem
 
@@ -669,6 +670,7 @@ func collectSucceeded(store *common.DataStore, def sectionDef) []EntityItem {
 			Language:     jsonStr(item, "language"),
 			Organization: jsonStr(item, "sonarcloud_org_key"),
 			Detail:       jsonStr(item, def.DetailField),
+			SourceKey:    jsonStr(item, def.SourceKeyField),
 		}
 		key := entry.Organization + "\x00" + entry.Detail + "\x00" + entry.Name + "\x00" + entry.Language
 		if seen[key] {
@@ -704,6 +706,7 @@ func collectSkipped(store *common.DataStore, def sectionDef) []EntityItem {
 				Organization: jsonStr(item, "sonarqube_org_key"),
 				Detail:       "Organization skipped",
 				SkipReason:   SkipReasonOrgSkipped,
+				SourceKey:    jsonStr(item, def.SourceKeyField),
 			})
 		}
 	}
@@ -807,6 +810,36 @@ func collectFailed(failuresByType map[string][]analysis.ReportRow, def sectionDe
 		})
 	}
 	return result
+}
+
+// attachFailedSourceKeys fills in EntityItem.SourceKey for Failed-bucket
+// rows (issue #448) by matching on Name against the generate*Mappings task
+// output. Failed rows come from the analysis report ledger
+// (analysis.ReportRow), which carries the entity name but not the source
+// key, so — unlike Succeeded/Skipped — it has to be looked up separately.
+// No-op when the section has no SourceKeyField (all sections except
+// Projects).
+func attachFailedSourceKeys(items []EntityItem, store *common.DataStore, def sectionDef) {
+	if def.SourceKeyField == "" || len(items) == 0 {
+		return
+	}
+	mapped, err := store.ReadAll(def.InputTask)
+	if err != nil {
+		return
+	}
+	keyByName := make(map[string]string, len(mapped))
+	for _, item := range mapped {
+		name := jsonStr(item, def.NameField)
+		if name == "" {
+			continue
+		}
+		keyByName[name] = jsonStr(item, def.SourceKeyField)
+	}
+	for i := range items {
+		if key, ok := keyByName[items[i].Name]; ok {
+			items[i].SourceKey = key
+		}
+	}
 }
 
 // projectDataOutcome holds the per-project state of the
