@@ -324,6 +324,105 @@ func TestSetProjectTags(t *testing.T) {
 	}
 }
 
+// TestSetProjectSourceLink asserts the migration adds a "SQS migrated
+// project" link back to the original SonarQube Server dashboard for
+// every migrated project (#418).
+func TestSetProjectSourceLink(t *testing.T) {
+	type call struct {
+		project string
+		name    string
+		url     string
+	}
+	var (
+		mu       sync.Mutex
+		recorded []call
+	)
+	cloudMux := http.NewServeMux()
+	cloudMux.HandleFunc("POST /api/project_links/create", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		mu.Lock()
+		recorded = append(recorded, call{
+			project: r.FormValue("projectKey"),
+			name:    r.FormValue("name"),
+			url:     r.FormValue("url"),
+		})
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	cloudMux.HandleFunc("GET /api/project_links/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"links": []map[string]any{}})
+	})
+	addDefaultCloudHandler(cloudMux)
+	e := newCustomCloudTest(t, cloudMux)
+
+	pw, _ := e.Store.Writer("createProjects")
+	data, _ := json.Marshal(map[string]any{
+		"key": "proj1", "server_url": testServerURL,
+		"cloud_project_key": "cloud-org1_proj1", "sonarcloud_org_key": testCloudOrg,
+	})
+	_ = pw.WriteOne(data)
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["setProjectSourceLink"].Run(context.Background(), e); err != nil {
+		t.Fatalf("setProjectSourceLink: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(recorded) != 1 {
+		t.Fatalf("expected 1 project_links/create call, got %d: %+v", len(recorded), recorded)
+	}
+	wantURL := "https://sq.test/dashboard?id=proj1"
+	if got := recorded[0]; got.project != "cloud-org1_proj1" || got.name != migratedProjectLinkName || got.url != wantURL {
+		t.Fatalf("unexpected create call: %+v (want project=cloud-org1_proj1 name=%q url=%q)",
+			got, migratedProjectLinkName, wantURL)
+	}
+}
+
+// TestSetProjectSourceLinkSkipsExisting asserts a re-run doesn't create a
+// duplicate link when one with the same name and URL already exists on
+// the target project.
+func TestSetProjectSourceLinkSkipsExisting(t *testing.T) {
+	var (
+		mu          sync.Mutex
+		createCalls int
+	)
+	cloudMux := http.NewServeMux()
+	cloudMux.HandleFunc("POST /api/project_links/create", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		createCalls++
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	cloudMux.HandleFunc("GET /api/project_links/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"links": []map[string]any{
+				{"name": migratedProjectLinkName, "url": "https://sq.test/dashboard?id=proj1"},
+			},
+		})
+	})
+	addDefaultCloudHandler(cloudMux)
+	e := newCustomCloudTest(t, cloudMux)
+
+	pw, _ := e.Store.Writer("createProjects")
+	data, _ := json.Marshal(map[string]any{
+		"key": "proj1", "server_url": testServerURL,
+		"cloud_project_key": "cloud-org1_proj1", "sonarcloud_org_key": testCloudOrg,
+	})
+	_ = pw.WriteOne(data)
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["setProjectSourceLink"].Run(context.Background(), e); err != nil {
+		t.Fatalf("setProjectSourceLink: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if createCalls != 0 {
+		t.Fatalf("expected no create call when link already exists, got %d", createCalls)
+	}
+}
+
 func TestCreateMigrationGroups(t *testing.T) {
 	e := newFlowTest(t)
 

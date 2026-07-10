@@ -73,7 +73,7 @@ const (
 var transferTargetTasks = []string{
 	// Project configuration (each is scoped to the migrated project).
 	"setProjectProfiles", "setProjectGates", "setProjectGroupPermissions",
-	"setProjectSettings", "setProjectTags", "setProjectLinks",
+	"setProjectSettings", "setProjectTags", "setProjectLinks", "setProjectSourceLink",
 	"setProjectWebhooks", "setNewCodePeriods",
 	// Quality profile rules + quality gate conditions.
 	"restoreProfiles", "addGateConditions",

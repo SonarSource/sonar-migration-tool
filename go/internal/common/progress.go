@@ -119,6 +119,7 @@ var ProgressLogInterval = map[string]int64{
 	"setDefaultGates":                      50,
 	"restoreProfiles":                      50,
 	"setProjectLinks":                      50,
+	"setProjectSourceLink":                 50,
 	"setProjectProfiles":                   50,
 	"addMigrationGroupToTemplates":         50,
 	"createMigrationGroups":                50,
