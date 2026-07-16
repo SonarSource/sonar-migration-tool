@@ -325,6 +325,18 @@ func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*i
 		IsMain:         input.IsMain,
 	}
 
+	// Space out consecutive ce/submit calls (issue #417). Submitting many
+	// analyses concurrently to the same SonarCloud organization makes the CE
+	// return task SUCCESS for an analysis whose source it never persisted —
+	// the Code view then renders empty even though the report carried source.
+	// A brand-new project analyzed in isolation (e.g. via `transfer`) is
+	// unaffected; the loss only appears under the concurrent submit load of a
+	// full `migrate`. Serializing submits with a minimum gap keeps at most a
+	// small number of analyses in the CE pipeline at once and avoids the race.
+	if err := e.SubmitGate.wait(ctx, e.Logger); err != nil {
+		return nil, err
+	}
+
 	result, err := scanreport.SubmitReport(ctx, e.Raw.HTTPClient(), cfg, report.ZIP)
 	if err != nil {
 		return nil, fmt.Errorf("submitting report: %w", err)

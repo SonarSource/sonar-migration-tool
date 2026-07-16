@@ -53,6 +53,37 @@ func PlanPhases(tasks map[string]bool, reg map[string]*TaskDef) ([][]string, err
 	return common.PlanPhasesGeneric(tasks, reg)
 }
 
+// orderPortfoliosAfterImport adds importProjectData as a dependency of
+// configurePortfolios so portfolio configuration runs in a phase AFTER the
+// project-data import (issue #417).
+//
+// configurePortfolios PATCHes each portfolio's project selection, which
+// triggers asynchronous portfolio (VIEW_REFRESH) computations on the
+// SonarCloud Compute Engine. By default configurePortfolios lands in the same
+// execution phase as importProjectData (runPhase fans every task in a phase
+// out concurrently), so those portfolio computations run on the org's CE at
+// the same time as the project analyses replayed by importProjectData. That
+// concurrent CE load makes the CE report analysis SUCCESS while silently
+// failing to persist file source — the migrated project then renders with an
+// empty Code view. (A single-project `transfer` never creates portfolios,
+// which is why it is unaffected; --concurrency and submit spacing don't help
+// because they bound only the tool's own submits, not CE-side portfolio tasks.)
+//
+// The dependency is added ONLY when both tasks are already in the run, so it
+// never pulls importProjectData back in when project-data migration is skipped
+// (--skip_project_data_migration), and it is a no-op for editions/commands
+// without portfolios (e.g. transfer, community edition).
+func orderPortfoliosAfterImport(taskSet map[string]bool, reg map[string]*TaskDef) {
+	if !taskSet["configurePortfolios"] || !taskSet["importProjectData"] {
+		return
+	}
+	def := reg["configurePortfolios"]
+	if def == nil || slices.Contains(def.Dependencies, "importProjectData") {
+		return
+	}
+	def.Dependencies = append(def.Dependencies, "importProjectData")
+}
+
 // RegisterAll returns every migrate task definition.
 func RegisterAll() []TaskDef {
 	var all []TaskDef

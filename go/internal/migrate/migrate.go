@@ -64,6 +64,14 @@ type MigrateConfig struct {
 	// SonarQube Cloud project key from the source key, the org key, and
 	// the enterprise key. Defaults to DefaultProjectKeyPattern. Issue #138.
 	ProjectKeyPattern string
+
+	// CESubmitSpacingSeconds is an optional minimum number of seconds enforced
+	// between consecutive scanner-report submissions to the SonarCloud CE
+	// (issue #417). It is OFF by default (0); the source-loss root cause is
+	// fixed by phase ordering, not by spacing submits. Operators can still set
+	// a positive value to throttle submits and reduce CE load. applyDefaults
+	// normalises any negative value to 0 (disabled).
+	CESubmitSpacingSeconds int
 }
 
 // Executor is the runtime context passed to every migrate task function.
@@ -83,6 +91,12 @@ type Executor struct {
 	Sem             chan struct{}
 	Logger          *slog.Logger
 	ExcludeBranches []string
+
+	// SubmitGate spaces out consecutive scanner-report submissions to the
+	// SonarCloud CE so a full migrate does not flood it with concurrent
+	// analyses and lose source on some of them (issue #417). Nil disables
+	// throttling.
+	SubmitGate *submitGate
 
 	// ProjectKeyPattern is the resolved target-key template (issue #138),
 	// consumed by every task that derives a SonarQube Cloud project key
@@ -273,6 +287,9 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 		return "", fmt.Errorf("cannot resolve dependencies for target tasks")
 	}
 
+	// #417: keep portfolio computation from overlapping project analyses.
+	orderPortfoliosAfterImport(taskSet, registry)
+
 	plan, err := PlanPhases(taskSet, registry)
 	if err != nil {
 		return "", err
@@ -305,6 +322,7 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 		Sem:               make(chan struct{}, cfg.Concurrency),
 		ExcludeBranches:   cfg.ExcludeBranches,
 		ProjectKeyPattern: cfg.ProjectKeyPattern,
+		SubmitGate:        newSubmitGate(time.Duration(cfg.CESubmitSpacingSeconds) * time.Second),
 		Logger:            logger,
 	}
 
@@ -377,6 +395,15 @@ func (cfg *MigrateConfig) applyDefaults() {
 	}
 	if strings.TrimSpace(cfg.ProjectKeyPattern) == "" {
 		cfg.ProjectKeyPattern = DefaultProjectKeyPattern
+	}
+	// CE submit spacing is OFF by default (issue #417). The real fix for the
+	// source-loss bug is phase ordering (portfolio computation no longer
+	// overlaps project analyses), so the throttle is not needed in the normal
+	// path and would only add latency. It remains available as an opt-in knob
+	// (--ce_submit_spacing N) for operators who want to further reduce CE load.
+	// 0/absent → disabled; a positive value enables spacing of N seconds.
+	if cfg.CESubmitSpacingSeconds < 0 {
+		cfg.CESubmitSpacingSeconds = 0
 	}
 	// Ensure trailing slash.
 	if cfg.URL != "" && cfg.URL[len(cfg.URL)-1] != '/' {
