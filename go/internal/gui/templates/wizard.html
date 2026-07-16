@@ -890,13 +890,13 @@ var Wizard = (function() {
 			hidePrompt();
 			showProcessing('Processing...');
 		},
-		openCloud: function() {
+		openCloud() {
 			const btn = document.getElementById('cloud-btn');
 			if (btn._targetURL) {
 				window.open(btn._targetURL, '_blank');
 			}
 		},
-		onInputKey: function(e) {
+		onInputKey(e) {
 			if (e.key === 'Enter') {
 				submitInput();
 			}
