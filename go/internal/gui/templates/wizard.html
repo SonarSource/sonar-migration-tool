@@ -322,7 +322,7 @@ var Wizard = (function() {
 		if (!phaseInputs[key]) {
 			phaseInputs[key] = [];
 		}
-		phaseInputs[key].push({ label: label, value: displayValue });
+		phaseInputs[key].push({ label, value: displayValue });
 		renderPhaseInputs(key);
 	}
 
@@ -728,7 +728,7 @@ var Wizard = (function() {
 		if (pendingPromptMsg) {
 			capturePhaseInput(pendingPromptMsg, value);
 		}
-		send({ type: 'prompt_response', id: pendingPromptId, value: value });
+		send({ type: 'prompt_response', id: pendingPromptId, value });
 		pendingPromptId = null;
 		pendingPromptMsg = null;
 		latestSummary = null;
@@ -848,17 +848,17 @@ var Wizard = (function() {
 	connect();
 
 	return {
-		start: function() {
+		start() {
 			if (status === 'running') {
 				return;
 			}
 			status = 'running';
 			send({ type: 'start_wizard' });
 		},
-		cancel: function() {
+		cancel() {
 			send({ type: 'cancel_wizard' });
 		},
-		submitInput: submitInput,
+		submitInput,
 		submitCloudURL: submitCloudURL,
 		submitChoice: function() {
 			const sel = document.getElementById('choice-select');
