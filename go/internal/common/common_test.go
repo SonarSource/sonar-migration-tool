@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -135,6 +136,50 @@ func TestDataStoreWriteAndReadAll(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Fatalf("expected 2, got %d", len(got))
+	}
+}
+
+// TestDataStoreSanitizesTaskDir verifies that task names containing
+// characters illegal in Windows path components (e.g. the ":" in
+// "getTemplateGroupsScanners:apply") are sanitized to a safe directory
+// name, and that Writer / ReadAll / TaskDirExists all agree on that
+// name so the round-trip works. Regression test for issue #486.
+func TestDataStoreSanitizesTaskDir(t *testing.T) {
+	dir := t.TempDir()
+	ds := NewDataStore(dir)
+
+	const taskName = "getTemplateGroupsScanners:apply"
+
+	w, err := ds.Writer(taskName)
+	if err != nil {
+		t.Fatalf("Writer: %v", err)
+	}
+	if err := w.WriteOne(json.RawMessage(`{"ok":true}`)); err != nil {
+		t.Fatalf("WriteOne: %v", err)
+	}
+
+	// The on-disk directory must not contain the illegal ":".
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 task dir, got %d", len(entries))
+	}
+	if got := entries[0].Name(); strings.ContainsAny(got, `\/:*?"<>|`) {
+		t.Errorf("task dir %q contains an illegal path character", got)
+	}
+
+	// Writer, ReadAll and TaskDirExists must resolve to the same dir.
+	if !ds.TaskDirExists(taskName) {
+		t.Error("TaskDirExists returned false for sanitized task")
+	}
+	got, err := ds.ReadAll(taskName)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 record round-tripped, got %d", len(got))
 	}
 }
 
