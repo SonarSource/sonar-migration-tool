@@ -10,8 +10,8 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/sonar-solutions/sq-api-go/cloud"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
+	"github.com/sonar-solutions/sq-api-go/cloud"
 )
 
 // Reasons recorded on a matchProjectRepos skip record. They are consumed
@@ -261,45 +261,13 @@ func runMatchProjectRepos(ctx context.Context, e *Executor) error {
 			continue
 		}
 
-		// Issue #122: only attempt a binding when the target org is bound
-		// to the same DevOps platform. Otherwise record a skip so the
-		// report can mark the project as partially migrated.
-		ob := orgBindings[orgKey]
-		if !ob.Bound || !strings.EqualFold(ob.ALM, info.ALM) {
-			e.Logger.Warn("matchProjectRepos: target organization is not bound to the project's DevOps platform",
-				"project", projKey, "org", orgKey,
-				"project_alm", info.ALM, "org_alm", ob.ALM, "org_bound", ob.Bound)
-			writeSkip(projKey, orgKey, BindingSkipOrgNotBound, map[string]any{
-				"alm":     info.ALM,
-				"org_alm": ob.ALM,
-			})
-			continue
-		}
-
-		repos := reposByOrg[orgKey]
-		repoID := MatchDevOpsPlatform(info.ALM, info.Repository, info.Slug, repos)
-		if repoID == "" {
-			e.Logger.Warn("matchProjectRepos: no matching repository in the bound DevOps organization",
-				"project", projKey, "org", orgKey, "alm", info.ALM,
-				"repository", info.Repository, "slug", info.Slug,
-				"dop_organization", ob.DevOpsOrg, "candidates", len(repos))
-			writeSkip(projKey, orgKey, BindingSkipRepoNotFound, map[string]any{
+		repoID, projID, skip := e.resolveBindingTargets(
+			ctx, proj, projKey, orgKey, info, orgBindings[orgKey], reposByOrg[orgKey])
+		if skip != "" {
+			writeSkip(projKey, orgKey, skip, map[string]any{
 				"alm":        info.ALM,
 				"repository": info.Repository,
 			})
-			continue
-		}
-
-		// SonarQube Cloud's /api/projects/search does not return an
-		// internal project id, so resolve it explicitly (issue #122).
-		projID := extractField(proj, "id")
-		if projID == "" {
-			projID = e.resolveCloudProjectID(ctx, projKey)
-		}
-		if projID == "" {
-			e.Logger.Warn("matchProjectRepos: could not resolve the cloud project id",
-				"project", projKey, "org", orgKey)
-			writeSkip(projKey, orgKey, BindingSkipNoProjectID, nil)
 			continue
 		}
 
@@ -315,6 +283,47 @@ func runMatchProjectRepos(ctx context.Context, e *Executor) error {
 		_ = w.WriteOne(result)
 	}
 	return nil
+}
+
+// resolveBindingTargets decides what a bound source project can be bound to
+// on SonarQube Cloud. It returns the repository identifier and the cloud
+// project id, or a non-empty BindingSkip* reason explaining why no binding
+// is possible (issue #122).
+func (e *Executor) resolveBindingTargets(ctx context.Context, proj json.RawMessage,
+	projKey, orgKey string, info projectALMInfo, ob orgBinding,
+	repos []json.RawMessage) (repoID, projID, skipReason string) {
+
+	// Only attempt a binding when the target org is bound to the same
+	// DevOps platform: SonarQube Cloud can only bind a project to a
+	// repository of the DevOps organization its own org is bound to.
+	if !ob.Bound || !strings.EqualFold(ob.ALM, info.ALM) {
+		e.Logger.Warn("matchProjectRepos: target organization is not bound to the project's DevOps platform",
+			"project", projKey, "org", orgKey,
+			"project_alm", info.ALM, "org_alm", ob.ALM, "org_bound", ob.Bound)
+		return "", "", BindingSkipOrgNotBound
+	}
+
+	repoID = MatchDevOpsPlatform(info.ALM, info.Repository, info.Slug, repos)
+	if repoID == "" {
+		e.Logger.Warn("matchProjectRepos: no matching repository in the bound DevOps organization",
+			"project", projKey, "org", orgKey, "alm", info.ALM,
+			"repository", info.Repository, "slug", info.Slug,
+			"dop_organization", ob.DevOpsOrg, "candidates", len(repos))
+		return "", "", BindingSkipRepoNotFound
+	}
+
+	// SonarQube Cloud's /api/projects/search does not return an internal
+	// project id, so resolve it explicitly.
+	projID = extractField(proj, "id")
+	if projID == "" {
+		projID = e.resolveCloudProjectID(ctx, projKey)
+	}
+	if projID == "" {
+		e.Logger.Warn("matchProjectRepos: could not resolve the cloud project id",
+			"project", projKey, "org", orgKey)
+		return "", "", BindingSkipNoProjectID
+	}
+	return repoID, projID, ""
 }
 
 // resolveCloudProjectID looks up a SonarQube Cloud project's internal id.

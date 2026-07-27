@@ -6,6 +6,7 @@ package summary
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -467,26 +468,8 @@ func collectProjectBindingOutcomes(store *common.DataStore) []projectFailure {
 	seen := make(map[string]bool)
 	for _, raw := range items {
 		key := jsonStr(raw, "cloud_project_key")
-		if key == "" {
-			continue
-		}
-		var op, errMsg string
-		switch {
-		case jsonBool(raw, "binding_skipped"):
-			reason := jsonStr(raw, "skip_reason")
-			op = bindingSkipOperations[reason]
-			if op == "" {
-				// Prefer the sentence the migrate side recorded so a
-				// newly added reason still renders something useful.
-				op = jsonStr(raw, "skip_detail")
-			}
-			if op == "" {
-				op = "DevOps platform binding was not migrated"
-			}
-		case jsonStr(raw, "status") == "failed":
-			op = "DevOps platform binding not migrated"
-			errMsg = jsonStr(raw, "error")
-		default:
+		op, errMsg, ok := classifyBindingRecord(raw)
+		if key == "" || !ok {
 			continue
 		}
 		// One line per project per distinct message.
@@ -503,4 +486,27 @@ func collectProjectBindingOutcomes(store *common.DataStore) []projectFailure {
 		})
 	}
 	return out
+}
+
+// classifyBindingRecord turns one DevOps-binding record into the operator
+// sentence and error to report. ok is false for records that need no
+// report entry (a successful binding, or an unrecognised shape).
+func classifyBindingRecord(raw json.RawMessage) (op, errMsg string, ok bool) {
+	if jsonBool(raw, "binding_skipped") {
+		reason := jsonStr(raw, "skip_reason")
+		op = bindingSkipOperations[reason]
+		if op == "" {
+			// Prefer the sentence the migrate side recorded so a newly
+			// added reason still renders something useful.
+			op = jsonStr(raw, "skip_detail")
+		}
+		if op == "" {
+			op = "DevOps platform binding was not migrated"
+		}
+		return op, "", true
+	}
+	if jsonStr(raw, "status") == "failed" {
+		return "DevOps platform binding not migrated", jsonStr(raw, "error"), true
+	}
+	return "", "", false
 }

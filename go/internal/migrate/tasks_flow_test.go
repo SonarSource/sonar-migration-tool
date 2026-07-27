@@ -790,58 +790,79 @@ func TestMatchProjectReposOrgNotBound(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newFlowTest(t)
-
-			writeItem := func(task string, data map[string]any) {
-				w, _ := e.Store.Writer(task)
-				b, _ := json.Marshal(data)
-				w.WriteOne(b)
-			}
-			writeItem("getProjectIds", map[string]any{
-				"key": "cloud-org1_proj1", "id": "proj-id-1", "sonarcloud_org_key": testCloudOrg,
-			})
-			writeItem("getOrgRepos", map[string]any{
-				"id": "repo-123", "slug": "myorg/myrepo", "label": "myrepo",
-				"sonarcloud_org_key": testCloudOrg,
-			})
-			writeItem("getOrgBinding", tc.orgBinding)
+			seedBindingInputs(t, e, tc.orgBinding)
 
 			reg := BuildMigrateRegistry(RegisterAll())
 			if err := reg["matchProjectRepos"].Run(context.Background(), e); err != nil {
 				t.Fatalf("matchProjectRepos: %v", err)
 			}
-
-			items, _ := e.Store.ReadAll("matchProjectRepos")
-			if len(items) != 1 {
-				t.Fatalf("expected exactly 1 skip record, got %d", len(items))
-			}
-			if !extractBool(items[0], "binding_skipped") {
-				t.Fatalf("expected binding_skipped=true, got %s", items[0])
-			}
-			if got := extractField(items[0], "skip_reason"); got != BindingSkipOrgNotBound {
-				t.Errorf("skip_reason = %q, want %q", got, BindingSkipOrgNotBound)
-			}
-			want := "project binding was not possible because the org itself is not bound"
-			if got := extractField(items[0], "skip_detail"); got != want {
-				t.Errorf("skip_detail = %q, want %q", got, want)
-			}
-			// No binding must have been attempted.
-			if id := extractField(items[0], "project_id"); id != "" {
-				t.Errorf("expected no project_id on a skip record, got %q", id)
-			}
+			assertOrgNotBoundSkip(t, e)
 
 			// setProjectBinding forwards the skip verbatim without calling
 			// the DevOps binding endpoint.
 			if err := reg["setProjectBinding"].Run(context.Background(), e); err != nil {
 				t.Fatalf("setProjectBinding: %v", err)
 			}
-			out, _ := e.Store.ReadAll("setProjectBinding")
-			if len(out) != 1 || !extractBool(out[0], "binding_skipped") {
-				t.Fatalf("expected the skip record forwarded, got %v", out)
-			}
-			if extractField(out[0], "status") != "" {
-				t.Errorf("skip record must carry no write status: %s", out[0])
-			}
+			assertSkipForwarded(t, e)
 		})
+	}
+}
+
+// seedBindingInputs writes the matchProjectRepos inputs: one created cloud
+// project, one bindable repository in the target org, and the target org's
+// own DevOps platform binding.
+func seedBindingInputs(t *testing.T, e *Executor, orgBinding map[string]any) {
+	t.Helper()
+	writeItem := func(task string, data map[string]any) {
+		w, _ := e.Store.Writer(task)
+		b, _ := json.Marshal(data)
+		w.WriteOne(b)
+	}
+	writeItem("getProjectIds", map[string]any{
+		"key": "cloud-org1_proj1", "id": "proj-id-1", "sonarcloud_org_key": testCloudOrg,
+	})
+	writeItem("getOrgRepos", map[string]any{
+		"id": "repo-123", "slug": "myorg/myrepo", "label": "myrepo",
+		"sonarcloud_org_key": testCloudOrg,
+	})
+	writeItem("getOrgBinding", orgBinding)
+}
+
+// assertOrgNotBoundSkip asserts matchProjectRepos produced exactly one skip
+// record carrying the issue #122 org-not-bound reason and no binding ids.
+func assertOrgNotBoundSkip(t *testing.T, e *Executor) {
+	t.Helper()
+	items, _ := e.Store.ReadAll("matchProjectRepos")
+	if len(items) != 1 {
+		t.Fatalf("expected exactly 1 skip record, got %d", len(items))
+	}
+	rec := items[0]
+	if !extractBool(rec, "binding_skipped") {
+		t.Fatalf("expected binding_skipped=true, got %s", rec)
+	}
+	if got := extractField(rec, "skip_reason"); got != BindingSkipOrgNotBound {
+		t.Errorf("skip_reason = %q, want %q", got, BindingSkipOrgNotBound)
+	}
+	const want = "project binding was not possible because the org itself is not bound"
+	if got := extractField(rec, "skip_detail"); got != want {
+		t.Errorf("skip_detail = %q, want %q", got, want)
+	}
+	// No binding must have been attempted.
+	if id := extractField(rec, "project_id"); id != "" {
+		t.Errorf("expected no project_id on a skip record, got %q", id)
+	}
+}
+
+// assertSkipForwarded asserts setProjectBinding passed the skip record
+// through untouched, without recording a write status.
+func assertSkipForwarded(t *testing.T, e *Executor) {
+	t.Helper()
+	out, _ := e.Store.ReadAll("setProjectBinding")
+	if len(out) != 1 || !extractBool(out[0], "binding_skipped") {
+		t.Fatalf("expected the skip record forwarded, got %v", out)
+	}
+	if extractField(out[0], "status") != "" {
+		t.Errorf("skip record must carry no write status: %s", out[0])
 	}
 }
 
