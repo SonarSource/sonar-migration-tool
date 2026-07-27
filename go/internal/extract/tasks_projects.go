@@ -182,7 +182,21 @@ func projectBindingsTask() func(ctx context.Context, e *Executor) error {
 				raw, err := e.Raw.Get(ctx, "api/alm_settings/get_binding",
 					url.Values{"project": {key}})
 				if err != nil {
-					return nil // Binding may not exist; skip gracefully.
+					// 404 means the project simply has no DevOps
+					// platform binding and 403 that the token cannot
+					// administer it. Both are expected and must NOT
+					// mark the project as skipped — an unbound project
+					// is the common case and still migrates fully.
+					// Anything else (5xx, auth failure, cancelled
+					// context) is a real error: swallowing it would
+					// silently report a bound project as unbound and
+					// skip its binding migration (issue #122).
+					if isNonFatalHTTPErr(err) {
+						e.Logger.Debug("getProjectBindings: no binding for project",
+							"key", key, "err", err)
+						return nil
+					}
+					return err
 				}
 				return w.WriteOne(EnrichRaw(raw, map[string]any{"projectKey": key, "serverUrl": e.ServerURL}))
 			})
