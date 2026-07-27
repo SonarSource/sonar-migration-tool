@@ -177,7 +177,7 @@ func TestSyncHotspotIssueTagsPreservesExistingTags(t *testing.T) {
 	rec.mount(mux)
 	e := newCustomCloudTest(t, mux)
 
-	if failed := syncHotspotIssueTags(context.Background(), e, "cloud-issue-1", []string{"cwe", "former-hotspot"}); failed {
+	if syncHotspotIssueTags(context.Background(), e, "cloud-issue-1", []string{"cwe", "former-hotspot"}) {
 		t.Fatal("syncHotspotIssueTags reported failure")
 	}
 
@@ -200,7 +200,7 @@ func TestSyncHotspotIssueTagsIsIdempotent(t *testing.T) {
 	e := newCustomCloudTest(t, mux)
 
 	existing := []string{"cwe", scanreport.HotspotIssueTag, metadataSyncTag}
-	if failed := syncHotspotIssueTags(context.Background(), e, "cloud-issue-1", existing); failed {
+	if syncHotspotIssueTags(context.Background(), e, "cloud-issue-1", existing) {
 		t.Fatal("syncHotspotIssueTags reported failure")
 	}
 

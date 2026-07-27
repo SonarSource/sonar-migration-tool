@@ -452,7 +452,13 @@ func syncOneHotspotAsIssue(ctx context.Context, e *Executor, src matchableHotspo
 
 	// 3. Back-link to the origin (#321). It still points at the source
 	// server's security_hotspots view — that is where the finding lives there.
-	addHotspotSourceLinkToIssue(ctx, e, target.Key, baseURL, projectKey, src.Key, src.Branch, target.Comments)
+	addHotspotSourceLinkToIssue(ctx, e, hotspotSourceLinkTarget{
+		IssueKey:   target.Key,
+		BaseURL:    baseURL,
+		ProjectKey: projectKey,
+		HotspotKey: src.Key,
+		Branch:     src.Branch,
+	}, target.Comments)
 
 	// 4. The sqs-hotspot tag (#423).
 	if syncHotspotIssueTags(ctx, e, target.Key, target.Tags) && firstErr == nil {
@@ -499,26 +505,30 @@ func syncHotspotIssueTags(ctx context.Context, e *Executor, cloudKey string, exi
 	return false
 }
 
+// hotspotSourceLinkTarget identifies where a hotspot back-link should be
+// posted and what it should point at.
+type hotspotSourceLinkTarget struct {
+	IssueKey   string // Cloud issue the hotspot migrated into
+	BaseURL    string // public base URL of the source server
+	ProjectKey string // source project key
+	HotspotKey string // source hotspot key
+	Branch     string // source branch, if any
+}
+
 // addHotspotSourceLinkToIssue posts the "Link to [Original hotspot](…)"
 // back-link as a comment on the migrated ISSUE. Best-effort and idempotent.
-func addHotspotSourceLinkToIssue(ctx context.Context, e *Executor, cloudKey, baseURL, projectKey, sourceHotspotKey, branch string, cloudComments []issueComment) {
-	link := hotspotSourceLinkURL(baseURL, projectKey, sourceHotspotKey, branch)
+func addHotspotSourceLinkToIssue(ctx context.Context, e *Executor, tgt hotspotSourceLinkTarget, cloudComments []issueComment) {
+	link := hotspotSourceLinkURL(tgt.BaseURL, tgt.ProjectKey, tgt.HotspotKey, tgt.Branch)
 	if link == "" {
 		return
 	}
-	for _, cc := range cloudComments {
-		t := cc.Markdown
-		if t == "" {
-			t = cc.HTMLText
-		}
-		if strings.Contains(t, hotspotSourceLinkMarker) {
-			return
-		}
+	if issueCommentsContain(cloudComments, hotspotSourceLinkMarker) {
+		return
 	}
 	text := hotspotSourceLinkMarker + "(" + link + ")"
-	if err := e.Cloud.Issues.AddComment(ctx, cloudKey, text); err != nil {
+	if err := e.Cloud.Issues.AddComment(ctx, tgt.IssueKey, text); err != nil {
 		e.Logger.Warn("syncHotspotMetadata: could not add source-link comment (non-fatal)",
-			"issue", cloudKey, "reason", sourceLinkErrSummary(err))
+			"issue", tgt.IssueKey, "reason", sourceLinkErrSummary(err))
 	}
 }
 
