@@ -50,32 +50,53 @@ Conclusions:
 5. `/api/issues/tags` for the org already lists `former-hotspot` and
    `metadata-synchronized`; `sqs-hotspot` returns 0 issues today (baseline).
 
-## 2. Why hotspots vanish on the target today
+## 2. What is actually broken today
 
-<!-- updated: 2026-07-27_00:00:00 -->
+<!-- updated: 2026-07-27_23:40:00 -->
 
-Hotspots were *already* being emitted into the scanner report as plain issues —
-this is forced by the protobuf schema (§3). The regression is in the
-**active-rule contract**, and it is the same class of bug the sibling issues
-#456 and #474 hit:
+**Correction to an earlier draft of this document.** The first version claimed
+hotspots "vanish" on the target. A live baseline run of `origin/main`
+(381b068) disproved that, and the real picture is more subtle. Recording it
+here because the wrong version of this claim is an easy one to repeat.
 
-- `go/internal/migrate/tasks_projectdata.go` drops native issues whose rule is
-  not in the surviving active-rule set (`dropIssuesWithInactiveRules`), because
-  the Compute Engine aborts the whole report on an issue referencing a rule that
-  is not activated in the analysis.
-- Hotspot-derived issues are appended to the issue list **after** that filter,
-  deliberately bypassing it. The in-code comment justifies this with *"they are
-  validated against hotspot rules, not the active-rule set"* — which was true
-  while Cloud had hotspots and is **false as of 2026-07-01**.
+Hotspots were *already* emitted into the scanner report as plain native issues —
+forced by the protobuf schema (§3) — and the Compute Engine derives a finding's
+kind from the rule. So for a project whose hotspot rules were **converted**
+rather than retired, the findings **do** already land on the target as ordinary
+issues, with the right rule, file, line and backdated creation date.
 
-So a hotspot-derived issue now either gets dropped by the CE or poisons the whole
-report, depending on whether its rule happens to be activated. Either way the
-finding does not land. Fixing this means hotspot rules must participate in
-`activerules.pb` like any other issue rule, and hotspot-derived issues must be
-subject to the same orphan-rule filter.
+The baseline transfer of `demo:java-security` (13 source hotspots) produced 13
+target issues on the 8 former-hotspot rules, correctly typed VULNERABILITY /
+CODE_SMELL by Cloud. What it did **not** produce was any way to tell them apart
+from ordinary issues, or any of their review state.
 
-`TODO:` confirm empirically which of "silently dropped" vs "report rejected"
-happens, from the before-run CE task log.
+The genuine defects, then, are:
+
+1. **No `sqs-hotspot` tag.** Nothing marks a migrated finding as having been a
+   Security Hotspot on the source, so the information is simply gone. This is
+   issue #423's third checkbox and the substance of the change.
+2. **Triage never syncs.** `syncHotspotMetadata` resolved the target counterpart
+   through `/api/hotspots/search`, which now returns nothing by definition. Every
+   hotspot therefore resolved to `not_found` and no status, resolution or comment
+   was ever applied. Silent, because the count of imported findings looked fine.
+3. **Hotspot-count verification is measuring the wrong thing.** Any check that
+   compares source hotspots against target `/api/hotspots/search` reports total
+   loss even when every finding migrated correctly — which is exactly how the
+   prior "31 → 0" observation on `okorach-oss_sonar-tools` arose.
+4. **Fabricated severity.** `vulnerabilityProbability` was squashed into a legacy
+   severity and stamped as `overridden_severity`, a value the rule would never
+   itself raise (§3).
+5. **Orphan-rule report risk.** Hotspot-derived issues bypassed
+   `dropIssuesWithInactiveRules`, on the in-code reasoning that *"they are
+   validated against hotspot rules, not the active-rule set"* — true while Cloud
+   had hotspots, false as of 2026-07-01. An issue naming a rule the analysis does
+   not activate aborts the entire report in the CE, so a hotspot on a **retired**
+   rule (§1, `status: REMOVED`) can now take a whole branch's findings down with
+   it. This is the same failure class as sibling issues #456 and #474.
+6. **Extract-side data loss** on a non-fatal 403/404 (§7 item 5).
+
+Items 1, 2, 4, 5 and 6 are what this change fixes. Item 3 is a reporting
+concern noted for follow-up.
 
 ## 3. Protobuf constraints (why we cannot set a type)
 

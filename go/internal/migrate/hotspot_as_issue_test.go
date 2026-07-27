@@ -357,3 +357,134 @@ func TestHotspotCommentsAsIssueComments(t *testing.T) {
 		t.Errorf("got %+v, want %+v", got[0], want)
 	}
 }
+
+// mountIssueSearch installs a /api/issues/search handler returning the given
+// issues verbatim, so each matching outcome can be provoked in isolation.
+func mountIssueSearch(mux *http.ServeMux, issues []map[string]any) {
+	mux.HandleFunc("GET /api/issues/search", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"issues": issues,
+			"paging": map[string]any{"pageIndex": 1, "pageSize": 100, "total": len(issues)},
+		})
+	})
+}
+
+func hotspotAt(line int) matchableHotspot {
+	return matchableHotspot{
+		Key: "hs-1", RuleKey: "java:S2245",
+		Component: "proj:src/Main.java", Line: line, Status: "TO_REVIEW",
+	}
+}
+
+func TestResolveAndSyncHotspotNotFoundWhenNoIssueOnLine(t *testing.T) {
+	mux := http.NewServeMux()
+	mountIssueSearch(mux, []map[string]any{
+		{"key": "other", "rule": "java:S2245", "line": 99, "issueStatus": "OPEN"},
+	})
+	e := newCustomCloudTest(t, mux)
+
+	got := resolveAndSyncHotspot(context.Background(), e, "proj", "org", "", "src", hotspotAt(12), NewTaskCounter("t"))
+	if got != syncOutcomeNotFound {
+		t.Errorf("outcome = %v, want not_found", got)
+	}
+}
+
+func TestResolveAndSyncHotspotLineMismatchWhenAmbiguous(t *testing.T) {
+	mux := http.NewServeMux()
+	mountIssueSearch(mux, []map[string]any{
+		{"key": "a", "rule": "java:S2245", "line": 12, "issueStatus": "OPEN"},
+		{"key": "b", "rule": "java:S2245", "line": 12, "issueStatus": "OPEN"},
+	})
+	e := newCustomCloudTest(t, mux)
+
+	got := resolveAndSyncHotspot(context.Background(), e, "proj", "org", "", "src", hotspotAt(12), NewTaskCounter("t"))
+	if got != syncOutcomeLineMismatch {
+		t.Errorf("outcome = %v, want line_mismatch", got)
+	}
+}
+
+// A source hotspot with no rule, no line or no component cannot be matched and
+// must be reported rather than sent to the API.
+func TestResolveAndSyncHotspotUnmatchableSource(t *testing.T) {
+	tests := []struct {
+		name string
+		src  matchableHotspot
+	}{
+		{"no line", matchableHotspot{Key: "h", RuleKey: "java:S2245", Component: "proj:A.java", Line: 0}},
+		{"no rule", matchableHotspot{Key: "h", RuleKey: "", Component: "proj:A.java", Line: 3}},
+		{"no component", matchableHotspot{Key: "h", RuleKey: "java:S2245", Component: "", Line: 3}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("GET /api/issues/search", func(w http.ResponseWriter, _ *http.Request) {
+				t.Error("unmatchable hotspot should not reach the API")
+			})
+			e := newCustomCloudTest(t, mux)
+
+			got := resolveAndSyncHotspot(context.Background(), e, "proj", "org", "", "src", tc.src, NewTaskCounter("t"))
+			if got != syncOutcomeNotFound {
+				t.Errorf("outcome = %v, want not_found", got)
+			}
+		})
+	}
+}
+
+func TestSyncHotspotIssueTagsReportsFailure(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/issues/set_tags", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	e := newCustomCloudTest(t, mux)
+
+	if !syncHotspotIssueTags(context.Background(), e, "cloud-1", nil) {
+		t.Error("expected syncHotspotIssueTags to report failure on a 500")
+	}
+}
+
+// A failed tag call must surface as an error from the whole sync, so the
+// sqs-hotspot tag is never silently missing.
+func TestSyncOneHotspotAsIssueSurfacesTagFailure(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/issues/set_tags", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	e := newCustomCloudTest(t, mux)
+
+	src := matchableHotspot{Key: "hs-1", RuleKey: "java:S2245", Line: 12, Status: "TO_REVIEW"}
+	target := matchableIssue{Key: "cloud-1", Line: 12}
+	err := syncOneHotspotAsIssue(context.Background(), e, src, target, "", "")
+	if err == nil || !strings.Contains(err.Error(), "tags") {
+		t.Errorf("err = %v, want a tag failure", err)
+	}
+}
+
+// The back-link is best-effort: a failure there must not fail the sync, because
+// the tag and triage matter more.
+func TestSyncOneHotspotAsIssueToleratesSourceLinkFailure(t *testing.T) {
+	rec := &hotspotIssueSyncRecorder{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/issues/set_tags", func(w http.ResponseWriter, req *http.Request) {
+		_ = req.ParseForm()
+		rec.mu.Lock()
+		rec.tagsSet = strings.Split(req.FormValue("tags"), ",")
+		rec.mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /api/issues/add_comment", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	e := newCustomCloudTest(t, mux)
+
+	src := matchableHotspot{Key: "hs-1", RuleKey: "java:S2245", Line: 12, Status: "TO_REVIEW"}
+	target := matchableIssue{Key: "cloud-1", Line: 12}
+	if err := syncOneHotspotAsIssue(context.Background(), e, src, target, "https://sq.example.com", "p"); err != nil {
+		t.Errorf("a failed back-link must not fail the sync, got %v", err)
+	}
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if !slices.Contains(rec.tagsSet, scanreport.HotspotIssueTag) {
+		t.Errorf("tag still expected despite back-link failure; tags = %v", rec.tagsSet)
+	}
+}
