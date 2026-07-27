@@ -394,6 +394,36 @@ func TestLogImportProjectDataFailure(t *testing.T) {
 	}
 }
 
+// The task summary is the operator's at-a-glance signal. Before #474 a project
+// whose report was rejected incremented nothing, so importProjectData reported
+// no outcome at all and a transfer that migrated zero issues looked clean.
+func TestRecordImportOutcome(t *testing.T) {
+	newExec := func(buf *bytes.Buffer) *Executor {
+		return &Executor{Logger: slog.New(slog.NewTextHandler(buf, nil))}
+	}
+
+	var okBuf bytes.Buffer
+	okCounter := NewTaskCounter("importProjectData")
+	recordImportOutcome(newExec(&okBuf), okCounter, "org_proj", nil)
+	if s, f := okCounter.succeeded.Load(), okCounter.failed.Load(); s != 1 || f != 0 {
+		t.Errorf("success: succeeded=%d failed=%d, want 1/0", s, f)
+	}
+	if okBuf.Len() != 0 {
+		t.Errorf("success must not log: %s", okBuf.String())
+	}
+
+	var failBuf bytes.Buffer
+	failCounter := NewTaskCounter("importProjectData")
+	recordImportOutcome(newExec(&failBuf), failCounter, "org_proj",
+		errors.New("CE task failed: Report contains a file with language 'lua' but no matching quality profile"))
+	if s, f := failCounter.succeeded.Load(), failCounter.failed.Load(); s != 0 || f != 1 {
+		t.Errorf("failure: succeeded=%d failed=%d, want 0/1", s, f)
+	}
+	if !strings.Contains(failBuf.String(), "level=ERROR") {
+		t.Errorf("failure must be logged at ERROR: %s", failBuf.String())
+	}
+}
+
 func TestResolveUnsupportedLanguages(t *testing.T) {
 	if got := resolveUnsupportedLanguages("", "skip"); got != "skip" {
 		t.Errorf("got %q, want the first non-empty value \"skip\"", got)
