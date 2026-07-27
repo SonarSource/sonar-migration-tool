@@ -5,6 +5,7 @@
 package migrate
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -572,6 +573,50 @@ func scProfiles(langs ...string) map[string]scanreport.QProfileInfo {
 	return m
 }
 
+// widenLangCase is one widenLangsForFindingRules scenario. Named (rather than
+// an anonymous struct) so the assertions can live in helpers and keep the test
+// function's cognitive complexity low.
+type widenLangCase struct {
+	name       string
+	langs      map[string]bool
+	scByLang   map[string]scanreport.QProfileInfo
+	issues     []scanreport.IssueInput
+	hotspots   []scanreport.IssueInput
+	wantAdded  []string
+	wantInLang []string
+	wantAbsent []string
+}
+
+// assertLangsPresent fails for every language missing from the widened set.
+func assertLangsPresent(t *testing.T, langs map[string]bool, want []string) {
+	t.Helper()
+	for _, l := range want {
+		if !langs[l] {
+			t.Errorf("language %q missing from widened set %v", l, langs)
+		}
+	}
+}
+
+// assertLangsAbsent fails for every language that must NOT have been added.
+func assertLangsAbsent(t *testing.T, langs map[string]bool, notWant []string) {
+	t.Helper()
+	for _, l := range notWant {
+		if langs[l] {
+			t.Errorf("language %q must NOT be in the set %v", l, langs)
+		}
+	}
+}
+
+// assertWidenCase checks the returned added-language list and the resulting set.
+func assertWidenCase(t *testing.T, tc widenLangCase, got []string) {
+	t.Helper()
+	if strings.Join(got, ",") != strings.Join(tc.wantAdded, ",") {
+		t.Errorf("added languages: want %v, got %v", tc.wantAdded, got)
+	}
+	assertLangsPresent(t, tc.langs, tc.wantInLang)
+	assertLangsAbsent(t, tc.langs, tc.wantAbsent)
+}
+
 func TestWidenLangsForFindingRules(t *testing.T) {
 	// The demo-rules shape from #456: a secret-detection rule (language
 	// "secrets") raising issues inside a shell script and an XML file, neither
@@ -584,16 +629,7 @@ func TestWidenLangsForFindingRules(t *testing.T) {
 		{RuleRepo: "noLang", RuleKey: "S1", Language: ""},
 	}
 
-	tests := []struct {
-		name       string
-		langs      map[string]bool
-		scByLang   map[string]scanreport.QProfileInfo
-		issues     []scanreport.IssueInput
-		hotspots   []scanreport.IssueInput
-		wantAdded  []string
-		wantInLang []string
-		wantAbsent []string
-	}{
+	tests := []widenLangCase{
 		{
 			name:     "secrets finding on a non-secrets file widens the language set",
 			langs:    map[string]bool{"py": true, "xml": true},
@@ -679,21 +715,34 @@ func TestWidenLangsForFindingRules(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := widenLangsForFindingRules(tc.langs, tc.scByLang, rules, tc.issues, tc.hotspots)
-			if strings.Join(got, ",") != strings.Join(tc.wantAdded, ",") {
-				t.Errorf("added languages: want %v, got %v", tc.wantAdded, got)
-			}
-			for _, l := range tc.wantInLang {
-				if !tc.langs[l] {
-					t.Errorf("language %q missing from widened set %v", l, tc.langs)
-				}
-			}
-			for _, l := range tc.wantAbsent {
-				if tc.langs[l] {
-					t.Errorf("language %q must NOT be in the set %v", l, tc.langs)
-				}
-			}
+			assertWidenCase(t, tc,
+				widenLangsForFindingRules(tc.langs, tc.scByLang, rules, tc.issues, tc.hotspots))
 		})
+	}
+}
+
+// logWidenedLangs must stay silent when nothing was widened and emit exactly
+// one line naming the languages when something was.
+func TestLogWidenedLangs(t *testing.T) {
+	var buf bytes.Buffer
+	e := &Executor{Logger: slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))}
+	input := importBranchInput{CloudKey: "org_proj", Branch: "main"}
+
+	logWidenedLangs(e, input, nil)
+	logWidenedLangs(e, input, []string{})
+	if buf.Len() != 0 {
+		t.Errorf("nothing widened must log nothing, got %q", buf.String())
+	}
+
+	logWidenedLangs(e, input, []string{"secrets", "text"})
+	out := buf.String()
+	for _, want := range []string{"widened report language set", "org_proj", "main", "secrets", "text"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log line missing %q; got %q", want, out)
+		}
+	}
+	if n := strings.Count(out, "widened report language set"); n != 1 {
+		t.Errorf("want exactly 1 log line, got %d: %q", n, out)
 	}
 }
 

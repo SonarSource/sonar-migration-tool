@@ -5,6 +5,14 @@
 package migrate
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -648,5 +656,415 @@ func TestOpenIssueWithCustomTagIsActionableAndNeedsNoTransition(t *testing.T) {
 	want := []string{"action-plan", "cwe", metadataSyncTag}
 	if got := mergeIssueTags(iss.tagsToApply(), nil); !equalStrings(got, want) {
 		t.Errorf("tag payload = %v, want %v", got, want)
+	}
+}
+
+// --- #456: coverage for the tag write path and the not_found accounting ---
+
+// newTagSyncServer returns a cloud stub that records every /api/issues/set_tags
+// payload, plus the recorder itself.
+func newTagSyncServer(t *testing.T, failSetTags bool) (*httptest.Server, *[]string) {
+	t.Helper()
+	var seen []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/issues/set_tags", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		seen = append(seen, r.Form.Get("tags"))
+		if failSetTags {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	})
+	mux.HandleFunc("POST /api/issues/add_comment", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("POST /api/issues/do_transition", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	return httptest.NewServer(mux), &seen
+}
+
+// syncIssueTags sends the union of the source and cloud tag lists. The cloud
+// issue's own rule-default tags must survive, because set_tags REPLACES.
+func TestSyncIssueTagsSendsUnion(t *testing.T) {
+	cloudSrv, seen := newTagSyncServer(t, false)
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+	e := newTestExecutor(cloudSrv, apiSrv, t.TempDir())
+
+	failed := syncIssueTags(context.Background(), e, "cloud-1",
+		[]string{"cwe", "action-plan"}, []string{"secret", "cwe"})
+	if failed {
+		t.Fatal("syncIssueTags reported failure on a 200 response")
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("want exactly 1 set_tags call, got %d", len(*seen))
+	}
+	want := "action-plan,cwe,metadata-synchronized,secret"
+	if (*seen)[0] != want {
+		t.Errorf("set_tags payload = %q, want %q", (*seen)[0], want)
+	}
+}
+
+// A non-2xx from set_tags must be reported so the pair counts as failed.
+// Note: the shared HTTP client retries 5xx, so several attempts are expected —
+// what matters is that the exhausted failure is surfaced, not swallowed.
+func TestSyncIssueTagsReportsAPIFailure(t *testing.T) {
+	cloudSrv, seen := newTagSyncServer(t, true)
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+	e := newTestExecutor(cloudSrv, apiSrv, t.TempDir())
+
+	if !syncIssueTags(context.Background(), e, "cloud-1", []string{"action-plan"}, nil) {
+		t.Error("syncIssueTags must report failure when the API rejects the call")
+	}
+	if len(*seen) == 0 {
+		t.Fatal("expected at least one set_tags attempt")
+	}
+	// Every attempt must carry the same union payload.
+	want := "action-plan," + metadataSyncTag
+	for i, got := range *seen {
+		if got != want {
+			t.Errorf("attempt %d payload = %q, want %q", i, got, want)
+		}
+	}
+}
+
+// syncOnePair writes the source issue's COMPLETE tag list (AllTags), not the
+// user-added subset that drives actionability.
+func TestSyncOnePairWritesFullSourceTagList(t *testing.T) {
+	cloudSrv, seen := newTagSyncServer(t, false)
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+	e := newTestExecutor(cloudSrv, apiSrv, t.TempDir())
+
+	pair := issuePair{
+		source: matchableIssue{
+			Key: "src-1", Rule: "secrets:S7001", Status: "OPEN", IssueStatus: "OPEN",
+			Tags: []string{"action-plan"}, AllTags: []string{"cwe", "action-plan"},
+		},
+		cloud: matchableIssue{Key: "cloud-1", Tags: []string{"secret"}},
+	}
+	counter := NewTaskCounter("test")
+	syncOnePair(context.Background(), e, pair, "", "src-proj", counter)
+
+	if len(*seen) != 1 {
+		t.Fatalf("want 1 set_tags call, got %d", len(*seen))
+	}
+	want := "action-plan,cwe,metadata-synchronized,secret"
+	if (*seen)[0] != want {
+		t.Errorf("set_tags payload = %q, want %q", (*seen)[0], want)
+	}
+	if got := counter.succeeded.Load(); got != 1 {
+		t.Errorf("want 1 success recorded, got %d", got)
+	}
+}
+
+// A cloud issue already carrying the marker short-circuits: no tag rewrite.
+func TestSyncOnePairSkipsAlreadySyncedIssue(t *testing.T) {
+	cloudSrv, seen := newTagSyncServer(t, false)
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+	e := newTestExecutor(cloudSrv, apiSrv, t.TempDir())
+
+	pair := issuePair{
+		source: matchableIssue{Key: "src-1", AllTags: []string{"action-plan"}},
+		cloud:  matchableIssue{Key: "cloud-1", Tags: []string{"action-plan", metadataSyncTag}},
+	}
+	syncOnePair(context.Background(), e, pair, "", "src-proj", NewTaskCounter("test"))
+
+	if len(*seen) != 0 {
+		t.Errorf("an already-synced issue must not be re-tagged, got %v", *seen)
+	}
+}
+
+// setupIssueTagExtract writes a getProjectIssuesFull + getRuleDetails extract
+// mirroring the #456 demo-rules shape: OPEN issues whose tags array folds the
+// rule's sysTags ("cwe") together with the user-added tag ("action-plan").
+func setupIssueTagExtract(t *testing.T, dir string) {
+	t.Helper()
+	extractDir := filepath.Join(dir, "extract-01")
+	writeJSON(filepath.Join(extractDir, "extract.json"),
+		map[string]any{"url": testServerURL, "edition": "enterprise"})
+
+	writeJSONL(filepath.Join(extractDir, "getRuleDetails"), []map[string]any{
+		{"key": "secrets:S7001", "tags": []string{}, "sysTags": []string{"cwe"}, "serverUrl": testServerURL},
+	})
+
+	writeJSONL(filepath.Join(extractDir, "getProjectIssuesFull"), []map[string]any{
+		{
+			"key": "src-tagged", "rule": "secrets:S7001", "component": "demo-rules:secrets/az.xml",
+			"projectKey": "demo-rules", "branch": "main", "status": "OPEN", "issueStatus": "OPEN",
+			"tags": []string{"cwe", "action-plan"}, "serverUrl": testServerURL,
+			"textRange": map[string]any{"startLine": 7, "endLine": 7},
+			"line":      7,
+		},
+		{
+			"key": "src-plain", "rule": "secrets:S7001", "component": "demo-rules:secrets/tmp",
+			"projectKey": "demo-rules", "branch": "main", "status": "OPEN", "issueStatus": "OPEN",
+			"tags": []string{"cwe"}, "serverUrl": testServerURL,
+			"line": 11,
+		},
+		{
+			"key": "src-fixed", "rule": "secrets:S7001", "component": "demo-rules:secrets/tmp",
+			"projectKey": "demo-rules", "branch": "main", "status": "RESOLVED", "resolution": "FIXED",
+			"tags": []string{"cwe", "action-plan"}, "serverUrl": testServerURL, "line": 12,
+		},
+	})
+}
+
+// loadMatchableIssues must populate BOTH tag fields: AllTags with the complete
+// source list (what gets written to Cloud) and Tags with the user-added subset
+// (what decides actionability). FIXED issues are excluded.
+func TestLoadMatchableIssuesPopulatesAllTagsAndUserTags(t *testing.T) {
+	dir := t.TempDir()
+	setupIssueTagExtract(t, dir)
+	e := newProjectDataExecutor(t, dir)
+
+	issues := loadMatchableIssues(e, testServerURL, "demo-rules", loadRuleTagDefaults(e))
+	if len(issues) != 2 {
+		t.Fatalf("want 2 issues (FIXED excluded), got %d: %+v", len(issues), issues)
+	}
+
+	byKey := make(map[string]matchableIssue, len(issues))
+	for _, iss := range issues {
+		byKey[iss.Key] = iss
+	}
+
+	tagged, ok := byKey["src-tagged"]
+	if !ok {
+		t.Fatalf("src-tagged missing from %v", byKey)
+	}
+	if !equalStrings(tagged.AllTags, []string{"cwe", "action-plan"}) {
+		t.Errorf("AllTags = %v, want the full source list [cwe action-plan]", tagged.AllTags)
+	}
+	if !equalStrings(tagged.Tags, []string{"action-plan"}) {
+		t.Errorf("Tags = %v, want the user-added subset [action-plan]", tagged.Tags)
+	}
+	if !hasManualChanges(tagged) {
+		t.Error("an OPEN issue with a user-added tag must be actionable")
+	}
+	if !equalStrings(tagged.tagsToApply(), []string{"cwe", "action-plan"}) {
+		t.Errorf("tagsToApply = %v, want the full source list", tagged.tagsToApply())
+	}
+
+	// The rule-default-only issue carries tags but no *user* tags, so it is not
+	// actionable — and must not be, or every issue would be synced.
+	plain := byKey["src-plain"]
+	if !equalStrings(plain.AllTags, []string{"cwe"}) {
+		t.Errorf("AllTags = %v, want [cwe]", plain.AllTags)
+	}
+	if len(plain.Tags) != 0 {
+		t.Errorf("Tags = %v, want empty (cwe is a rule default)", plain.Tags)
+	}
+	if hasManualChanges(plain) {
+		t.Error("a rule-default-only issue must NOT be actionable")
+	}
+}
+
+// syncProjectIssues end-to-end over the mock cloud: the tagged issue that HAS a
+// counterpart is tagged, and the tagged issue that has NONE is accounted as
+// not_found rather than silently ignored (#456 — that silence hid the bug).
+func TestSyncProjectIssuesTagsMatchedAndCountsNotFound(t *testing.T) {
+	dir := t.TempDir()
+	setupIssueTagExtract(t, dir)
+
+	var setTagsPayloads []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/issues/search", func(w http.ResponseWriter, r *http.Request) {
+		// The project-wide indexing probe must report a non-zero total so the
+		// sync proceeds without waiting on the backoff.
+		if r.URL.Query().Get("rules") == "" {
+			json.NewEncoder(w).Encode(map[string]any{
+				"issues": []map[string]any{},
+				"paging": map[string]any{"pageIndex": 1, "pageSize": 1, "total": 2},
+			})
+			return
+		}
+		// Per-source targeted search: only az.xml has a counterpart. The
+		// component-scoped search for secrets/tmp returns nothing, which is
+		// exactly the "rule missing on the target" shape from #456.
+		if strings.Contains(r.URL.Query().Get("componentKeys"), "secrets/az.xml") {
+			json.NewEncoder(w).Encode(map[string]any{
+				"issues": []map[string]any{{
+					"key": "cloud-az", "rule": "secrets:S7001",
+					"component": "cloud-proj:secrets/az.xml", "line": 7,
+					"tags": []string{"secret", "cwe"},
+				}},
+				"paging": map[string]any{"pageIndex": 1, "pageSize": 500, "total": 1},
+			})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"issues": []map[string]any{},
+			"paging": map[string]any{"pageIndex": 1, "pageSize": 500, "total": 0},
+		})
+	})
+	mux.HandleFunc("POST /api/issues/set_tags", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		setTagsPayloads = append(setTagsPayloads, r.Form.Get("tags"))
+	})
+	mux.HandleFunc("POST /api/issues/add_comment", func(w http.ResponseWriter, _ *http.Request) {})
+	cloudSrv := httptest.NewServer(mux)
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	var logBuf bytes.Buffer
+	e.Logger = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	// Make the second tagged issue actionable-but-unmatchable by giving the
+	// extract a user tag on the secrets/tmp issue too.
+	writeJSONL(filepath.Join(dir, "extract-01", "getProjectIssuesFull"), []map[string]any{
+		{
+			"key": "src-tagged", "rule": "secrets:S7001", "component": "demo-rules:secrets/az.xml",
+			"projectKey": "demo-rules", "branch": "main", "status": "OPEN", "issueStatus": "OPEN",
+			"tags": []string{"cwe", "action-plan"}, "serverUrl": testServerURL, "line": 7,
+		},
+		{
+			"key": "src-orphan", "rule": "secrets:S7001", "component": "demo-rules:secrets/tmp",
+			"projectKey": "demo-rules", "branch": "main", "status": "OPEN", "issueStatus": "OPEN",
+			"tags": []string{"cwe", "action-plan"}, "serverUrl": testServerURL, "line": 11,
+		},
+	})
+
+	stats := syncProjectIssues(context.Background(), e, "cloud-proj", "cloud-org",
+		testServerURL, "demo-rules", NewTaskCounter("test"), loadRuleTagDefaults(e))
+
+	if stats.Actionable != 2 {
+		t.Errorf("actionable: want 2, got %d", stats.Actionable)
+	}
+	if stats.A != 1 {
+		t.Errorf("synced: want 1, got %d", stats.A)
+	}
+	if stats.C != 1 {
+		t.Errorf("not_found: want 1, got %d", stats.C)
+	}
+	if stats.B != 0 {
+		t.Errorf("line_mismatch: want 0, got %d", stats.B)
+	}
+
+	// The matched issue keeps the cloud's rule-default tags AND gains the
+	// source's custom tag.
+	if len(setTagsPayloads) != 1 {
+		t.Fatalf("want 1 set_tags call, got %d: %v", len(setTagsPayloads), setTagsPayloads)
+	}
+	want := "action-plan,cwe,metadata-synchronized,secret"
+	if setTagsPayloads[0] != want {
+		t.Errorf("set_tags payload = %q, want %q", setTagsPayloads[0], want)
+	}
+
+	// The unmatched triaged issue is surfaced at WARN with totals.
+	out := logBuf.String()
+	if !strings.Contains(out, "without a unique Cloud counterpart") {
+		t.Errorf("expected the not_found WARN summary; got %q", out)
+	}
+	if !strings.Contains(out, "not_found=1") {
+		t.Errorf("expected not_found=1 in the WARN summary; got %q", out)
+	}
+}
+
+// When every actionable issue matches, the not_found WARN must NOT fire.
+func TestSyncProjectIssuesNoWarnWhenAllMatched(t *testing.T) {
+	dir := t.TempDir()
+	setupIssueTagExtract(t, dir)
+	writeJSONL(filepath.Join(dir, "extract-01", "getProjectIssuesFull"), []map[string]any{
+		{
+			"key": "src-tagged", "rule": "secrets:S7001", "component": "demo-rules:secrets/az.xml",
+			"projectKey": "demo-rules", "branch": "main", "status": "OPEN", "issueStatus": "OPEN",
+			"tags": []string{"cwe", "action-plan"}, "serverUrl": testServerURL, "line": 7,
+		},
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/issues/search", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("rules") == "" {
+			json.NewEncoder(w).Encode(map[string]any{
+				"issues": []map[string]any{},
+				"paging": map[string]any{"pageIndex": 1, "pageSize": 1, "total": 1},
+			})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"issues": []map[string]any{{
+				"key": "cloud-az", "rule": "secrets:S7001",
+				"component": "cloud-proj:secrets/az.xml", "line": 7,
+			}},
+			"paging": map[string]any{"pageIndex": 1, "pageSize": 500, "total": 1},
+		})
+	})
+	mux.HandleFunc("POST /api/issues/set_tags", func(w http.ResponseWriter, _ *http.Request) {})
+	mux.HandleFunc("POST /api/issues/add_comment", func(w http.ResponseWriter, _ *http.Request) {})
+	cloudSrv := httptest.NewServer(mux)
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	var logBuf bytes.Buffer
+	e.Logger = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	stats := syncProjectIssues(context.Background(), e, "cloud-proj", "cloud-org",
+		testServerURL, "demo-rules", NewTaskCounter("test"), loadRuleTagDefaults(e))
+
+	if stats.A != 1 || stats.B != 0 || stats.C != 0 {
+		t.Errorf("want synced=1 ambiguous=0 not_found=0, got a=%d b=%d c=%d", stats.A, stats.B, stats.C)
+	}
+	if strings.Contains(logBuf.String(), "without a unique Cloud counterpart") {
+		t.Errorf("the not_found WARN must not fire when everything matched; got %q", logBuf.String())
+	}
+}
+
+// No source issues at all: the sync returns zeroed stats without touching the
+// network (guards the early return).
+func TestSyncProjectIssuesNoSourceIssues(t *testing.T) {
+	dir := t.TempDir()
+	writeJSON(filepath.Join(dir, "extract-01", "extract.json"),
+		map[string]any{"url": testServerURL, "edition": "enterprise"})
+	writeJSONL(filepath.Join(dir, "extract-01", "getProjectIssuesFull"), nil)
+
+	cloudSrv, _ := newTagSyncServer(t, false)
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+
+	stats := syncProjectIssues(context.Background(), e, "cloud-proj", "cloud-org",
+		testServerURL, "demo-rules", NewTaskCounter("test"), loadRuleTagDefaults(e))
+	if stats.Actionable != 0 || stats.A != 0 || stats.C != 0 {
+		t.Errorf("want fully zeroed stats, got %+v", stats)
+	}
+}
+
+// Source issues exist but none is actionable: no cloud calls, zero stats
+// (guards the "no actionable" early return distinct from "no issues").
+func TestSyncProjectIssuesNoActionableIssues(t *testing.T) {
+	dir := t.TempDir()
+	setupIssueTagExtract(t, dir)
+	writeJSONL(filepath.Join(dir, "extract-01", "getProjectIssuesFull"), []map[string]any{
+		{
+			"key": "src-plain", "rule": "secrets:S7001", "component": "demo-rules:secrets/tmp",
+			"projectKey": "demo-rules", "branch": "main", "status": "OPEN", "issueStatus": "OPEN",
+			"tags": []string{"cwe"}, "serverUrl": testServerURL, "line": 11,
+		},
+	})
+
+	cloudSrv, seen := newTagSyncServer(t, false)
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+
+	stats := syncProjectIssues(context.Background(), e, "cloud-proj", "cloud-org",
+		testServerURL, "demo-rules", NewTaskCounter("test"), loadRuleTagDefaults(e))
+	if stats.Actionable != 0 {
+		t.Errorf("a rule-default-only issue must not be actionable, got %d", stats.Actionable)
+	}
+	if len(*seen) != 0 {
+		t.Errorf("no set_tags calls expected, got %v", *seen)
 	}
 }
