@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	sqapi "github.com/sonar-solutions/sq-api-go"
@@ -216,8 +217,13 @@ func newMockCloudServer() *httptest.Server {
 		})
 	})
 
+	// Issue #122: /dop-translation/project-bindings is served ONLY by the
+	// Cloud enterprise host (api.sonarcloud.io). The standard host answers
+	// the SPA index for this path, so a request arriving here means the
+	// binding write regressed to the wrong client. Fail loudly.
 	mux.HandleFunc("POST /dop-translation/project-bindings", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
+		http.Error(w, `{"errors":[{"msg":"dop-translation is not served by the standard host"}]}`,
+			http.StatusNotFound)
 	})
 
 	// --- GET endpoints (read operations) ---
@@ -242,6 +248,19 @@ func newMockCloudServer() *httptest.Server {
 		json.NewEncoder(w).Encode(map[string]any{
 			"repositories": []map[string]any{
 				{"id": "repo-123", "slug": "myorg/myrepo", "label": "myrepo"},
+			},
+		})
+	})
+
+	// Issue #122 — the target organization's own DevOps platform binding.
+	// Mirrors the live SonarQube Cloud response shape.
+	mux.HandleFunc("GET /api/alm_integration/show_bound_organization", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"almOrganization": map[string]any{
+				"key":      "myorg",
+				"url":      "",
+				"almUrl":   "https://github.com/myorg",
+				"personal": false,
 			},
 		})
 	})
@@ -355,9 +374,57 @@ func newAlreadyExistsCloudServer() *httptest.Server {
 	return httptest.NewServer(mux)
 }
 
+// dopBindingRequests records every project-binding body the enterprise
+// API mock received, so tests can assert the DevOps binding write landed
+// on the right host with the right payload (issue #122).
+type dopBindingRecorder struct {
+	mu       sync.Mutex
+	Requests []map[string]string
+}
+
+func (d *dopBindingRecorder) add(body map[string]string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.Requests = append(d.Requests, body)
+}
+
+// All returns a copy of the recorded request bodies.
+func (d *dopBindingRecorder) All() []map[string]string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]map[string]string(nil), d.Requests...)
+}
+
+// dopRecorderOf returns the recorder attached to an enterprise API mock
+// server created by newMockAPIServer.
+var dopRecorders sync.Map // *httptest.Server -> *dopBindingRecorder
+
+func dopRecorderOf(srv *httptest.Server) *dopBindingRecorder {
+	if v, ok := dopRecorders.Load(srv); ok {
+		return v.(*dopBindingRecorder)
+	}
+	return &dopBindingRecorder{}
+}
+
 // newMockAPIServer creates a mock enterprise API server.
 func newMockAPIServer() *httptest.Server {
 	mux := http.NewServeMux()
+
+	rec := &dopBindingRecorder{}
+
+	// Issue #122: the DevOps binding write must reach the enterprise host.
+	mux.HandleFunc("POST /dop-translation/project-bindings", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		json.NewDecoder(r.Body).Decode(&body)
+		rec.add(body)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":             "binding-1",
+			"projectId":      body["projectId"],
+			"repositoryId":   body["repositoryId"],
+			"devOpsPlatform": "github",
+		})
+	})
 
 	mux.HandleFunc("GET /enterprises/enterprises", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
@@ -394,7 +461,9 @@ func newMockAPIServer() *httptest.Server {
 		json.NewEncoder(w).Encode(map[string]any{})
 	})
 
-	return httptest.NewServer(mux)
+	srv := httptest.NewServer(mux)
+	dopRecorders.Store(srv, rec)
+	return srv
 }
 
 // newTestExecutor builds a fully wired Executor for testing.

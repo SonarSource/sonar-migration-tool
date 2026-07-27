@@ -10,8 +10,8 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sq-api-go/cloud"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
 // Reasons recorded on a matchProjectRepos skip record. They are consumed
@@ -174,39 +174,44 @@ func runGetOrgBinding(ctx context.Context, e *Executor) error {
 		})
 }
 
-func runMatchProjectRepos(ctx context.Context, e *Executor) error {
-	// Load project IDs.
-	projectItems, _ := e.Store.ReadAll("getProjectIds")
-	// Load org repos.
-	repoItems, _ := e.Store.ReadAll("getOrgRepos")
-
-	// Build repo lookup: orgKey -> []repo.
-	reposByOrg := make(map[string][]json.RawMessage)
-	for _, r := range repoItems {
+// loadOrgRepos groups the repositories read by getOrgRepos by target
+// organization key.
+func (e *Executor) loadOrgRepos() map[string][]json.RawMessage {
+	items, _ := e.Store.ReadAll("getOrgRepos")
+	byOrg := make(map[string][]json.RawMessage)
+	for _, r := range items {
 		orgKey := extractField(r, "sonarcloud_org_key")
-		reposByOrg[orgKey] = append(reposByOrg[orgKey], r)
+		byOrg[orgKey] = append(byOrg[orgKey], r)
 	}
+	return byOrg
+}
 
-	// Build the org -> DevOps-platform-binding lookup (issue #122).
-	orgBindings := make(map[string]orgBinding)
-	bindingItems, _ := e.Store.ReadAll("getOrgBinding")
-	for _, b := range bindingItems {
-		orgBindings[extractField(b, "sonarcloud_org_key")] = orgBinding{
+// loadOrgBindings indexes the getOrgBinding records by target
+// organization key (issue #122).
+func (e *Executor) loadOrgBindings() map[string]orgBinding {
+	items, _ := e.Store.ReadAll("getOrgBinding")
+	out := make(map[string]orgBinding, len(items))
+	for _, b := range items {
+		out[extractField(b, "sonarcloud_org_key")] = orgBinding{
 			Bound:     extractBool(b, "bound"),
 			ALM:       extractField(b, "alm"),
 			DevOpsOrg: extractField(b, "dop_organization"),
 			URL:       extractField(b, "alm_url"),
 		}
 	}
+	return out
+}
 
-	// Load project mappings to get ALM info.
-	projMappings, _ := e.Store.ReadAll("generateProjectMappings")
-	projALMInfo := make(map[string]projectALMInfo) // cloud_project_key -> ALM info
-	for _, pm := range projMappings {
+// loadProjectALMInfo indexes each mapped project's source DevOps binding
+// by the cloud project key it will be created under.
+func (e *Executor) loadProjectALMInfo() map[string]projectALMInfo {
+	items, _ := e.Store.ReadAll("generateProjectMappings")
+	out := make(map[string]projectALMInfo, len(items))
+	for _, pm := range items {
 		orgKey := extractField(pm, "sonarcloud_org_key")
 		key := extractField(pm, "key")
 		cloudKey := RenderProjectKey(e.ProjectKeyPattern, key, orgKey)
-		projALMInfo[cloudKey] = projectALMInfo{
+		out[cloudKey] = projectALMInfo{
 			ALM:        extractField(pm, "alm"),
 			Repository: extractField(pm, "repository"),
 			Slug:       extractField(pm, "slug"),
@@ -216,6 +221,14 @@ func runMatchProjectRepos(ctx context.Context, e *Executor) error {
 			SourceKey:  key,
 		}
 	}
+	return out
+}
+
+func runMatchProjectRepos(ctx context.Context, e *Executor) error {
+	projectItems, _ := e.Store.ReadAll("getProjectIds")
+	reposByOrg := e.loadOrgRepos()
+	orgBindings := e.loadOrgBindings()
+	projALMInfo := e.loadProjectALMInfo()
 
 	w, err := e.Store.Writer("matchProjectRepos")
 	if err != nil {
@@ -416,18 +429,34 @@ func repoIdentityOf(repo json.RawMessage) repoIdentity {
 	return ri
 }
 
-// bindingID returns the identifier to send as repositoryId when creating
-// the DOP binding. SonarQube Cloud resolves the repository from its
-// fully qualified slug; the numeric id is only a fallback for shapes
-// that carry no slug.
-func (r repoIdentity) bindingID() string {
-	if r.Slug != "" {
-		return r.Slug
+// bindingIDFor returns the identifier to send as repositoryId when
+// creating the DOP binding for the given platform.
+//
+// SonarQube Cloud resolves the repository by calling the DevOps platform
+// with this value, so it must be the identifier that platform's API
+// expects:
+//
+//	GitHub / Azure DevOps / Bitbucket Cloud  fully qualified slug
+//	                                        ("owner/repo"). Verified
+//	                                        live against GitHub: posting
+//	                                        the numeric id yields
+//	                                        "Call to GitHub on endpoint
+//	                                        .../repos/<id> failed with
+//	                                        status code 404".
+//	GitLab                                  numeric project id, which is
+//	                                        also what a SonarQube Server
+//	                                        GitLab binding stores.
+func (r repoIdentity) bindingIDFor(platform string) string {
+	ordered := []string{r.Slug, r.ID, r.Label}
+	if platform == "gitlab" {
+		ordered = []string{r.ID, r.Slug, r.Label}
 	}
-	if r.ID != "" {
-		return r.ID
+	for _, v := range ordered {
+		if v != "" {
+			return v
+		}
 	}
-	return r.Label
+	return ""
 }
 
 // lastSegment returns the text after the final "/" — the bare repository
@@ -463,49 +492,73 @@ func MatchDevOpsPlatform(alm, repository, slug string, repos []json.RawMessage) 
 	}
 	platform := strings.ToLower(alm)
 
-	exact := func(r repoIdentity) bool {
-		switch platform {
-		case "github":
-			return eqIdent(repository, r.Slug) || eqIdent(repository, r.ID)
-		case "gitlab":
-			// SonarQube Server stores the numeric GitLab project id.
-			return eqIdent(repository, r.ID) || eqIdent(repository, r.Slug)
-		case "bitbucketcloud":
-			return eqIdent(repository, r.Slug) || eqIdent(repository, r.Label) ||
-				eqIdent(repository, r.ID)
-		case "azure":
-			// SonarQube Cloud labels Azure repositories
-			// "<project name> / <repository name>".
-			return eqIdent(slug+" / "+repository, r.Label) ||
-				eqIdent(slug+"/"+repository, r.Slug) ||
-				eqIdent(slug+" / "+repository, r.Slug)
-		}
-		return false
+	passes := []func(string, string, repoIdentity) bool{
+		exactRepoMatch(platform),
+		fallbackRepoMatch(platform),
 	}
-
-	fallback := func(r repoIdentity) bool {
-		switch platform {
-		case "github", "bitbucketcloud":
-			name := lastSegment(repository)
-			return eqIdent(name, r.Label) || eqIdent(name, lastSegment(r.Slug))
-		case "azure":
-			return eqIdent(repository, r.Label) || eqIdent(repository, lastSegment(r.Slug))
-		}
-		// GitLab bindings only carry an opaque numeric id — guessing by
-		// name would be wrong, so there is no fallback.
-		return false
-	}
-
-	for _, pass := range []func(repoIdentity) bool{exact, fallback} {
+	for _, matches := range passes {
 		for _, repo := range repos {
 			ri := repoIdentityOf(repo)
-			if pass(ri) {
-				return ri.bindingID()
+			if matches(repository, slug, ri) {
+				return ri.bindingIDFor(platform)
 			}
 		}
 	}
 	return ""
 }
+
+// exactRepoMatch returns the fully-qualified matcher for a platform: the
+// source binding's identifier must equal the target repository's own
+// identifier exactly.
+func exactRepoMatch(platform string) func(repository, slug string, r repoIdentity) bool {
+	switch platform {
+	case "github":
+		return func(repository, _ string, r repoIdentity) bool {
+			return eqIdent(repository, r.Slug) || eqIdent(repository, r.ID)
+		}
+	case "gitlab":
+		// SonarQube Server stores the numeric GitLab project id.
+		return func(repository, _ string, r repoIdentity) bool {
+			return eqIdent(repository, r.ID) || eqIdent(repository, r.Slug)
+		}
+	case "bitbucketcloud":
+		return func(repository, _ string, r repoIdentity) bool {
+			return eqIdent(repository, r.Slug) || eqIdent(repository, r.Label) ||
+				eqIdent(repository, r.ID)
+		}
+	case "azure":
+		// SonarQube Cloud labels Azure repositories
+		// "<project name> / <repository name>".
+		return func(repository, slug string, r repoIdentity) bool {
+			return eqIdent(slug+" / "+repository, r.Label) ||
+				eqIdent(slug+"/"+repository, r.Slug) ||
+				eqIdent(slug+" / "+repository, r.Slug)
+		}
+	}
+	return neverMatches
+}
+
+// fallbackRepoMatch returns the bare-repository-name matcher for a
+// platform, used only when no exact match was found. GitLab has no
+// fallback: its bindings carry an opaque numeric id, so guessing by name
+// would risk binding to the wrong repository.
+func fallbackRepoMatch(platform string) func(repository, slug string, r repoIdentity) bool {
+	switch platform {
+	case "github", "bitbucketcloud":
+		return func(repository, _ string, r repoIdentity) bool {
+			name := lastSegment(repository)
+			return eqIdent(name, r.Label) || eqIdent(name, lastSegment(r.Slug))
+		}
+	case "azure":
+		return func(repository, _ string, r repoIdentity) bool {
+			return eqIdent(repository, r.Label) ||
+				eqIdent(repository, lastSegment(r.Slug))
+		}
+	}
+	return neverMatches
+}
+
+func neverMatches(_, _ string, _ repoIdentity) bool { return false }
 
 // eqIdent compares two DevOps identifiers case-insensitively, ignoring
 // surrounding whitespace. Empty values never match.
