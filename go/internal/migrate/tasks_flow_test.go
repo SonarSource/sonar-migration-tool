@@ -1076,3 +1076,100 @@ func TestTasksWithFailingServer(t *testing.T) {
 		}
 	}
 }
+
+// TestMatchProjectReposRepoNotFound covers the case where the target org IS
+// bound to the project's DevOps platform but the source repository does not
+// exist in the bound DevOps organization — for example migrating a project
+// bound to github.com/okorach into an org bound to github.com/other-org.
+func TestMatchProjectReposRepoNotFound(t *testing.T) {
+	e := newFlowTest(t)
+	seedBindingInputsWithRepo(t, e,
+		map[string]any{
+			"sonarcloud_org_key": testCloudOrg, "bound": true,
+			"alm": "github", "dop_organization": "other-org",
+			"alm_url": "https://github.com/other-org",
+		},
+		map[string]any{
+			"label": "unrelated", "slug": "other-org/unrelated",
+			"installationKey": "other-org/unrelated|99", "sonarcloud_org_key": testCloudOrg,
+		})
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["matchProjectRepos"].Run(context.Background(), e); err != nil {
+		t.Fatalf("matchProjectRepos: %v", err)
+	}
+	items, _ := e.Store.ReadAll("matchProjectRepos")
+	if len(items) != 1 || !extractBool(items[0], "binding_skipped") {
+		t.Fatalf("expected 1 skip record, got %v", items)
+	}
+	if got := extractField(items[0], "skip_reason"); got != BindingSkipRepoNotFound {
+		t.Errorf("skip_reason = %q, want %q", got, BindingSkipRepoNotFound)
+	}
+	want := "project binding was not possible because the repository was not found in the bound DevOps organization"
+	if got := extractField(items[0], "skip_detail"); got != want {
+		t.Errorf("skip_detail = %q, want %q", got, want)
+	}
+}
+
+// TestMatchProjectReposResolvesCloudProjectID covers the issue #122 fix for
+// SonarQube Cloud not returning an internal project id from
+// /api/projects/search: when the getProjectIds record carries no `id`, the
+// binding falls back to /api/navigation/component. Before this fix the
+// project id stayed empty and the binding was silently never created.
+func TestMatchProjectReposResolvesCloudProjectID(t *testing.T) {
+	e := newFlowTest(t)
+
+	writeItem := func(task string, data map[string]any) {
+		w, _ := e.Store.Writer(task)
+		b, _ := json.Marshal(data)
+		w.WriteOne(b)
+	}
+	// Exactly what Cloud returns: no "id" field.
+	writeItem("getProjectIds", map[string]any{
+		"key": "cloud-org1_proj1", "name": "Project 1",
+		"qualifier": "TRK", "sonarcloud_org_key": testCloudOrg,
+	})
+	writeItem("getOrgRepos", map[string]any{
+		"label": "myrepo", "slug": "myorg/myrepo",
+		"installationKey": "myorg/myrepo|123", "sonarcloud_org_key": testCloudOrg,
+	})
+	writeItem("getOrgBinding", map[string]any{
+		"sonarcloud_org_key": testCloudOrg, "bound": true,
+		"alm": "github", "dop_organization": "myorg",
+		"alm_url": "https://github.com/myorg",
+	})
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["matchProjectRepos"].Run(context.Background(), e); err != nil {
+		t.Fatalf("matchProjectRepos: %v", err)
+	}
+	items, _ := e.Store.ReadAll("matchProjectRepos")
+	if len(items) != 1 {
+		t.Fatalf("expected 1 binding record, got %d: %v", len(items), items)
+	}
+	if extractBool(items[0], "binding_skipped") {
+		t.Fatalf("expected a binding record, got a skip: %s", items[0])
+	}
+	if got := extractField(items[0], "project_id"); got != "resolved-uuid-1" {
+		t.Errorf("project_id = %q, want resolved-uuid-1 (from /api/navigation/component)", got)
+	}
+	if got := extractField(items[0], "repository_id"); got != "myorg/myrepo" {
+		t.Errorf("repository_id = %q, want myorg/myrepo", got)
+	}
+}
+
+// seedBindingInputsWithRepo is seedBindingInputs with a caller-supplied
+// repository fixture.
+func seedBindingInputsWithRepo(t *testing.T, e *Executor, orgBinding, repo map[string]any) {
+	t.Helper()
+	writeItem := func(task string, data map[string]any) {
+		w, _ := e.Store.Writer(task)
+		b, _ := json.Marshal(data)
+		w.WriteOne(b)
+	}
+	writeItem("getProjectIds", map[string]any{
+		"key": "cloud-org1_proj1", "id": "proj-id-1", "sonarcloud_org_key": testCloudOrg,
+	})
+	writeItem("getOrgRepos", repo)
+	writeItem("getOrgBinding", orgBinding)
+}

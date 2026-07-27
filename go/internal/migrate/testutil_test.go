@@ -16,10 +16,10 @@ import (
 	"sync"
 	"testing"
 
-	sqapi "github.com/sonar-solutions/sq-api-go"
-	"github.com/sonar-solutions/sq-api-go/cloud"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
+	sqapi "github.com/sonar-solutions/sq-api-go"
+	"github.com/sonar-solutions/sq-api-go/cloud"
 )
 
 const (
@@ -249,6 +249,15 @@ func newMockCloudServer() *httptest.Server {
 			"repositories": []map[string]any{
 				{"id": "repo-123", "slug": "myorg/myrepo", "label": "myrepo"},
 			},
+		})
+	})
+
+	// Issue #122 — SonarQube Cloud's /api/projects/search does not return an
+	// internal project id, so the binding needs this endpoint to resolve it.
+	mux.HandleFunc("GET /api/navigation/component", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"key": r.URL.Query().Get("component"),
+			"id":  "resolved-uuid-1",
 		})
 	})
 
