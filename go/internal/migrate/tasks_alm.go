@@ -10,8 +10,8 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/sonar-solutions/sq-api-go/cloud"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
+	"github.com/sonar-solutions/sq-api-go/cloud"
 )
 
 // Reasons recorded on a matchProjectRepos skip record. They are consumed
