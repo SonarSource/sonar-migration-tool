@@ -60,6 +60,14 @@ type MigrateConfig struct {
 	// during project data import. Main branch is never excluded.
 	ExcludeBranches []string
 
+	// UnsupportedLanguages selects how a project whose files use a language
+	// with no quality profile on the target organization is handled (#474):
+	// "exclude" (default) drops those files from the scanner report so the
+	// rest of the project migrates, "skip" declines to migrate the project's
+	// data at all, "warn" submits the report unchanged. Empty resolves to
+	// DefaultUnsupportedLanguages.
+	UnsupportedLanguages string
+
 	// ProjectKeyPattern is the template used to derive each target
 	// SonarQube Cloud project key from the source key, the org key, and
 	// the enterprise key. Defaults to DefaultProjectKeyPattern. Issue #138.
@@ -83,6 +91,11 @@ type Executor struct {
 	Sem             chan struct{}
 	Logger          *slog.Logger
 	ExcludeBranches []string
+
+	// UnsupportedLanguages is the resolved handling mode for files whose
+	// language has no quality profile on the target organization (#474):
+	// UnsupportedLanguagesExclude / Skip / Warn.
+	UnsupportedLanguages string
 
 	// ProjectKeyPattern is the resolved target-key template (issue #138),
 	// consumed by every task that derives a SonarQube Cloud project key
@@ -290,22 +303,23 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 	plan = filterCompleted(plan, store)
 
 	executor := &Executor{
-		Cloud:             cc,
-		CloudAPI:          apiCC,
-		Raw:               raw,
-		RawAPI:            rawAPI,
-		Extract:           nil, // Will be set per-task based on extract mapping
-		Store:             store,
-		CloudURL:          cloudClient.BaseURL(),
-		APIURL:            apiClient.BaseURL(),
-		EntKey:            cfg.EnterpriseKey,
-		Edition:           edition,
-		ExportDir:         cfg.ExportDirectory,
-		Mapping:           mapping,
-		Sem:               make(chan struct{}, cfg.Concurrency),
-		ExcludeBranches:   cfg.ExcludeBranches,
-		ProjectKeyPattern: cfg.ProjectKeyPattern,
-		Logger:            logger,
+		Cloud:                cc,
+		CloudAPI:             apiCC,
+		Raw:                  raw,
+		RawAPI:               rawAPI,
+		Extract:              nil, // Will be set per-task based on extract mapping
+		Store:                store,
+		CloudURL:             cloudClient.BaseURL(),
+		APIURL:               apiClient.BaseURL(),
+		EntKey:               cfg.EnterpriseKey,
+		Edition:              edition,
+		ExportDir:            cfg.ExportDirectory,
+		Mapping:              mapping,
+		Sem:                  make(chan struct{}, cfg.Concurrency),
+		ExcludeBranches:      cfg.ExcludeBranches,
+		UnsupportedLanguages: cfg.UnsupportedLanguages,
+		ProjectKeyPattern:    cfg.ProjectKeyPattern,
+		Logger:               logger,
 	}
 
 	// Execute phases.
@@ -377,6 +391,14 @@ func (cfg *MigrateConfig) applyDefaults() {
 	}
 	if strings.TrimSpace(cfg.ProjectKeyPattern) == "" {
 		cfg.ProjectKeyPattern = DefaultProjectKeyPattern
+	}
+	// #474 — normalise the unsupported-language handling mode. An invalid
+	// value is rejected at the CLI layer (ValidateUnsupportedLanguages), so
+	// here we only need to fill in the default for an absent value.
+	if mode, err := ParseUnsupportedLanguageMode(cfg.UnsupportedLanguages); err == nil {
+		cfg.UnsupportedLanguages = mode
+	} else {
+		cfg.UnsupportedLanguages = DefaultUnsupportedLanguages
 	}
 	// Ensure trailing slash.
 	if cfg.URL != "" && cfg.URL[len(cfg.URL)-1] != '/' {
