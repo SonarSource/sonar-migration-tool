@@ -22,16 +22,26 @@ import (
 //
 // The native Issue protobuf message has no type field at all — the scanner
 // never tells the server what kind of finding something is. Type, clean-code
-// attribute, software qualities and impact severity are all derived
-// server-side from the rule's own definition in the target's rule repository.
-// Mimicking the scanner therefore means:
+// attribute and software qualities are all derived server-side from the rule's
+// own definition in the target's rule repository. Mimicking the scanner
+// therefore means emitting a plain native Issue naming the (repo, rule) pair
+// and stamping no type and no impacts; Cloud then classifies the finding
+// exactly as it would classify the same rule raised by a real scan.
 //
-//   - emit a plain native Issue naming the (repo, rule) pair, and
-//   - do NOT stamp a type, an impact, or a severity override.
+// Severity is the one exception, and it is not a matter of taste. A native
+// issue in a fabricated report MUST carry an explicit severity: submitting one
+// with overridden_severity unset makes the Compute Engine abort the whole
+// report with
 //
-// Cloud then classifies the finding exactly as it would classify the same rule
-// raised by a real scan. Anything else would fabricate a finding shape the
-// rule could never actually produce.
+//	Cannot invoke "Object.getClass()" because "other" is null
+//	(Visit of Component {key=…,type=FILE} failed)
+//
+// which was reproduced live on 2026-07-27 — every finding on the branch was
+// lost, including the ordinary issues. So the hotspot's review priority is
+// mapped onto the equivalent severity band by HotspotSeverity. Every other
+// issue in the report already carries one, so this keeps converted hotspots
+// consistent with them rather than special-casing them into a shape the CE
+// cannot process.
 //
 // The review state (TO_REVIEW / REVIEWED + SAFE|FIXED|ACKNOWLEDGED) is not
 // expressible in the report either — it is triage, not analysis — so it is
@@ -77,10 +87,7 @@ type HotspotInput struct {
 	Component    string
 
 	// VulnerabilityProbability is the hotspot's HIGH/MEDIUM/LOW review
-	// priority. It is retained for reporting only: it is deliberately NOT
-	// mapped onto an issue severity override, because the converted rule on
-	// Cloud already carries its own impact severity and the real scanner does
-	// not override it.
+	// priority, mapped onto the issue severity by HotspotSeverity.
 	VulnerabilityProbability string
 
 	// Status and Resolution carry the hotspot's review state, used to derive
@@ -94,14 +101,34 @@ type HotspotInput struct {
 	EndOff    int32
 }
 
+// HotspotSeverity maps a hotspot's HIGH/MEDIUM/LOW vulnerability probability
+// onto the equivalent issue severity band.
+//
+// An explicit severity is mandatory rather than cosmetic — see the package
+// comment above for the Compute Engine failure that results from omitting it.
+// An unrecognised or absent probability yields MAJOR, the neutral middle band,
+// so a converted hotspot always carries something the CE can process.
+func HotspotSeverity(vulnerabilityProbability string) string {
+	switch strings.ToUpper(strings.TrimSpace(vulnerabilityProbability)) {
+	case "HIGH":
+		return "CRITICAL"
+	case "MEDIUM":
+		return "MAJOR"
+	case "LOW":
+		return "MINOR"
+	default:
+		return "MAJOR"
+	}
+}
+
 // ConvertHotspotToIssue converts one Security Hotspot into the native issue
 // the scanner would have reported for the same rule.
 //
 // Only the fields a real scanner reports are populated: the rule coordinates,
-// the message and the text range. Severity is left empty so that BuildIssues
-// emits no overridden_severity and Cloud applies the rule's own severity.
-// Key and CreationDate are carried through so BackdateChangesets can restore
-// the original creation date.
+// the message, the text range and a severity (see HotspotSeverity for why the
+// last of those is not optional). No type and no impacts are stamped, so Cloud
+// derives them from the rule. Key and CreationDate are carried through so
+// BackdateChangesets can restore the original creation date.
 func ConvertHotspotToIssue(h HotspotInput) IssueInput {
 	startLine, endLine := h.StartLine, h.EndLine
 	if endLine < startLine {
@@ -120,13 +147,12 @@ func ConvertHotspotToIssue(h HotspotInput) IssueInput {
 		RuleRepo:     h.RuleRepo,
 		RuleKey:      h.RuleKey,
 		Message:      h.Message,
-		// Severity intentionally left empty — see the package comment above.
-		Severity:  "",
-		StartLine: startLine,
-		EndLine:   endLine,
-		StartOff:  startOff,
-		EndOff:    endOff,
-		Component: h.Component,
+		Severity:     HotspotSeverity(h.VulnerabilityProbability),
+		StartLine:    startLine,
+		EndLine:      endLine,
+		StartOff:     startOff,
+		EndOff:       endOff,
+		Component:    h.Component,
 	}
 }
 

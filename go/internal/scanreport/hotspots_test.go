@@ -44,7 +44,7 @@ func TestConvertHotspotToIssue(t *testing.T) {
 				RuleRepo:     "java",
 				RuleKey:      "S2245",
 				Message:      "Make sure that using this pseudorandom number generator is safe here.",
-				Severity:     "",
+				Severity:     "MAJOR",
 				StartLine:    12,
 				EndLine:      12,
 				StartOff:     4,
@@ -53,7 +53,7 @@ func TestConvertHotspotToIssue(t *testing.T) {
 			},
 		},
 		{
-			name: "HIGH probability still yields no severity override",
+			name: "HIGH probability maps to CRITICAL",
 			in: HotspotInput{
 				RuleRepo:                 "python",
 				RuleKey:                  "S4502",
@@ -65,7 +65,7 @@ func TestConvertHotspotToIssue(t *testing.T) {
 			want: IssueInput{
 				RuleRepo:  "python",
 				RuleKey:   "S4502",
-				Severity:  "",
+				Severity:  "CRITICAL",
 				StartLine: 7,
 				EndLine:   7,
 				Component: "proj:app.py",
@@ -83,6 +83,7 @@ func TestConvertHotspotToIssue(t *testing.T) {
 			want: IssueInput{
 				RuleRepo:  "java",
 				RuleKey:   "S2077",
+				Severity:  "MAJOR",
 				Component: "proj:src/Db.java",
 			},
 		},
@@ -98,6 +99,7 @@ func TestConvertHotspotToIssue(t *testing.T) {
 			want: IssueInput{
 				RuleRepo:  "docker",
 				RuleKey:   "S6505",
+				Severity:  "MAJOR",
 				Component: "proj:Dockerfile",
 				StartLine: 30,
 				EndLine:   30,
@@ -115,11 +117,10 @@ func TestConvertHotspotToIssue(t *testing.T) {
 	}
 }
 
-// The real scanner never tells the server what kind of finding a rule raises —
-// the native Issue message has no type field. Converted hotspots must
-// therefore carry no severity override, so Cloud applies the converted rule's
-// own impact severity.
-func TestConvertedHotspotEmitsNoSeverityOverride(t *testing.T) {
+// A converted hotspot carries no type and no impacts — Cloud derives those
+// from the rule — but it MUST carry a severity: a native issue with
+// overridden_severity unset makes the Compute Engine abort the entire report.
+func TestConvertedHotspotCarriesSeverityButNoImpacts(t *testing.T) {
 	hotspots := []HotspotInput{
 		{RuleRepo: "python", RuleKey: "S4502", Component: "p:a.py", StartLine: 3, EndLine: 3, VulnerabilityProbability: "HIGH"},
 		{RuleRepo: "python", RuleKey: "S1313", Component: "p:a.py", StartLine: 4, EndLine: 4, VulnerabilityProbability: "LOW"},
@@ -135,20 +136,43 @@ func TestConvertedHotspotEmitsNoSeverityOverride(t *testing.T) {
 	byRef := BuildIssues(issues, cr)
 	got := byRef[ref]
 	if len(got) != 2 {
-		t.Fatalf("built %d issues for ref 2, want 2", len(got))
+		t.Fatalf("built %d issues for ref %d, want 2", len(got), ref)
 	}
-	for _, iss := range got {
-		if iss.OverriddenSeverity != nil {
-			t.Errorf("rule %s:%s got OverriddenSeverity=%v, want nil",
-				iss.GetRuleRepository(), iss.GetRuleKey(), iss.GetOverriddenSeverity())
+	wantSev := []pb.Severity{pb.Severity_CRITICAL, pb.Severity_MINOR}
+	for i, iss := range got {
+		if iss.OverriddenSeverity == nil {
+			t.Errorf("rule %s:%s has no OverriddenSeverity; the CE aborts the whole report without one",
+				iss.GetRuleRepository(), iss.GetRuleKey())
+			continue
+		}
+		if iss.GetOverriddenSeverity() != wantSev[i] {
+			t.Errorf("rule %s:%s severity = %v, want %v",
+				iss.GetRuleRepository(), iss.GetRuleKey(), iss.GetOverriddenSeverity(), wantSev[i])
 		}
 		if len(iss.GetOverriddenImpacts()) != 0 {
-			t.Errorf("rule %s:%s got OverriddenImpacts=%v, want none",
+			t.Errorf("rule %s:%s got OverriddenImpacts=%v, want none — Cloud derives impacts from the rule",
 				iss.GetRuleRepository(), iss.GetRuleKey(), iss.GetOverriddenImpacts())
 		}
 	}
 	if got[0].GetTextRange().GetStartLine() != 3 {
 		t.Errorf("first issue start line = %d, want 3", got[0].GetTextRange().GetStartLine())
+	}
+}
+
+func TestHotspotSeverity(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"HIGH", "CRITICAL"},
+		{"MEDIUM", "MAJOR"},
+		{"LOW", "MINOR"},
+		{"high", "CRITICAL"},
+		{" LOW ", "MINOR"},
+		{"", "MAJOR"},
+		{"NONSENSE", "MAJOR"},
+	}
+	for _, tc := range tests {
+		if got := HotspotSeverity(tc.in); got != tc.want {
+			t.Errorf("HotspotSeverity(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 
@@ -164,7 +188,7 @@ func TestConvertedHotspotMatchesNativeIssueOnTheWire(t *testing.T) {
 		VulnerabilityProbability: "MEDIUM", Status: HotspotStatusReviewed, Resolution: HotspotResolutionSafe,
 	}})
 	native := []IssueInput{{
-		RuleRepo: "java", RuleKey: "S2245", Message: "msg",
+		RuleRepo: "java", RuleKey: "S2245", Message: "msg", Severity: "MAJOR",
 		Component: "p:Main.java", StartLine: 9, EndLine: 9, StartOff: 1, EndOff: 5,
 	}}
 
