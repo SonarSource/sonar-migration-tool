@@ -6,7 +6,7 @@ This document describes everything the **sonar-migration-tool** migrates (and wi
 ---
 
 ## Current Capabilities (Implemented)
-<!-- updated: 2026-06-04_12:00:00 -->
+<!-- updated: 2026-07-27_23:05:00 -->
 
 The following entities are fully migrated today:
 
@@ -416,6 +416,7 @@ Each version has a dedicated extraction/encoding pipeline to handle API differen
 <!-- updated: 2026-06-26_18:52:18 -->
 
 ### SonarQube Server (Source -- Read Only)
+<!-- updated: 2026-07-27_23:05:00 -->
 
 | Endpoint | Purpose |
 |----------|---------|
@@ -434,8 +435,11 @@ Each version has a dedicated extraction/encoding pipeline to handle API differen
 | `/api/permissions/*` | Extract permissions |
 | `/api/project_branches/list` | List branches |
 | `/api/system/info` | Server version detection |
+| `GET /api/alm_settings/get_binding` | Project DevOps platform binding (issue #122) |
+| `GET /api/alm_settings/list` | Configured DevOps platform definitions |
 
 ### SonarQube Cloud (Target -- Read/Write)
+<!-- updated: 2026-07-27_23:05:00 -->
 
 | Endpoint | Purpose |
 |----------|---------|
@@ -453,6 +457,10 @@ Each version has a dedicated extraction/encoding pipeline to handle API differen
 | `/api/qualityprofiles/*` | Create/configure quality profiles |
 | `/api/user_groups/*` | Create/manage groups |
 | `/api/permissions/*` | Set permissions |
+| `GET /api/alm_integration/show_bound_organization` | The DevOps organization a Cloud org is bound to (issue #122) |
+| `GET /api/alm_integration/list_repositories` | Repositories bindable in that DevOps organization |
+| `GET /api/navigation/component` | Resolve a Cloud project's internal id (not returned by `/api/projects/search`) |
+| `POST {api-host}/dop-translation/project-bindings` | Create the project → repository binding |
 
 ---
 

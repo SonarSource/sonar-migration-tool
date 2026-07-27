@@ -214,7 +214,9 @@ POST endpoints on `sonarcloud.io` used during the `migrate` phase. Implemented i
 
 | Endpoint | Purpose | Parameters |
 |----------|---------|------------|
-| `POST /dop-translation/project-bindings` | Bind project to DevOps repo | `projectId`, `repositoryId` (JSON body) |
+| `POST {api-host}/dop-translation/project-bindings` | Bind project to DevOps repo | `projectId` (Cloud project id from `GET /api/navigation/component`), `repositoryId` (fully qualified repo slug, e.g. `owner/repo`; GitLab uses the numeric project id) — JSON body. **Enterprise host only** — the standard host returns the SPA index for this path |
+| `GET /api/alm_integration/show_bound_organization` | The DevOps org a Cloud org is bound to | `organization` |
+| `GET /api/alm_integration/is_project_bound` | Whether a Cloud project is bound | `project` |
 
 ---
 
