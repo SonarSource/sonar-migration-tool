@@ -21,6 +21,25 @@ The following entities are fully migrated today:
 | **Portfolios** | Portfolio structure and project assignments |
 | **Project Data** | Optional protobuf report injection for historical analysis data |
 
+### Languages SonarQube Cloud does not support
+<!-- updated: 2026-07-27_23:16:00 -->
+
+SonarQube Server can analyze languages SonarQube Cloud cannot — anything
+contributed by a 3rd-party (non-SonarSource) plugin has no Cloud analyzer and
+therefore no quality profile there. Such files **cannot** be migrated: the
+Compute Engine rejects any analysis report containing a file whose language has
+no matching quality profile, and it rejects the report as a whole.
+
+`transfer` detects this before submitting and, by default, excludes only those
+files so that every other file, issue, measure and branch still migrates; the
+project is then reported as a **Partial Migration** naming the languages and the
+file count. `--unsupported_languages=skip` declines to migrate the project's
+data at all. See
+[TRANSFER.md](TRANSFER.md#unsupported-programming-languages---unsupported_languages)
+and the troubleshooting entry
+[Project migrated but has no issues and no branches](TROUBLESHOOTING.md#project-migrated-but-has-no-issues-and-no-branches).
+Issue #474.
+
 ---
 
 ## Planned Capabilities (Roadmap)

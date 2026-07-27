@@ -234,6 +234,13 @@ statement of `runTransfer`.
   |         non-main branches SEQUENTIAL:                                      |
   |           buildBranchReport: load issues / hotspots / components /         |
   |             sources / activeRules ;  skip empty/purged ;                   |
+  |             buildSCProfileMap(org) -> profile per LANGUAGE ;               |
+  |             #474 applyUnsupportedLanguagePolicy(components, profiles):     |
+  |               langs(components) \ langs(profiles) = UNSUPPORTED            |
+  |                 exclude (default) -> drop those file components            |
+  |                 skip              -> return "skipped" + reason, NO submit  |
+  |                 warn              -> submit unchanged (CE will reject)     |
+  |               (empty profile map = API failure -> detection disabled)      |
   |             remap SQ->SC profile keys ;  dedup active rules ;              |
   |             drop issues on inactive rules ;                                |
   |             BackdateChangesets -> original creation dates                  |
@@ -474,7 +481,7 @@ flowchart TB
 ```
 
 ## Key facts the chart encodes
-<!-- updated: 2026-06-09_21:16:18 -->
+<!-- updated: 2026-07-27_23:15:00 -->
 
 - **Project scoping is carried by exactly one parameter.** `getProjects` is the
   sole consumer of `ProjectKeys`; it sets `projects=<key>` on
@@ -503,3 +510,19 @@ flowchart TB
   `GenerateReports` fails the transfer still prints "Transfer complete." and
   exits 0. Both report files are written to the **top-level** export dir, not
   inside `runDir`.
+- **The report's file languages and its quality-profile metadata come from two
+  different places, and the CE cross-checks them.** Component languages come
+  from the source server (`api/measures/component_tree`); `qprofiles_per_language`
+  can only name profiles that exist on the **target** org
+  (`buildSCProfileMap`). A language present in the former but absent from the
+  latter makes the CE reject the *whole* report with `Report contains a file
+  with language 'X' but no matching quality profile` — costing every issue and
+  every branch while the project, permissions and gate survive, because they
+  are created earlier. `applyUnsupportedLanguagePolicy` closes that gap by
+  comparing the two sets before submitting (#474). A failed profile fetch
+  yields an empty map, so detection is disabled in that case rather than
+  treating every language as unsupported.
+- **A rejected report no longer passes as success.** `importProjectData` logs
+  the failure at **ERROR** and counts it (`task summary … failed=1`); the
+  migration report names the offending language and the remedy instead of
+  framing it as "API error when migrating project data" (#474).
