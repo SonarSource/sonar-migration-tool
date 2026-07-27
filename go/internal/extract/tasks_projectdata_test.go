@@ -424,6 +424,48 @@ func TestProjectHotspotsFullTaskQueriesBothStatuses(t *testing.T) {
 	}
 }
 
+// A non-fatal failure on the second status query must not discard the
+// hotspots already collected by the first. The TO_REVIEW query runs first, so
+// a 403 on REVIEWED used to abandon the whole project/branch callback before
+// the chunk was ever written — losing every TO_REVIEW hotspot silently, behind
+// a warning that named only REVIEWED.
+func TestProjectHotspotsFullTaskNonFatalKeepsEarlierStatus(t *testing.T) {
+	srv, e := newSrvExecutor(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/hotspots/search" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		switch r.URL.Query().Get("status") {
+		case "TO_REVIEW":
+			json.NewEncoder(w).Encode(map[string]any{
+				"hotspots": []map[string]any{
+					{"key": "hs-keep-1", "status": "TO_REVIEW", "line": 5, "ruleKey": "java:S2245"},
+					{"key": "hs-keep-2", "status": "TO_REVIEW", "line": 9, "ruleKey": "java:S2077"},
+				},
+				"paging": map[string]any{"pageIndex": 1, "pageSize": 500, "total": 2},
+			})
+		case "REVIEWED":
+			// Non-fatal for the task (403/404), e.g. insufficient privileges.
+			w.WriteHeader(http.StatusForbidden)
+		}
+	})
+	defer srv.Close()
+
+	fn := projectHotspotsFullTask()
+	if err := fn(ctx(t), e); err != nil {
+		t.Fatalf("projectHotspotsFullTask should absorb a non-fatal error, got: %v", err)
+	}
+
+	items, _ := e.Store.ReadAll("getProjectHotspotsFull")
+	keys := map[string]bool{}
+	for _, raw := range items {
+		keys[extractField(raw, "key")] = true
+	}
+	if !keys["hs-keep-1"] || !keys["hs-keep-2"] {
+		t.Errorf("TO_REVIEW hotspots were discarded when the REVIEWED query failed; got %v", keys)
+	}
+}
+
 func TestProjectComponentTreeTask(t *testing.T) {
 	srv, e := newSrvExecutor(t, func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
