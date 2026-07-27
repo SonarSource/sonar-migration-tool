@@ -724,7 +724,7 @@ func TestMatchProjectReposAndBind(t *testing.T) {
 	if len(items) == 0 {
 		t.Fatal("expected matchProjectRepos output")
 	}
-	if skipped := extractBool(items[0], "binding_skipped"); skipped {
+	if extractBool(items[0], "binding_skipped") {
 		t.Fatalf("expected a binding record, got a skip: %s", items[0])
 	}
 	// GitHub binds by fully qualified slug, not by the numeric id.
