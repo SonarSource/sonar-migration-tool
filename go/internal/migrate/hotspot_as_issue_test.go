@@ -117,6 +117,21 @@ func TestSyncOneHotspotAsIssueTagsUntriagedHotspot(t *testing.T) {
 	}
 }
 
+// assertTransitions checks the transitions applied against the single expected
+// one, where "" means no transition should have been applied at all.
+func assertTransitions(t *testing.T, got []string, want string) {
+	t.Helper()
+	if want == "" {
+		if len(got) != 0 {
+			t.Errorf("expected no transition, got %v", got)
+		}
+		return
+	}
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("transitions = %v, want [%s]", got, want)
+	}
+}
+
 func TestSyncOneHotspotAsIssueStatusMapping(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -147,16 +162,9 @@ func TestSyncOneHotspotAsIssueStatusMapping(t *testing.T) {
 			}
 
 			rec.mu.Lock()
-			defer rec.mu.Unlock()
-			if tc.wantTransition == "" {
-				if len(rec.transitions) != 0 {
-					t.Errorf("expected no transition, got %v", rec.transitions)
-				}
-				return
-			}
-			if len(rec.transitions) != 1 || rec.transitions[0] != tc.wantTransition {
-				t.Errorf("transitions = %v, want [%s]", rec.transitions, tc.wantTransition)
-			}
+			got := append([]string(nil), rec.transitions...)
+			rec.mu.Unlock()
+			assertTransitions(t, got, tc.wantTransition)
 		})
 	}
 }

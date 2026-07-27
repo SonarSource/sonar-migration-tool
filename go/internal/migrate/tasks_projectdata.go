@@ -355,18 +355,8 @@ type branchReport struct {
 // to anchor its issues).
 func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput, targetBranch string) (*branchReport, *importResult, error) {
 	issues := loadExtractedIssues(e, input.ServerURL, input.ServerKey, input.Branch)
-	// SonarQube Cloud has no Security Hotspots since 2026-07-01 — the former
-	// hotspot rules are ordinary issue rules there — so every hotspot migrates
-	// as a native issue on the same rule (#423). The conversion deliberately
-	// sets no type and no severity override: the native Issue message carries
-	// no type, and the target derives type, clean-code attribute and impacts
-	// from the rule, exactly as it does for a real scan.
 	hotspots := loadExtractedHotspots(e, input.ServerURL, input.ServerKey, input.Branch)
-	hotspotIssues, rulelessHotspots := scanreport.ConvertHotspotsToIssues(hotspots)
-	if rulelessHotspots > 0 {
-		e.Logger.Warn("skipped hotspots with no resolvable rule key",
-			"project", input.CloudKey, "branch", input.Branch, "skipped", rulelessHotspots)
-	}
+	hotspotIssues := convertHotspotsForReport(e, input, hotspots)
 	extIssues, adHocRules := loadExtractedExternalIssues(e, input.ServerURL, input.ServerKey, input.Branch)
 	// Include ALL FIL components, not just those with source code; external
 	// issues can reference files without source. CloudVoyager does the same.
@@ -443,22 +433,7 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 		e.Logger.Warn("dropped native issues referencing inactive rules",
 			"project", input.CloudKey, "branch", input.Branch, "dropped", droppedOrphanIssues)
 	}
-	// Hotspot-derived issues must clear the same bar. They used to bypass this
-	// filter, on the reasoning that hotspots were "validated against hotspot
-	// rules, not the active-rule set" — true while the target had hotspots,
-	// false since 2026-07-01. Now that they are ordinary issues, an orphan
-	// hotspot rule would abort the whole report and take every other finding
-	// on the branch down with it. Rules retired outright on Cloud rather than
-	// converted (e.g. python:S4823, status REMOVED) land here.
-	hotspotIssues, droppedOrphanHotspots := dropIssuesWithInactiveRules(hotspotIssues, activeRules)
-	if droppedOrphanHotspots > 0 {
-		e.Logger.Warn("dropped hotspots referencing inactive rules — these rules are not activatable on the target",
-			"project", input.CloudKey, "branch", input.Branch, "dropped", droppedOrphanHotspots)
-	}
-	e.Logger.Info("converted security hotspots to issues",
-		"project", input.CloudKey, "branch", input.Branch,
-		"hotspots", len(hotspots), "converted", len(hotspotIssues),
-		"droppedInactiveRule", droppedOrphanHotspots, "skippedNoRule", rulelessHotspots)
+	hotspotIssues = dropHotspotsWithInactiveRules(e, input, len(hotspots), hotspotIssues, activeRules)
 	issues = append(issues, hotspotIssues...)
 
 	now := time.Now()
@@ -1063,6 +1038,45 @@ func loadExtractedHotspots(e *Executor, serverURL, serverKey, branch string) []s
 		})
 	}
 	return hotspots
+}
+
+// convertHotspotsForReport turns extracted Security Hotspots into the native
+// issues the scanner would have reported for the same rules.
+//
+// SonarQube Cloud has had no Security Hotspots since 2026-07-01 — the former
+// hotspot rules are ordinary issue rules there — so every hotspot migrates as a
+// native issue (#423). See scanreport.ConvertHotspotsToIssues for why no type
+// and no impacts are stamped.
+func convertHotspotsForReport(e *Executor, input importBranchInput, hotspots []scanreport.HotspotInput) []scanreport.IssueInput {
+	hotspotIssues, ruleless := scanreport.ConvertHotspotsToIssues(hotspots)
+	if ruleless > 0 {
+		e.Logger.Warn("skipped hotspots with no resolvable rule key",
+			"project", input.CloudKey, "branch", input.Branch, "skipped", ruleless)
+	}
+	return hotspotIssues
+}
+
+// dropHotspotsWithInactiveRules holds hotspot-derived issues to the same
+// active-rule contract as native issues.
+//
+// They used to bypass it, on the reasoning that hotspots were "validated
+// against hotspot rules, not the active-rule set" — true while the target had
+// hotspots, false since 2026-07-01. Now that they are ordinary issues, an
+// orphan hotspot rule aborts the whole report in the CE and takes every other
+// finding on the branch down with it. Rules that Cloud retired outright rather
+// than converting (e.g. python:S4823 and python:S4784, status REMOVED) land
+// here: they are unmigratable, and dropping them is the only way the rest of
+// the branch survives.
+func dropHotspotsWithInactiveRules(e *Executor, input importBranchInput, sourceCount int, hotspotIssues []scanreport.IssueInput, activeRules []scanreport.ActiveRuleInput) []scanreport.IssueInput {
+	kept, dropped := dropIssuesWithInactiveRules(hotspotIssues, activeRules)
+	if dropped > 0 {
+		e.Logger.Warn("dropped hotspots referencing inactive rules — these rules are not activatable on the target",
+			"project", input.CloudKey, "branch", input.Branch, "dropped", dropped)
+	}
+	e.Logger.Info("converted security hotspots to issues",
+		"project", input.CloudKey, "branch", input.Branch,
+		"hotspots", sourceCount, "converted", len(kept), "droppedInactiveRule", dropped)
+	return kept
 }
 
 func extractNestedRuleKey(data json.RawMessage) string {
