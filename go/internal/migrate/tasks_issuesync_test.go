@@ -502,3 +502,151 @@ func TestClassifyActionableReasonsIssueStatus(t *testing.T) {
 		t.Errorf("customTags: want 1, got %d", b.customTags)
 	}
 }
+
+// --- #456: custom issue tags must survive the migration ---
+
+// mergeIssueTags backs syncIssueTags. /api/issues/set_tags REPLACES an issue's
+// tag list rather than merging into it, so the payload has to be the union of
+// the source issue's tags and the tags the Cloud issue already carries.
+// Previously only the user-added subset was sent, which stripped the
+// rule-default tags (e.g. "cwe") the Cloud analysis had assigned.
+func TestMergeIssueTags(t *testing.T) {
+	tests := []struct {
+		name       string
+		sourceTags []string
+		cloudTags  []string
+		want       []string
+	}{
+		{
+			name:       "source tags unioned with cloud rule-default tags",
+			sourceTags: []string{"cwe", "action-plan"},
+			cloudTags:  []string{"cwe", "secret"},
+			want:       []string{"action-plan", "cwe", metadataSyncTag, "secret"},
+		},
+		{
+			name:       "custom tag from source is added to an untagged cloud issue",
+			sourceTags: []string{"action-plan"},
+			cloudTags:  nil,
+			want:       []string{"action-plan", metadataSyncTag},
+		},
+		{
+			name:       "cloud-only tags are preserved, never clobbered",
+			sourceTags: nil,
+			cloudTags:  []string{"former-hotspot", "secret"},
+			want:       []string{"former-hotspot", metadataSyncTag, "secret"},
+		},
+		{
+			name:       "duplicates across both sides collapse",
+			sourceTags: []string{"cwe", "cwe", "action-plan"},
+			cloudTags:  []string{"cwe", "action-plan"},
+			want:       []string{"action-plan", "cwe", metadataSyncTag},
+		},
+		{
+			name:       "marker already present is not duplicated (idempotent re-run)",
+			sourceTags: []string{"action-plan"},
+			cloudTags:  []string{"action-plan", metadataSyncTag},
+			want:       []string{"action-plan", metadataSyncTag},
+		},
+		{
+			name:       "blank and whitespace-only tags are dropped",
+			sourceTags: []string{"", "   ", "action-plan"},
+			cloudTags:  []string{"\t"},
+			want:       []string{"action-plan", metadataSyncTag},
+		},
+		{
+			name:       "no tags anywhere still writes the marker",
+			sourceTags: nil,
+			cloudTags:  nil,
+			want:       []string{metadataSyncTag},
+		},
+		{
+			name:       "tags are trimmed before comparison",
+			sourceTags: []string{" action-plan "},
+			cloudTags:  []string{"action-plan"},
+			want:       []string{"action-plan", metadataSyncTag},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mergeIssueTags(tc.sourceTags, tc.cloudTags)
+			if !equalStrings(got, tc.want) {
+				t.Errorf("mergeIssueTags(%v, %v) = %v, want %v",
+					tc.sourceTags, tc.cloudTags, got, tc.want)
+			}
+		})
+	}
+}
+
+// tagsToApply picks what actually gets written to the Cloud issue: the source's
+// COMPLETE tag list, not the user-added subset that drives actionability.
+func TestMatchableIssueTagsToApply(t *testing.T) {
+	tests := []struct {
+		name string
+		iss  matchableIssue
+		want []string
+	}{
+		{
+			name: "full source tag list preferred over the user-only subset",
+			iss:  matchableIssue{Tags: []string{"action-plan"}, AllTags: []string{"cwe", "action-plan"}},
+			want: []string{"cwe", "action-plan"},
+		},
+		{
+			name: "falls back to the user-only subset when AllTags is unset",
+			iss:  matchableIssue{Tags: []string{"action-plan"}},
+			want: []string{"action-plan"},
+		},
+		{
+			name: "no tags at all",
+			iss:  matchableIssue{},
+			want: nil,
+		},
+		{
+			name: "rule-default-only tag list still applied",
+			iss:  matchableIssue{Tags: nil, AllTags: []string{"cwe"}},
+			want: []string{"cwe"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.iss.tagsToApply(); !equalStrings(got, tc.want) {
+				t.Errorf("tagsToApply() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// An OPEN issue carrying a user-added tag must be actionable on its own: tag
+// sync must NOT be gated behind needing a status/resolution transition. This is
+// the property the #456 report suspected was broken; it holds, and the real
+// fault was upstream (the issues were dropped from the scan report entirely) —
+// so lock the property down against regression.
+func TestOpenIssueWithCustomTagIsActionableAndNeedsNoTransition(t *testing.T) {
+	iss := matchableIssue{
+		Key:         "src-1",
+		Rule:        "secrets:S7001",
+		Component:   "demo-rules:secrets/az.xml",
+		Line:        7,
+		Status:      "OPEN",
+		IssueStatus: "OPEN",
+		Tags:        []string{"action-plan"},
+		AllTags:     []string{"cwe", "action-plan"},
+	}
+	if !hasManualChanges(iss) {
+		t.Fatal("an OPEN issue with a user-added tag must be actionable")
+	}
+	if trans, downgraded := resolveTransition(iss, nil); trans != "" || downgraded {
+		t.Errorf("OPEN issue needs no transition: got %q downgraded=%v", trans, downgraded)
+	}
+	if b := classifyActionableReasons([]matchableIssue{iss}); b.customTags != 1 || b.acceptedOrFP != 0 {
+		t.Errorf("want customTags=1 acceptedOrFP=0, got customTags=%d acceptedOrFP=%d",
+			b.customTags, b.acceptedOrFP)
+	}
+	// The payload that would be written keeps both the custom and the
+	// rule-default tag, plus the idempotency marker.
+	want := []string{"action-plan", "cwe", metadataSyncTag}
+	if got := mergeIssueTags(iss.tagsToApply(), nil); !equalStrings(got, want) {
+		t.Errorf("tag payload = %v, want %v", got, want)
+	}
+}
