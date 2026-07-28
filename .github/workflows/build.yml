@@ -16,6 +16,14 @@ jobs:
     permissions:
       id-token: write
       contents: read
+    env:
+      # GitHub does not issue an OIDC ID token to `pull_request` runs from a forked
+      # repository, so Vault authentication — and therefore the SonarQube Cloud scan —
+      # can never succeed there ("Unable to get ACTIONS_ID_TOKEN_REQUEST_URL").
+      # Everything else in this job (the Go tests) still runs for forks.
+      # Unlike job-level `if`, step-level `if` CAN read the env context, so the single
+      # source of truth for the condition lives here.
+      SONAR_ANALYSIS_ENABLED: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -35,15 +43,40 @@ jobs:
           sed 's|github.com/sonar-solutions/sonar-migration-tool/|go/|g' go/coverage.out > go/coverage.sonar.out
           sed 's|github.com/sonar-solutions/sq-api-go/|lib/sq-api-go/|g' lib/sq-api-go/coverage.out > lib/sq-api-go/coverage.sonar.out
       - name: Fetch Vault secrets
+        if: env.SONAR_ANALYSIS_ENABLED == 'true'
         id: secrets
         uses: SonarSource/vault-action-wrapper@v3
         with:
           secrets: |
             development/kv/data/sonarcloud token | SONAR_TOKEN;
       - name: SonarQube Scan
+        if: env.SONAR_ANALYSIS_ENABLED == 'true'
         uses: SonarSource/sonarqube-scan-action@v8
         env:
           SONAR_TOKEN: ${{ fromJSON(steps.secrets.outputs.vault).SONAR_TOKEN }}
+      - name: Explain skipped SonarQube analysis (fork pull request)
+        if: env.SONAR_ANALYSIS_ENABLED != 'true'
+        env:
+          # Bound through env rather than inlined into the script: never interpolate
+          # contributor-controlled values straight into a `run:` block.
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+        run: |
+          {
+            echo "### SonarQube Cloud analysis skipped"
+            echo
+            echo "This pull request comes from a fork (\`${HEAD_REPO}\` -> \`${BASE_REPO}\`)."
+            echo
+            echo "GitHub does not issue an OIDC ID token to workflow runs triggered by fork"
+            echo "pull requests, so this job cannot authenticate to Vault, cannot obtain a"
+            echo "\`SONAR_TOKEN\`, and therefore cannot run the SonarQube Cloud scan."
+            echo "This is a platform restriction, not a problem with the change."
+            echo
+            echo "The Go tests above ran in full and are the signal for this pull request."
+            echo "SonarQube Cloud analysis and the quality gate run on \`main\` once the pull"
+            echo "request is merged; a maintainer can also run it early by pushing the branch"
+            echo "to this repository."
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
   # Cross-compile every platform binary on Linux and GPG-sign each one.
   # macOS and Windows binaries are re-signed after platform-specific signing below.
