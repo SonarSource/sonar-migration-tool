@@ -53,7 +53,12 @@ jobs:
         if: env.SONAR_ANALYSIS_ENABLED == 'true'
         uses: SonarSource/sonarqube-scan-action@v8
         env:
-          SONAR_TOKEN: ${{ fromJSON(steps.secrets.outputs.vault).SONAR_TOKEN }}
+          # `|| '{}'` is load-bearing: GitHub evaluates a step's `env` expressions
+          # even when its `if` is false, so when "Fetch Vault secrets" is skipped
+          # on a fork PR this output is empty and a bare fromJSON('') aborts the
+          # whole job with "Error reading JToken from JsonReader" — a template
+          # error, not a step failure, so the `if` above cannot prevent it.
+          SONAR_TOKEN: ${{ fromJSON(steps.secrets.outputs.vault || '{}').SONAR_TOKEN }}
       - name: Explain skipped SonarQube analysis (fork pull request)
         if: env.SONAR_ANALYSIS_ENABLED != 'true'
         env:
