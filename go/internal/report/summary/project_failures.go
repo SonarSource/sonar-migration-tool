@@ -6,6 +6,7 @@ package summary
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -290,6 +291,106 @@ func applyProjectFailures(succeeded, nearPerfect, partial []EntityItem,
 	return keep, nearPerfect, partial
 }
 
+// collectUnsupportedLanguageExclusions returns one Partial failure per project
+// whose scanner report had file components dropped because their language has
+// no quality profile on the target organization (#474,
+// --unsupported_languages=exclude).
+//
+// Those branches import successfully, so without this the project would be
+// reported as a full migration even though some of its files — and every issue
+// on them — never left the source. The project is routed to Partial with an
+// Issues line naming the languages and the file count.
+func collectUnsupportedLanguageExclusions(store *common.DataStore) []projectFailure {
+	items, err := store.ReadAll("importProjectData")
+	if err != nil || len(items) == 0 {
+		return nil
+	}
+	by, order := aggregateLanguageExclusions(items)
+
+	out := make([]projectFailure, 0, len(order))
+	for _, key := range order {
+		bucket := by[key]
+		out = append(out, projectFailure{
+			CloudProjectKey: key,
+			Bucket:          projectBucketPartial,
+			Operation:       "Files in unsupported languages not migrated",
+			Detail:          languageExclusionDetail(bucket),
+			Error: "the target organization has no quality profile for these languages — typically " +
+				"languages provided by 3rd-party SonarQube Server plugins. The files were excluded from the " +
+				"analysis report so the rest of the project could migrate; issues on them were not migrated",
+		})
+	}
+	return out
+}
+
+// languageExclusionAcc accumulates one project's excluded-file data across all
+// of its branch records.
+type languageExclusionAcc struct {
+	langs map[string]bool
+	files int
+}
+
+// aggregateLanguageExclusions folds the per-branch importProjectData records
+// into one accumulator per project, preserving first-seen project order.
+func aggregateLanguageExclusions(items []json.RawMessage) (map[string]*languageExclusionAcc, []string) {
+	by := make(map[string]*languageExclusionAcc)
+	var order []string
+	for _, raw := range items {
+		key := jsonStr(raw, "cloud_project_key")
+		excluded := jsonInt(raw, "excluded_files")
+		if key == "" || excluded <= 0 {
+			continue
+		}
+		bucket := by[key]
+		if bucket == nil {
+			bucket = &languageExclusionAcc{langs: map[string]bool{}}
+			by[key] = bucket
+			order = append(order, key)
+		}
+		// Every branch of a project drops the same files, so the per-project
+		// count is the worst branch's count — not the sum across branches.
+		if excluded > bucket.files {
+			bucket.files = excluded
+		}
+		for _, lang := range jsonStrSlice(raw, "unsupported_languages") {
+			bucket.langs[lang] = true
+		}
+	}
+	return by, order
+}
+
+// languageExclusionDetail renders "lua, delphi (13 files)".
+func languageExclusionDetail(bucket *languageExclusionAcc) string {
+	langs := make([]string, 0, len(bucket.langs))
+	for l := range bucket.langs {
+		langs = append(langs, l)
+	}
+	sort.Strings(langs)
+	unit := "files"
+	if bucket.files == 1 {
+		unit = "file"
+	}
+	return fmt.Sprintf("%s (%d %s)", strings.Join(langs, ", "), bucket.files, unit)
+}
+
+// jsonStrSlice reads a JSON array of strings from raw, returning nil when the
+// key is absent or is not an array of strings.
+func jsonStrSlice(raw json.RawMessage, key string) []string {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil
+	}
+	nested, ok := obj[key]
+	if !ok {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal(nested, &out); err != nil {
+		return nil
+	}
+	return out
+}
+
 // collectProjectSyncSkips reads the per-project status JSONL produced
 // by the data-migration tasks and returns a synthetic []projectFailure
 // covering #228's orange criteria plus #356's yellow criteria:
@@ -419,4 +520,3 @@ func collectSyncOutcome(store *common.DataStore, taskName, errorOp string) []pro
 	}
 	return out
 }
-

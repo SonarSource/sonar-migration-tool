@@ -48,6 +48,7 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 	}
 
 	completed := loadCompletedBranches(e.Store)
+	counter := TaskCounterFromContext(ctx)
 
 	e.Logger.Info("starting task", "task", "importProjectData", "items", len(projects))
 	prog := common.NewProgressLogger(e.Logger, "importProjectData", len(projects))
@@ -81,9 +82,11 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 
 			scMainBranch := fetchSCMainBranch(gCtx, e, cloudKey)
 
-			if err := importProjectBranches(gCtx, e, proj, sqBranches, scMainBranch, completed, w); err != nil {
-				e.Logger.Warn("project project data failed", "project", cloudKey, "err", err)
-			}
+			// #474 — a rejected report used to be a Warn that left the task
+			// summary reporting nothing at all, so a transfer that migrated
+			// zero issues and zero branches still looked clean.
+			recordImportOutcome(e, counter, cloudKey,
+				importProjectBranches(gCtx, e, proj, sqBranches, scMainBranch, completed, w))
 			prog.Increment()
 			return nil
 		})
@@ -275,6 +278,10 @@ func recordBranchResult(w *common.ChunkWriter, cloudKey, branchName string, resu
 		"task_id":           result.TaskID,
 		"error":             result.Error,
 		"source_purged":     result.SourcePurged,
+		// #474 — languages with no target quality profile, and how many files
+		// were dropped from the report because of them.
+		"unsupported_languages": result.UnsupportedLanguages,
+		"excluded_files":        result.ExcludedFiles,
 	})
 	w.WriteOne(record) //nolint:errcheck
 }
@@ -300,6 +307,15 @@ type importResult struct {
 	// flag drives the per-project "source code of branch X is missing" note
 	// in the migration report.
 	SourcePurged bool
+	// UnsupportedLanguages lists the languages found in this branch that have
+	// no quality profile on the target organization (#474). Set whether the
+	// branch was skipped, excluded-and-migrated, or submitted as-is, so the
+	// migration report can always explain what happened.
+	UnsupportedLanguages []string
+	// ExcludedFiles is the number of file components dropped from the scanner
+	// report because their language has no target quality profile (#474,
+	// --unsupported_languages=exclude).
+	ExcludedFiles int
 }
 
 func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*importResult, error) {
@@ -336,7 +352,10 @@ func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*i
 		return nil, fmt.Errorf("CE task failed: %w", err)
 	}
 
-	return &importResult{Status: "success", TaskID: result.TaskID, SourcePurged: report.SourcePurged}, nil
+	return &importResult{
+		Status: "success", TaskID: result.TaskID, SourcePurged: report.SourcePurged,
+		UnsupportedLanguages: report.UnsupportedLanguages, ExcludedFiles: report.ExcludedFiles,
+	}, nil
 }
 
 // branchReport is a packaged scanner report for one branch, ready to submit.
@@ -347,6 +366,11 @@ type branchReport struct {
 	// (purged by housekeeping) so the report carries measures + issues but no
 	// source. Propagated to the importResult for #425 reporting.
 	SourcePurged bool
+	// UnsupportedLanguages / ExcludedFiles carry the #474 finding through to
+	// the importResult so the migration report can explain the outcome even
+	// when the branch itself migrated successfully.
+	UnsupportedLanguages []string
+	ExcludedFiles        int
 }
 
 // buildBranchReport loads the extracted data for one branch, applies the
@@ -407,6 +431,20 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	// Fetch SC quality profiles (CloudVoyager uses SC profile keys, not SQ keys).
 	// The CE validates that qprofile keys in the metadata exist in the SC instance.
 	scProfileByLang := buildSCProfileMap(ctx, e, input.OrgKey)
+
+	// #474 — a file whose language has no target quality profile makes the
+	// SonarQube Cloud CE reject the WHOLE report ("Report contains a file with
+	// language 'X' but no matching quality profile"), which silently costs the
+	// project every issue and every branch. Detect that before submitting,
+	// explain it, and apply the configured handling mode.
+	componentsBeforePolicy := len(components)
+	components, unsupportedLangKeys, unsupportedSkip := applyUnsupportedLanguagePolicy(
+		e, input.CloudKey, input.Branch, components, scProfileByLang)
+	if unsupportedSkip != nil {
+		return nil, unsupportedSkip, nil
+	}
+	// Zero unless mode "exclude" actually dropped components.
+	excludedFiles := componentsBeforePolicy - len(components)
 
 	// Filter profiles and rules to languages present in the project (matches cloudvoyager).
 	projectLangs := collectProjectLanguages(components)
@@ -579,7 +617,10 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 		"activeRules", len(activeRules),
 	)
 
-	return &branchReport{ZIP: zipBytes, ProjectVersion: projectVersion, SourcePurged: sourcePurged}, nil, nil
+	return &branchReport{
+		ZIP: zipBytes, ProjectVersion: projectVersion, SourcePurged: sourcePurged,
+		UnsupportedLanguages: unsupportedLangKeys, ExcludedFiles: excludedFiles,
+	}, nil, nil
 }
 
 // ensureFileSourcesPresent guarantees every FILE component has a source

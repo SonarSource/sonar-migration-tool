@@ -71,6 +71,9 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 			// from the data-migration tasks' JSONL output.
 			projectFailures := collectProjectFailures(runDir)
 			projectFailures = append(projectFailures, collectProjectSyncSkips(store, projectDataMap)...)
+			// #474 — projects whose report had unsupported-language files
+			// excluded imported successfully but are not full migrations.
+			projectFailures = append(projectFailures, collectUnsupportedLanguageExclusions(store)...)
 			section.Succeeded, section.NearPerfect, section.Partial = applyProjectFailures(
 				section.Succeeded, section.NearPerfect, section.Partial, projectFailures)
 			// #356 — append a per-project "x/y issues synced (z%)"
@@ -919,9 +922,20 @@ func projectDataSkipReason(errMsg string) string {
 // with the operator-friendly framing the issue spec uses ("API error
 // when migrating project data"). Empty errors fall back to the bare
 // framing so we never lose the signal entirely.
+//
+// #474 — a Compute Engine rejection caused by a file whose language has no
+// quality profile on the target is not an API error, and framing it as one hid
+// the real cause from the operator. Name the language and the remedy instead.
 func projectDataFailureReason(errMsg string) string {
 	if errMsg == "" {
 		return "API error when migrating project data"
+	}
+	if lang := migrate.UnsupportedLanguageFromCEError(errMsg); lang != "" {
+		return "No issues or branches were migrated: the analysis report was rejected because the project " +
+			"contains files in language '" + lang + "', which has no quality profile in the target " +
+			"organization — typically a language provided by a 3rd-party SonarQube Server plugin. " +
+			"Re-run with --unsupported_languages=exclude to migrate everything except those files, " +
+			"or --unsupported_languages=skip to skip this project's data."
 	}
 	return "API error when migrating project data: " + errMsg
 }
