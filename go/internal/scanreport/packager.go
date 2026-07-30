@@ -40,6 +40,9 @@ func PackageReport(data *ReportData) ([]byte, error) {
 	if err := addMetadata(zw, data.Metadata); err != nil {
 		return nil, err
 	}
+	if err := addAnalytics(zw); err != nil {
+		return nil, err
+	}
 	if err := addComponents(zw, data.RootComponent, data.FileComponents); err != nil {
 		return nil, err
 	}
@@ -79,6 +82,15 @@ func PackageReport(data *ReportData) ([]byte, error) {
 
 func addMetadata(zw *zip.Writer, md *pb.Metadata) error {
 	return addProtoMessage(zw, "metadata.pb", md)
+}
+
+// addAnalytics writes analytics.pb, which the Compute Engine treats as
+// mandatory (issue #478). We identify ourselves via ci_name so migrated
+// analyses are distinguishable from real scanner runs.
+func addAnalytics(zw *zip.Writer) error {
+	return addProtoMessage(zw, "analytics.pb", &pb.Analytics{
+		Property: map[string]string{"ci_name": "sonar-migration-tool"},
+	})
 }
 
 func addComponents(zw *zip.Writer, root *pb.Component, files []*pb.Component) error {

@@ -1,7 +1,7 @@
 # Sonar Migration Tool
 <!-- updated: 2026-06-17 -->
 
-Migrate your SonarQube Server to SonarQube Cloud — projects, configuration, source code, issues, and history.
+Migrate your SonarQube Server to SonarQube Cloud — projects, configuration, source code, issues, and last analysis data on each branch.
 
 The tool ships as a single static binary. No installer, no runtime dependencies. Download it, run one command, and your projects land in SonarQube Cloud with their full issue history intact.
 
@@ -36,18 +36,19 @@ The tool ships as a single static binary. No installer, no runtime dependencies.
 * Groups, Permissions, Permission Templates<br>
 * Project Settings, Webhooks, Links<br>
 * Portfolios (Enterprise)<br>
-* Project data (Branches with Source files, Measures, Issues...) (Optional)<br>
+* Project data (Branches with Measures, Issues, Source files, Syntax highlighting, ...) (Optional)<br>
 * Issues & Hotspots status, comments, and tags (optional)
+* SCM blame authorship
 
 ### ❌ NOT migrated
 * User accounts & auth
 * User Permissions on users
 * Analysis history
+* Coverage and Duplication data
 * Applications
 * Portfolio hierarchies
 * Issue assignments
 * CI/CD pipelines
-* SCM blame authorship
 
 ---
 
@@ -76,9 +77,9 @@ Go to the [**Releases** page](https://github.com/sonar-solutions/sonar-migration
 
 | OS | Intel X64 | ARM 64 / Apple Silicon |
 |---|---|---|
-| Linux | sonar-migration-tool-linux-amd64 | sonar-migration-tool-linux-arm64 |
-| macOS | sonar-migration-tool-darwin-amd64 | sonar-migration-tool-darwin-arm64 |
-| Windows | sonar-migration-tool-windows-amd64.exe | sonar-migration-tool-windows-arm64.exe |
+| Linux | `sonar-migration-tool-linux-amd64` | `sonar-migration-tool-linux-arm64` |
+| macOS | `sonar-migration-tool-darwin-amd64` | `sonar-migration-tool-darwin-arm64` |
+| Windows | `sonar-migration-tool-windows-amd64.exe` | `sonar-migration-tool-windows-arm64.exe` |
 
 Rename the file and, on macOS and Linux, make the binary executable:
 
@@ -116,7 +117,7 @@ Ready-to-copy examples ship in [`examples/`](examples/): [`config.minimal.exampl
 > **Note**: If you don't want to put tokens or URLs in the configuration file, pass them on the command line instead:
 > - `--source_url` and `--source_token` for `extract`
 > - `--target_url` and `--target_token` for `migrate` and `reset`
-> - all four for `transfer`
+> - All above 4 options for `transfer`
 
 ### Step 3 — Open a terminal
 
@@ -126,7 +127,7 @@ Ready-to-copy examples ship in [`examples/`](examples/): [`config.minimal.exampl
 
 ### Step 4 — Run the migration
 
-Run the four phases in order. With `--default_organization`, every project goes to the **same** SonarQube Cloud organization, so you don't need to edit `organizations.csv` by hand:
+If you want to migrate all SQS projects in a single organization you can run the 4 phases in order, without any manual step. With `--default_organization`, every project goes to the **same** SonarQube Cloud organization, so you don't need to edit `organizations.csv` by hand:
 
 ```bash
 # 1. Extract everything from SonarQube Server
@@ -164,7 +165,7 @@ Once the command finishes:
 4. Unless you passed `--skip_project_data_migration`, verify that issues, hotspots, and their creation dates match the source — and that non-main branches appear under **Branches** with their issues. You can also run `./sonar-migration-tool regtest` for automated verification.
 5. Unless you passed `--skip_issue_sync`, verify that issues and hotspots marked as **false positive**, **accepted**, and **safe** respectively are in the same status on SonarQube Cloud.
 6. **Re-scan your projects in CI** to seed ongoing analysis. If you used `--skip_project_data_migration`, this first scan will be the baseline for all issue tracking.
-7. Update your CI/CD pipeline to point at SonarQube Cloud (`SONAR_TOKEN`, `SONAR_HOST_URL`, and `sonar.organization`).
+7. Update your CI/CD pipeline to point at SonarQube Cloud (`$SONAR_TOKEN`, `$SONAR_HOST_URL`, and `sonar.organization`).
 
 For the full post-migration checklist, see [After you migrate](docs/MIGRATE.md#after-you-migrate) in the MIGRATE guide.
 
@@ -269,9 +270,7 @@ For the complete list of **every configuration field and CLI flag** — its role
 
 - 📘 [Architecture overview](docs/ARCHITECTURE.md) — how the tool is built.
 - ⚙️ [Advanced configuration reference](docs/ADVANCED-CONFIG.md) — every config field and CLI flag, plus legacy config shapes.
-- 🔐 [Security best practices](docs/SECURITY.md) — keeping your tokens safe.
 - 🧪 [Regression testing protocol](docs/REGRESSION-TESTING.md) — verify changes against live SonarQube + SonarQube Cloud.
-- 🐛 [CloudVoyager delta audit](docs/CLOUDVOYAGER-DELTA.md) — known behavior differences from the reference implementation.
 
 ---
 

@@ -79,6 +79,18 @@ message ContextProperty {
   string value = 2;
 }
 
+// Analytics is CE-mandatory telemetry (see FileStructure#analyticsFile in
+// sonar-scanner-engine). We only populate ci_name to identify migrated
+// analyses; multiValueProperties is unused but kept for schema parity.
+message Analytics {
+  message Values {
+    repeated string values = 1;
+  }
+
+  map<string, string> property = 1;
+  map<string, Values> multiValueProperties = 2;
+}
+
 message ActiveRule {
   string rule_repository = 1;
   string rule_key = 2;

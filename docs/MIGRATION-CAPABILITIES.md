@@ -75,7 +75,7 @@ Migration of source code snapshots and version control blame data.
 - SCM blame/changeset data (author, revision, date per line)
 - Syntax highlighting (token colors in the Code view), reconstructed from
   `/api/sources/lines` into `syntax-highlightings-<ref>.pb` — see
-  [SYNTAX-HIGHLIGHTING-MIGRATION.md](SYNTAX-HIGHLIGHTING-MIGRATION.md) (issue #420)
+  [GitHub issue #420](https://github.com/SonarSource/sonar-migration-tool/issues/420)
 - Line hashes for duplicate detection
 - File-level metadata (language, encoding)
 - Changeset backdating to preserve accurate issue creation dates within SonarQube Cloud
@@ -110,15 +110,24 @@ Automatic handling of projects with more than 10,000 issues, which hit SonarQube
 - Deduplication of results across overlapping date windows
 
 #### Issue Metadata Synchronization (SPEC-008)
+<!-- updated: 2026-07-27_22:37:13 -->
 
 After issues are uploaded via scanner reports, this phase matches each SonarQube Cloud issue back to its Server counterpart and replicates the original lifecycle metadata.
 
 **What it migrates:**
 - **Issue statuses**: OPEN, CONFIRMED, FALSE_POSITIVE, WONTFIX, ACCEPTED, RESOLVED, CLOSED
 - **Issue comments**: All comments with original author attribution (`[Migrated from SonarQube Server - @author]`)
-- **Issue tags**: Custom tags applied by users
+- **Issue tags**: Custom tags applied by users, written as the union of the source issue's full tag list and the tags the Cloud issue already carries (`set_tags` replaces rather than merges, so the union is what preserves both sides)
 - **Issue assignments**: User assignments mapped via `users.csv`
-- Pre-filtering skips issues with no manual changes (60-80% of typical enterprise issues), dramatically reducing API calls
+- Pre-filtering skips issues with no manual changes (60-80% of typical enterprise issues), dramatically reducing API calls. A user-added tag is itself a trigger, so an **OPEN** issue that only carries a custom tag is still synced — no status change is required.
+
+**Prerequisite — the issue must exist on the target.** This phase can only write onto a Cloud counterpart that the replayed scanner report actually produced. If an issue was dropped at report-build time (its rule was not in the report's active-rule set) or by the Compute Engine (its rule does not exist in the target organization), there is nothing to tag or transition. Such issues are counted as `not_found` and reported at WARN, e.g.:
+
+```
+WARN syncIssueMetadata: triaged source issues without a unique Cloud counterpart —
+     their status, comments and tags were NOT migrated
+     project=... actionable=3 synced=2 ambiguous_line=0 not_found=1
+```
 
 #### Hotspot Metadata Synchronization (SPEC-009)
 
@@ -235,7 +244,7 @@ Fine-grained control over which entities are included in or excluded from migrat
 
 Migration of non-main branches and their associated analysis data.
 
-**Status: Implemented.** Non-main branches migrate as **long-lived branches with full issue history** via SonarQube Cloud's "Create analysis" handshake (`POST {api-host}/analysis/analyses` → `analysisUuid` stamped into report `metadata.analysis_uuid`); see [CLOUDVOYAGER-DELTA.md](CLOUDVOYAGER-DELTA.md) BUG-17. All migrated branches are registered as long-lived so SonarQube Cloud's automatic pruning of short-lived branches (after ~30 days) never discards migrated history.
+**Status: Implemented.** Non-main branches migrate as **long-lived branches with full issue history** via SonarQube Cloud's "Create analysis" handshake (`POST {api-host}/analysis/analyses` → `analysisUuid` stamped into report `metadata.analysis_uuid`). All migrated branches are registered as long-lived so SonarQube Cloud's automatic pruning of short-lived branches (after ~30 days) never discards migrated history.
 
 **What it migrates:**
 - Per-branch issues, hotspots, and measures (each branch's full project data)
@@ -339,7 +348,7 @@ Electron-based desktop application wrapping the CLI and browser GUI.
 | **External Issues** | **Not migrated** | **Full migration with ad-hoc rules** |
 | Issue Statuses | N/A | Synced (OPEN, CONFIRMED, FP, WONTFIX, etc.) |
 | Issue Comments | N/A | Synced with author attribution |
-| Issue Tags | N/A | Synced |
+| Issue Tags | N/A | Synced (full source tag list ∪ existing Cloud tags) |
 | Issue Assignments | N/A | Mapped via users.csv |
 | Hotspot Review Status | N/A | Synced (TO_REVIEW, REVIEWED/SAFE, etc.) |
 | Hotspot Comments | N/A | Synced |
