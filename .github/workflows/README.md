@@ -1,20 +1,33 @@
 # GitHub Actions Workflows
+<!-- updated: 2026-07-28_10:25:08 -->
 
 ## Active Workflows
+<!-- updated: 2026-07-28_10:25:08 -->
 
-### 1. `build.yml` - Test + Release
+### 1. `build.yml` - Test
 
 **Triggers:**
-- Push to `main` or `branch-*` — tests, build, sign, and (on `main` only) GitHub Release publish
-- Push to `kilo` — tests and SonarQube scan only
-- Pull requests — tests and SonarQube scan only
+- Push to `main`, `branch-*`, or `kilo` — tests and SonarQube scan
+- Pull requests — tests and SonarQube scan
 
 **What it does:**
 - Runs Go library and migration tool tests with coverage
 - Runs SonarQube Cloud analysis
-- On `main` / `branch-*` pushes: cross-compiles 6 platform binaries, GPG-signs all,
-  Apple code-signs + notarizes macOS, Authenticode-signs Windows (Azure Artifact Signing),
-  and publishes a GitHub Release on **`main` only**
+
+No binaries are built and no GitHub Release is published from this workflow —
+see `release.yml` below for that.
+
+### 2. `release.yml` - Manual Release
+
+**Trigger:** Manual dispatch (`workflow_dispatch`), from whichever branch/tag
+is selected in the Actions UI.
+
+**What it does:**
+- Re-runs the test + SonarQube scan job as a gate
+- Cross-compiles 6 platform binaries, GPG-signs all of them
+- Apple code-signs + notarizes macOS binaries
+- Authenticode-signs Windows binaries (Azure Artifact Signing) and re-GPG-signs them
+- Publishes a dated GitHub Release with every signed binary attached
 
 **Release binaries:**
 
@@ -35,3 +48,67 @@ See [docs/RELEASE-SIGNING-SETUP.md](../../docs/RELEASE-SIGNING-SETUP.md) for Vau
 
 **Trigger:** Manual dispatch (`workflow_dispatch`)  
 **Purpose:** On-demand test run with SonarQube Cloud scan
+
+`workflow_dispatch` can only be triggered against a ref in this repository, so this
+workflow always has OIDC available and is unaffected by the fork restriction below.
+
+### 3. `gitleaks.yml` - Secret Scan
+<!-- updated: 2026-07-28_10:25:08 -->
+
+**Triggers:** Push to `main` / `kilo`, and all pull requests  
+**Purpose:** Scans full git history for committed secrets with the gitleaks CLI
+
+Uses no secrets, no Vault, and no OIDC, so it runs identically on fork pull requests.
+
+## Fork pull requests
+<!-- updated: 2026-07-28_10:25:08 -->
+
+GitHub **does not issue an OIDC ID token** to workflow runs triggered by a
+`pull_request` event from a forked repository. Every Vault lookup in this repo
+authenticates to `vault.sonar.build` over OIDC, so on a fork PR the
+`SonarSource/vault-action-wrapper` step fails with:
+
+```
+##[error]Error message: Unable to get ACTIONS_ID_TOKEN_REQUEST_URL env variable
+```
+
+No amount of configuration on the contributor's side can satisfy this — it is a
+platform restriction. Before this was handled, the whole `Test` job went red on fork
+PRs even though every Go test had passed (see PR #487 / issue #486).
+
+**How it is handled.** The `test` job computes one job-level `env` flag:
+
+```yaml
+env:
+  SONAR_ANALYSIS_ENABLED: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+```
+
+`Fetch Vault secrets` and `SonarQube Scan` are gated on
+`if: env.SONAR_ANALYSIS_ENABLED == 'true'`; a companion step gated on the inverse
+prints an explicit explanation to the log and the job summary so the skip is never
+silent.
+
+> **Note:** job-level `env` is readable from a **step-level** `if`, but *not* from a
+> **job-level** `if`. That is why the `build-binaries`, `sign-*`, and `publish` jobs
+> still inline their conditions — see the comments in `build.yml`.
+
+| Trigger | `SONAR_ANALYSIS_ENABLED` | Go tests | Vault + SonarQube scan |
+|---------|--------------------------|----------|------------------------|
+| Push to `main` | `true` | run | run |
+| Push to `branch-*` / `kilo` | `true` | run | run |
+| PR from this repository | `true` | run | run |
+| PR from a fork | `false` | run | **skipped, with an explanation** |
+
+Behaviour on same-repo pushes and PRs is unchanged: the analysis that enforces the
+quality gate still runs on every one of them.
+
+**What this means for reviewers.** A fork PR gets no SonarQube Cloud analysis and
+therefore no quality gate reading. Analysis runs on `main` after the merge. To get a
+gate reading *before* merging, push the contributor's branch to this repository (e.g.
+`git fetch <fork> <branch> && git push origin FETCH_HEAD:refs/heads/branch-review-NNN`)
+and open an internal PR — that run has OIDC and scans normally.
+
+**What is deliberately *not* done.** `pull_request_target` would give fork PRs access
+to secrets while checking out untrusted code, which is a well-known privilege-escalation
+pattern. It is not used here, and the skip condition depends only on repository
+identity — never on anything a contributor can change from their branch.

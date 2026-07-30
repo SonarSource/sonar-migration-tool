@@ -236,6 +236,9 @@ statement of `runTransfer`.
   |         non-main branches SEQUENTIAL:                                      |
   |           buildBranchReport: load issues / hotspots / components /         |
   |             sources / activeRules ;  skip empty/purged ;                   |
+  |             langs = file languages + langs of rules the findings use       |
+  |               (widenLangsForFindingRules; needs a target profile) #456     |
+  |             filter active rules by lang ;                                  |
   |             remap SQ->SC profile keys ;  dedup active rules ;              |
   |             ConvertHotspotsToIssues: rule + msg + text range only          |
   |               (no type, no impacts, NO severity override) ;                |
@@ -484,8 +487,28 @@ flowchart TB
 ```
 
 ## Key facts the chart encodes
-<!-- updated: 2026-07-27_23:55:00 -->
+<!-- updated: 2026-07-27_22:37:13 -->
 
+- **The report's language set gates which issues survive, so cross-language
+  analyzers need explicit handling.** `buildBranchReport` filters the
+  active-rule set to the project's languages and then *drops every native issue
+  whose rule is not among the survivors* (an orphan rule aborts the whole report
+  in the CE). Deriving that language set from file components alone is not
+  enough: secret detection owns language `secrets` but raises issues inside
+  `.xml` files, shell scripts, and files SonarQube gives no language at all — so
+  `secrets` never appeared, every secrets rule was filtered out, and every
+  secrets finding was silently dropped along with its triage metadata (#456).
+  `widenLangsForFindingRules` therefore adds the languages of the rules the
+  findings actually reference, gated on the target org exposing a quality
+  profile for that language (without one the rules cannot be remapped to a
+  valid qprofile key and the CE would reject the metadata).
+- **The metadata sync can only write onto issues that the report produced.**
+  P6 is strictly downstream of P5: if an issue never materialised on Cloud —
+  dropped at report-build time, or dropped by the CE because its rule does not
+  exist in the target org (template-instantiated custom rules) — its status,
+  comments and tags are unreachable. Those are counted `not_found` and now
+  surfaced at WARN with totals; previously only per-issue at DEBUG, which is
+  why #456 went unnoticed.
 - **Project scoping is carried by exactly one parameter.** `getProjects` is the
   sole consumer of `ProjectKeys`; it sets `projects=<key>` on
   `api/projects/search` so the server returns only the scoped project. Every
