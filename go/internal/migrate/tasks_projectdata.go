@@ -48,6 +48,7 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 	}
 
 	completed := loadCompletedBranches(e.Store)
+	counter := TaskCounterFromContext(ctx)
 
 	e.Logger.Info("starting task", "task", "importProjectData", "items", len(projects))
 	prog := common.NewProgressLogger(e.Logger, "importProjectData", len(projects))
@@ -81,9 +82,11 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 
 			scMainBranch := fetchSCMainBranch(gCtx, e, cloudKey)
 
-			if err := importProjectBranches(gCtx, e, proj, sqBranches, scMainBranch, completed, w); err != nil {
-				e.Logger.Warn("project project data failed", "project", cloudKey, "err", err)
-			}
+			// #474 — a rejected report used to be a Warn that left the task
+			// summary reporting nothing at all, so a transfer that migrated
+			// zero issues and zero branches still looked clean.
+			recordImportOutcome(e, counter, cloudKey,
+				importProjectBranches(gCtx, e, proj, sqBranches, scMainBranch, completed, w))
 			prog.Increment()
 			return nil
 		})
@@ -275,6 +278,10 @@ func recordBranchResult(w *common.ChunkWriter, cloudKey, branchName string, resu
 		"task_id":           result.TaskID,
 		"error":             result.Error,
 		"source_purged":     result.SourcePurged,
+		// #474 — languages with no target quality profile, and how many files
+		// were dropped from the report because of them.
+		"unsupported_languages": result.UnsupportedLanguages,
+		"excluded_files":        result.ExcludedFiles,
 	})
 	w.WriteOne(record) //nolint:errcheck
 }
@@ -300,6 +307,15 @@ type importResult struct {
 	// flag drives the per-project "source code of branch X is missing" note
 	// in the migration report.
 	SourcePurged bool
+	// UnsupportedLanguages lists the languages found in this branch that have
+	// no quality profile on the target organization (#474). Set whether the
+	// branch was skipped, excluded-and-migrated, or submitted as-is, so the
+	// migration report can always explain what happened.
+	UnsupportedLanguages []string
+	// ExcludedFiles is the number of file components dropped from the scanner
+	// report because their language has no target quality profile (#474,
+	// --unsupported_languages=exclude).
+	ExcludedFiles int
 }
 
 func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*importResult, error) {
@@ -336,7 +352,10 @@ func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*i
 		return nil, fmt.Errorf("CE task failed: %w", err)
 	}
 
-	return &importResult{Status: "success", TaskID: result.TaskID, SourcePurged: report.SourcePurged}, nil
+	return &importResult{
+		Status: "success", TaskID: result.TaskID, SourcePurged: report.SourcePurged,
+		UnsupportedLanguages: report.UnsupportedLanguages, ExcludedFiles: report.ExcludedFiles,
+	}, nil
 }
 
 // branchReport is a packaged scanner report for one branch, ready to submit.
@@ -347,6 +366,11 @@ type branchReport struct {
 	// (purged by housekeeping) so the report carries measures + issues but no
 	// source. Propagated to the importResult for #425 reporting.
 	SourcePurged bool
+	// UnsupportedLanguages / ExcludedFiles carry the #474 finding through to
+	// the importResult so the migration report can explain the outcome even
+	// when the branch itself migrated successfully.
+	UnsupportedLanguages []string
+	ExcludedFiles        int
 }
 
 // buildBranchReport loads the extracted data for one branch, applies the
@@ -408,8 +432,32 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	// The CE validates that qprofile keys in the metadata exist in the SC instance.
 	scProfileByLang := buildSCProfileMap(ctx, e, input.OrgKey)
 
+	// #474 — a file whose language has no target quality profile makes the
+	// SonarQube Cloud CE reject the WHOLE report ("Report contains a file with
+	// language 'X' but no matching quality profile"), which silently costs the
+	// project every issue and every branch. Detect that before submitting,
+	// explain it, and apply the configured handling mode.
+	componentsBeforePolicy := len(components)
+	components, unsupportedLangKeys, unsupportedSkip := applyUnsupportedLanguagePolicy(
+		e, input.CloudKey, input.Branch, components, scProfileByLang)
+	if unsupportedSkip != nil {
+		return nil, unsupportedSkip, nil
+	}
+	// Zero unless mode "exclude" actually dropped components.
+	excludedFiles := componentsBeforePolicy - len(components)
+
 	// Filter profiles and rules to languages present in the project (matches cloudvoyager).
 	projectLangs := collectProjectLanguages(components)
+	// Cross-language analyzers raise findings on files whose own language
+	// differs from the analyzer's — secret detection is the canonical case: a
+	// `secrets:S6292` issue lives in a shell script, an XML file, or a file
+	// SonarQube assigns no language to at all. The component-derived language
+	// set therefore never contains "secrets", filterRulesByLanguage stripped
+	// every secrets active rule, and dropIssuesWithInactiveRules then discarded
+	// every secrets finding — silently losing the issues, and with them their
+	// custom tags (#456). Widen the set with the languages of the active rules
+	// the findings actually reference before filtering.
+	logWidenedLangs(e, input, widenLangsForFindingRules(projectLangs, scProfileByLang, activeRules, issues, hotspotIssues))
 	activeRules = filterRulesByLanguage(activeRules, projectLangs)
 
 	qprofiles := buildProjectQProfiles(projectLangs, scProfileByLang)
@@ -569,7 +617,10 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 		"activeRules", len(activeRules),
 	)
 
-	return &branchReport{ZIP: zipBytes, ProjectVersion: projectVersion, SourcePurged: sourcePurged}, nil, nil
+	return &branchReport{
+		ZIP: zipBytes, ProjectVersion: projectVersion, SourcePurged: sourcePurged,
+		UnsupportedLanguages: unsupportedLangKeys, ExcludedFiles: excludedFiles,
+	}, nil, nil
 }
 
 // ensureFileSourcesPresent guarantees every FILE component has a source
@@ -1738,6 +1789,74 @@ func stripNullBytes(s string) string {
 		return s // fast path — most files have no NUL bytes
 	}
 	return strings.ReplaceAll(s, "\x00", "")
+}
+
+// logWidenedLangs reports the languages widenLangsForFindingRules added to the
+// report's language set. No-op when nothing was added.
+func logWidenedLangs(e *Executor, input importBranchInput, added []string) {
+	if len(added) == 0 {
+		return
+	}
+	e.Logger.Info("widened report language set for cross-language analyzer findings",
+		"project", input.CloudKey, "branch", input.Branch, "languages", added)
+}
+
+// widenLangsForFindingRules adds to projectLangs the languages of the active
+// rules referenced by the given findings, so that language-filtering the
+// active-rule set does not strip rules the report's own issues depend on.
+// projectLangs is mutated in place; the sorted list of newly added languages
+// is returned for logging (empty when nothing changed).
+//
+// Motivation (#456): projectLangs is derived from the language SonarQube
+// assigned to each file component. Cross-language analyzers break that
+// assumption — a secret-detection rule (language "secrets") raises issues in
+// `.sh`, `.xml` and extension-less files, so "secrets" is absent from the
+// component-derived set. filterRulesByLanguage then dropped all secrets active
+// rules, and dropIssuesWithInactiveRules dropped every secrets issue, so those
+// issues never reached the target and the tag/status sync had nothing to write
+// onto.
+//
+// rules must be the UNFILTERED active-rule list (that is the only place a
+// rule's language is known). A language is only added when the target
+// organization actually exposes a quality profile for it: without a target
+// profile the rules cannot be remapped to a valid qprofile key
+// (remapActiveRuleProfiles) and the report's metadata would reference a
+// SonarQube Server profile key the Compute Engine rejects. Findings whose
+// language has no target profile keep being dropped by
+// dropIssuesWithInactiveRules, which logs them.
+func widenLangsForFindingRules(
+	projectLangs map[string]bool,
+	scProfileByLang map[string]scanreport.QProfileInfo,
+	rules []scanreport.ActiveRuleInput,
+	findingGroups ...[]scanreport.IssueInput,
+) []string {
+	if projectLangs == nil || len(rules) == 0 {
+		return nil
+	}
+	langByRule := make(map[string]string, len(rules))
+	for _, r := range rules {
+		if r.Language == "" {
+			continue
+		}
+		langByRule[r.RuleRepo+":"+r.RuleKey] = strings.ToLower(r.Language)
+	}
+
+	var added []string
+	for _, group := range findingGroups {
+		for _, f := range group {
+			lang, ok := langByRule[f.RuleRepo+":"+f.RuleKey]
+			if !ok || projectLangs[lang] {
+				continue
+			}
+			if _, hasProfile := scProfileByLang[lang]; !hasProfile {
+				continue
+			}
+			projectLangs[lang] = true
+			added = append(added, lang)
+		}
+	}
+	slices.Sort(added)
+	return added
 }
 
 // filterRulesByLanguage keeps only active rules whose language is in the project.

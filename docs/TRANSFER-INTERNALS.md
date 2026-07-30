@@ -1,5 +1,5 @@
 # `transfer` Command — Internal Flow (ASCII Chart)
-<!-- updated: 2026-06-09_21:35:54 -->
+<!-- updated: 2026-07-27_22:37:13 -->
 
 How `sonar-migration-tool transfer` works end-to-end, traced from
 [cmd/transfer.go](../go/cmd/transfer.go) down through `extract` → `structure` →
@@ -241,6 +241,16 @@ statement of `runTransfer`.
   |         non-main branches SEQUENTIAL:                                      |
   |           buildBranchReport: load issues / hotspots / components /         |
   |             sources / activeRules ;  skip empty/purged ;                   |
+  |             buildSCProfileMap(org) -> profile per LANGUAGE ;               |
+  |             #474 applyUnsupportedLanguagePolicy(components, profiles):     |
+  |               langs(components) \ langs(profiles) = UNSUPPORTED            |
+  |                 exclude (default) -> drop those file components            |
+  |                 skip              -> return "skipped" + reason, NO submit  |
+  |                 warn              -> submit unchanged (CE will reject)     |
+  |               (empty profile map = API failure -> detection disabled)      |
+  |             langs = file languages + langs of rules the findings use       |
+  |               (widenLangsForFindingRules; needs a target profile) #456     |
+  |             filter active rules by lang ;                                  |
   |             remap SQ->SC profile keys ;  dedup active rules ;              |
   |             drop issues on inactive rules ;                                |
   |             BackdateChangesets -> original creation dates                  |
@@ -262,7 +272,10 @@ statement of `runTransfer`.
   |           ISSUES:   search componentKeys=key:file & rules=rule &           |
   |             issueStatuses=...  -> classify by line                         |
   |             (1=sync, 0=miss, >1=ambig)                                     |
-  |             -> transition -> comments -> tags (+metadataSyncTag idem)      |
+  |             -> transition -> comments                                      |
+  |             -> tags = source full tags U cloud tags U metadataSyncTag       |
+  |                (set_tags REPLACES, so union; #456)                         |
+  |             miss/ambig totals reported at WARN (were DEBUG-only)           |
   |           HOTSPOTS: search projectKey & files  (NO rules param)            |
   |             -> classify by (ruleKey, line) -> ChangeStatus -> comments     |
   |                                              => sync*Metadata/*.jsonl      |
@@ -481,8 +494,28 @@ flowchart TB
 ```
 
 ## Key facts the chart encodes
-<!-- updated: 2026-06-09_21:16:18 -->
+<!-- updated: 2026-07-27_22:37:13 -->
 
+- **The report's language set gates which issues survive, so cross-language
+  analyzers need explicit handling.** `buildBranchReport` filters the
+  active-rule set to the project's languages and then *drops every native issue
+  whose rule is not among the survivors* (an orphan rule aborts the whole report
+  in the CE). Deriving that language set from file components alone is not
+  enough: secret detection owns language `secrets` but raises issues inside
+  `.xml` files, shell scripts, and files SonarQube gives no language at all — so
+  `secrets` never appeared, every secrets rule was filtered out, and every
+  secrets finding was silently dropped along with its triage metadata (#456).
+  `widenLangsForFindingRules` therefore adds the languages of the rules the
+  findings actually reference, gated on the target org exposing a quality
+  profile for that language (without one the rules cannot be remapped to a
+  valid qprofile key and the CE would reject the metadata).
+- **The metadata sync can only write onto issues that the report produced.**
+  P6 is strictly downstream of P5: if an issue never materialised on Cloud —
+  dropped at report-build time, or dropped by the CE because its rule does not
+  exist in the target org (template-instantiated custom rules) — its status,
+  comments and tags are unreachable. Those are counted `not_found` and now
+  surfaced at WARN with totals; previously only per-issue at DEBUG, which is
+  why #456 went unnoticed.
 - **Project scoping is carried by exactly one parameter.** `getProjects` is the
   sole consumer of `ProjectKeys`; it sets `projects=<key>` on
   `api/projects/search` so the server returns only the scoped project. Every
@@ -510,3 +543,19 @@ flowchart TB
   `GenerateReports` fails the transfer still prints "Transfer complete." and
   exits 0. Both report files are written to the **top-level** export dir, not
   inside `runDir`.
+- **The report's file languages and its quality-profile metadata come from two
+  different places, and the CE cross-checks them.** Component languages come
+  from the source server (`api/measures/component_tree`); `qprofiles_per_language`
+  can only name profiles that exist on the **target** org
+  (`buildSCProfileMap`). A language present in the former but absent from the
+  latter makes the CE reject the *whole* report with `Report contains a file
+  with language 'X' but no matching quality profile` — costing every issue and
+  every branch while the project, permissions and gate survive, because they
+  are created earlier. `applyUnsupportedLanguagePolicy` closes that gap by
+  comparing the two sets before submitting (#474). A failed profile fetch
+  yields an empty map, so detection is disabled in that case rather than
+  treating every language as unsupported.
+- **A rejected report no longer passes as success.** `importProjectData` logs
+  the failure at **ERROR** and counts it (`task summary … failed=1`); the
+  migration report names the offending language and the remedy instead of
+  framing it as "API error when migrating project data" (#474).

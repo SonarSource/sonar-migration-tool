@@ -62,7 +62,31 @@ For the architecture overview and package map, see [ARCHITECTURE.md](ARCHITECTUR
 
 The end-to-end regression suite lives in [`REGRESSION-TESTING.md`](REGRESSION-TESTING.md). It exercises a full migration against a real SQS + SQC pair and compares the result against a recorded baseline.
 
+## Contributing from a fork
+<!-- updated: 2026-07-28_10:25:08 -->
+
+CI behaves slightly differently for pull requests opened from a forked repository.
+
+GitHub does not issue an OIDC ID token to `pull_request` runs originating from a fork.
+Every secret in this repository's CI is fetched from Vault over OIDC, so the Vault step
+— and the SonarQube Cloud scan that depends on it — cannot run on a fork PR. They are
+skipped, and the `Test` job prints an explicit explanation instead of failing.
+
+What this means in practice:
+
+- **Go tests still run in full** on your PR, and are the signal to watch. Run
+  `go test ./...` in both `go/` and `lib/sq-api-go/` locally before pushing.
+- **No SonarQube Cloud analysis or quality gate reading** appears on a fork PR. A
+  maintainer can get one early by pushing your branch to this repository; otherwise
+  analysis runs on `main` after the merge.
+- **The secret scan (gitleaks) does run** on fork PRs — it uses no secrets.
+- Signing, notarization, and release publishing never run on any PR, fork or not.
+
+The condition and its rationale are documented in
+[`.github/workflows/README.md`](../.github/workflows/README.md#fork-pull-requests).
+
 ## Releasing
+<!-- updated: 2026-07-28_10:25:08 -->
 
 Tagged releases are built and published via GitHub Actions; see `.github/workflows/`. To bump the version manually:
 

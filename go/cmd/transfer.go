@@ -48,6 +48,7 @@ const (
 	flagCertPassword             = "cert_password"
 	flagDebug                    = "debug"
 	flagExcludeBranches          = "exclude_branches"
+	flagUnsupportedLanguages     = "unsupported_languages"
 )
 
 // transferTargetTasks is the explicit set of project-scoped "leaf" migrate
@@ -178,6 +179,10 @@ func init() {
 	f.String(flagCertPassword, "", "Password for the source server mTLS client certificate (maps to source.cert_password)")
 	// --debug is inherited from the persistent root flag; see cmd/root.go.
 	f.StringSlice(flagExcludeBranches, nil, "Glob patterns for non-main branches to skip during project data import (e.g. feature/*,bugfix/*)")
+	f.String(flagUnsupportedLanguages, "", "How to handle files whose language has no quality profile on the target — typically a language from a 3rd-party "+sqServerName+" plugin (#474). "+
+		"\"exclude\" (default) drops those files from the analysis report so the rest of the project still migrates; "+
+		"\"skip\" does not migrate the project's issues/branches at all; "+
+		"\"warn\" submits the report unchanged and lets "+scCloudName+" reject it. (maps to unsupported_languages)")
 }
 
 // transferConfig holds the resolved configuration after merging file and flag values.
@@ -201,6 +206,7 @@ type transferConfig struct {
 	skipProjectDataMigration bool
 	debug                    bool
 	excludeBranches          []string
+	unsupportedLanguages     string
 }
 
 func applyFlagString(cmd *cobra.Command, name string, target *string) {
@@ -290,6 +296,7 @@ func loadTransferFileDefaults(path string) (transferConfig, error) {
 	cfg.skipProjectDataMigration = migrateCfg.SkipProjectDataMigration
 	cfg.debug = migrateCfg.Debug
 	cfg.excludeBranches = migrateCfg.ExcludeBranches
+	cfg.unsupportedLanguages = migrateCfg.UnsupportedLanguages
 	return cfg, nil
 }
 
@@ -341,6 +348,7 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 	if cmd.Flags().Changed(flagExcludeBranches) {
 		cfg.excludeBranches, _ = cmd.Flags().GetStringSlice(flagExcludeBranches)
 	}
+	applyFlagString(cmd, flagUnsupportedLanguages, &cfg.unsupportedLanguages)
 
 	if cfg.exportDir == "" {
 		cfg.exportDir = "./migration-files/"
@@ -369,6 +377,11 @@ func validateTransferConfig(cfg transferConfig) error {
 	// of a downstream cascade.
 	if cfg.projectKey == "" {
 		return fmt.Errorf("project key is required (--%s or project_key in config file) — transfer is project-scoped by design", flagProjectKey)
+	}
+	// #474 — reject an unknown handling mode up front rather than silently
+	// falling back to the default after the extract phase has already run.
+	if _, err := migrate.ParseUnsupportedLanguageMode(cfg.unsupportedLanguages); err != nil {
+		return fmt.Errorf("--%s: %w", flagUnsupportedLanguages, err)
 	}
 	return nil
 }
@@ -536,6 +549,7 @@ func runTransferMigrate(ctx context.Context, cfg transferConfig) (string, error)
 		SkipProjectDataMigration: cfg.skipProjectDataMigration,
 		Debug:                    cfg.debug,
 		ExcludeBranches:          cfg.excludeBranches,
+		UnsupportedLanguages:     cfg.unsupportedLanguages,
 		ProjectKeyPattern:        cfg.projectKeyPattern,
 	})
 	if err != nil {

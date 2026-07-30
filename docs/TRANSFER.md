@@ -1,5 +1,5 @@
 # Using `transfer` — Transfer One Project
-<!-- updated: 2026-06-05_10:50:51 -->
+<!-- updated: 2026-07-27_23:05:00 -->
 
 `transfer` is the **single-command**, **project-scoped** path. It chains the four phases of a migration — **extract → structure → mappings → migrate** — into one call, then writes a PDF summary on completion. Use it when you have one project (or a small, well-known set of projects) to move across.
 
@@ -178,6 +178,7 @@ Omit `--project_key` to transfer **every** project visible to the token (in whic
 ---
 
 ## Flags
+<!-- updated: 2026-07-27_23:05:00 -->
 
 | Flag | Config key | Description |
 |------|------------|-------------|
@@ -197,8 +198,52 @@ Omit `--project_key` to transfer **every** project visible to the token (in whic
 | `--cert_password` | `source.cert_password` | Password for the source server mTLS client certificate |
 | `--skip_project_data_migration` | top-level `skip_project_data_migration` | Skip the project-data migration (importProjectData + per-issue / per-hotspot sync). Defaults to off — project data is migrated by default. Issue #303. |
 | `--exclude_branches` | `target.exclude_branches` | Glob patterns for non-main branches to skip during project data import. Repeatable. Main branch is never excluded. |
+| `--unsupported_languages` | top-level or `target.unsupported_languages` | How to handle files whose language has no quality profile on the target — typically a language from a 3rd-party SonarQube Server plugin. `exclude` (default) drops those files from the analysis report so the rest of the project still migrates; `skip` does not migrate the project's issues/branches at all; `warn` submits the report unchanged. Issue #474. |
 
 CLI flags override values from the config file when both are provided.
+
+### Unsupported programming languages (`--unsupported_languages`)
+<!-- updated: 2026-07-27_23:05:00 -->
+
+SonarQube Server can analyze languages SonarQube Cloud cannot. A language
+contributed by a 3rd-party (non-SonarSource) plugin has no analyzer on the
+Cloud side, and therefore no quality profile.
+
+The analysis report `transfer` fabricates stamps every file with the language
+the source server reported for it, while the report's metadata can only name
+quality profiles that exist on the target. When a file's language has no target
+profile, the SonarQube Cloud Compute Engine rejects the **entire** report:
+
+```
+Report contains a file with language 'lua' but no matching quality profile
+```
+
+The project, its permissions and its quality gate are created before the report
+is submitted, so the result is a project that looks migrated but has **no issues
+and no branches**.
+
+`transfer` detects this before submitting and prints the affected languages, the
+file count and an example path. Choose the handling with
+`--unsupported_languages`:
+
+| Mode | Behaviour |
+|------|-----------|
+| `exclude` (default) | Drops the unsupported-language files from the report. Everything else — the other files, their issues, measures and all branches — migrates. The project is reported as a **Partial Migration** with the languages and file count listed. |
+| `skip` | Submits no report for the project. Its settings, permissions and quality gate still migrate; its issues and branches do not. Reported as skipped, with the reason. |
+| `warn` | Submits the report unchanged (pre-#474 behaviour). The Compute Engine is expected to reject it; the rejection is reported as such rather than as a generic API error. |
+
+```bash
+# Migrate everything except the unsupported-language files (default)
+sonar-migration-tool transfer -c config.json --project_key my-project
+
+# Do not transfer this project's issues/branches at all
+sonar-migration-tool transfer -c config.json --project_key my-project \
+  --unsupported_languages skip
+```
+
+A failure to read the target organization's quality profiles disables the
+detection entirely rather than treating every language as unsupported, so a
+transient API error can never drop a project's files.
 
 ---
 

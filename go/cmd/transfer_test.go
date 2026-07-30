@@ -259,6 +259,38 @@ func TestValidateTransferConfig_HappyPath(t *testing.T) {
 	}
 }
 
+// #474: --unsupported_languages must be validated before the extract phase
+// runs. A typo'd mode silently falling back to the default would transfer data
+// the operator asked to skip, after a long extract has already completed.
+func TestValidateTransferConfig_UnsupportedLanguages(t *testing.T) {
+	base := transferConfig{
+		sourceURL:           "https://sq.example.com",
+		sourceToken:         "sq-tok",
+		projectKey:          "my-project",
+		targetToken:         "sc-tok",
+		defaultOrganization: "my-org",
+	}
+	for _, mode := range []string{"", "exclude", "skip", "warn", "SKIP"} {
+		cfg := base
+		cfg.unsupportedLanguages = mode
+		if err := validateTransferConfig(cfg); err != nil {
+			t.Errorf("mode %q: expected no error, got %v", mode, err)
+		}
+	}
+	for _, mode := range []string{"skipp", "none", "exclude-all"} {
+		cfg := base
+		cfg.unsupportedLanguages = mode
+		err := validateTransferConfig(cfg)
+		if err == nil {
+			t.Errorf("mode %q: expected a validation error", mode)
+			continue
+		}
+		if !contains(err.Error(), "--"+flagUnsupportedLanguages) {
+			t.Errorf("mode %q: error %q does not name the flag", mode, err.Error())
+		}
+	}
+}
+
 // #383: a misspelled --project_key passes validation but silently
 // returns zero projects from /api/projects/search?projects=<typo>.
 // ensureTransferProjectExtracted closes that gap by checking the
