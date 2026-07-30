@@ -57,6 +57,7 @@ func addCommands() {
 		structureCmd,
 		mappingsCmd,
 		migrateCmd,
+		syncIssuesCmd,
 		predictiveReportCmd,
 		resetCmd,
 		analysisReportCmd,

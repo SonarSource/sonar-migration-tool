@@ -55,176 +55,123 @@ func TestHotspotHasManualChanges(t *testing.T) {
 	}
 }
 
-// #392: the hotspot classifier is three-phase:
-//
-//  1. Precise (ruleKey, line, offset) — disambiguates co-located
-//     hotspots of the same rule on different columns (sys.argv[1] and
-//     sys.argv[2] on a single line). Only considered when both sides
-//     carry a non-zero offset.
-//  2. (ruleKey, line) — covers the common case where rule is enough.
-//  3. Empty-ruleKey line-only — fallback for the 2026-06-09 audit
-//     case where the cloud response omits ruleKey.
-func TestClassifyHotspotCandidatesByLine(t *testing.T) {
-	cand := func(key, rule string, line, offset int) matchableHotspot {
-		return matchableHotspot{Key: key, RuleKey: rule, Line: line, Offset: offset}
+// #412: hotspotMatchScore — a non-empty rule mismatch is a hard reject;
+// an empty ruleKey on either side is tolerated (preserving the pre-#412
+// empty-rule fallback), and the score otherwise accumulates across
+// message/file/line/offset/vulnerabilityProbability/author.
+func TestHotspotMatchScore(t *testing.T) {
+	base := matchableHotspot{
+		RuleKey: "python:S4823", Component: "a.py", Line: 35, Offset: 17,
+		Message: "Make sure this is safe", VulnerabilityProbability: "HIGH", Author: "alice",
 	}
+
 	tests := []struct {
-		name         string
-		candidates   []matchableHotspot
-		sourceRule   string
-		sourceLine   int
-		sourceOffset int
-		wantKey      string
-		wantOutcome  syncOutcome
+		name      string
+		candidate matchableHotspot
+		want      int
 	}{
-		// --- Phase 1: precise (rule, line, offset) ---
+		{"non-empty rule mismatch rejects", withHotspotRule(base, "python:S9999"), -1},
+		{"identical — max score", base, 7},
+		{"candidate empty ruleKey — tolerated, still scored", withHotspotRule(base, ""), 7},
 		{
-			// Live scenario from #392 follow-up: two cloud hotspots of
-			// the same rule on the same line, different startOffsets.
-			// Without offset they collapse to line_mismatch; with it,
-			// each source resolves cleanly to its column-matched peer.
-			name: "co-located cloud hotspots disambiguated by offset",
-			candidates: []matchableHotspot{
-				cand("h-MF", "python:S4823", 35, 35),
-				cand("h-MG", "python:S4823", 35, 17),
-			},
-			sourceRule:   "python:S4823",
-			sourceLine:   35,
-			sourceOffset: 17,
-			wantKey:      "h-MG",
-			wantOutcome:  syncOutcomeSynced,
+			"source has offset, candidate offset missing — no offset point",
+			withHotspotOffset(base, 0),
+			6,
 		},
 		{
-			// Same call shape, source on the OTHER column.
-			name: "co-located cloud hotspots — pick by offset 35",
-			candidates: []matchableHotspot{
-				cand("h-MF", "python:S4823", 35, 35),
-				cand("h-MG", "python:S4823", 35, 17),
-			},
-			sourceRule:   "python:S4823",
-			sourceLine:   35,
-			sourceOffset: 35,
-			wantKey:      "h-MF",
-			wantOutcome:  syncOutcomeSynced,
-		},
-
-		// --- Phase 2: (rule, line) match (offset unavailable / zero) ---
-		{
-			name:         "exact rule + line match — synced (offset absent)",
-			candidates:   []matchableHotspot{cand("h-1", "javasecurity:S1", 42, 0)},
-			sourceRule:   "javasecurity:S1",
-			sourceLine:   42,
-			sourceOffset: 0,
-			wantKey:      "h-1",
-			wantOutcome:  syncOutcomeSynced,
-		},
-		{
-			name: "rule disambiguates among same-line candidates (#392 regression guard)",
-			candidates: []matchableHotspot{
-				cand("h-1", "javasecurity:S1", 42, 0),
-				cand("h-2", "javasecurity:S2", 42, 0),
-			},
-			sourceRule:   "javasecurity:S2",
-			sourceLine:   42,
-			sourceOffset: 0,
-			wantKey:      "h-2",
-			wantOutcome:  syncOutcomeSynced,
-		},
-		{
-			name: "two same-rule same-line candidates with NO offset — line_mismatch",
-			candidates: []matchableHotspot{
-				cand("h-1", "javasecurity:S1", 42, 0),
-				cand("h-2", "javasecurity:S1", 42, 0),
-			},
-			sourceRule:   "javasecurity:S1",
-			sourceLine:   42,
-			sourceOffset: 0,
-			wantOutcome:  syncOutcomeLineMismatch,
-		},
-		{
-			// Source has offset but cloud doesn't — phase 1 yields
-			// nothing, phase 2 falls back and picks the single
-			// rule+line match.
-			name: "source has offset, cloud doesn't — phase 2 still resolves",
-			candidates: []matchableHotspot{
-				cand("h-1", "javasecurity:S1", 42, 0),
-			},
-			sourceRule:   "javasecurity:S1",
-			sourceLine:   42,
-			sourceOffset: 17,
-			wantKey:      "h-1",
-			wantOutcome:  syncOutcomeSynced,
-		},
-
-		// --- Phase 3: empty-ruleKey fallback ---
-		{
-			name:         "empty-ruleKey candidate falls back to line-only — synced",
-			candidates:   []matchableHotspot{cand("h-1", "", 42, 0)},
-			sourceRule:   "javasecurity:S1",
-			sourceLine:   42,
-			sourceOffset: 0,
-			wantKey:      "h-1",
-			wantOutcome:  syncOutcomeSynced,
-		},
-		{
-			name: "two empty-ruleKey candidates on the same line — line_mismatch",
-			candidates: []matchableHotspot{
-				cand("h-1", "", 42, 0),
-				cand("h-2", "", 42, 0),
-			},
-			sourceRule:   "javasecurity:S1",
-			sourceLine:   42,
-			sourceOffset: 0,
-			wantOutcome:  syncOutcomeLineMismatch,
-		},
-		{
-			// Non-empty cloud rule that doesn't match the source's rule
-			// must NOT be picked by phase 3.
-			name: "non-matching cloud rule on the line — not picked by fallback",
-			candidates: []matchableHotspot{
-				cand("h-1", "javasecurity:S2", 42, 0),
-			},
-			sourceRule:   "javasecurity:S1",
-			sourceLine:   42,
-			sourceOffset: 0,
-			wantOutcome:  syncOutcomeNotFound,
-		},
-		{
-			// Earlier phase wins: a precise rule+line match must not
-			// be undone by an empty-rule candidate on the same line.
-			name: "phase 2 match wins over phase 3 candidate on same line",
-			candidates: []matchableHotspot{
-				cand("h-1", "javasecurity:S1", 42, 0),
-				cand("h-2", "", 42, 0),
-			},
-			sourceRule:   "javasecurity:S1",
-			sourceLine:   42,
-			sourceOffset: 0,
-			wantKey:      "h-1",
-			wantOutcome:  syncOutcomeSynced,
-		},
-
-		// --- General negatives ---
-		{
-			name:         "no candidate on the source line — not_found",
-			candidates:   []matchableHotspot{cand("h-1", "javasecurity:S1", 40, 0)},
-			sourceRule:   "javasecurity:S1",
-			sourceLine:   42,
-			sourceOffset: 0,
-			wantOutcome:  syncOutcomeNotFound,
-		},
-		{
-			name:         "empty candidate set — not_found",
-			candidates:   nil,
-			sourceRule:   "javasecurity:S1",
-			sourceLine:   42,
-			sourceOffset: 0,
-			wantOutcome:  syncOutcomeNotFound,
+			"very different message, else equal",
+			withHotspotMessage(base, "An entirely unrelated finding description"),
+			5,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, outcome := classifyHotspotCandidatesByLine(tc.candidates, tc.sourceRule, tc.sourceLine, tc.sourceOffset)
+			if got := hotspotMatchScore(base, tc.candidate); got != tc.want {
+				t.Errorf("hotspotMatchScore = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func withHotspotRule(h matchableHotspot, rule string) matchableHotspot   { h.RuleKey = rule; return h }
+func withHotspotOffset(h matchableHotspot, offset int) matchableHotspot  { h.Offset = offset; return h }
+func withHotspotMessage(h matchableHotspot, msg string) matchableHotspot { h.Message = msg; return h }
+
+// #412: classifyHotspotCandidatesByScore — exact match (rule-compatible +
+// file + line + message) wins when unique; otherwise the approximate score
+// must clear hotspotApproxMatchThreshold and uniquely qualify.
+func TestClassifyHotspotCandidatesByScore(t *testing.T) {
+	source := matchableHotspot{
+		RuleKey: "python:S4823", Component: "a.py", Line: 35, Offset: 17,
+		Message: "Make sure this is safe", VulnerabilityProbability: "HIGH", Author: "alice",
+	}
+	exactMatch := source
+	exactMatch.Key = "h-exact"
+
+	approxMatch := matchableHotspot{
+		Key: "h-approx", RuleKey: "python:S4823", Component: "a.py", Line: 35, Offset: 17,
+		Message: "Make sure this stays safe", VulnerabilityProbability: "HIGH", Author: "alice",
+	} // message similar (+1), file+line+offset+vulnProb+author (+5) = 6
+
+	belowThreshold := matchableHotspot{
+		Key: "h-low", RuleKey: "python:S4823", Component: "b.py", Line: 99, Offset: 0,
+		Message: "unrelated", VulnerabilityProbability: "LOW", Author: "bob",
+	}
+
+	// Preserves the pre-#412 empty-ruleKey fallback: some SQ
+	// versions/endpoints omit ruleKey from hotspot search results.
+	emptyRuleExact := source
+	emptyRuleExact.Key = "h-empty-rule"
+	emptyRuleExact.RuleKey = ""
+
+	tests := []struct {
+		name        string
+		candidates  []matchableHotspot
+		wantKey     string
+		wantOutcome syncOutcome
+	}{
+		{
+			name:        "unique exact match — synced",
+			candidates:  []matchableHotspot{belowThreshold, exactMatch},
+			wantKey:     "h-exact",
+			wantOutcome: syncOutcomeSynced,
+		},
+		{
+			name:        "two exact matches — ambiguous",
+			candidates:  []matchableHotspot{exactMatch, {Key: "h-exact-2", RuleKey: "python:S4823", Component: "a.py", Line: 35, Message: "Make sure this is safe"}},
+			wantOutcome: syncOutcomeLineMismatch,
+		},
+		{
+			name:        "no exact, unique approximate match — synced",
+			candidates:  []matchableHotspot{belowThreshold, approxMatch},
+			wantKey:     "h-approx",
+			wantOutcome: syncOutcomeSynced,
+		},
+		{
+			name:        "no exact, two qualifying approximate matches — ambiguous",
+			candidates:  []matchableHotspot{approxMatch, {Key: "h-approx-2", RuleKey: "python:S4823", Component: "a.py", Line: 35, Offset: 17, Message: "Make sure this stays safe", VulnerabilityProbability: "HIGH", Author: "alice"}},
+			wantOutcome: syncOutcomeLineMismatch,
+		},
+		{
+			name:        "no candidate clears the threshold — not_found",
+			candidates:  []matchableHotspot{belowThreshold},
+			wantOutcome: syncOutcomeNotFound,
+		},
+		{
+			name:        "empty-ruleKey candidate still matches exactly (fallback preserved)",
+			candidates:  []matchableHotspot{emptyRuleExact},
+			wantKey:     "h-empty-rule",
+			wantOutcome: syncOutcomeSynced,
+		},
+		{
+			name:        "empty candidate set — not_found",
+			candidates:  nil,
+			wantOutcome: syncOutcomeNotFound,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, outcome := classifyHotspotCandidatesByScore(tc.candidates, source)
 			if outcome != tc.wantOutcome {
 				t.Errorf("outcome = %v, want %v", outcome, tc.wantOutcome)
 			}
@@ -244,7 +191,7 @@ func TestMapHotspotResolution(t *testing.T) {
 	}{
 		{"SAFE", "SAFE"},
 		{"FIXED", "FIXED"},
-		{"safe", "SAFE"},  // case-insensitive
+		{"safe", "SAFE"},   // case-insensitive
 		{"fixed", "FIXED"}, // case-insensitive
 		{"ACKNOWLEDGED", ""},
 		{"acknowledged", ""},
@@ -312,12 +259,12 @@ func TestSyncOneHotspotAddsSourceLink(t *testing.T) {
 // (TO_REVIEW is also the cloud default). Comments still propagate.
 func TestSyncOneHotspotAcknowledgedResetsToToReview(t *testing.T) {
 	var (
-		mu             sync.Mutex
-		changeStatus   string
-		changeResol    string
-		changeHotspot  string
-		changeCalls    int
-		commentCalls   int
+		mu            sync.Mutex
+		changeStatus  string
+		changeResol   string
+		changeHotspot string
+		changeCalls   int
+		commentCalls  int
 	)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/hotspots/change_status", func(w http.ResponseWriter, r *http.Request) {
@@ -376,9 +323,9 @@ func TestSyncOneHotspotAcknowledgedResetsToToReview(t *testing.T) {
 // status and merges the results.
 func TestFindCloudHotspotCandidatesQueriesBothStatuses(t *testing.T) {
 	var (
-		mu          sync.Mutex
-		seenStatus  []string
-		seenBranch  []string
+		mu         sync.Mutex
+		seenStatus []string
+		seenBranch []string
 	)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/hotspots/search", func(w http.ResponseWriter, r *http.Request) {
