@@ -30,6 +30,25 @@ func NewDataStore(baseDir string) *DataStore {
 	}
 }
 
+// taskDirSanitizer maps characters that are legal in task names but
+// illegal in a Windows path component to "_". Some task names embed a
+// ":" (e.g. "getTemplateGroupsScanners:apply"), which is fine on
+// Linux/macOS but rejected by NTFS — Windows forbids \ / : * ? " < > |
+// in file and directory names. Sanitizing here, at the single point
+// where a task name becomes a directory path, keeps the on-disk layout
+// unchanged on POSIX (these characters are otherwise unused in task
+// names) while making the migrate command runnable on Windows.
+// See issue #486.
+var taskDirSanitizer = strings.NewReplacer(
+	"\\", "_", "/", "_", ":", "_", "*", "_",
+	"?", "_", "\"", "_", "<", "_", ">", "_", "|", "_",
+)
+
+// taskDir returns the filesystem-safe directory path for a task.
+func (ds *DataStore) taskDir(taskName string) string {
+	return filepath.Join(ds.baseDir, taskDirSanitizer.Replace(taskName))
+}
+
 // BaseDir returns the root directory.
 func (ds *DataStore) BaseDir() string {
 	return ds.baseDir
@@ -37,12 +56,12 @@ func (ds *DataStore) BaseDir() string {
 
 // Writer returns a ChunkWriter for the named task.
 func (ds *DataStore) Writer(taskName string) (*ChunkWriter, error) {
-	return NewChunkWriter(filepath.Join(ds.baseDir, taskName))
+	return NewChunkWriter(ds.taskDir(taskName))
 }
 
 // ReadAll returns every JSONL object for a completed task as raw JSON.
 func (ds *DataStore) ReadAll(taskName string) ([]json.RawMessage, error) {
-	dir := filepath.Join(ds.baseDir, taskName)
+	dir := ds.taskDir(taskName)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -115,6 +134,6 @@ func (ds *DataStore) IsComplete(taskName string) bool {
 // TaskDirExists checks if a task's output directory exists on disk
 // (for resumability — skip tasks that already ran).
 func (ds *DataStore) TaskDirExists(taskName string) bool {
-	info, err := os.Stat(filepath.Join(ds.baseDir, taskName))
+	info, err := os.Stat(ds.taskDir(taskName))
 	return err == nil && info.IsDir()
 }
