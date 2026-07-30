@@ -5,6 +5,7 @@
 package migrate
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -557,6 +558,267 @@ func TestDropIssuesWithInactiveRules(t *testing.T) {
 		if k.RuleRepo == "secrets" {
 			t.Errorf("orphan secrets issue must have been dropped, got %+v", k)
 		}
+	}
+}
+
+// --- #456: cross-language analyzer findings must keep their active rules ---
+
+// scProfiles is a test helper building the language→target-profile map that
+// widenLangsForFindingRules consults.
+func scProfiles(langs ...string) map[string]scanreport.QProfileInfo {
+	m := make(map[string]scanreport.QProfileInfo, len(langs))
+	for _, l := range langs {
+		m[l] = scanreport.QProfileInfo{Key: "sc-" + l, Name: "Sonar way", Language: l}
+	}
+	return m
+}
+
+// widenLangCase is one widenLangsForFindingRules scenario. Named (rather than
+// an anonymous struct) so the assertions can live in helpers and keep the test
+// function's cognitive complexity low.
+type widenLangCase struct {
+	name       string
+	langs      map[string]bool
+	scByLang   map[string]scanreport.QProfileInfo
+	issues     []scanreport.IssueInput
+	hotspots   []scanreport.IssueInput
+	wantAdded  []string
+	wantInLang []string
+	wantAbsent []string
+}
+
+// assertLangsPresent fails for every language missing from the widened set.
+func assertLangsPresent(t *testing.T, langs map[string]bool, want []string) {
+	t.Helper()
+	for _, l := range want {
+		if !langs[l] {
+			t.Errorf("language %q missing from widened set %v", l, langs)
+		}
+	}
+}
+
+// assertLangsAbsent fails for every language that must NOT have been added.
+func assertLangsAbsent(t *testing.T, langs map[string]bool, notWant []string) {
+	t.Helper()
+	for _, l := range notWant {
+		if langs[l] {
+			t.Errorf("language %q must NOT be in the set %v", l, langs)
+		}
+	}
+}
+
+// assertWidenCase checks the returned added-language list and the resulting set.
+func assertWidenCase(t *testing.T, tc widenLangCase, got []string) {
+	t.Helper()
+	if strings.Join(got, ",") != strings.Join(tc.wantAdded, ",") {
+		t.Errorf("added languages: want %v, got %v", tc.wantAdded, got)
+	}
+	assertLangsPresent(t, tc.langs, tc.wantInLang)
+	assertLangsAbsent(t, tc.langs, tc.wantAbsent)
+}
+
+func TestWidenLangsForFindingRules(t *testing.T) {
+	// The demo-rules shape from #456: a secret-detection rule (language
+	// "secrets") raising issues inside a shell script and an XML file, neither
+	// of which SonarQube labels as "secrets".
+	rules := []scanreport.ActiveRuleInput{
+		{RuleRepo: "python", RuleKey: "S100", Language: "py"},
+		{RuleRepo: "secrets", RuleKey: "S7001", Language: "secrets"},
+		{RuleRepo: "secrets", RuleKey: "S6292", Language: "secrets"},
+		{RuleRepo: "text", RuleKey: "S1135", Language: "text"},
+		{RuleRepo: "noLang", RuleKey: "S1", Language: ""},
+	}
+
+	tests := []widenLangCase{
+		{
+			name:     "secrets finding on a non-secrets file widens the language set",
+			langs:    map[string]bool{"py": true, "xml": true},
+			scByLang: scProfiles("py", "xml", "secrets"),
+			issues: []scanreport.IssueInput{
+				{RuleRepo: "secrets", RuleKey: "S6292", Component: "p:secrets/run_linters.sh"},
+			},
+			wantAdded:  []string{"secrets"},
+			wantInLang: []string{"py", "xml", "secrets"},
+		},
+		{
+			name:     "language added only once even with many findings",
+			langs:    map[string]bool{"py": true},
+			scByLang: scProfiles("py", "secrets"),
+			issues: []scanreport.IssueInput{
+				{RuleRepo: "secrets", RuleKey: "S7001", Component: "p:a.xml"},
+				{RuleRepo: "secrets", RuleKey: "S6292", Component: "p:b.sh"},
+				{RuleRepo: "secrets", RuleKey: "S7001", Component: "p:c"},
+			},
+			wantAdded:  []string{"secrets"},
+			wantInLang: []string{"py", "secrets"},
+		},
+		{
+			name:     "no target quality profile for the language — not widened",
+			langs:    map[string]bool{"py": true},
+			scByLang: scProfiles("py"), // target org has no "secrets" profile
+			issues: []scanreport.IssueInput{
+				{RuleRepo: "secrets", RuleKey: "S6292", Component: "p:b.sh"},
+			},
+			wantAdded:  nil,
+			wantInLang: []string{"py"},
+			wantAbsent: []string{"secrets"},
+		},
+		{
+			name:     "language already present — nothing added",
+			langs:    map[string]bool{"py": true, "secrets": true},
+			scByLang: scProfiles("py", "secrets"),
+			issues: []scanreport.IssueInput{
+				{RuleRepo: "secrets", RuleKey: "S7001", Component: "p:a.xml"},
+			},
+			wantAdded:  nil,
+			wantInLang: []string{"py", "secrets"},
+		},
+		{
+			name:     "rule not in the active-rule list — nothing added",
+			langs:    map[string]bool{"py": true},
+			scByLang: scProfiles("py", "secrets"),
+			issues: []scanreport.IssueInput{
+				{RuleRepo: "secrets", RuleKey: "My_custom_rule", Component: "p:b.sh"},
+			},
+			wantAdded:  nil,
+			wantInLang: []string{"py"},
+			wantAbsent: []string{"secrets"},
+		},
+		{
+			name:     "active rule with no language is ignored",
+			langs:    map[string]bool{"py": true},
+			scByLang: scProfiles("py"),
+			issues: []scanreport.IssueInput{
+				{RuleRepo: "noLang", RuleKey: "S1", Component: "p:b.sh"},
+			},
+			wantAdded:  nil,
+			wantInLang: []string{"py"},
+		},
+		{
+			name:     "hotspot findings widen the set too",
+			langs:    map[string]bool{"py": true},
+			scByLang: scProfiles("py", "text"),
+			hotspots: []scanreport.IssueInput{
+				{RuleRepo: "text", RuleKey: "S1135", Component: "p:notes.md"},
+			},
+			wantAdded:  []string{"text"},
+			wantInLang: []string{"py", "text"},
+		},
+		{
+			name:       "no findings — nothing added",
+			langs:      map[string]bool{"py": true},
+			scByLang:   scProfiles("py", "secrets"),
+			wantAdded:  nil,
+			wantInLang: []string{"py"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assertWidenCase(t, tc,
+				widenLangsForFindingRules(tc.langs, tc.scByLang, rules, tc.issues, tc.hotspots))
+		})
+	}
+}
+
+// logWidenedLangs must stay silent when nothing was widened and emit exactly
+// one line naming the languages when something was.
+func TestLogWidenedLangs(t *testing.T) {
+	var buf bytes.Buffer
+	e := &Executor{Logger: slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))}
+	input := importBranchInput{CloudKey: "org_proj", Branch: "main"}
+
+	logWidenedLangs(e, input, nil)
+	logWidenedLangs(e, input, []string{})
+	if buf.Len() != 0 {
+		t.Errorf("nothing widened must log nothing, got %q", buf.String())
+	}
+
+	logWidenedLangs(e, input, []string{"secrets", "text"})
+	out := buf.String()
+	for _, want := range []string{"widened report language set", "org_proj", "main", "secrets", "text"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log line missing %q; got %q", want, out)
+		}
+	}
+	if n := strings.Count(out, "widened report language set"); n != 1 {
+		t.Errorf("want exactly 1 log line, got %d: %q", n, out)
+	}
+}
+
+func TestWidenLangsForFindingRulesDegenerateInputs(t *testing.T) {
+	rules := []scanreport.ActiveRuleInput{{RuleRepo: "secrets", RuleKey: "S7001", Language: "secrets"}}
+	issues := []scanreport.IssueInput{{RuleRepo: "secrets", RuleKey: "S7001"}}
+
+	if got := widenLangsForFindingRules(nil, scProfiles("secrets"), rules, issues); got != nil {
+		t.Errorf("nil language map: want nil, got %v", got)
+	}
+	langs := map[string]bool{"py": true}
+	if got := widenLangsForFindingRules(langs, scProfiles("secrets"), nil, issues); got != nil {
+		t.Errorf("no active rules: want nil, got %v", got)
+	}
+	if len(langs) != 1 || !langs["py"] {
+		t.Errorf("language map must be untouched, got %v", langs)
+	}
+}
+
+// TestSecretsFindingSurvivesLanguageFilter is the end-to-end regression test
+// for #456. It replays the exact pipeline order from buildBranchReport —
+// widen → filterRulesByLanguage → dropIssuesWithInactiveRules — over the
+// demo-rules shape, and asserts the secrets issues survive. Without the
+// widening step every secrets active rule is filtered out and all three
+// secrets issues are dropped from the scan report, so they never exist on the
+// target and their custom tags have nothing to be applied to.
+func TestSecretsFindingSurvivesLanguageFilter(t *testing.T) {
+	activeRules := []scanreport.ActiveRuleInput{
+		{RuleRepo: "python", RuleKey: "S100", Language: "py"},
+		{RuleRepo: "xml", RuleKey: "S1778", Language: "xml"},
+		{RuleRepo: "secrets", RuleKey: "S7001", Language: "secrets"},
+		{RuleRepo: "secrets", RuleKey: "S6292", Language: "secrets"},
+	}
+	issues := []scanreport.IssueInput{
+		{RuleRepo: "python", RuleKey: "S100", Component: "p:secrets/hello_world.py"},
+		// az.xml is language "xml"; run_linters.sh has NO language at all.
+		{RuleRepo: "secrets", RuleKey: "S7001", Component: "p:secrets/az.xml"},
+		{RuleRepo: "secrets", RuleKey: "S6292", Component: "p:secrets/run_linters.sh"},
+	}
+	// Component-derived languages: the secrets analyzer's own language is absent.
+	componentLangs := map[string]bool{"py": true, "xml": true}
+	scByLang := scProfiles("py", "xml", "secrets")
+
+	// --- Without the fix (pre-#456 behaviour): both secrets issues are lost.
+	before := map[string]bool{"py": true, "xml": true}
+	rulesBefore := filterRulesByLanguage(activeRules, before)
+	_, droppedBefore := dropIssuesWithInactiveRules(issues, rulesBefore)
+	if droppedBefore != 2 {
+		t.Fatalf("sanity check on pre-fix behaviour: want 2 secrets issues dropped, got %d", droppedBefore)
+	}
+
+	// --- With the fix: nothing is dropped.
+	added := widenLangsForFindingRules(componentLangs, scByLang, activeRules, issues, nil)
+	if strings.Join(added, ",") != "secrets" {
+		t.Fatalf("want [secrets] added, got %v", added)
+	}
+	rulesAfter := filterRulesByLanguage(activeRules, componentLangs)
+	kept, dropped := dropIssuesWithInactiveRules(issues, rulesAfter)
+	if dropped != 0 {
+		t.Errorf("want 0 issues dropped after widening, got %d", dropped)
+	}
+	if len(kept) != len(issues) {
+		t.Fatalf("want all %d issues kept, got %d", len(issues), len(kept))
+	}
+
+	// The report metadata must now declare the secrets quality profile, or the
+	// Compute Engine rejects issues raised on rules from an undeclared profile.
+	qprofiles := buildProjectQProfiles(componentLangs, scByLang)
+	var hasSecrets bool
+	for _, q := range qprofiles {
+		if q.Language == "secrets" {
+			hasSecrets = true
+		}
+	}
+	if !hasSecrets {
+		t.Errorf("report qprofiles must include the secrets profile, got %+v", qprofiles)
 	}
 }
 
