@@ -4,7 +4,7 @@
 > **Reconciled against the actual Go code on 2026-06-05.** Every row below reflects what the running binary does (`go/`, `lib/sq-api-go/`), not spec/design intent. Claims that previously described unbuilt specs or dead code have been corrected or moved. Full claim-by-claim evidence (file:line) is in [MIGRATION-FACETS-AUDIT.md](MIGRATION-FACETS-AUDIT.md).
 
 ## ✅ What IS Migrated
-<!-- updated: 2026-06-08_23:03:54 -->
+<!-- updated: 2026-07-27_22:37:13 -->
 
 The **Caveats / NOT carried** column is load-bearing — read it before relying on a row.
 
@@ -23,12 +23,12 @@ The **Caveats / NOT carried** column is load-bearing — read it before relying 
 | **Analysis Data** | Source Code | raw file content; language; line count | content rides in `source-{ref}.txt`; **language + line count ride in `component-{ref}.pb`** (not the source file). Part of the project-data migration, which runs by default on both `migrate` and `transfer`; opt out with `--skip_project_data_migration` | `source-{ref}.txt` + `component-{ref}.pb` in report ZIP | 004 |
 | **Analysis Data** | SCM / Blame Data | per-line **date** only, back-dated to oldest issue creation date | **per-line revision is a random-hex stub; author is a hardcoded stub** (`sonar-migration-tool@sonarcloud.io`) — original SCM identity is NOT preserved | Protobuf `Changesets` + `BackdateChangesets()` | 004 |
 | **Analysis Data** | Issue Creation Dates | original creation dates preserved | — (fully accurate) | via SCM changeset backdating | 004 |
-| **Analysis Data** | Active Rules | repo, key, severity, q-profile key (remapped SQ→Cloud) | **params, impacts, and timestamps are NOT migrated** on this path — params default to empty, timestamps fall back to the migration run-time | Protobuf `activerules.pb` | 001 |
+| **Analysis Data** | Active Rules | repo, key, severity, q-profile key (remapped SQ→Cloud); language set = the project's file languages **plus** the languages of rules the findings reference | **params, impacts, and timestamps are NOT migrated** on this path — params default to empty, timestamps fall back to the migration run-time. The rule set is language-filtered and any native issue on a non-surviving rule is dropped from the report, so **cross-language analyzers must be accounted for explicitly**: secret detection owns language `secrets` but raises issues inside `.xml` / `.sh` / language-less files, so filtering on file languages alone silently discarded every secrets finding (fixed in #456 — see the Known Gaps note) | Protobuf `activerules.pb` | 001 |
 | **Analysis Data** | External Issues (3rd-party analyzers) | engineId, ruleId, message, severity, type, textRange | filename is **`external-issues-{ref}.pb`** (hyphenated) | Protobuf `external-issues-{ref}.pb` | 013 |
 | **Analysis Data** | Ad-Hoc Rules | engineId, ruleId, severity, type, cleanCodeAttribute | **`name` = rule key** (not a display name); **`description` = generic placeholder** `"Rule from {engine} plugin"`, not the source rule description | Protobuf `adhocrules.pb` | 013 |
 | **Metadata Sync** | Issue Status | OPEN, CONFIRMED, REOPENED, RESOLVED, FALSE_POSITIVE, WONTFIX, **ACCEPTED** | **`ACCEPTED` maps to the `accept` transition** → lands as ACCEPTED on Cloud (fixed in #322); modern MQR `ACCEPTED` (surfaced over the Server API as status=RESOLVED, resolution=WONTFIX) is detected via the `issueStatus` enum and routed to `accept`, while genuine legacy `WONTFIX` still maps to `wontfix`. **`FIXED`-resolution issues are intentionally excluded** — the fixed code no longer exists, so CE re-analysis of the migrated scanner report won't reproduce them (no Cloud counterpart to transition) | `/api/issues/do_transition` | 008/024 |
 | **Metadata Sync** | Issue Comments | text (Markdown, HTML fallback) + original author + timestamp | prefix is **`[Migrated from {login} on {date}]`** (no literal "SonarQube Server", no `@`); dedup is **plain substring match, not hashing** | `/api/issues/add_comment` | 008/024 |
-| **Metadata Sync** | Issue Tags | all custom tags | — (fully accurate) | `/api/issues/set_tags` | 008/024 |
+| **Metadata Sync** | Issue Tags | the issue's **complete** source tag list (custom + rule-default), unioned with the tags the Cloud issue already carries, plus the `metadata-synchronized` marker | tags are written with `set_tags`, which **REPLACES** the list — the union is what preserves the Cloud analysis's own rule-default tags (fixed in #456; before that only the user-added subset was sent, stripping e.g. `cwe`). **A tag can only be applied if the issue exists on the target**: an issue whose rule is absent from the target org (e.g. a template-instantiated custom rule that profile restore could not create) is never raised on Cloud, so its tags are unreachable — reported at WARN as `not_found` | `/api/issues/set_tags` | 008/024 |
 | **Metadata Sync** | Hotspot Review Status | TO_REVIEW / REVIEWED + resolution SAFE / FIXED | **`ACKNOWLEDGED` is silently downgraded to `SAFE`**; TO_REVIEW makes no API call (Cloud default) | `/api/hotspots/change_status` | 009/024 |
 | **Metadata Sync** | Hotspot Comments | review comments with author attribution | — (fully accurate) | `/api/hotspots/add_comment` | 009/024 |
 | **Scope** | Branches | main + non-main **LONG** branches (main first, blocking CE gate); per-branch issues, source, SCM (backdated), reference-branch mapping (→ main), create-analysis handshake (analysis_uuid field 19) | **only LONG branches migrate** — SHORT branches are skipped, PULL_REQUEST branches are never submitted (all forced to `branchType=LONG`); **per-branch measures are NOT carried** (CE recomputes); **per-branch new-code-period is NOT migrated** | Per-branch report upload | 020 |
@@ -62,10 +62,11 @@ The **Caveats / NOT carried** column is load-bearing — read it before relying 
 | Symbols / syntax-highlighting reference data | Lower-priority, optional (SPEC-004 FR-12/FR-13) | Endpoints never called; proto types unused |
 
 ## ⚠️ Known Gaps (real bugs / partial fidelity, verified in code)
-<!-- updated: 2026-06-08_23:03:54 -->
+<!-- updated: 2026-07-27_22:37:13 -->
 
 | Item | Status | Spec |
 |---|---|---|
+| **Template-instantiated custom rules are not created on the target**, so their issues are never raised on Cloud and carry none of their triage metadata (status, comments, tags). Live-verified on `demo-rules`: `secrets:My_custom_secret_rule` 404s on the target org, so its `action-plan`-tagged issue cannot be migrated. Reported at WARN as `not_found` by `syncIssueMetadata` | Real, unfixed | 456 |
 | **BUG-02** — active rule **params (regex/thresholds), impacts, timestamps** missing from the scanner-report `activerules.pb` path (the XML restore path *does* carry them into the profile definition) | Real, partial | 001 |
 | **BUG-05** — issue **assignee** extracted but the assign call is never invoked (no Cloud assign API) | Real | 010 |
 | **BUG-06** — no source-link / back-reference comment to the original Server issue/hotspot is added | Real | 008/009 |

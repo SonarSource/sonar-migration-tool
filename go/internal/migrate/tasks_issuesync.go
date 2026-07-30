@@ -49,7 +49,15 @@ func issueMetadataSyncTasks() []TaskDef {
 // default tags+sysTags). The raw /api/issues/search response folds
 // rule defaults into every issue's tags array, so the unsubtracted
 // list is useless as a "manual triage" signal — see ruleTagDefaults
-// (#352 follow-up).
+// (#352 follow-up). Tags is the *actionability* signal only.
+//
+// AllTags holds the issue's COMPLETE tag list as the source server
+// reports it (rule defaults included). It is what actually gets
+// written to the Cloud issue: /api/issues/set_tags REPLACES the tag
+// list rather than merging into it, so writing only the user-added
+// subset would strip the rule-default tags the Cloud issue carries
+// from its own analysis (#456). Populated for source-side issues;
+// empty for Cloud-side candidates.
 //
 // ManualSeverity mirrors the `manualSeverity` boolean on the SQ Server
 // API response: true means a user has explicitly overridden the issue's
@@ -82,6 +90,7 @@ type matchableIssue struct {
 	Resolution     string
 	IssueStatus    string
 	Tags           []string
+	AllTags        []string
 	Comments       []issueComment
 	Assignee       string
 	ManualSeverity bool
@@ -555,6 +564,21 @@ func syncProjectIssues(ctx context.Context, e *Executor, cloudKey, orgKey, serve
 	stats.A = a.Load()
 	stats.B = b.Load()
 	stats.C = c.Load()
+	// Surface unmatched triaged issues at WARN. Each unmatched pair means a
+	// manually triaged source issue whose status, comments and tags were NOT
+	// migrated — previously only visible per-issue at DEBUG, which is how #456
+	// (every "secrets" finding dropped from the scan report, so nothing to sync
+	// onto) went unnoticed. The counts make the fidelity loss visible in a
+	// default-verbosity run.
+	if stats.B+stats.C > 0 {
+		e.Logger.Warn("syncIssueMetadata: triaged source issues without a unique Cloud counterpart — their status, comments and tags were NOT migrated (run with --debug for the per-issue rule/file/line)",
+			"project", cloudKey,
+			"actionable", stats.Actionable,
+			"synced", stats.A,
+			"ambiguous_line", stats.B,
+			"not_found", stats.C,
+		)
+	}
 	return stats
 }
 
@@ -716,7 +740,7 @@ func syncOnePair(ctx context.Context, e *Executor, pair issuePair, baseURL, proj
 	// URL-bearing comment body) must NOT fail the pair — the status,
 	// comments and tags have already synced successfully.
 	syncIssueSourceLink(ctx, e, cloudKey, baseURL, projectKey, pair.source.Key, pair.source.Branch, pair.cloud.Comments)
-	tagsFailed := syncIssueTags(ctx, e, cloudKey, pair.source.Tags)
+	tagsFailed := syncIssueTags(ctx, e, cloudKey, pair.source.tagsToApply(), pair.cloud.Tags)
 
 	if transFailed || commentFailed || tagsFailed {
 		counter.Fail()
@@ -909,19 +933,60 @@ func isAlreadyMigratedIssueComment(body string, cloudComments []issueComment) bo
 	return false
 }
 
-// syncIssueTags sets the source tags plus the idempotency marker on the Cloud issue.
+// syncIssueTags writes the source issue's tags onto the Cloud issue, unioned
+// with the tags the Cloud issue already carries, plus the idempotency marker.
 // Returns true if the API call failed.
-func syncIssueTags(ctx context.Context, e *Executor, cloudKey string, sourceTags []string) bool {
-	tags := make([]string, 0, len(sourceTags)+1)
-	tags = append(tags, sourceTags...)
-	if !slices.Contains(tags, metadataSyncTag) {
-		tags = append(tags, metadataSyncTag)
-	}
+//
+// /api/issues/set_tags REPLACES the tag list, so the union matters: sending
+// only the source tags would drop the rule-default tags the Cloud analysis
+// assigned, and sending only the user-added subset would drop both those and
+// the source's own rule-default tags (#456).
+func syncIssueTags(ctx context.Context, e *Executor, cloudKey string, sourceTags, cloudTags []string) bool {
+	tags := mergeIssueTags(sourceTags, cloudTags)
 	if err := e.Cloud.Issues.SetTags(ctx, cloudKey, tags); err != nil {
 		logAPIWarn(e.Logger, "syncIssueMetadata: set tags failed", err, "issue", cloudKey)
 		return true
 	}
 	return false
+}
+
+// mergeIssueTags returns the de-duplicated union of the source issue's tags and
+// the Cloud issue's existing tags, with the metadataSyncTag idempotency marker
+// appended. Blank entries are dropped and the result is sorted so the payload
+// (and therefore the unit tests) is deterministic.
+func mergeIssueTags(sourceTags, cloudTags []string) []string {
+	seen := make(map[string]struct{}, len(sourceTags)+len(cloudTags)+1)
+	out := make([]string, 0, len(sourceTags)+len(cloudTags)+1)
+	add := func(t string) {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			return
+		}
+		if _, dup := seen[t]; dup {
+			return
+		}
+		seen[t] = struct{}{}
+		out = append(out, t)
+	}
+	for _, t := range cloudTags {
+		add(t)
+	}
+	for _, t := range sourceTags {
+		add(t)
+	}
+	add(metadataSyncTag)
+	slices.Sort(out)
+	return out
+}
+
+// tagsToApply returns the tag list to write onto the Cloud counterpart: the
+// source issue's complete tag set when available, falling back to the
+// user-added subset for records built before AllTags existed.
+func (m matchableIssue) tagsToApply() []string {
+	if len(m.AllTags) > 0 {
+		return m.AllTags
+	}
+	return m.Tags
 }
 
 // ---------------------------------------------------------------------------
@@ -1044,7 +1109,8 @@ func loadMatchableIssues(e *Executor, serverURL, serverKey string, ruleDefaults 
 
 		comments := parseIssueComments(item.Data)
 		rule := extractField(item.Data, "rule")
-		userTags := ruleDefaults.UserTagsOnly(serverURL, rule, extractStringArray(item.Data, "tags"))
+		allTags := extractStringArray(item.Data, "tags")
+		userTags := ruleDefaults.UserTagsOnly(serverURL, rule, allTags)
 
 		issues = append(issues, matchableIssue{
 			Key:            extractField(item.Data, "key"),
@@ -1055,6 +1121,7 @@ func loadMatchableIssues(e *Executor, serverURL, serverKey string, ruleDefaults 
 			Resolution:     extractField(item.Data, "resolution"),
 			IssueStatus:    extractField(item.Data, "issueStatus"),
 			Tags:           userTags,
+			AllTags:        allTags,
 			Comments:       comments,
 			Assignee:       extractField(item.Data, "assignee"),
 			ManualSeverity: extractBool(item.Data, "manualSeverity"),

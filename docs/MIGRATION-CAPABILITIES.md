@@ -129,15 +129,24 @@ Automatic handling of projects with more than 10,000 issues, which hit SonarQube
 - Deduplication of results across overlapping date windows
 
 #### Issue Metadata Synchronization (SPEC-008)
+<!-- updated: 2026-07-27_22:37:13 -->
 
 After issues are uploaded via scanner reports, this phase matches each SonarQube Cloud issue back to its Server counterpart and replicates the original lifecycle metadata.
 
 **What it migrates:**
 - **Issue statuses**: OPEN, CONFIRMED, FALSE_POSITIVE, WONTFIX, ACCEPTED, RESOLVED, CLOSED
 - **Issue comments**: All comments with original author attribution (`[Migrated from SonarQube Server - @author]`)
-- **Issue tags**: Custom tags applied by users
+- **Issue tags**: Custom tags applied by users, written as the union of the source issue's full tag list and the tags the Cloud issue already carries (`set_tags` replaces rather than merges, so the union is what preserves both sides)
 - **Issue assignments**: User assignments mapped via `users.csv`
-- Pre-filtering skips issues with no manual changes (60-80% of typical enterprise issues), dramatically reducing API calls
+- Pre-filtering skips issues with no manual changes (60-80% of typical enterprise issues), dramatically reducing API calls. A user-added tag is itself a trigger, so an **OPEN** issue that only carries a custom tag is still synced — no status change is required.
+
+**Prerequisite — the issue must exist on the target.** This phase can only write onto a Cloud counterpart that the replayed scanner report actually produced. If an issue was dropped at report-build time (its rule was not in the report's active-rule set) or by the Compute Engine (its rule does not exist in the target organization), there is nothing to tag or transition. Such issues are counted as `not_found` and reported at WARN, e.g.:
+
+```
+WARN syncIssueMetadata: triaged source issues without a unique Cloud counterpart —
+     their status, comments and tags were NOT migrated
+     project=... actionable=3 synced=2 ambiguous_line=0 not_found=1
+```
 
 #### Hotspot Metadata Synchronization (SPEC-009)
 
@@ -358,7 +367,7 @@ Electron-based desktop application wrapping the CLI and browser GUI.
 | **External Issues** | **Not migrated** | **Full migration with ad-hoc rules** |
 | Issue Statuses | N/A | Synced (OPEN, CONFIRMED, FP, WONTFIX, etc.) |
 | Issue Comments | N/A | Synced with author attribution |
-| Issue Tags | N/A | Synced |
+| Issue Tags | N/A | Synced (full source tag list ∪ existing Cloud tags) |
 | Issue Assignments | N/A | Mapped via users.csv |
 | Hotspot Review Status | N/A | Synced (TO_REVIEW, REVIEWED/SAFE, etc.) |
 | Hotspot Comments | N/A | Synced |
