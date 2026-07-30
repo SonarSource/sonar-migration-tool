@@ -72,6 +72,7 @@ func verifyZipStructure(t *testing.T, zipBytes []byte) {
 
 	expected := map[string]bool{
 		"metadata.pb":      false,
+		"analytics.pb":     false,
 		"component-1.pb":   false,
 		"component-2.pb":   false,
 		"activerules.pb":   false,
