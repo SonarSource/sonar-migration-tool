@@ -158,8 +158,14 @@ func projectHotspotsFullTask() func(ctx context.Context, e *Executor) error {
 					})
 					if err != nil {
 						if isNonFatalHTTPErr(err) {
+							// Skip only THIS status. A bare `return nil` here
+							// abandoned the whole project/branch, so a 403/404
+							// on the second status silently threw away every
+							// hotspot already collected for the first — and
+							// wrote no chunk at all, leaving the operator with
+							// a warning that named only the failing status.
 							e.Logger.Warn("getProjectHotspotsFull skipped", "project", projectKey, "branch", branch, "status", status, "err", err)
-							return nil
+							continue
 						}
 						return err
 					}

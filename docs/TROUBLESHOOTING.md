@@ -142,6 +142,68 @@ sonar-migration-tool reset <TOKEN> <ENTERPRISE_KEY> --export_directory ./files/
 
 ---
 
+## Project migrated but has no issues and no branches
+<!-- updated: 2026-07-27_23:05:00 -->
+
+**Symptom.** `transfer` finishes and reports success. The project is on
+SonarQube Cloud with the right permissions, settings and quality gate — but it
+has no issues, no Security Hotspots, and only a single empty branch (usually
+named `master`, not your source main branch). The migration report says
+*Partial Migration*.
+
+**Cause.** The project contains files in a language that has no quality profile
+on the target organization — almost always a language contributed by a 3rd-party
+(non-SonarSource) SonarQube Server plugin, which SonarQube Cloud has no analyzer
+for. The Compute Engine rejects the **whole** analysis report:
+
+```
+Report contains a file with language 'lua' but no matching quality profile
+  (Visit failed for Component {key=my-project:src/main/Constants.lua,type=FILE} ...)
+```
+
+Because the project, its permissions and its quality gate are created *before*
+the report is submitted, everything except the code, issues and branches lands.
+
+**Confirm it.** Look for `level=ERROR msg="project data NOT migrated: ...` in the
+transfer output, or query the Compute Engine directly:
+
+```bash
+curl -u "$SC_TOKEN:" \
+  "https://sonarcloud.io/api/ce/activity?component=<target-project-key>&ps=10" \
+  | python3 -m json.tool | grep -A2 errorMessage
+```
+
+**Fix.** Choose how the transfer should handle those files with
+`--unsupported_languages` (issue #474):
+
+```bash
+# Default: drop the unsupported-language files, migrate everything else
+sonar-migration-tool transfer -c config.json --project_key my-project
+
+# Or: do not migrate this project's issues/branches at all
+sonar-migration-tool transfer -c config.json --project_key my-project \
+  --unsupported_languages skip
+```
+
+With the default `exclude` mode the affected files (and the issues on them)
+are left behind, and the project is reported as a Partial Migration with the
+languages and file count listed — every other file, issue, measure and branch
+migrates normally. See
+[Unsupported programming languages](TRANSFER.md#unsupported-programming-languages---unsupported_languages).
+
+To see which languages are involved before migrating, compare the source
+project's languages against the target organization's quality profiles:
+
+```bash
+curl -u "$SQ_TOKEN:" \
+  "$SQ_URL/api/measures/component?component=my-project&metricKeys=ncloc_language_distribution"
+curl -u "$SC_TOKEN:" \
+  "https://sonarcloud.io/api/qualityprofiles/search?organization=<org>" \
+  | python3 -c 'import sys,json; print(sorted({p["language"] for p in json.load(sys.stdin)["profiles"]}))'
+```
+
+---
+
 ## CE Task "Issue whilst processing the report" (importProjectData)
 <!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 

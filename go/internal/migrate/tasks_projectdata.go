@@ -48,6 +48,7 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 	}
 
 	completed := loadCompletedBranches(e.Store)
+	counter := TaskCounterFromContext(ctx)
 
 	e.Logger.Info("starting task", "task", "importProjectData", "items", len(projects))
 	prog := common.NewProgressLogger(e.Logger, "importProjectData", len(projects))
@@ -81,9 +82,11 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 
 			scMainBranch := fetchSCMainBranch(gCtx, e, cloudKey)
 
-			if err := importProjectBranches(gCtx, e, proj, sqBranches, scMainBranch, completed, w); err != nil {
-				e.Logger.Warn("project project data failed", "project", cloudKey, "err", err)
-			}
+			// #474 — a rejected report used to be a Warn that left the task
+			// summary reporting nothing at all, so a transfer that migrated
+			// zero issues and zero branches still looked clean.
+			recordImportOutcome(e, counter, cloudKey,
+				importProjectBranches(gCtx, e, proj, sqBranches, scMainBranch, completed, w))
 			prog.Increment()
 			return nil
 		})
@@ -275,6 +278,10 @@ func recordBranchResult(w *common.ChunkWriter, cloudKey, branchName string, resu
 		"task_id":           result.TaskID,
 		"error":             result.Error,
 		"source_purged":     result.SourcePurged,
+		// #474 — languages with no target quality profile, and how many files
+		// were dropped from the report because of them.
+		"unsupported_languages": result.UnsupportedLanguages,
+		"excluded_files":        result.ExcludedFiles,
 	})
 	w.WriteOne(record) //nolint:errcheck
 }
@@ -300,6 +307,15 @@ type importResult struct {
 	// flag drives the per-project "source code of branch X is missing" note
 	// in the migration report.
 	SourcePurged bool
+	// UnsupportedLanguages lists the languages found in this branch that have
+	// no quality profile on the target organization (#474). Set whether the
+	// branch was skipped, excluded-and-migrated, or submitted as-is, so the
+	// migration report can always explain what happened.
+	UnsupportedLanguages []string
+	// ExcludedFiles is the number of file components dropped from the scanner
+	// report because their language has no target quality profile (#474,
+	// --unsupported_languages=exclude).
+	ExcludedFiles int
 }
 
 func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*importResult, error) {
@@ -336,7 +352,10 @@ func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*i
 		return nil, fmt.Errorf("CE task failed: %w", err)
 	}
 
-	return &importResult{Status: "success", TaskID: result.TaskID, SourcePurged: report.SourcePurged}, nil
+	return &importResult{
+		Status: "success", TaskID: result.TaskID, SourcePurged: report.SourcePurged,
+		UnsupportedLanguages: report.UnsupportedLanguages, ExcludedFiles: report.ExcludedFiles,
+	}, nil
 }
 
 // branchReport is a packaged scanner report for one branch, ready to submit.
@@ -347,6 +366,11 @@ type branchReport struct {
 	// (purged by housekeeping) so the report carries measures + issues but no
 	// source. Propagated to the importResult for #425 reporting.
 	SourcePurged bool
+	// UnsupportedLanguages / ExcludedFiles carry the #474 finding through to
+	// the importResult so the migration report can explain the outcome even
+	// when the branch itself migrated successfully.
+	UnsupportedLanguages []string
+	ExcludedFiles        int
 }
 
 // buildBranchReport loads the extracted data for one branch, applies the
@@ -355,7 +379,8 @@ type branchReport struct {
 // to anchor its issues).
 func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput, targetBranch string) (*branchReport, *importResult, error) {
 	issues := loadExtractedIssues(e, input.ServerURL, input.ServerKey, input.Branch)
-	hotspotIssues := loadExtractedHotspots(e, input.ServerURL, input.ServerKey, input.Branch)
+	hotspots := loadExtractedHotspots(e, input.ServerURL, input.ServerKey, input.Branch)
+	hotspotIssues := convertHotspotsForReport(e, input, hotspots)
 	extIssues, adHocRules := loadExtractedExternalIssues(e, input.ServerURL, input.ServerKey, input.Branch)
 	// Include ALL FIL components, not just those with source code; external
 	// issues can reference files without source. CloudVoyager does the same.
@@ -408,6 +433,20 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	// The CE validates that qprofile keys in the metadata exist in the SC instance.
 	scProfileByLang := buildSCProfileMap(ctx, e, input.OrgKey)
 
+	// #474 — a file whose language has no target quality profile makes the
+	// SonarQube Cloud CE reject the WHOLE report ("Report contains a file with
+	// language 'X' but no matching quality profile"), which silently costs the
+	// project every issue and every branch. Detect that before submitting,
+	// explain it, and apply the configured handling mode.
+	componentsBeforePolicy := len(components)
+	components, unsupportedLangKeys, unsupportedSkip := applyUnsupportedLanguagePolicy(
+		e, input.CloudKey, input.Branch, components, scProfileByLang)
+	if unsupportedSkip != nil {
+		return nil, unsupportedSkip, nil
+	}
+	// Zero unless mode "exclude" actually dropped components.
+	excludedFiles := componentsBeforePolicy - len(components)
+
 	// Filter profiles and rules to languages present in the project (matches cloudvoyager).
 	projectLangs := collectProjectLanguages(components)
 	// Cross-language analyzers raise findings on files whose own language
@@ -436,13 +475,13 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	// requires every native issue's rule to be activated in the analysis; an
 	// orphan rule (e.g. a "secrets" finding when secrets rules were never
 	// extracted as active rules) aborts the entire report. Such issues cannot
-	// be recreated on the target regardless. Hotspots are appended afterward —
-	// they are validated against hotspot rules, not the active-rule set.
+	// be recreated on the target regardless.
 	issues, droppedOrphanIssues := dropIssuesWithInactiveRules(issues, activeRules)
 	if droppedOrphanIssues > 0 {
 		e.Logger.Warn("dropped native issues referencing inactive rules",
 			"project", input.CloudKey, "branch", input.Branch, "dropped", droppedOrphanIssues)
 	}
+	hotspotIssues = dropHotspotsWithInactiveRules(e, input, len(hotspots), hotspotIssues, activeRules)
 	issues = append(issues, hotspotIssues...)
 
 	now := time.Now()
@@ -477,8 +516,9 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	// offset would be rejected by the CE with "offset out of range". We zero
 	// out the offsets for those issues below while preserving their line numbers.
 	purgedRefs := ensureFileSourcesPresent(fileComps, pbSources)
+	// Covers the hotspot-derived issues too — they were merged into `issues`
+	// above, so a second pass over `hotspotIssues` would be a no-op.
 	issues = zeroOffsetsForPurgedComponents(issues, purgedRefs, cr)
-	hotspotIssues = zeroOffsetsForPurgedComponents(hotspotIssues, purgedRefs, cr)
 
 	changesets := buildChangesetMap(cr, components, pbSources, scmByComponent, now)
 
@@ -579,7 +619,10 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 		"activeRules", len(activeRules),
 	)
 
-	return &branchReport{ZIP: zipBytes, ProjectVersion: projectVersion, SourcePurged: sourcePurged}, nil, nil
+	return &branchReport{
+		ZIP: zipBytes, ProjectVersion: projectVersion, SourcePurged: sourcePurged,
+		UnsupportedLanguages: unsupportedLangKeys, ExcludedFiles: excludedFiles,
+	}, nil, nil
 }
 
 // ensureFileSourcesPresent guarantees every FILE component has a source
@@ -981,16 +1024,21 @@ func extractImpactInputs(data json.RawMessage, field string) []scanreport.Impact
 	return out
 }
 
-// loadExtractedHotspots loads hotspots from the extract and converts them
-// to IssueInput for inclusion in the scanner report protobuf. Hotspots
-// are mapped to regular issues with severity derived from vulnerability
-// probability (matching CloudVoyager behavior).
-func loadExtractedHotspots(e *Executor, serverURL, serverKey, branch string) []scanreport.IssueInput {
+// loadExtractedHotspots loads the Security Hotspots extracted from the source
+// SonarQube Server for one branch.
+//
+// The returned HotspotInputs are converted into native issues by
+// scanreport.ConvertHotspotsToIssues before they enter the report: SonarQube
+// Cloud dropped hotspots on 2026-07-01 and turned the former hotspot rules
+// into ordinary issue rules, so a hotspot has to migrate as an issue (#423).
+// The review state is carried through here so the metadata-sync phase can
+// reproduce it as issue triage.
+func loadExtractedHotspots(e *Executor, serverURL, serverKey, branch string) []scanreport.HotspotInput {
 	items, err := readExtractItems(e, "getProjectHotspotsFull")
 	if err != nil {
 		return nil
 	}
-	var hotspots []scanreport.IssueInput
+	var hotspots []scanreport.HotspotInput
 	for _, item := range items {
 		if item.ServerURL != serverURL {
 			continue
@@ -1012,7 +1060,6 @@ func loadExtractedHotspots(e *Executor, serverURL, serverKey, branch string) []s
 			ruleKey = extractNestedRuleKey(item.Data)
 		}
 		repo, key := splitRule(ruleKey)
-		severity := mapVulnProbToSeverity(extractField(item.Data, "vulnerabilityProbability"))
 		// Prefer the full textRange (with column offsets) so the report
 		// matches CloudVoyager / the real scanner; fall back to the bare
 		// line when no textRange is present.
@@ -1025,21 +1072,62 @@ func loadExtractedHotspots(e *Executor, serverURL, serverKey, branch string) []s
 			startLine = line
 			endLine = line
 		}
-		hotspots = append(hotspots, scanreport.IssueInput{
-			Key:          extractField(item.Data, "key"),
-			CreationDate: parseISODate(extractField(item.Data, "creationDate")),
-			RuleRepo:     repo,
-			RuleKey:      key,
-			Message:      extractField(item.Data, "message"),
-			Severity:     severity,
-			StartLine:    startLine,
-			EndLine:      endLine,
-			StartOff:     startOff,
-			EndOff:       endOff,
-			Component:    extractField(item.Data, "component"),
+		hotspots = append(hotspots, scanreport.HotspotInput{
+			Key:                      extractField(item.Data, "key"),
+			CreationDate:             parseISODate(extractField(item.Data, "creationDate")),
+			RuleRepo:                 repo,
+			RuleKey:                  key,
+			Message:                  extractField(item.Data, "message"),
+			VulnerabilityProbability: extractField(item.Data, "vulnerabilityProbability"),
+			Status:                   extractField(item.Data, "status"),
+			Resolution:               extractField(item.Data, "resolution"),
+			StartLine:                startLine,
+			EndLine:                  endLine,
+			StartOff:                 startOff,
+			EndOff:                   endOff,
+			Component:                extractField(item.Data, "component"),
 		})
 	}
 	return hotspots
+}
+
+// convertHotspotsForReport turns extracted Security Hotspots into the native
+// issues the scanner would have reported for the same rules.
+//
+// SonarQube Cloud has had no Security Hotspots since 2026-07-01 — the former
+// hotspot rules are ordinary issue rules there — so every hotspot migrates as a
+// native issue (#423). See scanreport.ConvertHotspotsToIssues for why no type
+// and no impacts are stamped.
+func convertHotspotsForReport(e *Executor, input importBranchInput, hotspots []scanreport.HotspotInput) []scanreport.IssueInput {
+	hotspotIssues, ruleless := scanreport.ConvertHotspotsToIssues(hotspots)
+	if ruleless > 0 {
+		e.Logger.Warn("skipped hotspots with no resolvable rule key",
+			"project", input.CloudKey, "branch", input.Branch, "skipped", ruleless)
+	}
+	return hotspotIssues
+}
+
+// dropHotspotsWithInactiveRules holds hotspot-derived issues to the same
+// active-rule contract as native issues.
+//
+// They used to bypass it, on the reasoning that hotspots were "validated
+// against hotspot rules, not the active-rule set" — true while the target had
+// hotspots, false since 2026-07-01. Now that they are ordinary issues, an
+// orphan hotspot rule aborts the whole report in the CE and takes every other
+// finding on the branch down with it. Rules that Cloud retired outright rather
+// than converting (e.g. python:S4823 and python:S4784, status REMOVED) land
+// here: they are unmigratable, and dropping them is the only way the rest of
+// the branch survives.
+func dropHotspotsWithInactiveRules(e *Executor, input importBranchInput, sourceCount int, hotspotIssues []scanreport.IssueInput, activeRules []scanreport.ActiveRuleInput) []scanreport.IssueInput {
+	kept, dropped := dropIssuesWithInactiveRules(hotspotIssues, activeRules)
+	if dropped > 0 {
+		e.Logger.Warn("dropped hotspots referencing inactive rules — these rules are not activatable on the target",
+			"project", input.CloudKey, "branch", input.Branch, "dropped", dropped)
+	}
+	e.Logger.Info("converted security hotspots to issues",
+		"project", input.CloudKey, "branch", input.Branch,
+		"hotspots", sourceCount, "converted", len(kept), "droppedInactiveRule", dropped)
+	return kept
 }
 
 func extractNestedRuleKey(data json.RawMessage) string {
@@ -1062,19 +1150,6 @@ func extractNestedRuleKey(data json.RawMessage) string {
 	var key string
 	json.Unmarshal(keyRaw, &key)
 	return key
-}
-
-func mapVulnProbToSeverity(prob string) string {
-	switch strings.ToUpper(prob) {
-	case "HIGH":
-		return "CRITICAL"
-	case "MEDIUM":
-		return "MAJOR"
-	case "LOW":
-		return "MINOR"
-	default:
-		return "MAJOR"
-	}
 }
 
 func loadExtractedComponents(e *Executor, serverURL, serverKey, branch string) []scanreport.ComponentInput {

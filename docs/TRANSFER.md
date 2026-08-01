@@ -1,5 +1,5 @@
 # Using `transfer` — Transfer One Project
-<!-- updated: 2026-06-05_10:50:51 -->
+<!-- updated: 2026-07-27_23:05:00 -->
 
 `transfer` is the **single-command**, **project-scoped** path. It chains the four phases of a migration — **extract → structure → mappings → migrate** — into one call, then writes a PDF summary on completion. Use it when you have one project (or a small, well-known set of projects) to move across.
 
@@ -39,7 +39,7 @@ On completion, a migration summary is written into the export directory as both 
 ---
 
 ## What gets migrated
-<!-- updated: 2026-06-05_12:26:41 -->
+<!-- updated: 2026-07-27_23:55:00 -->
 
 `transfer` migrates a **project-scoped** slice, not the whole instance.
 
@@ -50,7 +50,7 @@ On completion, a migration summary is written into the export directory as both 
 - The **quality profiles** the project uses, with their rules restored (and any parent relationships).
 - The project's **permissions** (group permissions), **settings**, **tags**, **links**, **webhooks**, and **new code period**.
 - The project's complete **issue history** — both native SonarQube issues and **externally imported issues** (from third-party analyzers) — replayed via project-data import, with triage state (status, resolution, assignee, comments, tags) synced afterward.
-- The project's **Security Hotspots**, with their review status and comments synced.
+- The project's **Security Hotspots** — which land on SonarQube Cloud as **issues tagged `sqs-hotspot`**. SonarQube Cloud dropped Security Hotspots as a distinct finding kind on 1 July 2026 and converted the former hotspot rules in place into ordinary issue rules, so there is no hotspot to migrate *into*; each hotspot becomes an issue on the same rule, file and line, and the `sqs-hotspot` tag is what tells you it used to be a hotspot on SonarQube Server. Their **review status** is re-applied as an issue transition — still-to-review stays open, *safe* becomes false-positive, *fixed* and *acknowledged* become accepted — along with their **comments** and a link back to the original hotspot on the source server. A hotspot whose rule was **retired** on SonarQube Cloud rather than converted cannot be migrated at all; those are counted and logged rather than silently dropped.
 
 **Not modified** (use the full [`migrate`](MIGRATE.md) command for these):
 
@@ -64,7 +64,7 @@ On completion, a migration summary is written into the export directory as both 
 
 > **Note on prerequisites.** A few global entities are created on the target only because the project depends on them — for example, the groups referenced by the project's group permissions, and the migration user/permissions used to perform the migration. These are created as needed so the project's own configuration resolves correctly.
 
-> **Note on issue counts.** The target issue count is normally lower than the SonarQube Server total because issues that are **CLOSED** or resolved as **FIXED** have no SonarQube Cloud counterpart and are intentionally skipped (the scanner report only recreates active findings). Open issues plus triaged ones (won't-fix / false-positive / accepted) and all externally-imported issues are migrated. Security Hotspots transfer in full.
+> **Note on issue counts.** The target issue count is normally lower than the SonarQube Server total because issues that are **CLOSED** or resolved as **FIXED** have no SonarQube Cloud counterpart and are intentionally skipped (the scanner report only recreates active findings). Open issues plus triaged ones (won't-fix / false-positive / accepted) and all externally-imported issues are migrated. Security Hotspots transfer in full, but they arrive as **issues** (see above) — so they are *counted inside* the target issue total, and SonarQube Cloud's Security Hotspots view will be empty by design. Comparing a source hotspot count against a target hotspot count therefore always reads as total loss even when every hotspot migrated correctly; filter the target project by the `sqs-hotspot` tag instead.
 
 > **Non-main branches.** Project-data import now migrates the project's **non-main branches too** — each is created on SonarQube Cloud as a **long-lived branch with its full issue history**. Before submitting a non-main branch's report, the tool performs SonarQube Cloud's **"Create analysis" handshake** (`POST {api-host}/analysis/analyses`) to register the branch and obtain an analysis id, which it embeds in the report so the Compute Engine binds the issues to the branch. All migrated branches are registered as **long-lived** so SonarQube Cloud's automatic pruning of short-lived branches (after ~30 days) never discards migrated history. A non-main branch is **skipped** only when the source server no longer has its source code (e.g. purged by housekeeping for an inactive branch) — re-analyze that branch on the source first to restore it.
 
@@ -148,6 +148,7 @@ Omit `--project_key` to transfer **every** project visible to the token (in whic
 ---
 
 ## Flags
+<!-- updated: 2026-07-27_23:05:00 -->
 
 | Flag | Config key | Description |
 |------|------------|-------------|
@@ -167,8 +168,52 @@ Omit `--project_key` to transfer **every** project visible to the token (in whic
 | `--cert_password` | `source.cert_password` | Password for the source server mTLS client certificate |
 | `--skip_project_data_migration` | top-level `skip_project_data_migration` | Skip the project-data migration (importProjectData + per-issue / per-hotspot sync). Defaults to off — project data is migrated by default. Issue #303. |
 | `--exclude_branches` | `target.exclude_branches` | Glob patterns for non-main branches to skip during project data import. Repeatable. Main branch is never excluded. |
+| `--unsupported_languages` | top-level or `target.unsupported_languages` | How to handle files whose language has no quality profile on the target — typically a language from a 3rd-party SonarQube Server plugin. `exclude` (default) drops those files from the analysis report so the rest of the project still migrates; `skip` does not migrate the project's issues/branches at all; `warn` submits the report unchanged. Issue #474. |
 
 CLI flags override values from the config file when both are provided.
+
+### Unsupported programming languages (`--unsupported_languages`)
+<!-- updated: 2026-07-27_23:05:00 -->
+
+SonarQube Server can analyze languages SonarQube Cloud cannot. A language
+contributed by a 3rd-party (non-SonarSource) plugin has no analyzer on the
+Cloud side, and therefore no quality profile.
+
+The analysis report `transfer` fabricates stamps every file with the language
+the source server reported for it, while the report's metadata can only name
+quality profiles that exist on the target. When a file's language has no target
+profile, the SonarQube Cloud Compute Engine rejects the **entire** report:
+
+```
+Report contains a file with language 'lua' but no matching quality profile
+```
+
+The project, its permissions and its quality gate are created before the report
+is submitted, so the result is a project that looks migrated but has **no issues
+and no branches**.
+
+`transfer` detects this before submitting and prints the affected languages, the
+file count and an example path. Choose the handling with
+`--unsupported_languages`:
+
+| Mode | Behaviour |
+|------|-----------|
+| `exclude` (default) | Drops the unsupported-language files from the report. Everything else — the other files, their issues, measures and all branches — migrates. The project is reported as a **Partial Migration** with the languages and file count listed. |
+| `skip` | Submits no report for the project. Its settings, permissions and quality gate still migrate; its issues and branches do not. Reported as skipped, with the reason. |
+| `warn` | Submits the report unchanged (pre-#474 behaviour). The Compute Engine is expected to reject it; the rejection is reported as such rather than as a generic API error. |
+
+```bash
+# Migrate everything except the unsupported-language files (default)
+sonar-migration-tool transfer -c config.json --project_key my-project
+
+# Do not transfer this project's issues/branches at all
+sonar-migration-tool transfer -c config.json --project_key my-project \
+  --unsupported_languages skip
+```
+
+A failure to read the target organization's quality profiles disables the
+detection entirely rather than treating every language as unsupported, so a
+transient API error can never drop a project's files.
 
 ---
 
@@ -187,11 +232,11 @@ For a full description of every output file, see the [Output Files Reference](MI
 ---
 
 ## After the transfer
-<!-- updated: 2026-06-05_10:50:51 -->
+<!-- updated: 2026-07-27_23:55:00 -->
 
 1. Log in to SonarQube Cloud and confirm the project appears under the target organization.
 2. Spot-check that the quality gate and quality profile are present.
-3. Spot-check that issues and hotspots came across (compare counts against the source). Project data is always imported, so a fresh re-scan is not required to seed historical data — though you should still run a normal analysis once your pipeline is repointed.
+3. Spot-check that issues came across (compare counts against the source). Former Security Hotspots are part of that issue count — filter the target project by the `sqs-hotspot` tag to see them. Do **not** compare against SonarQube Cloud's Security Hotspots view: it is empty by design, because Cloud no longer has hotspots. Project data is always imported, so a fresh re-scan is not required to seed historical data — though you should still run a normal analysis once your pipeline is repointed.
 4. Update your CI/CD pipeline to point at SonarQube Cloud (`SONAR_TOKEN`, `SONAR_HOST_URL`).
 
 For more on post-migration steps, see the [After you migrate](MIGRATE.md#after-you-migrate) section in MIGRATE.md.

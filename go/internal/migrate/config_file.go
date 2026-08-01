@@ -47,6 +47,10 @@ type configFileShape struct {
 	SkipProjectDataMigration *FlexibleBool `json:"skip_project_data_migration"`
 	Debug                    bool          `json:"debug"`
 	ExcludeBranches          []string      `json:"exclude_branches"`
+	// UnsupportedLanguages selects how projects containing files in a
+	// language with no target quality profile are handled (#474):
+	// "exclude" (default), "skip", or "warn".
+	UnsupportedLanguages string `json:"unsupported_languages"`
 
 	// Shape 2 (command-sectioned).
 	Migrate *configFileShape `json:"migrate"`
@@ -98,6 +102,8 @@ type unifiedTargetBlock struct {
 	DefaultOrganization string   `json:"default_organization"` // #281
 	ProjectKeyPattern   string   `json:"project_key_pattern"`  // #138
 	ExcludeBranches     []string `json:"exclude_branches"`
+	// UnsupportedLanguages — see configFileShape.UnsupportedLanguages (#474).
+	UnsupportedLanguages string `json:"unsupported_languages"`
 }
 
 type sonarCloudBlock struct {
@@ -165,7 +171,11 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			cfg.DefaultOrganization = s.Target.DefaultOrganization
 			cfg.ProjectKeyPattern = s.Target.ProjectKeyPattern
 			cfg.ExcludeBranches = s.Target.ExcludeBranches
+			cfg.UnsupportedLanguages = s.Target.UnsupportedLanguages
 		}
+		// #474 — target.unsupported_languages wins, else the top-level field.
+		cfg.UnsupportedLanguages = resolveUnsupportedLanguages(
+			cfg.UnsupportedLanguages, s.UnsupportedLanguages)
 		if cfg.Concurrency == 0 {
 			cfg.Concurrency = s.Concurrency
 		}
@@ -185,6 +195,8 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		return cfg
 	case s.SonarCloud != nil:
 		cfg := s.SonarCloud.toMigrateConfig(s.Settings)
+		cfg.UnsupportedLanguages = resolveUnsupportedLanguages(
+			cfg.UnsupportedLanguages, s.UnsupportedLanguages)
 		if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
 			cfg.SkipIssueSync = s.SkipIssueSync.Value
 		}
@@ -194,6 +206,8 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		return cfg
 	case s.Migrate != nil:
 		cfg := s.Migrate.toMigrateConfig()
+		cfg.UnsupportedLanguages = resolveUnsupportedLanguages(
+			cfg.UnsupportedLanguages, s.UnsupportedLanguages)
 		// Outer-level skip_issue_sync wins when both outer and inner
 		// set it (#299). If only outer is set, propagate it down.
 		if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
@@ -218,6 +232,8 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			IncludeProjectData: s.IncludeProjectData,
 			Debug:              s.Debug,
 			ExcludeBranches:    s.ExcludeBranches,
+			// #474 — flat shape reads the field directly.
+			UnsupportedLanguages: s.UnsupportedLanguages,
 		}
 		if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
 			cfg.SkipIssueSync = s.SkipIssueSync.Value

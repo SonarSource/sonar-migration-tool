@@ -859,16 +859,16 @@ var Wizard = (function() {
 			send({ type: 'cancel_wizard' });
 		},
 		submitInput: submitInput,
-		submitCloudURL: submitCloudURL,
-		submitChoice: function() {
+		submitCloudURL,
+		submitChoice() {
 			const sel = document.getElementById('choice-select');
 			if (sel) {
 				respond(Number.parseInt(sel.value, 10));
 			}
 		},
-		onCloudSelect: onCloudSelect,
-		respond: respond,
-		goBack: function() {
+		onCloudSelect,
+		respond,
+		goBack() {
 			if (!pendingPromptId) {
 				return;
 			}
