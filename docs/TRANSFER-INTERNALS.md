@@ -215,14 +215,21 @@ statement of `runTransfer`.
   | P1   generate{Project,Profile,Gate,Group,Organization}Mappings   (no deps) |
   |         |                                                                  |
   | P2   createProjects, createProfiles, createGates, createGroups,            |
-  |       getMigrationUser                                                     |
+  |       getMigrationUser, getOrgBinding, getOrgRepos                         |
   |         |                                                                  |
   | P3   analyzeProfileRules, getGateConditions, getProfileBackups,            |
-  |       grantMigrationUserProjectPermissions, setProfileParent               |
+  |       grantMigrationUserProjectPermissions, setProfileParent,              |
+  |       getProjectIds, matchProjectRepos                                     |
+  |         |                                                                  |
+  |       matchProjectRepos (issue #122): source binding x org binding x       |
+  |         org repos -> {project_id, repository_id} or a skip record          |
+  |         (org_not_bound / repo_not_found / no_project_id)                   |
   |         |                                                                  |
   | P4   restoreProfiles, addGateConditions     <== profiles + gate configured |
   |       setProjectProfiles / Gates / GroupPermissions / Settings /           |
   |         Tags / Links / Webhooks, setNewCodePeriods  BEFORE scan replay (P5)|
+  |       setProjectBinding -> POST {api}/dop-translation/project-bindings     |
+  |         (enterprise host only; skips forwarded for the report)             |
   |         |                                                                  |
   | P5   importProjectData                                                     |
   |         |                                                                  |

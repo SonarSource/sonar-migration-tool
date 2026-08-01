@@ -520,3 +520,93 @@ func collectSyncOutcome(store *common.DataStore, taskName, errorOp string) []pro
 	}
 	return out
 }
+
+// bindingSkipOperations maps the skip reasons recorded by the migrate
+// package's matchProjectRepos task to the operator-facing sentence shown
+// in the report's Details column (issue #122).
+//
+// The map is keyed by the same string constants the migrate package
+// writes (migrate.BindingSkip*); they are duplicated here rather than
+// imported to keep internal/report free of a dependency on
+// internal/migrate, matching how the global-settings outcome contract is
+// already handled.
+var bindingSkipOperations = map[string]string{
+	"org_not_bound":  "project binding was not possible because the org itself is not bound",
+	"repo_not_found": "project binding was not possible because the repository was not found in the bound DevOps organization",
+	"no_project_id":  "project binding was not possible because the target project id could not be resolved",
+}
+
+// collectProjectBindingOutcomes reads the per-project DevOps platform
+// binding records written by matchProjectRepos / setProjectBinding and
+// converts the non-successful ones into projectFailure entries so the
+// affected projects are reported as Partial Migration (issue #122).
+//
+// Two shapes are handled:
+//
+//   - skip records ({"binding_skipped":true,"skip_reason":...}) — the
+//     binding was never attempted. The dominant case is a source project
+//     that WAS bound while the target organization is not bound to the
+//     same DevOps platform, which issue #122 requires to be reported as
+//     partially migrated with an explicit explanation.
+//   - failed writes ({"status":"failed","error":...}) — the binding call
+//     itself was rejected by SonarQube Cloud.
+//
+// Records are read from setProjectBinding when present (it forwards the
+// skip records verbatim and adds the write outcomes) and fall back to
+// matchProjectRepos so the skips are still reported when the binding
+// write task did not run.
+func collectProjectBindingOutcomes(store *common.DataStore) []projectFailure {
+	items, err := store.ReadAll("setProjectBinding")
+	if err != nil || len(items) == 0 {
+		items, err = store.ReadAll("matchProjectRepos")
+		if err != nil {
+			return nil
+		}
+	}
+
+	var out []projectFailure
+	seen := make(map[string]bool)
+	for _, raw := range items {
+		key := jsonStr(raw, "cloud_project_key")
+		op, errMsg, ok := classifyBindingRecord(raw)
+		if key == "" || !ok {
+			continue
+		}
+		// One line per project per distinct message.
+		dedup := key + "\x00" + op
+		if seen[dedup] {
+			continue
+		}
+		seen[dedup] = true
+		out = append(out, projectFailure{
+			CloudProjectKey: key,
+			Bucket:          projectBucketPartial,
+			Operation:       op,
+			Error:           errMsg,
+		})
+	}
+	return out
+}
+
+// classifyBindingRecord turns one DevOps-binding record into the operator
+// sentence and error to report. ok is false for records that need no
+// report entry (a successful binding, or an unrecognised shape).
+func classifyBindingRecord(raw json.RawMessage) (op, errMsg string, ok bool) {
+	if jsonBool(raw, "binding_skipped") {
+		reason := jsonStr(raw, "skip_reason")
+		op = bindingSkipOperations[reason]
+		if op == "" {
+			// Prefer the sentence the migrate side recorded so a newly
+			// added reason still renders something useful.
+			op = jsonStr(raw, "skip_detail")
+		}
+		if op == "" {
+			op = "DevOps platform binding was not migrated"
+		}
+		return op, "", true
+	}
+	if jsonStr(raw, "status") == "failed" {
+		return "DevOps platform binding not migrated", jsonStr(raw, "error"), true
+	}
+	return "", "", false
+}

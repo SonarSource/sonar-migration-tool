@@ -71,6 +71,12 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 			// from the data-migration tasks' JSONL output.
 			projectFailures := collectProjectFailures(runDir)
 			projectFailures = append(projectFailures, collectProjectSyncSkips(store, projectDataMap)...)
+			// #122 — a project whose source DevOps platform binding
+			// could not be replicated on SonarQube Cloud (most often
+			// because the target organization is not itself bound to
+			// that platform) is reported as Partial Migration with the
+			// reason spelled out in the Details column.
+			projectFailures = append(projectFailures, collectProjectBindingOutcomes(store)...)
 			// #474 — projects whose report had unsupported-language files
 			// excluded imported successfully but are not full migrations.
 			projectFailures = append(projectFailures, collectUnsupportedLanguageExclusions(store)...)
