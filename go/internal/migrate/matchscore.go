@@ -90,7 +90,7 @@ func issueMatchScore(source, candidate matchableIssue) int {
 	case levenshteinWithin(source.Message, candidate.Message, messageApproxDistance):
 		score++
 	}
-	if source.Component == candidate.Component {
+	if stripProjectKeyPrefix(source.Component) == stripProjectKeyPrefix(candidate.Component) {
 		score++
 	}
 	if source.Line == candidate.Line {
@@ -126,7 +126,8 @@ func issueMatchScore(source, candidate matchableIssue) int {
 func classifyIssueCandidatesByScore(candidates []matchableIssue, source matchableIssue) (matchableIssue, syncOutcome) {
 	var exact []matchableIssue
 	for _, c := range candidates {
-		if c.Component == source.Component && c.Line == source.Line && c.Message == source.Message {
+		if stripProjectKeyPrefix(c.Component) == stripProjectKeyPrefix(source.Component) &&
+			c.Line == source.Line && c.Message == source.Message {
 			exact = append(exact, c)
 		}
 	}
@@ -179,7 +180,7 @@ func hotspotMatchScore(source, candidate matchableHotspot) int {
 	case levenshteinWithin(source.Message, candidate.Message, messageApproxDistance):
 		score++
 	}
-	if source.Component == candidate.Component {
+	if stripProjectKeyPrefix(source.Component) == stripProjectKeyPrefix(candidate.Component) {
 		score++
 	}
 	if source.Line == candidate.Line {
@@ -204,7 +205,8 @@ func classifyHotspotCandidatesByScore(candidates []matchableHotspot, source matc
 	var exact []matchableHotspot
 	for _, c := range candidates {
 		if (source.RuleKey == "" || c.RuleKey == "" || c.RuleKey == source.RuleKey) &&
-			c.Component == source.Component && c.Line == source.Line && c.Message == source.Message {
+			stripProjectKeyPrefix(c.Component) == stripProjectKeyPrefix(source.Component) &&
+			c.Line == source.Line && c.Message == source.Message {
 			exact = append(exact, c)
 		}
 	}
