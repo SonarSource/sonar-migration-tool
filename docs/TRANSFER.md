@@ -39,7 +39,7 @@ On completion, a migration summary is written into the export directory as both 
 ---
 
 ## What gets migrated
-<!-- updated: 2026-07-27_23:05:00 -->
+<!-- updated: 2026-07-27_23:55:00 -->
 
 `transfer` migrates a **project-scoped** slice, not the whole instance.
 
@@ -64,7 +64,7 @@ On completion, a migration summary is written into the export directory as both 
 
 > **Note on prerequisites.** A few global entities are created on the target only because the project depends on them — for example, the groups referenced by the project's group permissions, and the migration user/permissions used to perform the migration. These are created as needed so the project's own configuration resolves correctly.
 
-> **Note on issue counts.** The target issue count is normally lower than the SonarQube Server total because issues that are **CLOSED** or resolved as **FIXED** have no SonarQube Cloud counterpart and are intentionally skipped (the scanner report only recreates active findings). Open issues plus triaged ones (won't-fix / false-positive / accepted) and all externally-imported issues are migrated. Security Hotspots transfer in full.
+> **Note on issue counts.** The target issue count is normally lower than the SonarQube Server total because issues that are **CLOSED** or resolved as **FIXED** have no SonarQube Cloud counterpart and are intentionally skipped (the scanner report only recreates active findings). Open issues plus triaged ones (won't-fix / false-positive / accepted) and all externally-imported issues are migrated. Security Hotspots transfer in full, but they arrive as **issues** (see above) — so they are *counted inside* the target issue total, and SonarQube Cloud's Security Hotspots view will be empty by design. Comparing a source hotspot count against a target hotspot count therefore always reads as total loss even when every hotspot migrated correctly; filter the target project by the `sqs-hotspot` tag instead.
 
 > **Non-main branches.** Project-data import now migrates the project's **non-main branches too** — each is created on SonarQube Cloud as a **long-lived branch with its full issue history**. Before submitting a non-main branch's report, the tool performs SonarQube Cloud's **"Create analysis" handshake** (`POST {api-host}/analysis/analyses`) to register the branch and obtain an analysis id, which it embeds in the report so the Compute Engine binds the issues to the branch. All migrated branches are registered as **long-lived** so SonarQube Cloud's automatic pruning of short-lived branches (after ~30 days) never discards migrated history. A non-main branch is **skipped** only when the source server no longer has its source code (e.g. purged by housekeeping for an inactive branch) — re-analyze that branch on the source first to restore it.
 
@@ -262,11 +262,11 @@ For a full description of every output file, see the [Output Files Reference](MI
 ---
 
 ## After the transfer
-<!-- updated: 2026-06-05_10:50:51 -->
+<!-- updated: 2026-07-27_23:55:00 -->
 
 1. Log in to SonarQube Cloud and confirm the project appears under the target organization.
 2. Spot-check that the quality gate and quality profile are present.
-3. Spot-check that issues and hotspots came across (compare counts against the source). Project data is always imported, so a fresh re-scan is not required to seed historical data — though you should still run a normal analysis once your pipeline is repointed.
+3. Spot-check that issues came across (compare counts against the source). Former Security Hotspots are part of that issue count — filter the target project by the `sqs-hotspot` tag to see them. Do **not** compare against SonarQube Cloud's Security Hotspots view: it is empty by design, because Cloud no longer has hotspots. Project data is always imported, so a fresh re-scan is not required to seed historical data — though you should still run a normal analysis once your pipeline is repointed.
 4. Update your CI/CD pipeline to point at SonarQube Cloud (`SONAR_TOKEN`, `SONAR_HOST_URL`).
 
 For more on post-migration steps, see the [After you migrate](MIGRATE.md#after-you-migrate) section in MIGRATE.md.

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/scanreport"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 )
 
@@ -67,12 +69,6 @@ type hotspotComment struct {
 	HTMLText  string
 	Markdown  string
 	CreatedAt string
-}
-
-// hotspotPair links a source hotspot to its matched Cloud counterpart.
-type hotspotPair struct {
-	source matchableHotspot
-	cloud  matchableHotspot
 }
 
 // ---------------------------------------------------------------------------
@@ -201,23 +197,6 @@ func dedupeActionableHotspots(in []matchableHotspot) []matchableHotspot {
 // Resolution mapping
 // ---------------------------------------------------------------------------
 
-// mapHotspotResolution converts a SonarQube Server hotspot resolution
-// into the equivalent SonarQube Cloud resolution value, or "" when the
-// source resolution has no SonarQube Cloud counterpart and the caller
-// must skip the status change entirely (#323 — ACKNOWLEDGED falls
-// here: SQC has no equivalent, so we leave the hotspot in its default
-// TO_REVIEW state and record the demotion in the per-project stats).
-func mapHotspotResolution(resolution string) string {
-	switch strings.ToUpper(resolution) {
-	case "SAFE":
-		return "SAFE"
-	case "FIXED":
-		return "FIXED"
-	default:
-		return ""
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Main task entry point
 // ---------------------------------------------------------------------------
@@ -297,11 +276,21 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 	if len(sourceHotspots) == 0 {
 		return result
 	}
-	var actionable []matchableHotspot
+	// Every source hotspot needs a target visit now, not only the triaged
+	// ones. SonarQube Cloud dropped hotspots on 2026-07-01, so each one lands
+	// as an ordinary issue and has to be tagged `sqs-hotspot` to stay
+	// identifiable as a former hotspot (#423) — including TO_REVIEW hotspots,
+	// which carry no triage at all and were previously filtered out here.
+	//
+	// hotspotHasManualChanges is retained because the predict pipeline still
+	// uses it to report how many hotspots carry migratable triage.
+	actionable := make([]matchableHotspot, 0, len(sourceHotspots))
+	triaged := 0
 	for _, h := range sourceHotspots {
 		if hotspotHasManualChanges(h) {
-			actionable = append(actionable, h)
+			triaged++
 		}
+		actionable = append(actionable, h)
 	}
 	// #323 follow-up: the source extract carries one hotspot record per
 	// branch of the SQS project, but a single SQC hotspot exists per
@@ -321,19 +310,24 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 	}
 	result.Stats.Actionable = int64(len(actionable))
 	if len(actionable) == 0 {
-		e.Logger.Info("syncHotspotMetadata: no actionable source hotspots after filter", "project", input.CloudKey, "source_total", len(sourceHotspots))
+		e.Logger.Info("syncHotspotMetadata: no source hotspots to sync", "project", input.CloudKey, "source_total", len(sourceHotspots))
 		return result
 	}
 
-	// 2. Wait for Cloud indexing — proves the CE task is done.
+	// 2. Wait for Cloud indexing — proves the CE task is done. Counted over
+	// issues, not hotspots: the imported findings are issues on the target.
 	_ = waitForCloudIndexing(ctx, func() (int, error) {
-		return e.Cloud.Hotspots.Count(ctx, input.CloudKey, input.OrgKey)
+		params := url.Values{}
+		params.Set("componentKeys", input.CloudKey)
+		params.Set("organization", input.OrgKey)
+		return e.Cloud.Issues.Count(ctx, params)
 	})
 
-	e.Logger.Info("syncHotspotMetadata: syncing pairs",
+	e.Logger.Info("syncHotspotMetadata: syncing hotspots as issues",
 		"project", input.CloudKey,
 		"source_total", len(sourceHotspots),
-		"actionable", len(actionable),
+		"to_sync", len(actionable),
+		"carrying_triage", triaged,
 	)
 
 	// 3 + 4. Per-actionable-source: targeted search + resolve by
@@ -380,37 +374,33 @@ func resolveAndSyncHotspot(ctx context.Context, e *Executor, cloudKey, orgKey, b
 		e.Logger.Debug("syncHotspotMetadata: source hotspot not matchable", "key", src.Key, "rule", src.RuleKey, "component", src.Component, "line", src.Line)
 		return syncOutcomeNotFound
 	}
-	candidates, err := findCloudHotspotCandidates(ctx, e, cloudKey, orgKey, filePath, src.Branch)
+	// The target counterpart is an ISSUE, not a hotspot: SonarQube Cloud has
+	// had no hotspots since 2026-07-01, so /api/hotspots/search can never
+	// return the migrated finding. Reuse the issue matcher, which additionally
+	// scopes the search server-side by rule — something the hotspot endpoint
+	// never accepted (#423).
+	candidates, err := findCloudIssueCandidates(ctx, e, cloudKey, orgKey, filePath, src.RuleKey, src.Branch)
 	if err != nil {
 		logAPIWarn(e.Logger, "syncHotspotMetadata: cloud candidate lookup failed", err,
 			"project", cloudKey, "source_key", src.Key, "file", filePath, "branch", src.Branch)
 		return syncOutcomeLookupError
 	}
-	target, outcome := classifyHotspotCandidatesByLine(candidates, src.RuleKey, src.Line, src.Offset)
+	target, outcome := classifyIssueCandidatesByLine(candidates, src.Line)
 	switch outcome {
 	case syncOutcomeSynced:
-		pair := hotspotPair{source: src, cloud: target}
-		if err := syncOneHotspot(ctx, e, pair, baseURL, sourceKey); err != nil {
+		if err := syncOneHotspotAsIssue(ctx, e, src, target, baseURL, sourceKey); err != nil {
 			counter.Fail()
 			logAPIWarn(e.Logger, "syncHotspotMetadata: hotspot sync failed", err,
 				"source_key", src.Key, "cloud_key", target.Key)
 		} else {
 			counter.Success()
 		}
-		// #323: matched a cloud counterpart but the source resolution
-		// is ACKNOWLEDGED, which SQC doesn't support. syncOneHotspot
-		// has already skipped the status change (still synced comments)
-		// — re-classify here so the per-project tally records a
-		// demotion instead of a clean sync.
-		if IsAcknowledgedResolution(src.Resolution) {
-			outcome = syncOutcomeAckDemoted
-		}
 	case syncOutcomeNotFound:
 		e.Logger.Debug("syncHotspotMetadata: no cloud counterpart on source line", "source_key", src.Key, "rule", src.RuleKey, "file", filePath, "line", src.Line)
 	case syncOutcomeLineMismatch:
 		keys := make([]string, 0)
 		for _, c := range candidates {
-			if c.Line == src.Line && (c.RuleKey == "" || c.RuleKey == src.RuleKey) {
+			if c.Line == src.Line {
 				keys = append(keys, c.Key)
 			}
 		}
@@ -419,236 +409,127 @@ func resolveAndSyncHotspot(ctx context.Context, e *Executor, cloudKey, orgKey, b
 	return outcome
 }
 
-// classifyHotspotCandidatesByLine resolves a cloud counterpart for one
-// source hotspot from the per-file candidate set returned by
-// /api/hotspots/search?files=<filePath>.
-//
-// Three-phase match (#392 + follow-up):
-//
-//  1. PRECISE — (ruleKey, line, offset) match. textRange.startOffset
-//     disambiguates two hotspots of the same rule firing on different
-//     columns of the same line (e.g. `sys.argv[1]` and `sys.argv[2]`).
-//     Without it, those collapse to syncOutcomeLineMismatch and stay
-//     TO_REVIEW. Skipped when either side has Offset == 0 (older API
-//     shapes that omit textRange).
-//
-//  2. RULE+LINE — (ruleKey, line) match. The common case: rule
-//     populated on both sides, no column ambiguity needed. Restores
-//     the pre-offset behaviour that already covered 25 of the 31
-//     SAFE hotspots in the live run.
-//
-//  3. EMPTY-RULE FALLBACK — line-only against cloud candidates whose
-//     ruleKey is empty. The 2026-06-09 audit recorded a case where
-//     every cloud hotspot parsed with RuleKey == "" (per-version /
-//     per-endpoint omission); without this fallback the entire
-//     project's REVIEWED hotspots stay TO_REVIEW. Candidates with a
-//     non-empty ruleKey that doesn't match the source are deliberately
-//     NOT considered here — they're a different rule firing on the
-//     same line.
-//
-// Returns syncOutcomeSynced when exactly one candidate qualifies,
-// syncOutcomeLineMismatch when several do (caller skips rather than
-// guess), and syncOutcomeNotFound when none do.
-func classifyHotspotCandidatesByLine(candidates []matchableHotspot, sourceRule string, sourceLine, sourceOffset int) (matchableHotspot, syncOutcome) {
-	// Phase 1: precise (ruleKey, line, offset). Both sides must carry
-	// a non-zero offset for this phase to be considered.
-	if sourceOffset > 0 {
-		var pick matchableHotspot
-		matches := 0
-		for _, c := range candidates {
-			if c.RuleKey == sourceRule && c.Line == sourceLine && c.Offset > 0 && c.Offset == sourceOffset {
-				matches++
-				if matches == 1 {
-					pick = c
-				}
-			}
-		}
-		if matches == 1 {
-			return pick, syncOutcomeSynced
-		}
-		// matches == 0 (offset not present or no exact column hit) →
-		// fall through to phase 2. matches > 1 means duplicate offsets
-		// on the cloud (extremely unusual) — also fall through and let
-		// phase 2's rule+line check resolve to line_mismatch.
-	}
-
-	// Phase 2: (ruleKey, line) match.
-	var pick matchableHotspot
-	matches := 0
-	for _, c := range candidates {
-		if c.RuleKey == sourceRule && c.Line == sourceLine {
-			matches++
-			if matches == 1 {
-				pick = c
-			}
-		}
-	}
-	if matches > 0 {
-		if matches == 1 {
-			return pick, syncOutcomeSynced
-		}
-		return matchableHotspot{}, syncOutcomeLineMismatch
-	}
-
-	// Phase 3: cloud candidates with no ruleKey are eligible for a
-	// line-only fallback.
-	matches = 0
-	for _, c := range candidates {
-		if c.RuleKey == "" && c.Line == sourceLine {
-			matches++
-			if matches == 1 {
-				pick = c
-			}
-		}
-	}
-	switch matches {
-	case 0:
-		return matchableHotspot{}, syncOutcomeNotFound
-	case 1:
-		return pick, syncOutcomeSynced
-	default:
-		return matchableHotspot{}, syncOutcomeLineMismatch
-	}
-}
-
-// findCloudHotspotCandidates queries /api/hotspots/search?files=…
-// for cloud hotspots in a single file. Hotspots are scarce enough
-// that we can skip the rule filter here and resolve in memory; the
-// /api/hotspots/search endpoint also does not accept a rules
-// parameter.
-//
-// The endpoint defaults to status=TO_REVIEW when no status is
-// supplied — a hotspot already moved to REVIEWED by a prior migration
-// run would be invisible (#323). We issue one paginated request per
-// status (TO_REVIEW + REVIEWED) and merge the results so re-runs can
-// see (and correct) cloud hotspots in any state, deduplicating by
-// hotspot key on the off chance the same key surfaces in both
-// responses.
-//
-// Uses e.Raw (the cloud-side raw client) because the typed
-// HotspotsClient's SearchAll doesn't expose a per-file filter.
-//
-// The branch parameter is essential for multi-branch projects: without it
-// /api/hotspots/search resolves against the project's main branch only, so
-// hotspots on non-main branches never find their cloud counterpart and go
-// unsynced. Source and target branch names match 1:1 (the main branch is
-// renamed to the source name on import — #428), so the source branch name
-// is the correct cloud branch to search.
-func findCloudHotspotCandidates(ctx context.Context, e *Executor, cloudKey, orgKey, filePath, branch string) ([]matchableHotspot, error) {
-	baseParams := func() url.Values {
-		p := url.Values{}
-		p.Set("projectKey", cloudKey)
-		p.Set("files", filePath)
-		if orgKey != "" {
-			p.Set("organization", orgKey)
-		}
-		if branch != "" {
-			p.Set("branch", branch)
-		}
-		return p
-	}
-
-	out := make([]matchableHotspot, 0)
-	seen := make(map[string]bool)
-	for _, status := range []string{"TO_REVIEW", "REVIEWED"} {
-		params := baseParams()
-		params.Set("status", status)
-		items, err := e.Raw.GetPaginated(ctx, common.PaginatedOpts{
-			Path:      "api/hotspots/search",
-			Params:    params,
-			ResultKey: "hotspots",
-			PageLimit: 5, // hotspots-in-one-file is small; cap for safety
-		})
-		if err != nil {
-			return nil, err
-		}
-		for _, raw := range items {
-			h := parseMatchableHotspot(raw)
-			if h.Key == "" || seen[h.Key] {
-				continue
-			}
-			seen[h.Key] = true
-			out = append(out, h)
-		}
-	}
-	return out, nil
-}
-
 // ---------------------------------------------------------------------------
 // Per-hotspot sync
 // ---------------------------------------------------------------------------
 
-// syncOneHotspot synchronises a single hotspot's status and comments, then
-// appends a back-link to the original SonarQube Server hotspot (#321).
-// Operations are sequential within each hotspot: status first, then comments,
-// then the source-link comment.
-func syncOneHotspot(ctx context.Context, e *Executor, pair hotspotPair, baseURL, projectKey string) error {
-	// 1. Sync status. Three branches when the source is REVIEWED:
-	//   - SAFE/FIXED → mapHotspotResolution returns the SQC resolution;
-	//     post change_status REVIEWED+<resolution>.
-	//   - ACKNOWLEDGED → SQC has no equivalent resolution. Actively
-	//     reset the cloud hotspot to TO_REVIEW with no resolution so a
-	//     re-run undoes any SAFE state a previous (buggy) migration
-	//     may have left on SQC. Idempotent — TO_REVIEW is also the
-	//     cloud default for a never-touched hotspot. #323.
-	//   - Unknown resolution → no API call (defensive).
-	// A status-sync failure is recorded but does NOT short-circuit the
-	// rest of the function — the comment and source-link steps must still
-	// run. Returning early here was why already-synced hotspots (whose
-	// change_status is rejected because they're already REVIEWED on a
-	// re-run) never got a back-link (#321).
-	var statusErr error
-	if strings.ToUpper(pair.source.Status) == "REVIEWED" {
-		resolution := mapHotspotResolution(pair.source.Resolution)
-		switch {
-		case resolution != "":
-			if err := e.Cloud.Hotspots.ChangeStatus(ctx, pair.cloud.Key, "REVIEWED", resolution); err != nil {
-				statusErr = fmt.Errorf("change status: %w", err)
-			}
-		case IsAcknowledgedResolution(pair.source.Resolution):
-			if err := e.Cloud.Hotspots.ChangeStatus(ctx, pair.cloud.Key, "TO_REVIEW", ""); err != nil {
-				statusErr = fmt.Errorf("reset ACKNOWLEDGED to TO_REVIEW: %w", err)
-			}
+// syncOneHotspotAsIssue reproduces one source hotspot's review state on its
+// migrated Cloud counterpart, which is an ordinary issue (#423).
+//
+// Order mirrors syncOnePair — transition, comments, back-link, tags — with the
+// sqs-hotspot tag applied last so its presence signals that everything before
+// it completed.
+//
+// Unlike the issue sync, this runs for EVERY hotspot, including a TO_REVIEW one
+// with no triage and no comments, because the tag itself is the deliverable:
+// with no hotspot concept left on the target, the tag is the only thing that
+// keeps a former hotspot identifiable.
+func syncOneHotspotAsIssue(ctx context.Context, e *Executor, src matchableHotspot, target matchableIssue, baseURL, projectKey string) error {
+	// 1. Review state. The hotspot's status/resolution maps onto the unified
+	// issue-status enum, and the existing issue machinery turns that into a
+	// transition — including gating "accept" on the Cloud issue actually
+	// offering it (#322).
+	//
+	// ACKNOWLEDGED no longer has to be demoted to SAFE. That conflation was
+	// forced by Cloud's hotspot API having no ACKNOWLEDGED resolution; the
+	// issue model expresses it faithfully as ACCEPTED.
+	synthetic := matchableIssue{
+		Key:         src.Key,
+		IssueStatus: scanreport.HotspotIssueStatus(src.Status, src.Resolution),
+		Resolution:  src.Resolution,
+	}
+	var firstErr error
+	if syncIssueTransition(ctx, e, target.Key, synthetic, target.Transitions) {
+		firstErr = fmt.Errorf("transition to %s failed", synthetic.IssueStatus)
+	}
+
+	// 2. Review comments, via the issue comment path.
+	if len(src.Comments) > 0 {
+		if syncIssueComments(ctx, e, target.Key, hotspotCommentsAsIssueComments(src.Comments), target.Comments) && firstErr == nil {
+			firstErr = fmt.Errorf("one or more comments failed")
 		}
 	}
 
-	// 2. Sync comments + the source-link comment. Cloud detail is fetched
-	// once up front for the idempotency checks of both. Unlike before, we
-	// fetch even when the source has no comments, because the source-link
-	// comment (#321) is always appended for a matched hotspot.
-	cloudComments := fetchCloudHotspotComments(ctx, e, pair.cloud.Key)
-	for _, comment := range pair.source.Comments {
-		if isAlreadyMigratedComment(comment, cloudComments) {
-			continue
-		}
+	// 3. Back-link to the origin (#321). It still points at the source
+	// server's security_hotspots view — that is where the finding lives there.
+	addHotspotSourceLinkToIssue(ctx, e, hotspotSourceLinkTarget{
+		IssueKey:   target.Key,
+		BaseURL:    baseURL,
+		ProjectKey: projectKey,
+		HotspotKey: src.Key,
+		Branch:     src.Branch,
+	}, target.Comments)
 
-		text := formatMigratedHotspotComment(comment)
-		if text == "" {
-			continue
-		}
-
-		if err := e.Cloud.Hotspots.AddComment(ctx, pair.cloud.Key, text); err != nil {
-			logAPIWarn(e.Logger, "syncHotspotMetadata: add comment failed", err,
-				"cloud_key", pair.cloud.Key,
-				"comment_author", comment.Login,
-			)
-			continue
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(100 * time.Millisecond):
-		}
+	// 4. The sqs-hotspot tag (#423).
+	if syncHotspotIssueTags(ctx, e, target.Key, target.Tags) && firstErr == nil {
+		firstErr = fmt.Errorf("set tags failed")
 	}
 
-	// 3. Append a back-link to the original SonarQube Server hotspot so
-	// engineers can click through to its origin (#321). Best-effort and
-	// idempotent — consistent with the migrated-comment handling above.
-	// Always attempted, even if the status sync above failed.
-	addHotspotSourceLink(ctx, e, pair.cloud.Key, baseURL, projectKey, pair.source.Key, pair.source.Branch, cloudComments)
+	return firstErr
+}
 
-	return statusErr
+// hotspotCommentsAsIssueComments adapts hotspot comments to the issue comment
+// shape so the issue comment sync can be reused verbatim.
+func hotspotCommentsAsIssueComments(in []hotspotComment) []issueComment {
+	out := make([]issueComment, 0, len(in))
+	for _, c := range in {
+		out = append(out, issueComment{
+			Login:     c.Login,
+			HTMLText:  c.HTMLText,
+			Markdown:  c.Markdown,
+			CreatedAt: c.CreatedAt,
+		})
+	}
+	return out
+}
+
+// syncHotspotIssueTags tags a migrated hotspot with scanreport.HotspotIssueTag
+// so it stays identifiable as a former Security Hotspot on a target that no
+// longer has the concept (#423).
+//
+// /api/issues/set_tags replaces the whole tag set, so the Cloud issue's
+// existing tags are carried over rather than clobbered. The metadata-sync
+// marker is added too, for consistency with the issue sync.
+func syncHotspotIssueTags(ctx context.Context, e *Executor, cloudKey string, existingTags []string) bool {
+	tags := make([]string, 0, len(existingTags)+2)
+	tags = append(tags, existingTags...)
+	for _, t := range []string{scanreport.HotspotIssueTag, metadataSyncTag} {
+		if !slices.Contains(tags, t) {
+			tags = append(tags, t)
+		}
+	}
+	if err := e.Cloud.Issues.SetTags(ctx, cloudKey, tags); err != nil {
+		logAPIWarn(e.Logger, "syncHotspotMetadata: set tags failed", err, "issue", cloudKey)
+		return true
+	}
+	return false
+}
+
+// hotspotSourceLinkTarget identifies where a hotspot back-link should be
+// posted and what it should point at.
+type hotspotSourceLinkTarget struct {
+	IssueKey   string // Cloud issue the hotspot migrated into
+	BaseURL    string // public base URL of the source server
+	ProjectKey string // source project key
+	HotspotKey string // source hotspot key
+	Branch     string // source branch, if any
+}
+
+// addHotspotSourceLinkToIssue posts the "Link to [Original hotspot](…)"
+// back-link as a comment on the migrated ISSUE. Best-effort and idempotent.
+func addHotspotSourceLinkToIssue(ctx context.Context, e *Executor, tgt hotspotSourceLinkTarget, cloudComments []issueComment) {
+	link := hotspotSourceLinkURL(tgt.BaseURL, tgt.ProjectKey, tgt.HotspotKey, tgt.Branch)
+	if link == "" {
+		return
+	}
+	if issueCommentsContain(cloudComments, hotspotSourceLinkMarker) {
+		return
+	}
+	text := hotspotSourceLinkMarker + "(" + link + ")"
+	if err := e.Cloud.Issues.AddComment(ctx, tgt.IssueKey, text); err != nil {
+		e.Logger.Warn("syncHotspotMetadata: could not add source-link comment (non-fatal)",
+			"issue", tgt.IssueKey, "reason", sourceLinkErrSummary(err))
+	}
 }
 
 // hotspotSourceLinkURL builds the SonarQube Server deep link back to the
@@ -670,113 +551,6 @@ func hotspotSourceLinkURL(baseURL, projectKey, hotspotKey, branch string) string
 // detect an already-added source-link comment (see issueSourceLinkMarker for
 // why we match on the marker rather than the full URL).
 const hotspotSourceLinkMarker = "Link to [Original hotspot]"
-
-// addHotspotSourceLink posts a one-line "Link to [Original hotspot](…)"
-// comment pointing back to the source hotspot (#321). Best-effort and
-// idempotent: skipped when a cloud comment already carries the marker.
-func addHotspotSourceLink(ctx context.Context, e *Executor, cloudKey, baseURL, projectKey, sourceHotspotKey, branch string, cloudComments []hotspotComment) {
-	link := hotspotSourceLinkURL(baseURL, projectKey, sourceHotspotKey, branch)
-	if link == "" {
-		return
-	}
-	if hotspotCommentsContain(cloudComments, hotspotSourceLinkMarker) {
-		return
-	}
-	text := hotspotSourceLinkMarker + "(" + link + ")"
-	if err := e.Cloud.Hotspots.AddComment(ctx, cloudKey, text); err != nil {
-		e.Logger.Warn("syncHotspotMetadata: could not add source-link comment (non-fatal)",
-			"cloud_key", cloudKey, "reason", sourceLinkErrSummary(err))
-	}
-}
-
-// hotspotCommentsContain reports whether any cloud comment's text contains substr.
-func hotspotCommentsContain(cloudComments []hotspotComment, substr string) bool {
-	for _, cc := range cloudComments {
-		t := cc.Markdown
-		if t == "" {
-			t = cc.HTMLText
-		}
-		if strings.Contains(t, substr) {
-			return true
-		}
-	}
-	return false
-}
-
-// fetchCloudHotspotComments retrieves comments for a Cloud hotspot via the
-// /api/hotspots/show endpoint. Returns nil on failure (non-fatal — worst case
-// is duplicate comments, not data loss).
-func fetchCloudHotspotComments(ctx context.Context, e *Executor, cloudKey string) []hotspotComment {
-	detail, err := e.Cloud.Hotspots.Show(ctx, cloudKey)
-	if err != nil {
-		e.Logger.Debug("syncHotspotMetadata: could not fetch cloud hotspot detail",
-			"cloud_key", cloudKey, "err", err)
-		return nil
-	}
-	comments := make([]hotspotComment, 0, len(detail.Comment))
-	for _, c := range detail.Comment {
-		comments = append(comments, hotspotComment{
-			Login:    c.Login,
-			HTMLText: c.HTMLText,
-			Markdown: c.Markdown,
-		})
-	}
-	return comments
-}
-
-// migratedCommentPrefix is prepended to every migrated comment.
-const migratedCommentPrefix = "[Migrated from SonarQube]"
-
-// formatMigratedHotspotComment builds the comment text to post to Cloud.
-func formatMigratedHotspotComment(c hotspotComment) string {
-	body := c.Markdown
-	if body == "" {
-		body = c.HTMLText
-	}
-	if body == "" {
-		return ""
-	}
-
-	var sb strings.Builder
-	sb.WriteString(migratedCommentPrefix)
-	sb.WriteString("\n\n")
-	if c.Login != "" {
-		sb.WriteString("**Author:** ")
-		sb.WriteString(c.Login)
-		sb.WriteString("\n")
-	}
-	if c.CreatedAt != "" {
-		sb.WriteString("**Date:** ")
-		sb.WriteString(c.CreatedAt)
-		sb.WriteString("\n")
-	}
-	sb.WriteString("\n")
-	sb.WriteString(body)
-	return sb.String()
-}
-
-// isAlreadyMigratedComment checks whether a source comment has already been
-// migrated to Cloud by looking for the migration prefix in Cloud comments.
-func isAlreadyMigratedComment(source hotspotComment, cloudComments []hotspotComment) bool {
-	body := source.Markdown
-	if body == "" {
-		body = source.HTMLText
-	}
-	if body == "" {
-		return true // empty comment, treat as already handled
-	}
-
-	for _, cc := range cloudComments {
-		ccText := cc.Markdown
-		if ccText == "" {
-			ccText = cc.HTMLText
-		}
-		if strings.Contains(ccText, migratedCommentPrefix) && strings.Contains(ccText, body) {
-			return true
-		}
-	}
-	return false
-}
 
 // ---------------------------------------------------------------------------
 // Loading source hotspots from extract data

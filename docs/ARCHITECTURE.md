@@ -113,7 +113,7 @@ Both `extract` and `migrate` use a typed task engine with topological sort plann
 4. **Data flow** — Tasks read input from a `DataStore` (which loads JSONL files from previous tasks) and write output via a `ChunkWriter` (which produces JSONL files for downstream tasks).
 
 ### Extract Tasks (68 tasks)
-<!-- updated: 2026-06-04_15:30:00 -->
+<!-- updated: 2026-07-27_23:55:00 -->
 
 Organized by category in `go/internal/extract/tasks_*.go`:
 - **System** — Server version, edition, plugins
@@ -124,11 +124,11 @@ Organized by category in `go/internal/extract/tasks_*.go`:
 - **Templates** — Permission templates, associated groups/users
 - **Views** — Portfolios, applications (Enterprise+ only)
 - **Issues** — Accepted issues, safe hotspots
-- **Project Data** — `getProjectIssuesFull` (issues with comments/tags/flows), `getProjectHotspotsFull` (hotspots with review details), `getProjectVersions` (current project version per branch via `/api/navigation/component`), component trees (using `FIL,UTS` qualifiers for files and unit test source files), source code, SCM data. External issues (ruff, pylint, flake8, etc.) are extracted alongside native issues. Runs by default; skipped when `--skip_project_data_migration` is set.
+- **Project Data** — `getProjectIssuesFull` (issues with comments/tags/flows), `getProjectHotspotsFull` (hotspots with review details — one query per review status, `TO_REVIEW` then `REVIEWED`, with the `REVIEWED` ones enriched via `/api/hotspots/show` for their comments and rule key; a non-fatal 403/404 on one status now `continue`s to the next instead of returning early, which used to discard the hotspots already collected for the other status and write no chunk at all), `getProjectVersions` (current project version per branch via `/api/navigation/component`), component trees (using `FIL,UTS` qualifiers for files and unit test source files), source code, SCM data. External issues (ruff, pylint, flake8, etc.) are extracted alongside native issues. Runs by default; skipped when `--skip_project_data_migration` is set.
 - **Webhooks** — Global and project-level webhooks
 
 ### Migrate Tasks (44+ tasks)
-<!-- updated: 2026-07-27_23:05:00 -->
+<!-- updated: 2026-07-27_23:55:00 -->
 
 Organized by category in `go/internal/migrate/tasks_*.go`:
 - **Create** — Projects, groups, quality gates, quality profiles, permission templates, portfolios
@@ -136,10 +136,10 @@ Organized by category in `go/internal/migrate/tasks_*.go`:
 - **Associate** — Profile-to-project, gate-to-project, group memberships
 - **Permissions** — Template permissions, project permissions
 - **Rules** — Custom rule activation
-- **ALM** — DevOps platform (project-level) binding migration, issue #122. `getOrgBinding` reads each target organization's own DevOps binding (`GET /api/alm_integration/show_bound_organization`) so a project binding is only attempted when the org is bound to the same platform; `matchProjectRepos` pairs the source project's binding with a repository of that bound DevOps organization (`GET /api/alm_integration/list_repositories`) using per-platform identifiers — GitHub `owner/repo`, GitLab numeric project id, Azure DevOps `project / repository`, Bitbucket Cloud repository slug — and resolves the Cloud project's internal id via `GET /api/navigation/component` (Cloud's `/api/projects/search` does not return one); `setProjectBinding` then writes the binding with `POST /dop-translation/project-bindings` on the **enterprise API host** (the standard host does not serve that path). Projects that cannot be bound are recorded as skips and surfaced by the report as **Partial Migration** with the reason.
-- **Project Data** — Import scan reports via reconstructed protobuf format (native issues, external issues via ExternalIssue protobuf, hotspots mapped to issues). BackdateChangesets mechanism preserves original issue creation dates; external issues are included in changeset backdating alongside native issues. Project version (`sonar.projectVersion`) is migrated from SonarQube Server to SonarQube Cloud: the extracted version is set in both the protobuf metadata and the CE submit form, falling back to `"1.0.0"` if unavailable (matching CloudVoyager behavior). Harvested from CloudVoyager's `resolve-source-project-version.js`. **Multi-branch handling:** Branches are sorted main-first via `sortBranchesMainFirst()`. The main branch is imported first and its CE task awaited; each non-main branch is then migrated as a **long-lived branch with full issue history** — `buildBranchReport` first performs SonarQube Cloud's "Create analysis" handshake (`PreCreateAnalysis` → `POST {api-host}/analysis/analyses` with `branchType=long`) to register the branch and obtain an `analysisUuid`, which is stamped into `metadata.analysis_uuid` (proto field 19) so the CE binds the report to the branch (without it the CE accepts the report but creates no branch). If the main branch CE task fails, remaining branches are skipped; a branch whose source is no longer retrievable on the server is also skipped with a clear message. Supports `ExcludeBranches` glob patterns to skip non-main branches, and per-branch checkpoint/resume via `loadCompletedBranches()`/`shouldSkipBranch()`. Project-level concurrency uses `errgroup.WithContext` + `SetLimit`.
+- **ALM** — DevOps platform binding detection
+- **Project Data** — Import scan reports via reconstructed protobuf format (native issues, external issues via ExternalIssue protobuf, and Security Hotspots converted to native issues by `scanreport.ConvertHotspotsToIssues`). **Hotspots have no separate representation in the scanner protocol:** the native `Issue` protobuf message has no type field, so a report can only name a rule and let the server classify the finding — which is why hotspots have always arrived on the target as ordinary issues rather than being lost. The conversion therefore emits rule coordinates, message and text range only, with no type, no impacts and **no severity override** (the previous `vulnerabilityProbability` → CRITICAL/MAJOR/MINOR squash stamped a severity the rule would never raise; SonarQube Cloud derives type and severity from the rule, which since 2026-07-01 is an ordinary issue rule carrying SonarSource's `former-hotspot` system tag). Converted hotspots then pass through the **same** `dropIssuesWithInactiveRules` filter as native issues — they used to bypass it, which is unsafe now that a hotspot rule can be `REMOVED` on Cloud and an issue naming a rule the analysis does not activate aborts the *entire* report in the CE; dropped ones are counted and logged. See [HOTSPOTS-AS-ISSUES.md](HOTSPOTS-AS-ISSUES.md). BackdateChangesets mechanism preserves original issue creation dates; external issues are included in changeset backdating alongside native issues. Project version (`sonar.projectVersion`) is migrated from SonarQube Server to SonarQube Cloud: the extracted version is set in both the protobuf metadata and the CE submit form, falling back to `"1.0.0"` if unavailable (matching CloudVoyager behavior). Harvested from CloudVoyager's `resolve-source-project-version.js`. **Multi-branch handling:** Branches are sorted main-first via `sortBranchesMainFirst()`. The main branch is imported first and its CE task awaited; each non-main branch is then migrated as a **long-lived branch with full issue history** — `buildBranchReport` first performs SonarQube Cloud's "Create analysis" handshake (`PreCreateAnalysis` → `POST {api-host}/analysis/analyses` with `branchType=long`) to register the branch and obtain an `analysisUuid`, which is stamped into `metadata.analysis_uuid` (proto field 19) so the CE binds the report to the branch (without it the CE accepts the report but creates no branch). If the main branch CE task fails, remaining branches are skipped; a branch whose source is no longer retrievable on the server is also skipped with a clear message. Supports `ExcludeBranches` glob patterns to skip non-main branches, and per-branch checkpoint/resume via `loadCompletedBranches()`/`shouldSkipBranch()`. Project-level concurrency uses `errgroup.WithContext` + `SetLimit`.
 - **Issue Metadata Sync** — `syncIssueMetadata`: two-phase task that waits for Cloud indexing, matches source→cloud issues by composite key (rule|filePath|line), then syncs status transitions (with fallback transition paths), comments, and tags per matched pair. Idempotent via `metadata-synchronized` tag. Runs by default; skipped when `--skip_project_data_migration` is set.
-- **Hotspot Metadata Sync** — `syncHotspotMetadata`: same two-phase pattern, matches source→cloud hotspots by composite key, syncs REVIEWED status/resolution and comments. Idempotent. Runs by default; skipped when `--skip_project_data_migration` is set.
+- **Hotspot Metadata Sync** — `syncHotspotMetadata`: same two-phase pattern, but the target side is now **issue-based**. SonarQube Cloud dropped Security Hotspots on 2026-07-01, so `/api/hotspots/search` returns nothing there by definition and every hotspot previously resolved to `not_found` — no triage was ever applied. Each source hotspot is now resolved through `findCloudIssueCandidates` + `classifyIssueCandidatesByLine` against `/api/issues/search` (which supports a server-side `rules=` filter). Each match then gets, in order: the review state as an issue transition (`TO_REVIEW` → no transition, stays OPEN; `REVIEWED`+`SAFE` → `falsepositive`; `REVIEWED`+`FIXED` → `accept`; `REVIEWED`+`ACKNOWLEDGED` → `accept`, no longer downgraded to `SAFE` — a fidelity gain the issue API can represent), its comments (`hotspotCommentsAsIssueComments`), a back-link to the original hotspot on the source server (`addHotspotSourceLinkToIssue`), and the `sqs-hotspot` tag plus `metadata-synchronized` via `/api/issues/set_tags` (`syncHotspotIssueTags`, existing tags preserved). The sync visits **every** hotspot, not just triaged ones, because the tag matters for untriaged `TO_REVIEW` hotspots too. `/api/hotspots/change_status` and `/api/hotspots/add_comment` are no longer used. Idempotent. Runs by default; skipped when `--skip_project_data_migration` is set.
 - **Global Settings** — Migrates only SQS-supported settings; `sonar.dbcleaner.branchesToKeepWhenInactive` is migrated as a regex on SonarQube Cloud
 - **Delete/Reset** — Cleanup tasks for the `reset` command
 
@@ -164,7 +164,7 @@ SonarQube Cloud API
 ```
 
 ## API Binding Library (sq-api-go)
-<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
+<!-- updated: 2026-07-27_23:55:00 -->
 
 The `lib/sq-api-go/` module provides typed Go methods for SonarQube Server and Cloud APIs. Key features:
 
@@ -173,7 +173,7 @@ The `lib/sq-api-go/` module provides typed Go methods for SonarQube Server and C
 - **mTLS support** — Client certificate authentication
 - **Automatic pagination** — Handles `p`/`ps` pagination parameters
 - **Retry with backoff** — 3 attempts with exponential backoff
-- **Cloud API clients** — `IssuesClient` and `HotspotsClient` in `cloud/` provide typed methods for Cloud issue/hotspot search, transitions, comments, and tags
+- **Cloud API clients** — `IssuesClient` in `cloud/` provides typed methods for Cloud issue search, transitions, comments, and tags; it now also carries the hotspot metadata sync, because SonarQube Cloud no longer has hotspots. `HotspotsClient` still exists in `cloud/` (search, status changes, comments) but has no production caller left; the Server-side `HotspotsClient` remains in use for reading hotspots off the source.
 
 ## Version-Specific Pipeline Architecture (SPEC-011)
 <!-- updated: 2026-06-04_01:14:00.000 by Claude -->
@@ -393,19 +393,19 @@ See [roadmap/README.md](../roadmap/README.md) for the full spec index, dependenc
 The migration tool now migrates `sonar.projectVersion` from SonarQube Server to SonarQube Cloud during project data import. The `getProjectVersions` extract task fetches the current project version per branch via `/api/navigation/component`. During project data import, the extracted version is passed to both the protobuf metadata and the CE submit form. Falls back to `"1.0.0"` if the version is not available (matching CloudVoyager behavior). This feature was harvested from CloudVoyager's `resolve-source-project-version.js`. Runs by default; skipped when `--skip_project_data_migration` is set.
 
 ### Issue #104: Migrate All Issues (Implementation Status)
-<!-- updated: 2026-06-04_15:30:00 -->
+<!-- updated: 2026-07-27_23:55:00 -->
 
 Full end-to-end issue and hotspot migration pipeline. Current status by phase:
 
 | Phase | Task | Status | Notes |
 |-------|------|--------|-------|
 | Extract | `getProjectIssuesFull` | Complete | Extracts issues with comments, tags, flows. Live-verified against SQ Enterprise 2026.2.0 |
-| Extract | `getProjectHotspotsFull` | Complete | Extracts hotspots with review details. Live-verified against SQ Enterprise 2026.2.0 |
-| Project Data Import | Protobuf report builder | Complete | Native issues, external issues (via ExternalIssue protobuf classification), hotspots mapped to issues |
+| Extract | `getProjectHotspotsFull` | Complete | Extracts hotspots with review details, one query per review status (`TO_REVIEW`, `REVIEWED`); a non-fatal 403/404 on one status now skips only that status instead of discarding the whole branch's hotspots. Live-verified against SQ Enterprise 2026.2.0 |
+| Project Data Import | Protobuf report builder | Complete | Native issues, external issues (via ExternalIssue protobuf classification), and Security Hotspots converted to native issues — rule coordinates, message and text range only, no type, no impacts, no severity override (the protobuf `Issue` message has no type field, so the server classifies the finding from the rule). Converted hotspots go through the same inactive-rule drop as native issues |
 | Migrate | `syncIssueMetadata` | Complete | Composite key matching (rule\|filePath\|line), fallback status transitions, comment sync, tag sync, idempotent via `metadata-synchronized` tag |
-| Migrate | `syncHotspotMetadata` | Complete | Composite key matching, REVIEWED status/resolution sync, comment sync, idempotent |
+| Migrate | `syncHotspotMetadata` | Complete (issue-based since 2026-07) | Matches source hotspots against target **issues** via `/api/issues/search` (server-side `rules=` filter, then line classification), applies the review state as an issue transition, comments, a source back-link, and the `sqs-hotspot` tag. Visits every hotspot, not just triaged ones. Idempotent |
 | Cloud API | `IssuesClient` | Complete | `lib/sq-api-go/cloud/` — search, transitions, comments, tags |
-| Cloud API | `HotspotsClient` | Complete | `lib/sq-api-go/cloud/` — search, status changes, comments |
+| Cloud API | `HotspotsClient` | Retired on the Cloud side | `lib/sq-api-go/cloud/` — search, status changes, comments. Still compiled but no longer on any production path: Cloud has no hotspots, so `syncHotspotMetadata` goes through `IssuesClient`. The Server-side client is still used to read hotspots off the source |
 | Infrastructure | Edition detection fallback | Complete | `/api/navigation/global` fallback when `/api/system/info` returns 403 (non-admin tokens) |
 | Testing | Unit tests + race detector | Passing | All unit tests pass, race detector clean |
 
