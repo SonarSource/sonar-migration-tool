@@ -69,10 +69,12 @@ func TestResolveAndSyncIssueLookupError(t *testing.T) {
 }
 
 // A cloud-search failure during hotspot resolution is reported as a lookup
-// error, exercising the branch-aware call site.
+// error, exercising the branch-aware call site. The lookup goes through
+// /api/issues/search: since 2026-07-01 the migrated hotspot is an issue on the
+// target, so /api/hotspots/search is never consulted (#423).
 func TestResolveAndSyncHotspotLookupError(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/hotspots/search", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/issues/search", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
 	cloudSrv := httptest.NewServer(mux)

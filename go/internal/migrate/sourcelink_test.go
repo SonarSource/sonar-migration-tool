@@ -100,15 +100,17 @@ func TestSourceLinkIdempotencyHelpers(t *testing.T) {
 	})
 	_ = link
 
+	// The hotspot back-link is now a comment on the migrated ISSUE, since the
+	// target has no hotspots — so its marker is matched over issue comments.
 	t.Run("hotspot: marker detected", func(t *testing.T) {
-		cloud := []hotspotComment{{Markdown: hotspotSourceLinkMarker + "(https://sq.example.com/security_hotspots?id=p&hotspots=k)"}}
-		if !hotspotCommentsContain(cloud, hotspotSourceLinkMarker) {
+		cloud := []issueComment{{Markdown: hotspotSourceLinkMarker + "(https://sq.example.com/security_hotspots?id=p&hotspots=k)"}}
+		if !issueCommentsContain(cloud, hotspotSourceLinkMarker) {
 			t.Fatal("expected the existing hotspot source link to be detected via marker")
 		}
 	})
 	t.Run("hotspot: absent when no link", func(t *testing.T) {
-		cloud := []hotspotComment{{HTMLText: "unrelated"}}
-		if hotspotCommentsContain(cloud, hotspotSourceLinkMarker) {
+		cloud := []issueComment{{HTMLText: "unrelated"}}
+		if issueCommentsContain(cloud, hotspotSourceLinkMarker) {
 			t.Fatal("did not expect a hotspot source link to be detected")
 		}
 	})
