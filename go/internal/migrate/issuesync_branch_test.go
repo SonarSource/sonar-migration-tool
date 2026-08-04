@@ -87,3 +87,103 @@ func TestResolveAndSyncHotspotLookupError(t *testing.T) {
 		t.Fatalf("want syncOutcomeLookupError, got %v", got)
 	}
 }
+
+// No cloud candidates on the source's file means resolveAndSyncIssue
+// reports not_found rather than synced or an error.
+func TestResolveAndSyncIssueNotFound(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/issues/search", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"issues": []map[string]any{},
+			"paging": map[string]any{"pageIndex": 1, "pageSize": 500, "total": 0},
+		})
+	})
+	cloudSrv := httptest.NewServer(mux)
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+	e := newTestExecutor(cloudSrv, apiSrv, t.TempDir())
+
+	src := matchableIssue{Key: "s1", Rule: "java:S100", Component: "src-proj:src/app.go", Line: 10, Message: "Do not do this"}
+	got := resolveAndSyncIssue(context.Background(), e, "cloud-proj", "cloud-org", "", "src-proj", src, nil)
+	if got != syncOutcomeNotFound {
+		t.Fatalf("want syncOutcomeNotFound, got %v", got)
+	}
+}
+
+// Two cloud candidates that both exactly match the source's file, line, and
+// message are ambiguous — resolveAndSyncIssue must skip (line_mismatch)
+// rather than guess.
+func TestResolveAndSyncIssueLineMismatch(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/issues/search", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"issues": []map[string]any{
+				{"key": "iss-1", "rule": "java:S100", "component": "cloud-proj:src/app.go", "line": 10, "message": "Do not do this"},
+				{"key": "iss-2", "rule": "java:S100", "component": "cloud-proj:src/app.go", "line": 10, "message": "Do not do this"},
+			},
+			"paging": map[string]any{"pageIndex": 1, "pageSize": 500, "total": 2},
+		})
+	})
+	cloudSrv := httptest.NewServer(mux)
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+	e := newTestExecutor(cloudSrv, apiSrv, t.TempDir())
+
+	src := matchableIssue{Key: "s1", Rule: "java:S100", Component: "src-proj:src/app.go", Line: 10, Message: "Do not do this"}
+	got := resolveAndSyncIssue(context.Background(), e, "cloud-proj", "cloud-org", "", "src-proj", src, nil)
+	if got != syncOutcomeLineMismatch {
+		t.Fatalf("want syncOutcomeLineMismatch, got %v", got)
+	}
+}
+
+// No cloud candidates on the source's file means resolveAndSyncHotspot
+// reports not_found rather than synced or an error.
+func TestResolveAndSyncHotspotNotFound(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/hotspots/search", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"hotspots": []map[string]any{},
+			"paging":   map[string]any{"pageIndex": 1, "pageSize": 500, "total": 0},
+		})
+	})
+	cloudSrv := httptest.NewServer(mux)
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+	e := newTestExecutor(cloudSrv, apiSrv, t.TempDir())
+
+	src := matchableHotspot{Key: "h1", RuleKey: "rk1", Component: "src-proj:src/app.go", Line: 10, Message: "Review this"}
+	got := resolveAndSyncHotspot(context.Background(), e, "cloud-proj", "cloud-org", "", "src-proj", src, nil)
+	if got != syncOutcomeNotFound {
+		t.Fatalf("want syncOutcomeNotFound, got %v", got)
+	}
+}
+
+// Two cloud candidates that both exactly match the source's file, line, and
+// message are ambiguous — resolveAndSyncHotspot must skip (line_mismatch)
+// rather than guess.
+func TestResolveAndSyncHotspotLineMismatch(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/hotspots/search", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"hotspots": []map[string]any{
+				{"key": "hs-1", "ruleKey": "rk1", "component": "cloud-proj:src/app.go", "line": 10, "message": "Review this"},
+				{"key": "hs-2", "ruleKey": "rk1", "component": "cloud-proj:src/app.go", "line": 10, "message": "Review this"},
+			},
+			"paging": map[string]any{"pageIndex": 1, "pageSize": 500, "total": 2},
+		})
+	})
+	cloudSrv := httptest.NewServer(mux)
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+	e := newTestExecutor(cloudSrv, apiSrv, t.TempDir())
+
+	src := matchableHotspot{Key: "h1", RuleKey: "rk1", Component: "src-proj:src/app.go", Line: 10, Message: "Review this"}
+	got := resolveAndSyncHotspot(context.Background(), e, "cloud-proj", "cloud-org", "", "src-proj", src, nil)
+	if got != syncOutcomeLineMismatch {
+		t.Fatalf("want syncOutcomeLineMismatch, got %v", got)
+	}
+}

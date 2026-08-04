@@ -5,21 +5,24 @@
 package migrate
 
 import (
+	"path/filepath"
 	"testing"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 )
 
 func TestIsAlreadyMigratedIssueComment(t *testing.T) {
 	tests := []struct {
-		name         string
-		body         string
+		name          string
+		body          string
 		cloudComments []issueComment
-		want         bool
+		want          bool
 	}{
 		{
-			name: "no cloud comments",
-			body: "some comment text",
+			name:          "no cloud comments",
+			body:          "some comment text",
 			cloudComments: nil,
-			want: false,
+			want:          false,
 		},
 		{
 			name: "cloud comment contains prefix and body",
@@ -150,7 +153,7 @@ func TestRuleTagDefaultsUserTagsOnly(t *testing.T) {
 		bySrv: map[string]map[string]map[string]struct{}{
 			"https://server1": {
 				"java:S1481": setOf("unused", "convention"),
-				"java:S2095":  setOf("cwe", "denial-of-service", "security"),
+				"java:S2095": setOf("cwe", "denial-of-service", "security"),
 			},
 		},
 	}
@@ -163,37 +166,37 @@ func TestRuleTagDefaultsUserTagsOnly(t *testing.T) {
 		want      []string
 	}{
 		{
-			name: "all tags are rule defaults — returns empty",
+			name:      "all tags are rule defaults — returns empty",
 			serverURL: "https://server1", ruleKey: "java:S1481",
 			allTags: []string{"unused", "convention"},
 			want:    []string{},
 		},
 		{
-			name: "rule defaults stripped, user tags retained",
+			name:      "rule defaults stripped, user tags retained",
 			serverURL: "https://server1", ruleKey: "java:S2095",
 			allTags: []string{"cwe", "denial-of-service", "security", "flagged-by-team", "needs-investigation"},
 			want:    []string{"flagged-by-team", "needs-investigation"},
 		},
 		{
-			name: "rule not indexed — fallback returns input unchanged",
+			name:      "rule not indexed — fallback returns input unchanged",
 			serverURL: "https://server1", ruleKey: "kotlin:S100",
 			allTags: []string{"convention"},
 			want:    []string{"convention"},
 		},
 		{
-			name: "server not indexed — fallback returns input unchanged",
+			name:      "server not indexed — fallback returns input unchanged",
 			serverURL: "https://other-server", ruleKey: "java:S1481",
 			allTags: []string{"unused"},
 			want:    []string{"unused"},
 		},
 		{
-			name: "empty input — returns empty",
+			name:      "empty input — returns empty",
 			serverURL: "https://server1", ruleKey: "java:S1481",
 			allTags: nil,
 			want:    nil,
 		},
 		{
-			name: "user tags only (no rule defaults present)",
+			name:      "user tags only (no rule defaults present)",
 			serverURL: "https://server1", ruleKey: "java:S1481",
 			allTags: []string{"team-quarantine"},
 			want:    []string{"team-quarantine"},
@@ -279,14 +282,14 @@ func TestStripProjectKeyPrefix(t *testing.T) {
 func TestClassifyActionableReasonsAndBranches(t *testing.T) {
 	comment := issueComment{Login: "u", Markdown: "noted"}
 	issues := []matchableIssue{
-		{Status: "ACCEPTED", Branch: "main"},                                                       // accepted
-		{Status: "RESOLVED", Resolution: "FALSE-POSITIVE", Branch: "main"},                          // accepted_or_fp (via resolution)
-		{Status: "FALSE_POSITIVE", Branch: "develop"},                                               // accepted_or_fp (modern enum)
-		{Status: "OPEN", Tags: []string{"flagged"}, Branch: "develop"},                              // custom_tags
-		{Status: "OPEN", ManualSeverity: true, Branch: "feat-1"},                                    // manual_severity
-		{Status: "OPEN", Comments: []issueComment{comment}, Branch: "feat-2"},                       // comments
-		{Status: "ACCEPTED", Tags: []string{"audited"}, Branch: "main"},                             // accepted + tags (counted in both)
-		{Status: "ACCEPTED", Comments: []issueComment{comment}, ManualSeverity: true, Branch: ""},   // accepted + manualSeverity + comments
+		{Status: "ACCEPTED", Branch: "main"},                                                      // accepted
+		{Status: "RESOLVED", Resolution: "FALSE-POSITIVE", Branch: "main"},                        // accepted_or_fp (via resolution)
+		{Status: "FALSE_POSITIVE", Branch: "develop"},                                             // accepted_or_fp (modern enum)
+		{Status: "OPEN", Tags: []string{"flagged"}, Branch: "develop"},                            // custom_tags
+		{Status: "OPEN", ManualSeverity: true, Branch: "feat-1"},                                  // manual_severity
+		{Status: "OPEN", Comments: []issueComment{comment}, Branch: "feat-2"},                     // comments
+		{Status: "ACCEPTED", Tags: []string{"audited"}, Branch: "main"},                           // accepted + tags (counted in both)
+		{Status: "ACCEPTED", Comments: []issueComment{comment}, ManualSeverity: true, Branch: ""}, // accepted + manualSeverity + comments
 	}
 	b := classifyActionableReasons(issues)
 	if want := 5; b.acceptedOrFP != want {
@@ -307,64 +310,113 @@ func TestClassifyActionableReasonsAndBranches(t *testing.T) {
 	}
 }
 
-// #356: case a/b/c classification — exactly the semantics from the
-// issue. 1 cloud counterpart on the source line → synced (a); 0
-// counterparts on the line → not_found (c); 2+ on the same line →
-// line_mismatch (b). Off-line candidates are ignored.
-func TestClassifyIssueCandidatesByLine(t *testing.T) {
-	cand := func(key string, line int) matchableIssue {
-		return matchableIssue{Key: key, Line: line}
+// #412: issueMatchScore — rule mismatch is a hard reject; otherwise the
+// score accumulates across message/file/line/type/severity/author.
+func TestIssueMatchScore(t *testing.T) {
+	base := matchableIssue{
+		Rule: "java:S1", Component: "a.java", Line: 10,
+		Message: "Fix this issue please", Type: "CODE_SMELL", Severity: "MAJOR", Author: "alice",
 	}
+
+	tests := []struct {
+		name      string
+		candidate matchableIssue
+		want      int
+	}{
+		{"rule mismatch rejects", withRule(base, "java:S2"), -1},
+		{"identical — max score", base, 7},
+		{
+			"similar message (edit distance <=5), all else equal",
+			withMessage(base, "Fix this issue pls"),
+			6,
+		},
+		{
+			"very different message, all else equal",
+			withMessage(base, "Completely unrelated wording here"),
+			5,
+		},
+		{
+			"only rule+line equal, everything else different",
+			matchableIssue{Rule: "java:S1", Component: "b.java", Line: 10, Message: "zzz", Type: "BUG", Severity: "MINOR", Author: "bob"},
+			1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := issueMatchScore(base, tc.candidate); got != tc.want {
+				t.Errorf("issueMatchScore = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func withRule(m matchableIssue, rule string) matchableIssue   { m.Rule = rule; return m }
+func withMessage(m matchableIssue, msg string) matchableIssue { m.Message = msg; return m }
+
+// #412: classifyIssueCandidatesByScore — exact match (file+line+message)
+// wins when unique; otherwise fall back to the approximate score, which
+// must clear issueApproxMatchThreshold and be uniquely qualifying.
+func TestClassifyIssueCandidatesByScore(t *testing.T) {
+	source := matchableIssue{
+		Rule: "java:S1", Component: "a.java", Line: 42,
+		Message: "Fix this issue please", Type: "CODE_SMELL", Severity: "MAJOR", Author: "alice",
+	}
+	exactMatch := source
+	exactMatch.Key = "cloud-exact"
+
+	approxMatch := matchableIssue{
+		Key: "cloud-approx", Rule: "java:S1", Component: "a.java", Line: 42,
+		Message: "Fix this issue pls", Type: "CODE_SMELL", Severity: "MAJOR", Author: "alice",
+	} // score 6: message similar(+1) + file+line+type+severity+author(+5)
+
+	belowThreshold := matchableIssue{
+		Key: "cloud-low", Rule: "java:S1", Component: "b.java", Line: 99,
+		Message: "totally different text", Type: "BUG", Severity: "MINOR", Author: "bob",
+	}
+
 	tests := []struct {
 		name        string
 		candidates  []matchableIssue
-		sourceLine  int
 		wantKey     string
 		wantOutcome syncOutcome
 	}{
 		{
-			name:        "exactly one match on line — synced (a)",
-			candidates:  []matchableIssue{cand("cloud-1", 42)},
-			sourceLine:  42,
-			wantKey:     "cloud-1",
+			name:        "unique exact match — synced",
+			candidates:  []matchableIssue{belowThreshold, exactMatch},
+			wantKey:     "cloud-exact",
 			wantOutcome: syncOutcomeSynced,
 		},
 		{
-			name:        "one match among off-line candidates — synced (a)",
-			candidates:  []matchableIssue{cand("cloud-a", 40), cand("cloud-b", 42), cand("cloud-c", 44)},
-			sourceLine:  42,
-			wantKey:     "cloud-b",
+			name:        "two exact matches — ambiguous",
+			candidates:  []matchableIssue{exactMatch, {Key: "cloud-exact-2", Rule: "java:S1", Component: "a.java", Line: 42, Message: "Fix this issue please"}},
+			wantOutcome: syncOutcomeLineMismatch,
+		},
+		{
+			name:        "no exact, unique approximate match — synced",
+			candidates:  []matchableIssue{belowThreshold, approxMatch},
+			wantKey:     "cloud-approx",
 			wantOutcome: syncOutcomeSynced,
 		},
 		{
-			name:        "two matches on same line — line_mismatch (b)",
-			candidates:  []matchableIssue{cand("cloud-a", 42), cand("cloud-b", 42)},
-			sourceLine:  42,
+			name:        "no exact, two qualifying approximate matches — ambiguous",
+			candidates:  []matchableIssue{approxMatch, {Key: "cloud-approx-2", Rule: "java:S1", Component: "a.java", Line: 42, Message: "Fix this issue pls", Type: "CODE_SMELL", Severity: "MAJOR", Author: "alice"}},
 			wantOutcome: syncOutcomeLineMismatch,
 		},
 		{
-			name:        "three matches on same line, one off-line — line_mismatch (b)",
-			candidates:  []matchableIssue{cand("cloud-a", 42), cand("cloud-b", 42), cand("cloud-c", 42), cand("cloud-d", 99)},
-			sourceLine:  42,
-			wantOutcome: syncOutcomeLineMismatch,
-		},
-		{
-			name:        "no matches on line, candidates elsewhere — not_found (c)",
-			candidates:  []matchableIssue{cand("cloud-a", 40), cand("cloud-b", 44)},
-			sourceLine:  42,
+			name:        "no candidate clears the threshold — not_found",
+			candidates:  []matchableIssue{belowThreshold},
 			wantOutcome: syncOutcomeNotFound,
 		},
 		{
-			name:        "empty candidates — not_found (c)",
+			name:        "empty candidates — not_found",
 			candidates:  nil,
-			sourceLine:  42,
 			wantOutcome: syncOutcomeNotFound,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, outcome := classifyIssueCandidatesByLine(tc.candidates, tc.sourceLine)
+			got, outcome := classifyIssueCandidatesByScore(tc.candidates, source)
 			if outcome != tc.wantOutcome {
 				t.Errorf("outcome = %v, want %v", outcome, tc.wantOutcome)
 			}
@@ -500,5 +552,30 @@ func TestClassifyActionableReasonsIssueStatus(t *testing.T) {
 	}
 	if b.customTags != 1 {
 		t.Errorf("customTags: want 1, got %d", b.customTags)
+	}
+}
+
+// #412: loadMatchableIssues carries message/type/severity/author through
+// from the extract into matchableIssue — the approximate-match scorer
+// (matchscore.go) needs them.
+func TestLoadMatchableIssuesCarriesScorerFields(t *testing.T) {
+	dir := t.TempDir()
+	extractDir := filepath.Join(dir, "extract-01")
+	writeJSONL(filepath.Join(extractDir, "getProjectIssuesFull"), []map[string]any{
+		{
+			"key": "iss-1", "rule": "java:S100", "component": "proj-a:src/app.go", "line": 10,
+			"status": "OPEN", "projectKey": "proj-a",
+			"message": "Do not do this", "type": "BUG", "severity": "MAJOR", "author": "dev@example.com",
+		},
+	})
+
+	e := &Executor{ExportDir: dir, Mapping: structure.ExtractMapping{testServerURL: "extract-01"}}
+	got := loadMatchableIssues(e, testServerURL, "proj-a", loadRuleTagDefaults(e))
+	if len(got) != 1 {
+		t.Fatalf("loadMatchableIssues: got %d issues, want 1", len(got))
+	}
+	iss := got[0]
+	if iss.Message != "Do not do this" || iss.Type != "BUG" || iss.Severity != "MAJOR" || iss.Author != "dev@example.com" {
+		t.Errorf("loadMatchableIssues: scorer fields not carried through, got %+v", iss)
 	}
 }

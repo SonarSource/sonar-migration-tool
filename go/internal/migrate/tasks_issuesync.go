@@ -87,6 +87,14 @@ type matchableIssue struct {
 	ManualSeverity bool
 	Branch         string
 	Transitions    []string
+
+	// Message, Type, Severity and Author feed the approximate-match scorer
+	// (matchscore.go, issue #412) — they play no role in the transition /
+	// comment / tag sync logic below.
+	Message  string
+	Type     string
+	Severity string
+	Author   string
 }
 
 // issueComment is a normalised comment attached to a matchableIssue.
@@ -600,48 +608,20 @@ func resolveAndSyncIssue(ctx context.Context, e *Executor, cloudKey, orgKey, bas
 			"project", cloudKey, "source_key", src.Key, "rule", src.Rule, "file", filePath, "branch", src.Branch)
 		return syncOutcomeLookupError
 	}
-	target, outcome := classifyIssueCandidatesByLine(candidates, src.Line)
+	target, outcome := classifyIssueCandidatesByScore(candidates, src)
 	switch outcome {
 	case syncOutcomeSynced:
 		syncOnePair(ctx, e, issuePair{source: src, cloud: target}, baseURL, projectKey, counter)
 	case syncOutcomeNotFound:
-		e.Logger.Debug("syncIssueMetadata: no cloud counterpart on source line", "source_key", src.Key, "rule", src.Rule, "file", filePath, "line", src.Line)
+		e.Logger.Debug("syncIssueMetadata: no cloud counterpart matched", "source_key", src.Key, "rule", src.Rule, "file", filePath, "line", src.Line)
 	case syncOutcomeLineMismatch:
 		keys := make([]string, 0)
 		for _, c := range candidates {
-			if c.Line == src.Line {
-				keys = append(keys, c.Key)
-			}
+			keys = append(keys, c.Key)
 		}
-		e.Logger.Debug("syncIssueMetadata: multiple cloud counterparts on source line, skipping", "source_key", src.Key, "rule", src.Rule, "file", filePath, "line", src.Line, "candidates", keys)
+		e.Logger.Debug("syncIssueMetadata: multiple cloud counterparts matched, skipping", "source_key", src.Key, "rule", src.Rule, "file", filePath, "line", src.Line, "candidates", keys)
 	}
 	return outcome
-}
-
-// classifyIssueCandidatesByLine implements the case a/b/c decision
-// from #356: among candidates returned by /api/issues/search, pick
-// the one on the source's line. 1 → synced, 0 → not_found, n>1 →
-// line_mismatch. Factored out so the per-pair logic is unit testable
-// without HTTP mocking.
-func classifyIssueCandidatesByLine(candidates []matchableIssue, sourceLine int) (matchableIssue, syncOutcome) {
-	var pick matchableIssue
-	matches := 0
-	for _, c := range candidates {
-		if c.Line == sourceLine {
-			matches++
-			if matches == 1 {
-				pick = c
-			}
-		}
-	}
-	switch matches {
-	case 0:
-		return matchableIssue{}, syncOutcomeNotFound
-	case 1:
-		return pick, syncOutcomeSynced
-	default:
-		return matchableIssue{}, syncOutcomeLineMismatch
-	}
 }
 
 // findCloudIssueCandidates queries /api/issues/search for cloud issues
@@ -1059,6 +1039,10 @@ func loadMatchableIssues(e *Executor, serverURL, serverKey string, ruleDefaults 
 			Assignee:       extractField(item.Data, "assignee"),
 			ManualSeverity: extractBool(item.Data, "manualSeverity"),
 			Branch:         extractField(item.Data, "branch"),
+			Message:        extractField(item.Data, "message"),
+			Type:           extractField(item.Data, "type"),
+			Severity:       extractField(item.Data, "severity"),
+			Author:         extractField(item.Data, "author"),
 		})
 	}
 
@@ -1096,6 +1080,10 @@ func apiIssueToMatchable(ai sqtypes.Issue) matchableIssue {
 		Comments:    comments,
 		Assignee:    ai.Assignee,
 		Transitions: ai.Transitions,
+		Message:     ai.Message,
+		Type:        ai.Type,
+		Severity:    ai.Severity,
+		Author:      ai.Author,
 	}
 }
 

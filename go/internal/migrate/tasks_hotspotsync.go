@@ -59,6 +59,13 @@ type matchableHotspot struct {
 	// extracted from (enriched into the extract record). Used to build a
 	// branch-correct back-link to the original hotspot (#321).
 	Branch string
+
+	// Message, Author and VulnerabilityProbability feed the approximate-
+	// match scorer (matchscore.go, issue #412) — they play no role in the
+	// status / comment sync logic below.
+	Message                  string
+	Author                   string
+	VulnerabilityProbability string
 }
 
 // hotspotComment captures a single comment attached to a hotspot.
@@ -368,8 +375,8 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 }
 
 // resolveAndSyncHotspot searches Cloud for hotspots in the source
-// hotspot's file, then resolves by (ruleKey, line). Returns the case
-// a/b/c/lookup outcome.
+// hotspot's file, then resolves via the scored matcher (matchscore.go,
+// issue #412). Returns the case a/b/c/lookup outcome.
 func resolveAndSyncHotspot(ctx context.Context, e *Executor, cloudKey, orgKey, baseURL, sourceKey string, src matchableHotspot, counter *TaskCounter) syncOutcome {
 	// Strip "projectKey:" and any trailing "moduleKey:" segments so the bare
 	// file path can be used in the cloud search. Multi-module (monorepo)
@@ -386,7 +393,7 @@ func resolveAndSyncHotspot(ctx context.Context, e *Executor, cloudKey, orgKey, b
 			"project", cloudKey, "source_key", src.Key, "file", filePath, "branch", src.Branch)
 		return syncOutcomeLookupError
 	}
-	target, outcome := classifyHotspotCandidatesByLine(candidates, src.RuleKey, src.Line, src.Offset)
+	target, outcome := classifyHotspotCandidatesByScore(candidates, src)
 	switch outcome {
 	case syncOutcomeSynced:
 		pair := hotspotPair{source: src, cloud: target}
@@ -406,109 +413,15 @@ func resolveAndSyncHotspot(ctx context.Context, e *Executor, cloudKey, orgKey, b
 			outcome = syncOutcomeAckDemoted
 		}
 	case syncOutcomeNotFound:
-		e.Logger.Debug("syncHotspotMetadata: no cloud counterpart on source line", "source_key", src.Key, "rule", src.RuleKey, "file", filePath, "line", src.Line)
+		e.Logger.Debug("syncHotspotMetadata: no cloud counterpart matched", "source_key", src.Key, "rule", src.RuleKey, "file", filePath, "line", src.Line)
 	case syncOutcomeLineMismatch:
 		keys := make([]string, 0)
 		for _, c := range candidates {
-			if c.Line == src.Line && (c.RuleKey == "" || c.RuleKey == src.RuleKey) {
-				keys = append(keys, c.Key)
-			}
+			keys = append(keys, c.Key)
 		}
-		e.Logger.Debug("syncHotspotMetadata: multiple cloud counterparts on source line, skipping", "source_key", src.Key, "rule", src.RuleKey, "file", filePath, "line", src.Line, "candidates", keys)
+		e.Logger.Debug("syncHotspotMetadata: multiple cloud counterparts matched, skipping", "source_key", src.Key, "rule", src.RuleKey, "file", filePath, "line", src.Line, "candidates", keys)
 	}
 	return outcome
-}
-
-// classifyHotspotCandidatesByLine resolves a cloud counterpart for one
-// source hotspot from the per-file candidate set returned by
-// /api/hotspots/search?files=<filePath>.
-//
-// Three-phase match (#392 + follow-up):
-//
-//  1. PRECISE — (ruleKey, line, offset) match. textRange.startOffset
-//     disambiguates two hotspots of the same rule firing on different
-//     columns of the same line (e.g. `sys.argv[1]` and `sys.argv[2]`).
-//     Without it, those collapse to syncOutcomeLineMismatch and stay
-//     TO_REVIEW. Skipped when either side has Offset == 0 (older API
-//     shapes that omit textRange).
-//
-//  2. RULE+LINE — (ruleKey, line) match. The common case: rule
-//     populated on both sides, no column ambiguity needed. Restores
-//     the pre-offset behaviour that already covered 25 of the 31
-//     SAFE hotspots in the live run.
-//
-//  3. EMPTY-RULE FALLBACK — line-only against cloud candidates whose
-//     ruleKey is empty. The 2026-06-09 audit recorded a case where
-//     every cloud hotspot parsed with RuleKey == "" (per-version /
-//     per-endpoint omission); without this fallback the entire
-//     project's REVIEWED hotspots stay TO_REVIEW. Candidates with a
-//     non-empty ruleKey that doesn't match the source are deliberately
-//     NOT considered here — they're a different rule firing on the
-//     same line.
-//
-// Returns syncOutcomeSynced when exactly one candidate qualifies,
-// syncOutcomeLineMismatch when several do (caller skips rather than
-// guess), and syncOutcomeNotFound when none do.
-func classifyHotspotCandidatesByLine(candidates []matchableHotspot, sourceRule string, sourceLine, sourceOffset int) (matchableHotspot, syncOutcome) {
-	// Phase 1: precise (ruleKey, line, offset). Both sides must carry
-	// a non-zero offset for this phase to be considered.
-	if sourceOffset > 0 {
-		var pick matchableHotspot
-		matches := 0
-		for _, c := range candidates {
-			if c.RuleKey == sourceRule && c.Line == sourceLine && c.Offset > 0 && c.Offset == sourceOffset {
-				matches++
-				if matches == 1 {
-					pick = c
-				}
-			}
-		}
-		if matches == 1 {
-			return pick, syncOutcomeSynced
-		}
-		// matches == 0 (offset not present or no exact column hit) →
-		// fall through to phase 2. matches > 1 means duplicate offsets
-		// on the cloud (extremely unusual) — also fall through and let
-		// phase 2's rule+line check resolve to line_mismatch.
-	}
-
-	// Phase 2: (ruleKey, line) match.
-	var pick matchableHotspot
-	matches := 0
-	for _, c := range candidates {
-		if c.RuleKey == sourceRule && c.Line == sourceLine {
-			matches++
-			if matches == 1 {
-				pick = c
-			}
-		}
-	}
-	if matches > 0 {
-		if matches == 1 {
-			return pick, syncOutcomeSynced
-		}
-		return matchableHotspot{}, syncOutcomeLineMismatch
-	}
-
-	// Phase 3: cloud candidates with no ruleKey are eligible for a
-	// line-only fallback.
-	matches = 0
-	for _, c := range candidates {
-		if c.RuleKey == "" && c.Line == sourceLine {
-			matches++
-			if matches == 1 {
-				pick = c
-			}
-		}
-	}
-	switch matches {
-	case 0:
-		return matchableHotspot{}, syncOutcomeNotFound
-	case 1:
-		return pick, syncOutcomeSynced
-	default:
-		return matchableHotspot{}, syncOutcomeLineMismatch
-	}
 }
 
 // findCloudHotspotCandidates queries /api/hotspots/search?files=…
@@ -842,7 +755,10 @@ func parseMatchableHotspot(data json.RawMessage) matchableHotspot {
 		Comments:   comments,
 		// Present on source-side records (enriched at extract time);
 		// absent/empty on cloud candidates, which don't need it.
-		Branch: extractField(data, "branch"),
+		Branch:                   extractField(data, "branch"),
+		Message:                  extractField(data, "message"),
+		Author:                   extractField(data, "author"),
+		VulnerabilityProbability: extractField(data, "vulnerabilityProbability"),
 	}
 }
 
