@@ -78,6 +78,37 @@ func TestHotspotSourceLinkURL(t *testing.T) {
 	}
 }
 
+func TestProjectSourceLinkURL(t *testing.T) {
+	cases := []struct {
+		name       string
+		serverURL  string
+		projectKey string
+		want       string
+	}{
+		{
+			name: "basic", serverURL: "https://sq.example.com", projectKey: "my-proj",
+			want: "https://sq.example.com/dashboard?id=my-proj",
+		},
+		{
+			name: "trailing slash trimmed", serverURL: "https://sq.example.com/", projectKey: "p",
+			want: "https://sq.example.com/dashboard?id=p",
+		},
+		{
+			name: "special chars escaped", serverURL: "https://sq.example.com", projectKey: "org:proj",
+			want: "https://sq.example.com/dashboard?id=org%3Aproj",
+		},
+		{name: "missing serverURL", serverURL: "", projectKey: "p", want: ""},
+		{name: "missing projectKey", serverURL: "https://sq", projectKey: "", want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := projectSourceLinkURL(tc.serverURL, tc.projectKey); got != tc.want {
+				t.Fatalf("projectSourceLinkURL = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSourceLinkIdempotencyHelpers(t *testing.T) {
 	link := issueSourceLinkURL("https://sq.example.com", "p", "k", "")
 

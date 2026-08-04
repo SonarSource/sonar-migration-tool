@@ -79,7 +79,7 @@ const (
 var transferTargetTasks = []string{
 	// Project configuration (each is scoped to the migrated project).
 	"setProjectProfiles", "setProjectGates", "setProjectGroupPermissions",
-	"setProjectSettings", "setProjectTags", "setProjectLinks",
+	"setProjectSettings", "setProjectTags", "setProjectLinks", "setProjectSourceLink",
 	"setProjectWebhooks", "setNewCodePeriods",
 	// Project DevOps platform binding (issue #122). Project-scoped: it
 	// binds the transferred project to the repository of the DevOps

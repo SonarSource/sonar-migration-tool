@@ -249,6 +249,7 @@ You may want to rerun the command with the extra `--debug` flag to get more trou
 | `structure` | Group extracted projects into organizations |
 | `mappings` | Generate entity mapping CSVs |
 | `migrate` | Push configuration and data to SonarQube Cloud |
+| `sync-issues` | Sync issue/hotspot triage state from SonarQube Server to an already-migrated SonarQube Cloud project |
 | `wizard` | Interactive guided migration (terminal) |
 | `gui` | Browser-based guided migration |
 | `report` | Generate a migration or maturity report |

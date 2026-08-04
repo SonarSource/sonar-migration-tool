@@ -241,6 +241,10 @@ type EntityItem struct {
 	ErrorMessage string   // failures only
 	SkipReason   string   // for skipped items: SkipReason* constants below
 	Issues       []string // for partial migrations: human-readable list of issues
+	// SourceKey is the source-side project key, shown beneath the project
+	// name in the report's Name column (issue #448). Populated for the
+	// Projects section only; empty for all other sections.
+	SourceKey string
 }
 
 // Skip reason constants used when classifying skipped entities.
@@ -278,6 +282,10 @@ type sectionDef struct {
 	NameField      string // JSONL field to extract entity name
 	DetailField    string // JSONL field for detail column (e.g., cloud key)
 	ExtractTask    string // extract task for source data (empty if not applicable)
+	// SourceKeyField is the JSONL field holding the source-side key shown
+	// under the project name (issue #448). Only set for Projects; left
+	// empty elsewhere so other sections are unaffected.
+	SourceKeyField string
 }
 
 // sectionDefs defines the sections in report order.
@@ -331,6 +339,7 @@ var sectionDefs = []sectionDef{
 		AnalysisEntity: "Project",
 		NameField:      "name",
 		DetailField:    "cloud_project_key",
+		SourceKeyField: "key",
 	},
 	{
 		// Global settings (issue #186) — one row per non-default SQS
