@@ -5,7 +5,10 @@
 package migrate
 
 import (
+	"path/filepath"
 	"testing"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 )
 
 func TestIsAlreadyMigratedIssueComment(t *testing.T) {
@@ -549,5 +552,30 @@ func TestClassifyActionableReasonsIssueStatus(t *testing.T) {
 	}
 	if b.customTags != 1 {
 		t.Errorf("customTags: want 1, got %d", b.customTags)
+	}
+}
+
+// #412: loadMatchableIssues carries message/type/severity/author through
+// from the extract into matchableIssue — the approximate-match scorer
+// (matchscore.go) needs them.
+func TestLoadMatchableIssuesCarriesScorerFields(t *testing.T) {
+	dir := t.TempDir()
+	extractDir := filepath.Join(dir, "extract-01")
+	writeJSONL(filepath.Join(extractDir, "getProjectIssuesFull"), []map[string]any{
+		{
+			"key": "iss-1", "rule": "java:S100", "component": "proj-a:src/app.go", "line": 10,
+			"status": "OPEN", "projectKey": "proj-a",
+			"message": "Do not do this", "type": "BUG", "severity": "MAJOR", "author": "dev@example.com",
+		},
+	})
+
+	e := &Executor{ExportDir: dir, Mapping: structure.ExtractMapping{testServerURL: "extract-01"}}
+	got := loadMatchableIssues(e, testServerURL, "proj-a", loadRuleTagDefaults(e))
+	if len(got) != 1 {
+		t.Fatalf("loadMatchableIssues: got %d issues, want 1", len(got))
+	}
+	iss := got[0]
+	if iss.Message != "Do not do this" || iss.Type != "BUG" || iss.Severity != "MAJOR" || iss.Author != "dev@example.com" {
+		t.Errorf("loadMatchableIssues: scorer fields not carried through, got %+v", iss)
 	}
 }
