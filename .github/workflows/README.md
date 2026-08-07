@@ -45,6 +45,7 @@ Each binary has a matching `.asc` GPG signature.
 See [docs/RELEASE-SIGNING-SETUP.md](../../docs/RELEASE-SIGNING-SETUP.md) for Vault and Azure onboarding.
 
 ### 2. `test.yml` - Manual Test Run
+<!-- updated: 2026-07-28_10:25:08 -->
 
 **Trigger:** Manual dispatch (`workflow_dispatch`)  
 **Purpose:** On-demand test run with SonarQube Cloud scan
