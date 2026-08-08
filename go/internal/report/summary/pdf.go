@@ -499,6 +499,10 @@ type unifiedRow struct {
 	outcome  string
 	color    [3]int
 	details  string
+	// sourceKey is the source-side project key (issue #448), rendered
+	// beneath the name in small bold text. Populated for Projects rows
+	// only; empty for every other section.
+	sourceKey string
 }
 
 // displayName returns the row's name as displayed in the Name column.
@@ -508,6 +512,19 @@ func (r unifiedRow) displayName() string {
 		return r.language + " / " + r.name
 	}
 	return r.name
+}
+
+// nameCellMarkdown returns the Markdown Name-cell value: displayName(),
+// plus — when a source key is present — a line break and the key wrapped
+// in inline-bold markers, so mdDetail renders it as "**key**" below the
+// name (issue #448), matching the Details column's target-project-key
+// styling.
+func (r unifiedRow) nameCellMarkdown() string {
+	name := r.displayName()
+	if r.sourceKey == "" {
+		return name
+	}
+	return name + "\n" + inlineBoldStart + r.sourceKey + inlineBoldEnd
 }
 
 // sectionsWithoutOrganization lists sections rendered without an Organization
@@ -635,13 +652,7 @@ func renderUnifiedTable(pdf *fpdf.Fpdf, section Section, predictive bool) {
 		// directly without going through truncate(), which was the
 		// previous sanitizer entry point for the Name column.
 		nameText := sanitizeForPDF(row.displayName())
-		nameLineCount := 1
-		if wrapName {
-			nameLineCount = len(pdf.SplitLines([]byte(nameText), widths[0]))
-			if nameLineCount < 1 {
-				nameLineCount = 1
-			}
-		}
+		nameLines, keyLines, nameLineCount := computeNameCellLines(pdf, row, nameText, widths[0], bodyFontSize, multiLineFontSize, wrapName)
 		lineCount := detailsLineCount
 		if nameLineCount > lineCount {
 			lineCount = nameLineCount
@@ -686,8 +697,13 @@ func renderUnifiedTable(pdf *fpdf.Fpdf, section Section, predictive bool) {
 			// clipped descenders when nameLineCount matched (the per-
 			// line height of 3mm was too tight for 8pt body). Drawing
 			// one cell per line at the row's lineH gives consistent
-			// height AND room for descenders.
-			drawWrappedCell(pdf, widths[col], lineH, lineCount, pdf.SplitLines([]byte(nameText), widths[col]))
+			// height AND room for descenders. drawNameCell additionally
+			// renders any trailing keyLines (the source project key,
+			// #448) in a smaller bold font beneath the name lines.
+			drawNameCell(pdf, widths[col], lineH, lineCount, nameCellContent{
+				nameLines: nameLines, keyLines: keyLines,
+				nameFontSize: bodyFontSize, keyFontSize: multiLineFontSize,
+			})
 		} else {
 			pdf.CellFormat(widths[col], rowHeight, truncate(nameText, nameLimit), "1", 0, "L", true, 0, "")
 		}
@@ -722,6 +738,34 @@ func renderUnifiedTable(pdf *fpdf.Fpdf, section Section, predictive bool) {
 		// iteration's GetXY() reports the correct position.
 		pdf.SetXY(rowStartX, rowStartY+rowHeight)
 	}
+}
+
+// computeNameCellLines wraps a row's name text (and, when wrapName is
+// true and the row carries a source project key, the key text too —
+// issue #448) to colWidth, returning the two line groups plus their
+// combined count for row-height sizing. The key is measured in the
+// bold/smaller key font, restoring bodyFontSize before returning.
+// Pulled out of renderUnifiedTable's per-row loop to keep that
+// function's branching from growing with the #448 addition.
+func computeNameCellLines(pdf *fpdf.Fpdf, row unifiedRow, nameText string, colWidth, bodyFontSize, keyFontSize float64, wrapName bool) (nameLines, keyLines [][]byte, lineCount int) {
+	if !wrapName {
+		return nil, nil, 1
+	}
+	nameLines = pdf.SplitLines([]byte(nameText), colWidth)
+	lineCount = len(nameLines)
+	if lineCount < 1 {
+		lineCount = 1
+	}
+	if row.sourceKey == "" {
+		return nameLines, nil, lineCount
+	}
+	// Source project key: rendered on its own line(s) beneath the
+	// name, in the same smaller bold styling the Details column uses
+	// for the target project key.
+	pdf.SetFont(pdfFontFamilyBody, "B", keyFontSize)
+	keyLines = pdf.SplitLines([]byte(sanitizeForPDF(row.sourceKey)), colWidth)
+	pdf.SetFont(pdfFontFamilyBody, "", bodyFontSize)
+	return nameLines, keyLines, lineCount + len(keyLines)
 }
 
 // drawDetailsCell renders the Details column for a unified-table row.
@@ -978,6 +1022,66 @@ type fpdfCell interface {
 	CellFormat(w, h float64, txtStr, borderStr string, ln int, alignStr string, fill bool, link int, linkStr string)
 }
 
+// fpdfStyledCell is fpdfCell plus SetFont, letting drawNameCell switch
+// font style/size per line. *fpdf.Fpdf satisfies this implicitly; tests
+// can supply a recorder instead of spinning up a full PDF document.
+type fpdfStyledCell interface {
+	fpdfCell
+	SetFont(familyStr, styleStr string, size float64)
+}
+
+// nameCellContent groups the Name column's two font-styled line groups —
+// the regular-font name lines and the trailing bold/smaller source-key
+// lines (issue #448) — into one value so drawNameCell stays within the
+// project's 7-parameter limit.
+type nameCellContent struct {
+	nameLines, keyLines       [][]byte
+	nameFontSize, keyFontSize float64
+}
+
+// drawNameCell renders the Name column as one CellFormat per physical
+// line, like drawWrappedCell, but content.keyLines render in a smaller
+// bold font beneath the regular nameLines — the source project key
+// line (issue #448), matching the target project key's bold styling in
+// the Details column (drawDetailsCell). Restores the caller's font
+// (regular, nameFontSize) before returning.
+func drawNameCell(pdf fpdfStyledCell, w, lineH float64, lineCount int, content nameCellContent) {
+	x, y := pdf.GetXY()
+	for j := 0; j < lineCount; j++ {
+		var text string
+		bold := false
+		fontSize := content.nameFontSize
+		switch {
+		case j < len(content.nameLines):
+			text = string(content.nameLines[j])
+		case j-len(content.nameLines) < len(content.keyLines):
+			text = string(content.keyLines[j-len(content.nameLines)])
+			bold = true
+			fontSize = content.keyFontSize
+		}
+		border := ""
+		switch {
+		case lineCount == 1:
+			border = "1"
+		case j == 0:
+			border = "LRT"
+		case j == lineCount-1:
+			border = "LRB"
+		default:
+			border = "LR"
+		}
+		style := ""
+		if bold {
+			style = "B"
+		}
+		pdf.SetFont(pdfFontFamilyBody, style, fontSize)
+		pdf.SetXY(x, y+float64(j)*lineH)
+		pdf.CellFormat(w, lineH, text, border, 0, "L", true, 0, "")
+	}
+	pdf.SetXY(x+w, y)
+	pdf.SetFont(pdfFontFamilyBody, "", content.nameFontSize)
+}
+
 // buildUnifiedRows flattens the section's buckets into ordered rows:
 // Succeeded → NearPerfect → Partial → Failed → Skipped (skipped grouped by
 // reason order). Order mirrors the green → yellow → orange → red → grey
@@ -1011,12 +1115,13 @@ func buildUnifiedRows(section Section, predictive bool) []unifiedRow {
 
 	for _, item := range section.Succeeded {
 		rows = append(rows, unifiedRow{
-			name:     item.Name,
-			language: item.Language,
-			org:      item.Organization,
-			outcome:  successLabel,
-			color:    colorGreen,
-			details:  toPredictiveTense(successDetails(item, predictive, hideCloudKey, labelProjectKey), predictive),
+			name:      item.Name,
+			language:  item.Language,
+			org:       item.Organization,
+			outcome:   successLabel,
+			color:     colorGreen,
+			details:   toPredictiveTense(successDetails(item, predictive, hideCloudKey, labelProjectKey), predictive),
+			sourceKey: item.SourceKey,
 		})
 	}
 	for _, item := range section.NearPerfect {
@@ -1025,12 +1130,13 @@ func buildUnifiedRows(section Section, predictive bool) []unifiedRow {
 			name = "(unknown)"
 		}
 		rows = append(rows, unifiedRow{
-			name:     name,
-			language: item.Language,
-			org:      item.Organization,
-			outcome:  outcomeNearPerfect,
-			color:    colorYellow,
-			details:  toPredictiveTense(partialDetails(item, predictive, hideCloudKey, labelProjectKey), predictive),
+			name:      name,
+			language:  item.Language,
+			org:       item.Organization,
+			outcome:   outcomeNearPerfect,
+			color:     colorYellow,
+			details:   toPredictiveTense(partialDetails(item, predictive, hideCloudKey, labelProjectKey), predictive),
+			sourceKey: item.SourceKey,
 		})
 	}
 	for _, item := range section.Partial {
@@ -1039,22 +1145,24 @@ func buildUnifiedRows(section Section, predictive bool) []unifiedRow {
 			name = "(unknown)"
 		}
 		rows = append(rows, unifiedRow{
-			name:     name,
-			language: item.Language,
-			org:      item.Organization,
-			outcome:  outcomePartial,
-			color:    colorAmber,
-			details:  toPredictiveTense(partialDetails(item, predictive, hideCloudKey, labelProjectKey), predictive),
+			name:      name,
+			language:  item.Language,
+			org:       item.Organization,
+			outcome:   outcomePartial,
+			color:     colorAmber,
+			details:   toPredictiveTense(partialDetails(item, predictive, hideCloudKey, labelProjectKey), predictive),
+			sourceKey: item.SourceKey,
 		})
 	}
 	for _, item := range section.Failed {
 		rows = append(rows, unifiedRow{
-			name:     item.Name,
-			language: item.Language,
-			org:      item.Organization,
-			outcome:  outcomeFailed,
-			color:    colorRed,
-			details:  toPredictiveTense(item.ErrorMessage, predictive),
+			name:      item.Name,
+			language:  item.Language,
+			org:       item.Organization,
+			outcome:   outcomeFailed,
+			color:     colorRed,
+			details:   toPredictiveTense(item.ErrorMessage, predictive),
+			sourceKey: item.SourceKey,
 		})
 	}
 	// Skipped — preserve group ordering by SkipReason.
@@ -1065,12 +1173,13 @@ func buildUnifiedRows(section Section, predictive bool) []unifiedRow {
 	for _, entry := range skipReasonOrder {
 		for _, item := range skippedGroups[entry.Reason] {
 			rows = append(rows, unifiedRow{
-				name:     item.Name,
-				language: item.Language,
-				org:      item.Organization,
-				outcome:  outcomeSkipped,
-				color:    colorDarkGray,
-				details:  toPredictiveTense(skippedDetails(item), predictive),
+				name:      item.Name,
+				language:  item.Language,
+				org:       item.Organization,
+				outcome:   outcomeSkipped,
+				color:     colorDarkGray,
+				details:   toPredictiveTense(skippedDetails(item), predictive),
+				sourceKey: item.SourceKey,
 			})
 		}
 	}

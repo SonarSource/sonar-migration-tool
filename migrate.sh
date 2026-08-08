@@ -36,13 +36,13 @@ fi
 CONFIG_FILE="config-${CONFIG}.json"
 
 if [[ "${DO_EXTRACT}" = true ]]; then
-  ./sonar-migration-tool extract --config "${CONFIG_FILE}"
-  ./sonar-migration-tool structure --config "${CONFIG_FILE}"
-  ./sonar-migration-tool mappings --config "${CONFIG_FILE}"
+  sonar-migration-tool extract --config "${CONFIG_FILE}"
+  sonar-migration-tool structure --config "${CONFIG_FILE}"
+  sonar-migration-tool mappings --config "${CONFIG_FILE}"
 
   cp organizations-${CONFIG}.csv migration-files-${CONFIG}/organizations.csv
 fi
 
 if [[ "${DO_MIGRATE}" = true ]]; then
-  ./sonar-migration-tool migrate --config "${CONFIG_FILE}"
+  sonar-migration-tool migrate --config "${CONFIG_FILE}"
 fi
