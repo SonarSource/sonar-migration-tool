@@ -61,6 +61,13 @@ type matchableHotspot struct {
 	// extracted from (enriched into the extract record). Used to build a
 	// branch-correct back-link to the original hotspot (#321).
 	Branch string
+
+	// Message, Author and VulnerabilityProbability feed the approximate-
+	// match scorer (matchscore.go, issue #412) — they play no role in the
+	// status / comment sync logic below.
+	Message                  string
+	Author                   string
+	VulnerabilityProbability string
 }
 
 // hotspotComment captures a single comment attached to a hotspot.
@@ -362,8 +369,8 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 }
 
 // resolveAndSyncHotspot searches Cloud for hotspots in the source
-// hotspot's file, then resolves by (ruleKey, line). Returns the case
-// a/b/c/lookup outcome.
+// hotspot's file, then resolves via the scored matcher (matchscore.go,
+// issue #412). Returns the case a/b/c/lookup outcome.
 func resolveAndSyncHotspot(ctx context.Context, e *Executor, cloudKey, orgKey, baseURL, sourceKey string, src matchableHotspot, counter *TaskCounter) syncOutcome {
 	// Strip "projectKey:" and any trailing "moduleKey:" segments so the bare
 	// file path can be used in the cloud search. Multi-module (monorepo)
@@ -396,7 +403,7 @@ func resolveAndSyncHotspot(ctx context.Context, e *Executor, cloudKey, orgKey, b
 			counter.Success()
 		}
 	case syncOutcomeNotFound:
-		e.Logger.Debug("syncHotspotMetadata: no cloud counterpart on source line", "source_key", src.Key, "rule", src.RuleKey, "file", filePath, "line", src.Line)
+		e.Logger.Debug("syncHotspotMetadata: no cloud counterpart matched", "source_key", src.Key, "rule", src.RuleKey, "file", filePath, "line", src.Line)
 	case syncOutcomeLineMismatch:
 		keys := make([]string, 0)
 		for _, c := range candidates {
@@ -404,7 +411,7 @@ func resolveAndSyncHotspot(ctx context.Context, e *Executor, cloudKey, orgKey, b
 				keys = append(keys, c.Key)
 			}
 		}
-		e.Logger.Debug("syncHotspotMetadata: multiple cloud counterparts on source line, skipping", "source_key", src.Key, "rule", src.RuleKey, "file", filePath, "line", src.Line, "candidates", keys)
+		e.Logger.Debug("syncHotspotMetadata: multiple cloud counterparts matched, skipping", "source_key", src.Key, "rule", src.RuleKey, "file", filePath, "line", src.Line, "candidates", keys)
 	}
 	return outcome
 }
@@ -616,7 +623,10 @@ func parseMatchableHotspot(data json.RawMessage) matchableHotspot {
 		Comments:   comments,
 		// Present on source-side records (enriched at extract time);
 		// absent/empty on cloud candidates, which don't need it.
-		Branch: extractField(data, "branch"),
+		Branch:                   extractField(data, "branch"),
+		Message:                  extractField(data, "message"),
+		Author:                   extractField(data, "author"),
+		VulnerabilityProbability: extractField(data, "vulnerabilityProbability"),
 	}
 }
 
