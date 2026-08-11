@@ -110,8 +110,18 @@ Only a cancelled or timed-out run still aborts these tasks. The distinction betw
 `phase 2: task getOrgBinding: ...`, and reporting an unread binding as "not bound" would state
 something the tool never observed.
 
-**Bitbucket Server** bindings are not migrated: SonarQube Cloud has no Bitbucket Server integration,
-so such a binding has no target equivalent (only Bitbucket **Cloud** does).
+**On-premise DevOps platforms are never migrated.** SonarQube Cloud integrates only with the
+**cloud** platforms — GitHub.com, GitLab.com, Azure DevOps Services and Bitbucket Cloud — so a
+source project bound to GitHub Enterprise Server, self-managed GitLab or Bitbucket Server/Data
+Center has no target equivalent. Cloud vs on-premise is decided from the source ALM setting's `url`
+(its API endpoint: `api.github.com`, `gitlab.com`, `dev.azure.com`, `visualstudio.com` for Azure
+DevOps Services accounts predating the rename, `bitbucket.org`). Such a project is reported as
+**Partial Migration** with *"project binding was not possible because the source project is bound to
+an on-premise DevOps platform, which SonarQube Cloud cannot integrate with"* — before #505 the
+binding was dropped silently and the project was reported as fully migrated.
+
+A project that is **not bound at all** on the source is still left unbound on the target with
+nothing reported, which is the #122 behaviour.
 
 ---
 

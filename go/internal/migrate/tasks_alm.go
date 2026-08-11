@@ -43,6 +43,14 @@ const (
 	// matched — as opposed to BindingSkipRepoNotFound, where the listing
 	// succeeded and simply did not contain the source repository (#505).
 	BindingSkipReposUnknown = "repos_unknown"
+	// BindingSkipOnPremPlatform means the source project is bound to an
+	// on-premise DevOps platform (GitHub Enterprise Server, self-managed
+	// GitLab, Bitbucket Server). SonarQube Cloud integrates only with
+	// GitHub.com, GitLab.com, Azure DevOps Services and Bitbucket Cloud,
+	// so such a binding has no target equivalent. Before #505 these were
+	// dropped silently and the project was still reported as fully
+	// migrated.
+	BindingSkipOnPremPlatform = "on_prem_platform"
 )
 
 // BindingSkipDetail maps a skip reason to the operator-facing sentence
@@ -53,6 +61,7 @@ var BindingSkipDetail = map[string]string{
 	BindingSkipNoProjectID:       "project binding was not possible because the target project id could not be resolved",
 	BindingSkipOrgBindingUnknown: "project binding was not possible because the target organization's DevOps platform binding could not be read",
 	BindingSkipReposUnknown:      "project binding was not possible because the repositories of the bound DevOps organization could not be listed",
+	BindingSkipOnPremPlatform:    "project binding was not possible because the source project is bound to an on-premise DevOps platform, which SonarQube Cloud cannot integrate with",
 }
 
 // bindingSkip explains why a project's DevOps binding could not be
@@ -358,7 +367,21 @@ func runMatchProjectRepos(ctx context.Context, e *Executor) error {
 		info, ok := projALMInfo[projKey]
 		// Issue #122: only attempt a binding when the source project is
 		// itself bound to a cloud DevOps platform.
-		if !ok || !info.IsCloud || info.ALM == "" {
+		if !ok || info.ALM == "" {
+			// Not bound on the source: nothing to replicate and nothing
+			// to report (#122).
+			continue
+		}
+		if !info.IsCloud {
+			// Bound on the source, but to an on-premise platform that
+			// SonarQube Cloud cannot integrate with at all. Silently
+			// dropping this left the project reported as fully migrated
+			// even though a real binding did not come across (#505).
+			e.Logger.Warn("matchProjectRepos: source binding is to an on-premise DevOps platform, which SonarQube Cloud cannot bind to",
+				"project", projKey, "org", orgKey,
+				"alm", info.ALM, "repository", info.Repository)
+			writeBindingSkip(w, projKey, orgKey, info,
+				bindingSkip{Reason: BindingSkipOnPremPlatform})
 			continue
 		}
 

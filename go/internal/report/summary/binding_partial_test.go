@@ -180,6 +180,37 @@ func TestCollectProjectBindingOutcomes_ReposLookupFailed(t *testing.T) {
 	}
 }
 
+// TestCollectProjectBindingOutcomes_OnPremPlatform covers a source
+// project bound to an on-premise DevOps platform. SonarQube Cloud has no
+// integration with those, so the binding cannot be replicated — and
+// before #505 that was dropped silently, leaving the project reported as
+// fully migrated despite a real source binding not coming across.
+func TestCollectProjectBindingOutcomes_OnPremPlatform(t *testing.T) {
+	dir := t.TempDir()
+	writeBindingRecords(t, dir, "matchProjectRepos", map[string]any{
+		"cloud_project_key": "cloud-1", "binding_skipped": true,
+		"skip_reason": "on_prem_platform",
+		"alm":         "bitbucket", "repository": "project3-BBS",
+	})
+
+	failures := collectProjectBindingOutcomes(common.NewDataStore(dir))
+	if len(failures) != 1 {
+		t.Fatalf("expected 1 failure, got %+v", failures)
+	}
+	want := "project binding was not possible because the source project is bound to " +
+		"an on-premise DevOps platform, which SonarQube Cloud cannot integrate with"
+	if failures[0].Operation != want {
+		t.Errorf("operation = %q, want %q", failures[0].Operation, want)
+	}
+	if failures[0].Bucket != projectBucketPartial {
+		t.Errorf("bucket = %v, want projectBucketPartial", failures[0].Bucket)
+	}
+	// Nothing was attempted against an API, so there is no error to quote.
+	if failures[0].Error != "" {
+		t.Errorf("error = %q, want empty", failures[0].Error)
+	}
+}
+
 // TestCollectProjectBindingOutcomes_SuccessAndFailure verifies that a
 // successfully created binding produces no report entry, while a rejected
 // binding write is surfaced as a partial migration with the API error.

@@ -544,6 +544,7 @@ var bindingSkipOperations = map[string]string{
 	"no_project_id":       "project binding was not possible because the target project id could not be resolved",
 	"org_binding_unknown": "project binding was not possible because the target organization's DevOps platform binding could not be read",
 	"repos_unknown":       "project binding was not possible because the repositories of the bound DevOps organization could not be listed",
+	"on_prem_platform":    "project binding was not possible because the source project is bound to an on-premise DevOps platform, which SonarQube Cloud cannot integrate with",
 }
 
 // collectProjectBindingOutcomes reads the per-project DevOps platform

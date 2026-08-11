@@ -1005,6 +1005,57 @@ func TestMatchProjectReposUnboundSourceProject(t *testing.T) {
 	}
 }
 
+// TestMatchProjectReposOnPremSourceBinding covers a source project bound
+// to an on-premise DevOps platform. SonarQube Cloud integrates only with
+// GitHub.com, GitLab.com, Azure DevOps Services and Bitbucket Cloud, so
+// the binding has no target equivalent — but the operator must be told,
+// rather than the project being reported as fully migrated (#505).
+func TestMatchProjectReposOnPremSourceBinding(t *testing.T) {
+	e := newFlowTest(t)
+
+	// Verbatim shape of a Bitbucket Server binding on the source:
+	// alm is set and the repository is real, but is_cloud_binding is
+	// false because the ALM url is the customer's own host.
+	w, _ := e.Store.Writer("generateProjectMappings")
+	pm, _ := json.Marshal(map[string]any{
+		"key": "proj1", "sonarcloud_org_key": testCloudOrg,
+		"alm": "bitbucket", "repository": "project3-BBS",
+		"is_cloud_binding": false,
+	})
+	w.WriteOne(pm)
+
+	writeItem := func(task string, data map[string]any) {
+		wr, _ := e.Store.Writer(task)
+		b, _ := json.Marshal(data)
+		wr.WriteOne(b)
+	}
+	writeItem("getProjectIds", map[string]any{
+		"key": "cloud-org1_proj1", "id": "proj-id-1", "sonarcloud_org_key": testCloudOrg,
+	})
+	writeItem("getOrgBinding", map[string]any{
+		"sonarcloud_org_key": testCloudOrg, "bound": true, "alm": "github",
+	})
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["matchProjectRepos"].Run(context.Background(), e); err != nil {
+		t.Fatalf("matchProjectRepos: %v", err)
+	}
+	items, _ := e.Store.ReadAll("matchProjectRepos")
+	if len(items) != 1 {
+		t.Fatalf("expected exactly one skip record, got %d: %v", len(items), items)
+	}
+	if got := extractField(items[0], "skip_reason"); got != BindingSkipOnPremPlatform {
+		t.Errorf("skip_reason = %q, want %q", got, BindingSkipOnPremPlatform)
+	}
+	if got := extractField(items[0], "skip_detail"); got != BindingSkipDetail[BindingSkipOnPremPlatform] {
+		t.Errorf("skip_detail = %q, want %q", got, BindingSkipDetail[BindingSkipOnPremPlatform])
+	}
+	// No binding was attempted, so there is no API error to quote.
+	if got := extractField(items[0], "skip_error"); got != "" {
+		t.Errorf("skip_error = %q, want empty", got)
+	}
+}
+
 // TestGetOrgBinding exercises the org DevOps-binding lookup against the
 // live response shape.
 func TestGetOrgBinding(t *testing.T) {
