@@ -49,9 +49,19 @@ jobs:
         with:
           secrets: |
             development/kv/data/sonarcloud token | SONAR_TOKEN;
+      - name: Compute project version
+        if: env.SONAR_ANALYSIS_ENABLED == 'true'
+        id: project_version
+        run: |
+          RAW_VERSION="$(grep -oE 'const Version = "[^"]+"' go/internal/version/version.go | cut -d'"' -f2)"
+          VERSION="${RAW_VERSION#v}"
+          VERSION="${VERSION%%-*}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
       - name: SonarQube Scan
         if: env.SONAR_ANALYSIS_ENABLED == 'true'
         uses: SonarSource/sonarqube-scan-action@v8
+        with:
+          args: -Dsonar.projectVersion=${{ steps.project_version.outputs.version }}
         env:
           # `|| '{}'` is load-bearing: GitHub evaluates a step's `env` expressions
           # even when its `if` is false, so when "Fetch Vault secrets" is skipped
