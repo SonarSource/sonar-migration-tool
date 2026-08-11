@@ -5,6 +5,7 @@
 package sqapi
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"math/rand/v2"
@@ -147,11 +148,6 @@ type retryTransport struct {
 }
 
 func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	var (
-		resp *http.Response
-		err  error
-	)
-
 	// pausedForRateLimit records whether this request slept for at least one
 	// 429 backoff; totalWaited accumulates that backoff. They drive the
 	// recovery callback so we log a resume only for requests that were
@@ -164,7 +160,7 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	for attempt := 0; ; attempt++ {
 		t.waitOnGate(req.Context())
 
-		resp, err = t.inner.RoundTrip(req)
+		resp, err := t.inner.RoundTrip(req)
 		if !shouldRetry(resp, err) {
 			if pausedForRateLimit {
 				t.fireRecovery(req, attempt, totalWaited)
@@ -172,35 +168,81 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return resp, err
 		}
 
-		rl := t.observeRateLimit(resp)
-		drainAndClose(resp)
-
-		wait, total, more := t.nextWait(rl, attempt)
-		chosenWait := chosenWaitOrZero(wait, more)
-		wallClockAdded := time.Duration(0)
-		if more {
-			if rl.isSonarRateLimit() {
-				wallClockAdded = t.extendGate(time.Now().Add(wait))
-			} else {
-				wallClockAdded = chosenWait
-			}
-		}
-		t.fireObserver(rl, chosenWait, wallClockAdded)
-		if !more {
+		d := t.planRetry(req, resp, attempt)
+		if !d.more {
+			// Give-up path: planRetry left resp.Body readable so the
+			// caller still sees the real status and payload.
 			return resp, err
 		}
-		if rl.is429 {
+		if d.is429 {
 			pausedForRateLimit = true
-			totalWaited += chosenWait
+			totalWaited += d.chosen
 		}
 
-		t.logAttempt(req, resp, attempt, total)
+		t.logAttempt(req, resp, attempt, d.total)
 		select {
 		case <-req.Context().Done():
 			return resp, req.Context().Err()
-		case <-time.After(jitter(wait)):
+		case <-time.After(jitter(d.wait)):
 		}
 	}
+}
+
+// retryDecision bundles everything RoundTrip needs to know once a
+// retryable outcome has been fully processed by planRetry.
+type retryDecision struct {
+	wait   time.Duration // schedule value for this attempt, before jitter
+	chosen time.Duration // wait when retrying, zero when giving up
+	total  int           // total attempts in the applicable schedule
+	more   bool          // whether another attempt will be made
+	is429  bool          // whether this outcome was a rate limit
+}
+
+// planRetry processes one retryable outcome: it classifies the response,
+// decides whether another attempt is both scheduled and physically
+// possible, disposes of the response body accordingly, and notifies the
+// rate-limit observer.
+//
+// The body disposition is the crux of issue #505. When retrying, the
+// body is drained and closed so the connection returns to the pool.
+// When giving up, the body must stay READABLE — the caller is about to
+// receive this response with a nil error and needs the status and
+// payload to build a meaningful HTTP error. Closing it there produced
+// the opaque "http: read on closed response body" that masked the real
+// upstream status.
+func (t *retryTransport) planRetry(req *http.Request, resp *http.Response, attempt int) retryDecision {
+	rl := t.observeRateLimit(resp)
+
+	wait, total, more := t.nextWait(rl, attempt)
+	// Decide before destroying anything: a retry is only real if the
+	// schedule allows it AND the request body can be transmitted again.
+	more = more && rewindRequestBody(req)
+
+	if more {
+		drainAndClose(resp)
+	} else {
+		restoreConsumedBody(resp, rl.body)
+	}
+
+	chosen := chosenWaitOrZero(wait, more)
+	t.fireObserver(rl, chosen, t.wallClockAdded(rl, chosen, more))
+
+	return retryDecision{wait: wait, chosen: chosen, total: total, more: more, is429: rl.is429}
+}
+
+// wallClockAdded returns the gate-deduplicated wall-clock pause this
+// event actually contributes. Sonar-classified 429s share the rate-limit
+// gate, so only the first (or extending) event of a window reports real
+// time; everything else contributes its own wait, and a request that is
+// giving up contributes nothing at all.
+func (t *retryTransport) wallClockAdded(rl rateLimitInfo, chosen time.Duration, more bool) time.Duration {
+	if !more {
+		return 0
+	}
+	if rl.isSonarRateLimit() {
+		return t.extendGate(time.Now().Add(chosen))
+	}
+	return chosen
 }
 
 // chosenWaitOrZero returns wait when a retry will follow, or zero when
@@ -213,6 +255,63 @@ func chosenWaitOrZero(wait time.Duration, more bool) time.Duration {
 	}
 	return 0
 }
+
+// rewindRequestBody restores req.Body so the request can be transmitted
+// again, reporting whether that was possible.
+//
+// Every RoundTripper — including the inner http.Transport — consumes and
+// closes req.Body. Re-issuing the same *http.Request without rewinding
+// therefore sends an exhausted reader: with a known Content-Length the
+// write fails outright ("ContentLength=N with Body length 0"), and with
+// an unknown length it silently POSTs an EMPTY body, turning a failed
+// write into a successful no-op call. http.Request.GetBody exists for
+// exactly this and is populated automatically by http.NewRequest for
+// *strings.Reader, *bytes.Reader and *bytes.Buffer — the three types
+// every write in this client uses.
+//
+// A request that carries a body but has no GetBody cannot be replayed
+// safely, so this reports false and the transport gives up rather than
+// re-sending something different from what the caller asked for.
+func rewindRequestBody(req *http.Request) bool {
+	if req.Body == nil || req.Body == http.NoBody {
+		return true // bodyless request (every GET) — nothing to rewind
+	}
+	if req.GetBody == nil {
+		return false
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		return false
+	}
+	// The previous body was already closed by the inner RoundTripper,
+	// which the http.RoundTripper contract requires of every attempt.
+	req.Body = body
+	return true
+}
+
+// restoreConsumedBody puts back the bytes observeRateLimit peeked at so
+// the caller reads the response exactly as the server sent it.
+// Only 429s are peeked at (to classify them); for every other retryable
+// status nothing was consumed and resp is handed back untouched.
+func restoreConsumedBody(resp *http.Response, consumed []byte) {
+	if resp == nil || len(consumed) == 0 {
+		return
+	}
+	resp.Body = &rejoinedBody{
+		Reader: io.MultiReader(bytes.NewReader(consumed), resp.Body),
+		closer: resp.Body,
+	}
+}
+
+// rejoinedBody re-presents bytes already read from a response body while
+// still closing the original body, so the caller closing the response
+// releases the underlying connection as usual.
+type rejoinedBody struct {
+	io.Reader
+	closer io.Closer
+}
+
+func (b *rejoinedBody) Close() error { return b.closer.Close() }
 
 // shouldRetry reports whether the (resp, err) pair from inner.RoundTrip
 // warrants another attempt. Network errors (nil resp or non-nil err)
@@ -250,10 +349,12 @@ func (r rateLimitInfo) isSonarRateLimit() bool {
 }
 
 // observeRateLimit reads a 429 response's body and headers, classifies
-// it, and returns a rateLimitInfo describing what was found. The body
-// is consumed but not yet closed — drainAndClose handles the remainder
-// and connection cleanup afterwards. For non-429 responses it returns
-// the zero rateLimitInfo without touching the body.
+// it, and returns a rateLimitInfo describing what was found. The bytes
+// it consumes are returned in the `body` field: planRetry either
+// discards them with the rest of the body (drainAndClose, when
+// retrying) or splices them back in front of the remainder
+// (restoreConsumedBody, when giving up). For non-429 responses it
+// returns the zero rateLimitInfo without touching the body.
 func (t *retryTransport) observeRateLimit(resp *http.Response) rateLimitInfo {
 	if resp == nil || resp.StatusCode != http.StatusTooManyRequests {
 		return rateLimitInfo{}

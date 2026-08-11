@@ -20,6 +20,10 @@ var (
 	Jitter          = jitter
 )
 
+// BodySnippetMax exposes the classifier's 429 body peek window so tests
+// can build payloads that are provably longer than it.
+const BodySnippetMax = bodySnippetMax
+
 // BuildTransport exposes buildTransport for testing TLS config branches.
 func BuildTransport(token string, version float64, tlsMinVersion uint16) http.RoundTripper {
 	cfg := defaultClientConfig()
