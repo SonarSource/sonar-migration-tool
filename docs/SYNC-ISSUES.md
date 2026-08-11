@@ -61,14 +61,6 @@ If a rendered target key does not exist on SonarQube Cloud, its findings are log
 ### With CLI flags
 
 ```bash
-# From source
-cd go && go run . sync-issues \
-  --source_url https://sonarqube.example.com \
-  --source_token sqp_xxx \
-  --target_token squ_xxx \
-  --default_organization my-org
-
-# Built binary
 sonar-migration-tool sync-issues \
   --source_url https://sonarqube.example.com \
   --source_token sqp_xxx \
@@ -81,10 +73,6 @@ Omitting `--project_key` syncs every project visible to the source token.
 ### With a config file
 
 ```bash
-# From source
-cd go && go run . sync-issues -c config.json
-
-# Built binary
 sonar-migration-tool sync-issues -c config.json
 ```
 
