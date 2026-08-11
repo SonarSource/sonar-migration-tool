@@ -530,10 +530,20 @@ func collectSyncOutcome(store *common.DataStore, taskName, errorOp string) []pro
 // imported to keep internal/report free of a dependency on
 // internal/migrate, matching how the global-settings outcome contract is
 // already handled.
+//
+// org_binding_unknown / repos_unknown (issue #505) exist because the
+// lookups feeding a project binding are best-effort: when one of them
+// fails the tool never learns whether the org is bound or which
+// repositories it has, and saying "the org is not bound" would state
+// something it never observed. Those two records carry the API error in
+// skip_error, which is rendered after the sentence (issue #122 asked for
+// the API error to be surfaced in the report).
 var bindingSkipOperations = map[string]string{
-	"org_not_bound":  "project binding was not possible because the org itself is not bound",
-	"repo_not_found": "project binding was not possible because the repository was not found in the bound DevOps organization",
-	"no_project_id":  "project binding was not possible because the target project id could not be resolved",
+	"org_not_bound":       "project binding was not possible because the org itself is not bound",
+	"repo_not_found":      "project binding was not possible because the repository was not found in the bound DevOps organization",
+	"no_project_id":       "project binding was not possible because the target project id could not be resolved",
+	"org_binding_unknown": "project binding was not possible because the target organization's DevOps platform binding could not be read",
+	"repos_unknown":       "project binding was not possible because the repositories of the bound DevOps organization could not be listed",
 }
 
 // collectProjectBindingOutcomes reads the per-project DevOps platform
@@ -603,7 +613,9 @@ func classifyBindingRecord(raw json.RawMessage) (op, errMsg string, ok bool) {
 		if op == "" {
 			op = "DevOps platform binding was not migrated"
 		}
-		return op, "", true
+		// skip_error is set only when a failed lookup — not an observed
+		// fact — caused the skip (#505); it is the API error to quote.
+		return op, jsonStr(raw, "skip_error"), true
 	}
 	if jsonStr(raw, "status") == "failed" {
 		return "DevOps platform binding not migrated", jsonStr(raw, "error"), true

@@ -96,7 +96,14 @@ func runGetOrgRepos(ctx context.Context, e *Executor) error {
 				"api/alm_integration/list_repositories", "repositories",
 				url.Values{"organization": {orgKey}})
 			if err != nil {
-				e.Logger.Warn("getOrgRepos skipped", "org", orgKey, "err", err)
+				// A cancelled/expired run must still abort; a failure of
+				// this best-effort listing must not (issue #505).
+				if ctx.Err() != nil {
+					return err
+				}
+				if marker := e.orgReposFailure(orgKey, err); marker != nil {
+					return w.WriteOne(marker)
+				}
 				return nil
 			}
 			enriched := common.EnrichAll(raw, map[string]any{
@@ -104,6 +111,32 @@ func runGetOrgRepos(ctx context.Context, e *Executor) error {
 			})
 			return w.WriteChunk(enriched)
 		})
+}
+
+// orgReposFailure logs a failed DevOps repository listing and returns
+// the marker record to persist, or nil when there is nothing to record.
+//
+// 400/403/404 are an answer rather than a fault: SonarQube Cloud rejects
+// list_repositories for an organization with no DevOps binding with
+// HTTP 400 "This organization is not bound to an ALM application", and
+// matchProjectRepos already reports that from the org binding itself.
+// Anything else means the listing genuinely could not be read, so record
+// why (issue #505) — otherwise the report would claim the repository was
+// not found in an organization the tool never managed to list.
+func (e *Executor) orgReposFailure(orgKey string, err error) []byte {
+	if common.IsHTTPError(err, 400, 403, 404) {
+		e.Logger.Info("getOrgRepos: no DevOps repositories to list for this organization",
+			"org", orgKey, "err", err)
+		return nil
+	}
+	e.Logger.Warn("getOrgRepos: could not list the organization's DevOps repositories; "+
+		"project DevOps bindings will be skipped for this organization",
+		"org", orgKey, "err", err)
+	marker, _ := json.Marshal(map[string]any{
+		"sonarcloud_org_key": orgKey,
+		"repos_lookup_error": err.Error(),
+	})
+	return marker
 }
 
 func runGetGateConditions(ctx context.Context, e *Executor) error {

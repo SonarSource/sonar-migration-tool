@@ -69,7 +69,7 @@ On completion, a migration summary is written into the export directory as both 
 > **Non-main branches.** Project-data import now migrates the project's **non-main branches too** — each is created on SonarQube Cloud as a **long-lived branch with its full issue history**. Before submitting a non-main branch's report, the tool performs SonarQube Cloud's **"Create analysis" handshake** (`POST {api-host}/analysis/analyses`) to register the branch and obtain an analysis id, which it embeds in the report so the Compute Engine binds the issues to the branch. All migrated branches are registered as **long-lived** so SonarQube Cloud's automatic pruning of short-lived branches (after ~30 days) never discards migrated history. A non-main branch is **skipped** only when the source server no longer has its source code (e.g. purged by housekeeping for an inactive branch) — re-analyze that branch on the source first to restore it.
 
 ### DevOps platform (ALM) bindings
-<!-- updated: 2026-07-27_23:05:00 -->
+<!-- updated: 2026-08-11_10:20:00 -->
 
 `transfer` replicates the project's DevOps platform binding so the migrated project is linked to the
 same repository on SonarQube Cloud. The identifier carried over per platform is:
@@ -94,6 +94,21 @@ project's migration outcome becomes **Partial Migration** and the report's Detai
 *"project binding was not possible because the org itself is not bound"*. The same happens, with a
 different sentence, when the organization is bound but the repository does not exist in the bound
 DevOps organization.
+
+**Both preconditions are best-effort and never fail the migration** (issue #505). Reading them only
+enables this optional extra, so any failure degrades to "no binding" and the run continues:
+
+| What the target answers | Recorded as | Report Details |
+| --- | --- | --- |
+| `show_bound_organization` → HTTP 500 (SonarQube Cloud's **normal** answer for an org with no DevOps binding), 404 (no such org), 400/403 (token cannot administer it) | unbound | *"...because the org itself is not bound"* |
+| `show_bound_organization` → any other failure (transport error, 502/503, ...) | binding **unknown** | *"...because the target organization's DevOps platform binding could not be read"* + the API error |
+| `list_repositories` → HTTP 400 *"This organization is not bound to an ALM application"* / 403 / 404 | no repositories | the unbound-org sentence above (reported from the org binding) |
+| `list_repositories` → any other failure | repositories **unknown** | *"...because the repositories of the bound DevOps organization could not be listed"* + the API error |
+
+Only a cancelled or timed-out run still aborts these tasks. The distinction between "unbound" and
+"unknown" is deliberate: before #505 an unbound org's HTTP 500 aborted the entire `migrate` run with
+`phase 2: task getOrgBinding: ...`, and reporting an unread binding as "not bound" would state
+something the tool never observed.
 
 **Bitbucket Server** bindings are not migrated: SonarQube Cloud has no Bitbucket Server integration,
 so such a binding has no target equivalent (only Bitbucket **Cloud** does).

@@ -7,11 +7,14 @@ package migrate
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // newFlowTest creates a complete test environment: mock servers, extract
@@ -1028,6 +1031,254 @@ func TestGetOrgBinding(t *testing.T) {
 	if got := extractField(items[0], "dop_organization"); got != "myorg" {
 		t.Errorf("dop_organization = %q, want myorg", got)
 	}
+}
+
+// cloudUnboundOrg500Body is the verbatim body SonarQube Cloud returns
+// from show_bound_organization for an organization that is NOT bound to
+// a DevOps platform. Probed live against sc-staging.io for issue #505:
+// two of three real orgs answered HTTP 500 with exactly this, so a 500
+// here is the normal "not bound" answer rather than a transient fault.
+const cloudUnboundOrg500Body = `{"errors":[{"msg":"An unexpected error occurred. Please try again later."}]}`
+
+// newOrgTaskTest builds a flow executor whose SonarQube Cloud host
+// answers `pattern` with h (everything else: an empty JSON object), and
+// seeds the single organization mapping the org-scoped tasks iterate.
+func newOrgTaskTest(t *testing.T, pattern string, h http.HandlerFunc) *Executor {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc(pattern, h)
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	})
+	cloudSrv := httptest.NewServer(mux)
+	t.Cleanup(cloudSrv.Close)
+	apiSrv := newMockAPIServer()
+	t.Cleanup(apiSrv.Close)
+	dir := t.TempDir()
+	setupExtractData(dir)
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+
+	w, _ := e.Store.Writer("generateOrganizationMappings")
+	om, _ := json.Marshal(map[string]any{"sonarcloud_org_key": testCloudOrg})
+	w.WriteOne(om)
+	return e
+}
+
+// respondWith answers with a fixed status and body.
+func respondWith(status int, body string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(status)
+		fmt.Fprint(w, body)
+	}
+}
+
+// runOrgBindingTask runs getOrgBinding, asserts it did NOT abort the
+// migration (issue #505), and returns its single record.
+func runOrgBindingTask(t *testing.T, e *Executor) json.RawMessage {
+	t.Helper()
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["getOrgBinding"].Run(context.Background(), e); err != nil {
+		t.Fatalf("getOrgBinding must never abort the migration, got: %v", err)
+	}
+	items, _ := e.Store.ReadAll("getOrgBinding")
+	if len(items) != 1 {
+		t.Fatalf("expected 1 record, got %d: %v", len(items), items)
+	}
+	if extractBool(items[0], "bound") {
+		t.Errorf("expected bound=false, got %s", items[0])
+	}
+	return items[0]
+}
+
+// TestGetOrgBindingUnboundOrgAnswers500 is the issue #505 regression
+// test. An unbound SonarQube Cloud org answers this endpoint with HTTP
+// 500; the old code treated anything but 400/403/404 as fatal, so the
+// entire run died with "phase 2: task getOrgBinding: ...". The 500 is a
+// plain "not bound", recorded as such and never surfaced as a lookup
+// failure.
+func TestGetOrgBindingUnboundOrgAnswers500(t *testing.T) {
+	e := newOrgTaskTest(t, "GET /api/alm_integration/show_bound_organization",
+		respondWith(http.StatusInternalServerError, cloudUnboundOrg500Body))
+
+	rec := runOrgBindingTask(t, e)
+	if got := extractField(rec, "lookup_error"); got != "" {
+		t.Errorf("500 is Cloud's normal unbound answer and must not be recorded "+
+			"as a failed lookup, got lookup_error=%q", got)
+	}
+}
+
+// TestGetOrgBindingOrgNotFound404 pins the pre-existing behaviour for the
+// answer that really is a 404 — "Could not find organization with key
+// ..." — which also means there is no binding to replicate.
+func TestGetOrgBindingOrgNotFound404(t *testing.T) {
+	e := newOrgTaskTest(t, "GET /api/alm_integration/show_bound_organization",
+		respondWith(http.StatusNotFound,
+			`{"errors":[{"msg":"Could not find organization with key 'cloud-org1'"}]}`))
+
+	rec := runOrgBindingTask(t, e)
+	if got := extractField(rec, "lookup_error"); got != "" {
+		t.Errorf("a 404 is an answer, not a failed lookup, got lookup_error=%q", got)
+	}
+}
+
+// TestGetOrgBindingUnexpectedFailureDegrades covers the other half of
+// issue #505: reading an org's DevOps binding only enables the optional
+// project-binding extra, so an unexpected failure of it degrades to
+// "unknown" and lets the migration finish — while still recording WHY so
+// the report can tell it apart from a genuine unbound org.
+func TestGetOrgBindingUnexpectedFailureDegrades(t *testing.T) {
+	e := newOrgTaskTest(t, "GET /api/alm_integration/show_bound_organization",
+		respondWith(http.StatusBadGateway, `{"errors":[{"msg":"Bad gateway"}]}`))
+
+	rec := runOrgBindingTask(t, e)
+	got := extractField(rec, "lookup_error")
+	if !strings.Contains(got, "502") || !strings.Contains(got, "Bad gateway") {
+		t.Errorf("lookup_error = %q, want the underlying API error", got)
+	}
+}
+
+// TestGetOrgBindingContextCancelled: degrade-never-abort applies to
+// lookup failures, not to a run being torn down. A cancelled context must
+// still propagate, and must not be recorded as "this org is not bound".
+func TestGetOrgBindingContextCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	e := newOrgTaskTest(t, "GET /api/alm_integration/show_bound_organization",
+		func(_ http.ResponseWriter, r *http.Request) {
+			cancel() // the run is torn down while the lookup is in flight
+			select {
+			case <-r.Context().Done(): // the client aborted the request
+			case <-time.After(5 * time.Second):
+			}
+		})
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["getOrgBinding"].Run(ctx, e); err == nil {
+		t.Fatal("expected the cancellation to propagate, got nil")
+	}
+	if items, _ := e.Store.ReadAll("getOrgBinding"); len(items) != 0 {
+		t.Errorf("a cancelled lookup must not be recorded as unbound: %v", items)
+	}
+}
+
+// TestGetOrgReposUnexpectedFailureDegrades: listing an org's DevOps
+// repositories is the second best-effort lookup feeding the optional
+// project binding. It must not abort the run, and it must record why it
+// failed so the report does not claim the repository was missing from an
+// organization that was never listed (issue #505).
+func TestGetOrgReposUnexpectedFailureDegrades(t *testing.T) {
+	e := newOrgTaskTest(t, "GET /api/alm_integration/list_repositories",
+		respondWith(http.StatusServiceUnavailable, `{"errors":[{"msg":"Service Unavailable"}]}`))
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["getOrgRepos"].Run(context.Background(), e); err != nil {
+		t.Fatalf("getOrgRepos must never abort the migration, got: %v", err)
+	}
+	items, _ := e.Store.ReadAll("getOrgRepos")
+	if len(items) != 1 {
+		t.Fatalf("expected 1 marker record, got %d: %v", len(items), items)
+	}
+	if got := extractField(items[0], "repos_lookup_error"); !strings.Contains(got, "503") {
+		t.Errorf("repos_lookup_error = %q, want the underlying API error", got)
+	}
+}
+
+// TestGetOrgReposUnboundOrg: Cloud rejects list_repositories for an org
+// with no DevOps binding with HTTP 400 "This organization is not bound to
+// an ALM application". That is an answer, not a failed listing, so no
+// marker is recorded — getOrgBinding already reports the unbound org.
+func TestGetOrgReposUnboundOrg(t *testing.T) {
+	e := newOrgTaskTest(t, "GET /api/alm_integration/list_repositories",
+		respondWith(http.StatusBadRequest,
+			`{"errors":[{"msg":"This organization is not bound to an ALM application"}]}`))
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["getOrgRepos"].Run(context.Background(), e); err != nil {
+		t.Fatalf("getOrgRepos: %v", err)
+	}
+	if items, _ := e.Store.ReadAll("getOrgRepos"); len(items) != 0 {
+		t.Errorf("expected no records for an unbound org, got %v", items)
+	}
+}
+
+// TestMatchProjectReposOrgBindingUnknown is the issue #505 report-honesty
+// test: when the org's DevOps binding could not be READ, the project must
+// not be told "the org itself is not bound" — something the tool never
+// observed — but that the binding could not be read, with the API error
+// attached for the report (issue #122 asked for it to be surfaced).
+func TestMatchProjectReposOrgBindingUnknown(t *testing.T) {
+	e := newFlowTest(t)
+	const apiErr = "HTTP 502 GET https://sonarcloud.io/api/alm_integration/" +
+		"show_bound_organization?organization=cloud-org1 - Bad gateway"
+	seedBindingInputs(t, e, map[string]any{
+		"sonarcloud_org_key": testCloudOrg, "bound": false,
+		"lookup_error": apiErr,
+	})
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["matchProjectRepos"].Run(context.Background(), e); err != nil {
+		t.Fatalf("matchProjectRepos: %v", err)
+	}
+	rec := assertSingleSkip(t, e, BindingSkipOrgBindingUnknown,
+		"project binding was not possible because the target organization's "+
+			"DevOps platform binding could not be read")
+	if got := extractField(rec, "skip_error"); got != apiErr {
+		t.Errorf("skip_error = %q, want the API error %q", got, apiErr)
+	}
+
+	// setProjectBinding forwards it without attempting the write.
+	if err := reg["setProjectBinding"].Run(context.Background(), e); err != nil {
+		t.Fatalf("setProjectBinding: %v", err)
+	}
+	assertSkipForwarded(t, e)
+}
+
+// TestMatchProjectReposReposUnknown: the org IS bound, but its repository
+// listing failed. Reporting "the repository was not found in the bound
+// DevOps organization" would assert something never checked (issue #505).
+func TestMatchProjectReposReposUnknown(t *testing.T) {
+	e := newFlowTest(t)
+	const apiErr = "HTTP 503 GET https://sonarcloud.io/api/alm_integration/" +
+		"list_repositories?organization=cloud-org1 - Service Unavailable"
+	seedBindingInputsWithRepo(t, e,
+		map[string]any{
+			"sonarcloud_org_key": testCloudOrg, "bound": true,
+			"alm": "github", "dop_organization": "myorg",
+			"alm_url": "https://github.com/myorg",
+		},
+		// The marker runGetOrgRepos writes instead of repositories.
+		map[string]any{
+			"sonarcloud_org_key": testCloudOrg, "repos_lookup_error": apiErr,
+		})
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["matchProjectRepos"].Run(context.Background(), e); err != nil {
+		t.Fatalf("matchProjectRepos: %v", err)
+	}
+	rec := assertSingleSkip(t, e, BindingSkipReposUnknown,
+		"project binding was not possible because the repositories of the "+
+			"bound DevOps organization could not be listed")
+	if got := extractField(rec, "skip_error"); got != apiErr {
+		t.Errorf("skip_error = %q, want the API error %q", got, apiErr)
+	}
+}
+
+// assertSingleSkip asserts matchProjectRepos produced exactly one skip
+// record with the given reason and operator-facing detail.
+func assertSingleSkip(t *testing.T, e *Executor, reason, detail string) json.RawMessage {
+	t.Helper()
+	items, _ := e.Store.ReadAll("matchProjectRepos")
+	if len(items) != 1 || !extractBool(items[0], "binding_skipped") {
+		t.Fatalf("expected exactly 1 skip record, got %v", items)
+	}
+	if got := extractField(items[0], "skip_reason"); got != reason {
+		t.Errorf("skip_reason = %q, want %q", got, reason)
+	}
+	if got := extractField(items[0], "skip_detail"); got != detail {
+		t.Errorf("skip_detail = %q, want %q", got, detail)
+	}
+	return items[0]
 }
 
 func TestSetPortfolioProjects(t *testing.T) {

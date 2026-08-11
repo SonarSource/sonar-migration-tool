@@ -31,14 +31,37 @@ const (
 	// BindingSkipNoProjectID means the cloud project's internal id could
 	// not be resolved, so the DOP binding call cannot be made.
 	BindingSkipNoProjectID = "no_project_id"
+	// BindingSkipOrgBindingUnknown means the target org's own DevOps
+	// binding could not be READ (issue #505): show_bound_organization
+	// failed with something other than the "not bound" answer, so the
+	// tool never found out whether the org is bound. Reported apart from
+	// BindingSkipOrgNotBound because telling an operator "your org is not
+	// bound" when we never managed to look is misleading.
+	BindingSkipOrgBindingUnknown = "org_binding_unknown"
+	// BindingSkipReposUnknown means listing the bound DevOps
+	// organization's repositories failed, so no repository could be
+	// matched — as opposed to BindingSkipRepoNotFound, where the listing
+	// succeeded and simply did not contain the source repository (#505).
+	BindingSkipReposUnknown = "repos_unknown"
 )
 
 // BindingSkipDetail maps a skip reason to the operator-facing sentence
 // rendered in the migration report's Details column.
 var BindingSkipDetail = map[string]string{
-	BindingSkipOrgNotBound:  "project binding was not possible because the org itself is not bound",
-	BindingSkipRepoNotFound: "project binding was not possible because the repository was not found in the bound DevOps organization",
-	BindingSkipNoProjectID:  "project binding was not possible because the target project id could not be resolved",
+	BindingSkipOrgNotBound:       "project binding was not possible because the org itself is not bound",
+	BindingSkipRepoNotFound:      "project binding was not possible because the repository was not found in the bound DevOps organization",
+	BindingSkipNoProjectID:       "project binding was not possible because the target project id could not be resolved",
+	BindingSkipOrgBindingUnknown: "project binding was not possible because the target organization's DevOps platform binding could not be read",
+	BindingSkipReposUnknown:      "project binding was not possible because the repositories of the bound DevOps organization could not be listed",
+}
+
+// bindingSkip explains why a project's DevOps binding could not be
+// replicated. Err carries the underlying API error when the skip was
+// caused by a failed lookup rather than by an observed fact, so the
+// report can quote it (issues #122, #505).
+type bindingSkip struct {
+	Reason string
+	Err    string
 }
 
 // almTasks returns tasks for ALM (DevOps platform) binding.
@@ -128,12 +151,23 @@ type orgBinding struct {
 	// DevOpsOrg is the organization/workspace key on the DevOps platform.
 	DevOpsOrg string
 	URL       string
+	// LookupError is non-empty when the binding could not be read at all
+	// (issue #505). Bound is then false because nothing was observed,
+	// NOT because the org was seen to be unbound.
+	LookupError string
 }
 
 // runGetOrgBinding resolves, for every target organization, the DevOps
 // platform organization it is bound to (issue #122). An org that is not
 // bound yields a record with bound=false rather than being omitted, so
 // matchProjectRepos can tell "not bound" apart from "not looked up".
+//
+// The lookup is best-effort: it only enables the optional project ALM
+// binding, so no failure of it may abort the migration. Issue #505: an
+// unbound org answers HTTP 500 here (see orgBindingNotBoundCodes), which
+// the old code treated as fatal, so every migration into an unbound org
+// died with "phase 2: task getOrgBinding: http: read on closed response
+// body".
 func runGetOrgBinding(ctx context.Context, e *Executor) error {
 	return forEachMigrateItem(ctx, e, "getOrgBinding", "generateOrganizationMappings",
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
@@ -145,45 +179,97 @@ func runGetOrgBinding(ctx context.Context, e *Executor) error {
 				"org", orgKey)
 			raw, err := e.Raw.Get(ctx, "api/alm_integration/show_bound_organization",
 				url.Values{"organization": {orgKey}})
-			rec := map[string]any{"sonarcloud_org_key": orgKey, "bound": false}
 			if err != nil {
-				// An unbound org answers 404 (and 400/403 when the token
-				// cannot administer it). Either way the binding cannot
-				// be replicated — record it as unbound rather than
-				// failing the whole migration.
-				if !common.IsHTTPError(err, 400, 403, 404) {
+				// A cancelled/expired run is being torn down — that must
+				// still propagate, unlike a failure of this optional
+				// lookup.
+				if ctx.Err() != nil {
 					return err
 				}
-				e.Logger.Info("getOrgBinding: organization is not bound to a DevOps platform",
-					"org", orgKey, "err", err)
-				out, _ := json.Marshal(rec)
-				return w.WriteOne(out)
+				return w.WriteOne(e.unboundOrgRecord(orgKey, err))
 			}
-			almURL, dopOrg := parseBoundOrganization(raw)
-			alm := almFromURL(almURL)
-			if dopOrg != "" || alm != "" {
-				rec["bound"] = true
-			}
-			rec["alm"] = alm
-			rec["dop_organization"] = dopOrg
-			rec["alm_url"] = almURL
-			e.Logger.Info("getOrgBinding: organization DevOps binding resolved",
-				"org", orgKey, "alm", alm, "dop_organization", dopOrg)
-			out, _ := json.Marshal(rec)
-			return w.WriteOne(out)
+			return w.WriteOne(e.boundOrgRecord(orgKey, raw))
 		})
 }
 
+// orgBindingNotBoundCodes are the statuses that ARE an answer: none of
+// them can yield a binding, so each records a plain bound=false. Probed
+// live against SonarQube Cloud for issue #505:
+//
+//	500  the organization exists but is NOT bound to a DevOps platform.
+//	     This is SonarQube Cloud's normal answer for an unbound org, not
+//	     a transient server fault — it comes back with
+//	     {"errors":[{"msg":"An unexpected error occurred. Please try
+//	     again later."}]} and is reproducible per org. Two of three
+//	     probed orgs answered it, so it is the common case.
+//	404  no organization with that key (NOT "unbound", as an earlier
+//	     comment here claimed).
+//	400/403  the token may not administer that organization.
+var orgBindingNotBoundCodes = []int{400, 403, 404, 500}
+
+// unboundOrgRecord builds the getOrgBinding record for an organization
+// no binding could be read for, and logs it honestly.
+//
+// Anything outside orgBindingNotBoundCodes (a transport error, 502/503,
+// an edition not serving the endpoint, a rate limit that outlived its
+// retries) means the tool never found out. It is logged at WARN and
+// recorded as lookup_error so the report can say "could not be read"
+// instead of asserting an unbound org it never observed (issue #505).
+func (e *Executor) unboundOrgRecord(orgKey string, err error) []byte {
+	rec := map[string]any{"sonarcloud_org_key": orgKey, "bound": false}
+	switch {
+	case common.IsHTTPError(err, 404):
+		e.Logger.Info("getOrgBinding: organization not found, no DevOps binding to replicate",
+			"org", orgKey, "err", err)
+	case common.IsHTTPError(err, orgBindingNotBoundCodes...):
+		e.Logger.Info("getOrgBinding: organization is not bound to a DevOps platform",
+			"org", orgKey, "err", err)
+	default:
+		rec["lookup_error"] = err.Error()
+		e.Logger.Warn("getOrgBinding: could not read the organization's DevOps binding; "+
+			"continuing without project DevOps bindings for this organization",
+			"org", orgKey, "err", err)
+	}
+	out, _ := json.Marshal(rec)
+	return out
+}
+
+// boundOrgRecord builds the getOrgBinding record from a successful
+// show_bound_organization response. An empty almOrganization is how
+// SonarQube Cloud answers for an org that is genuinely not bound.
+func (e *Executor) boundOrgRecord(orgKey string, raw json.RawMessage) []byte {
+	almURL, dopOrg := parseBoundOrganization(raw)
+	alm := almFromURL(almURL)
+	rec := map[string]any{
+		"sonarcloud_org_key": orgKey,
+		"bound":              dopOrg != "" || alm != "",
+		"alm":                alm,
+		"dop_organization":   dopOrg,
+		"alm_url":            almURL,
+	}
+	e.Logger.Info("getOrgBinding: organization DevOps binding resolved",
+		"org", orgKey, "alm", alm, "dop_organization", dopOrg)
+	out, _ := json.Marshal(rec)
+	return out
+}
+
 // loadOrgRepos groups the repositories read by getOrgRepos by target
-// organization key.
-func (e *Executor) loadOrgRepos() map[string][]json.RawMessage {
+// organization key. Marker records written when the listing itself
+// failed (issue #505) are returned separately, keyed by org, rather than
+// being mistaken for repositories.
+func (e *Executor) loadOrgRepos() (byOrg map[string][]json.RawMessage, failed map[string]string) {
 	items, _ := e.Store.ReadAll("getOrgRepos")
-	byOrg := make(map[string][]json.RawMessage)
+	byOrg = make(map[string][]json.RawMessage)
+	failed = make(map[string]string)
 	for _, r := range items {
 		orgKey := extractField(r, "sonarcloud_org_key")
+		if msg := extractField(r, "repos_lookup_error"); msg != "" {
+			failed[orgKey] = msg
+			continue
+		}
 		byOrg[orgKey] = append(byOrg[orgKey], r)
 	}
-	return byOrg
+	return byOrg, failed
 }
 
 // loadOrgBindings indexes the getOrgBinding records by target
@@ -193,11 +279,42 @@ func (e *Executor) loadOrgBindings() map[string]orgBinding {
 	out := make(map[string]orgBinding, len(items))
 	for _, b := range items {
 		out[extractField(b, "sonarcloud_org_key")] = orgBinding{
-			Bound:     extractBool(b, "bound"),
-			ALM:       extractField(b, "alm"),
-			DevOpsOrg: extractField(b, "dop_organization"),
-			URL:       extractField(b, "alm_url"),
+			Bound:       extractBool(b, "bound"),
+			ALM:         extractField(b, "alm"),
+			DevOpsOrg:   extractField(b, "dop_organization"),
+			URL:         extractField(b, "alm_url"),
+			LookupError: extractField(b, "lookup_error"),
 		}
+	}
+	return out
+}
+
+// orgContext is everything matchProjectRepos knows about one target
+// organization: its own DevOps binding, the repositories of the bound
+// DevOps organization, and why either lookup failed (issue #505).
+type orgContext struct {
+	Binding    orgBinding
+	Repos      []json.RawMessage
+	ReposError string
+}
+
+// loadOrgContexts joins the two best-effort org lookups per target org.
+func (e *Executor) loadOrgContexts() map[string]orgContext {
+	out := make(map[string]orgContext)
+	set := func(org string, apply func(*orgContext)) {
+		oc := out[org]
+		apply(&oc)
+		out[org] = oc
+	}
+	for org, b := range e.loadOrgBindings() {
+		set(org, func(oc *orgContext) { oc.Binding = b })
+	}
+	repos, reposFailed := e.loadOrgRepos()
+	for org, list := range repos {
+		set(org, func(oc *orgContext) { oc.Repos = list })
+	}
+	for org, msg := range reposFailed {
+		set(org, func(oc *orgContext) { oc.ReposError = msg })
 	}
 	return out
 }
@@ -226,28 +343,12 @@ func (e *Executor) loadProjectALMInfo() map[string]projectALMInfo {
 
 func runMatchProjectRepos(ctx context.Context, e *Executor) error {
 	projectItems, _ := e.Store.ReadAll("getProjectIds")
-	reposByOrg := e.loadOrgRepos()
-	orgBindings := e.loadOrgBindings()
+	orgs := e.loadOrgContexts()
 	projALMInfo := e.loadProjectALMInfo()
 
 	w, err := e.Store.Writer("matchProjectRepos")
 	if err != nil {
 		return err
-	}
-
-	writeSkip := func(cloudKey, orgKey, reason string, extra map[string]any) {
-		rec := map[string]any{
-			"cloud_project_key":  cloudKey,
-			"sonarcloud_org_key": orgKey,
-			"binding_skipped":    true,
-			"skip_reason":        reason,
-			"skip_detail":        BindingSkipDetail[reason],
-		}
-		for k, v := range extra {
-			rec[k] = v
-		}
-		out, _ := json.Marshal(rec)
-		_ = w.WriteOne(out)
 	}
 
 	for _, proj := range projectItems {
@@ -262,12 +363,9 @@ func runMatchProjectRepos(ctx context.Context, e *Executor) error {
 		}
 
 		repoID, projID, skip := e.resolveBindingTargets(
-			ctx, proj, projKey, orgKey, info, orgBindings[orgKey], reposByOrg[orgKey])
-		if skip != "" {
-			writeSkip(projKey, orgKey, skip, map[string]any{
-				"alm":        info.ALM,
-				"repository": info.Repository,
-			})
+			ctx, proj, projKey, orgKey, info, orgs[orgKey])
+		if skip.Reason != "" {
+			writeBindingSkip(w, projKey, orgKey, info, skip)
 			continue
 		}
 
@@ -285,31 +383,47 @@ func runMatchProjectRepos(ctx context.Context, e *Executor) error {
 	return nil
 }
 
+// writeBindingSkip records that a project's DevOps binding could not be
+// replicated. internal/report/summary reads skip_detail — plus
+// skip_error when a lookup failure caused the skip (#505) — into the
+// project's Details column and marks it partially migrated.
+func writeBindingSkip(w *common.ChunkWriter, cloudKey, orgKey string,
+	info projectALMInfo, skip bindingSkip) {
+
+	rec := map[string]any{
+		"cloud_project_key":  cloudKey,
+		"sonarcloud_org_key": orgKey,
+		"binding_skipped":    true,
+		"skip_reason":        skip.Reason,
+		"skip_detail":        BindingSkipDetail[skip.Reason],
+		"alm":                info.ALM,
+		"repository":         info.Repository,
+	}
+	if skip.Err != "" {
+		rec["skip_error"] = skip.Err
+	}
+	out, _ := json.Marshal(rec)
+	_ = w.WriteOne(out)
+}
+
 // resolveBindingTargets decides what a bound source project can be bound to
 // on SonarQube Cloud. It returns the repository identifier and the cloud
-// project id, or a non-empty BindingSkip* reason explaining why no binding
-// is possible (issue #122).
+// project id, or a bindingSkip explaining why no binding is possible
+// (issue #122).
 func (e *Executor) resolveBindingTargets(ctx context.Context, proj json.RawMessage,
-	projKey, orgKey string, info projectALMInfo, ob orgBinding,
-	repos []json.RawMessage) (repoID, projID, skipReason string) {
+	projKey, orgKey string, info projectALMInfo,
+	oc orgContext) (repoID, projID string, skip bindingSkip) {
 
 	// Only attempt a binding when the target org is bound to the same
 	// DevOps platform: SonarQube Cloud can only bind a project to a
 	// repository of the DevOps organization its own org is bound to.
-	if !ob.Bound || !strings.EqualFold(ob.ALM, info.ALM) {
-		e.Logger.Warn("matchProjectRepos: target organization is not bound to the project's DevOps platform",
-			"project", projKey, "org", orgKey,
-			"project_alm", info.ALM, "org_alm", ob.ALM, "org_bound", ob.Bound)
-		return "", "", BindingSkipOrgNotBound
+	if !oc.Binding.Bound || !strings.EqualFold(oc.Binding.ALM, info.ALM) {
+		return "", "", e.orgBindingSkip(projKey, orgKey, info, oc.Binding)
 	}
 
-	repoID = MatchDevOpsPlatform(info.ALM, info.Repository, info.Slug, repos)
+	repoID = MatchDevOpsPlatform(info.ALM, info.Repository, info.Slug, oc.Repos)
 	if repoID == "" {
-		e.Logger.Warn("matchProjectRepos: no matching repository in the bound DevOps organization",
-			"project", projKey, "org", orgKey, "alm", info.ALM,
-			"repository", info.Repository, "slug", info.Slug,
-			"dop_organization", ob.DevOpsOrg, "candidates", len(repos))
-		return "", "", BindingSkipRepoNotFound
+		return "", "", e.repoMatchSkip(projKey, orgKey, info, oc)
 	}
 
 	// SonarQube Cloud's /api/projects/search does not return an internal
@@ -321,9 +435,48 @@ func (e *Executor) resolveBindingTargets(ctx context.Context, proj json.RawMessa
 	if projID == "" {
 		e.Logger.Warn("matchProjectRepos: could not resolve the cloud project id",
 			"project", projKey, "org", orgKey)
-		return "", "", BindingSkipNoProjectID
+		return "", "", bindingSkip{Reason: BindingSkipNoProjectID}
 	}
-	return repoID, projID, ""
+	return repoID, projID, bindingSkip{}
+}
+
+// orgBindingSkip separates "the target org is genuinely not bound to the
+// project's DevOps platform" from "the org's binding could never be
+// read" (issue #505): reporting the second as the first states something
+// the tool never observed.
+func (e *Executor) orgBindingSkip(projKey, orgKey string,
+	info projectALMInfo, ob orgBinding) bindingSkip {
+
+	if ob.LookupError != "" {
+		e.Logger.Warn("matchProjectRepos: the target organization's DevOps binding could not be read, skipping the project binding",
+			"project", projKey, "org", orgKey,
+			"project_alm", info.ALM, "err", ob.LookupError)
+		return bindingSkip{Reason: BindingSkipOrgBindingUnknown, Err: ob.LookupError}
+	}
+	e.Logger.Warn("matchProjectRepos: target organization is not bound to the project's DevOps platform",
+		"project", projKey, "org", orgKey,
+		"project_alm", info.ALM, "org_alm", ob.ALM, "org_bound", ob.Bound)
+	return bindingSkip{Reason: BindingSkipOrgNotBound}
+}
+
+// repoMatchSkip separates "the repository is not in the bound DevOps
+// organization" from "the repositories could not be listed at all"
+// (issue #505) — an empty candidate list means nothing when the listing
+// itself failed.
+func (e *Executor) repoMatchSkip(projKey, orgKey string,
+	info projectALMInfo, oc orgContext) bindingSkip {
+
+	if oc.ReposError != "" {
+		e.Logger.Warn("matchProjectRepos: the bound DevOps organization's repositories could not be listed, skipping the project binding",
+			"project", projKey, "org", orgKey, "alm", info.ALM,
+			"repository", info.Repository, "err", oc.ReposError)
+		return bindingSkip{Reason: BindingSkipReposUnknown, Err: oc.ReposError}
+	}
+	e.Logger.Warn("matchProjectRepos: no matching repository in the bound DevOps organization",
+		"project", projKey, "org", orgKey, "alm", info.ALM,
+		"repository", info.Repository, "slug", info.Slug,
+		"dop_organization", oc.Binding.DevOpsOrg, "candidates", len(oc.Repos))
+	return bindingSkip{Reason: BindingSkipRepoNotFound}
 }
 
 // resolveCloudProjectID looks up a SonarQube Cloud project's internal id.

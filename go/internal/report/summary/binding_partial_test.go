@@ -99,6 +99,87 @@ func TestCollectProjectBindingOutcomes_OrgNotBound(t *testing.T) {
 	}
 }
 
+// TestCollectProjectBindingOutcomes_OrgBindingLookupFailed is the issue
+// #505 report-honesty test. When the target org's DevOps binding could
+// not be READ, the Details column must say exactly that — quoting the API
+// error — and must NOT claim the org is not bound, which the tool never
+// observed.
+func TestCollectProjectBindingOutcomes_OrgBindingLookupFailed(t *testing.T) {
+	dir := t.TempDir()
+	const apiErr = "HTTP 502 GET https://sonarcloud.io/api/alm_integration/" +
+		"show_bound_organization?organization=org1 - Bad gateway"
+	writeBindingRecords(t, dir, "setProjectBinding", map[string]any{
+		"cloud_project_key":  "cloud-1",
+		"sonarcloud_org_key": "org1",
+		"binding_skipped":    true,
+		"skip_reason":        "org_binding_unknown",
+		"skip_detail": "project binding was not possible because the target " +
+			"organization's DevOps platform binding could not be read",
+		"skip_error": apiErr,
+		"alm":        "github",
+	})
+
+	failures := collectProjectBindingOutcomes(common.NewDataStore(dir))
+	if len(failures) != 1 {
+		t.Fatalf("expected 1 failure, got %d: %+v", len(failures), failures)
+	}
+	const want = "project binding was not possible because the target " +
+		"organization's DevOps platform binding could not be read"
+	if failures[0].Operation != want {
+		t.Errorf("operation = %q, want %q", failures[0].Operation, want)
+	}
+	if failures[0].Error != apiErr {
+		t.Errorf("error = %q, want the API error %q", failures[0].Error, apiErr)
+	}
+	if failures[0].Bucket != projectBucketPartial {
+		t.Errorf("bucket = %v, want Partial", failures[0].Bucket)
+	}
+
+	// End to end: the project lands in Partial with the honest sentence
+	// and the API error, and never the org-not-bound claim.
+	succeeded := []EntityItem{{Name: "proj1", Organization: "org1", Detail: "cloud-1"}}
+	_, _, partial := applyProjectFailures(succeeded, nil, nil, failures)
+	if len(partial) != 1 {
+		t.Fatalf("expected proj1 in Partial, got %+v", partial)
+	}
+	details := partialDetails(partial[0], false, false, true)
+	if !strings.Contains(details, want) {
+		t.Errorf("Details column %q does not contain %q", details, want)
+	}
+	if !strings.Contains(details, apiErr) {
+		t.Errorf("Details column %q does not quote the API error %q", details, apiErr)
+	}
+	if strings.Contains(details, "the org itself is not bound") {
+		t.Errorf("Details column must not claim the org is not bound: %q", details)
+	}
+}
+
+// TestCollectProjectBindingOutcomes_ReposLookupFailed is the sibling of
+// the above for the repository listing (issue #505): a listing that never
+// succeeded must not be reported as "the repository was not found".
+func TestCollectProjectBindingOutcomes_ReposLookupFailed(t *testing.T) {
+	dir := t.TempDir()
+	const apiErr = "HTTP 503 GET https://sonarcloud.io/api/alm_integration/" +
+		"list_repositories?organization=org1 - Service Unavailable"
+	writeBindingRecords(t, dir, "matchProjectRepos", map[string]any{
+		"cloud_project_key": "cloud-1", "binding_skipped": true,
+		"skip_reason": "repos_unknown", "skip_error": apiErr,
+	})
+
+	failures := collectProjectBindingOutcomes(common.NewDataStore(dir))
+	if len(failures) != 1 {
+		t.Fatalf("expected 1 failure, got %+v", failures)
+	}
+	want := "project binding was not possible because the repositories of the " +
+		"bound DevOps organization could not be listed"
+	if failures[0].Operation != want {
+		t.Errorf("operation = %q, want %q", failures[0].Operation, want)
+	}
+	if failures[0].Error != apiErr {
+		t.Errorf("error = %q, want the API error %q", failures[0].Error, apiErr)
+	}
+}
+
 // TestCollectProjectBindingOutcomes_SuccessAndFailure verifies that a
 // successfully created binding produces no report entry, while a rejected
 // binding write is surfaced as a partial migration with the API error.
