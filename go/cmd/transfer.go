@@ -62,8 +62,13 @@ const (
 // intentionally omitted so a transfer only affects the specified project:
 // portfolios, global settings/webhooks/new-code-period, permission
 // templates, org-level and profile-level group permissions, default
-// gate/profile selection, rule tag/description updates, ALM bindings, and
+// gate/profile selection, rule tag/description updates, and
 // migration-group provisioning.
+//
+// The project's DevOps platform (ALM) binding IS included (issue #122):
+// it is strictly project-scoped — it binds only the transferred project
+// to its repository and never mutates the organization's own DevOps
+// platform binding, which is read-only input here.
 //
 // Project data import plus issue and hotspot metadata sync are always
 // included so every SonarQube issue (native and externally imported) and
@@ -74,8 +79,12 @@ const (
 var transferTargetTasks = []string{
 	// Project configuration (each is scoped to the migrated project).
 	"setProjectProfiles", "setProjectGates", "setProjectGroupPermissions",
-	"setProjectSettings", "setProjectTags", "setProjectLinks",
+	"setProjectSettings", "setProjectTags", "setProjectLinks", "setProjectSourceLink",
 	"setProjectWebhooks", "setNewCodePeriods",
+	// Project DevOps platform binding (issue #122). Project-scoped: it
+	// binds the transferred project to the repository of the DevOps
+	// organization the target org is bound to.
+	"setProjectBinding",
 	// Quality profile rules + quality gate conditions.
 	"restoreProfiles", "addGateConditions",
 	// Local quality-profile rule analysis (no API calls); feeds the PDF

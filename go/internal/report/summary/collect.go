@@ -71,6 +71,12 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 			// from the data-migration tasks' JSONL output.
 			projectFailures := collectProjectFailures(runDir)
 			projectFailures = append(projectFailures, collectProjectSyncSkips(store, projectDataMap)...)
+			// #122 — a project whose source DevOps platform binding
+			// could not be replicated on SonarQube Cloud (most often
+			// because the target organization is not itself bound to
+			// that platform) is reported as Partial Migration with the
+			// reason spelled out in the Details column.
+			projectFailures = append(projectFailures, collectProjectBindingOutcomes(store)...)
 			// #474 — projects whose report had unsupported-language files
 			// excluded imported successfully but are not full migrations.
 			projectFailures = append(projectFailures, collectUnsupportedLanguageExclusions(store)...)
@@ -233,6 +239,26 @@ func collectLimitations(runDir, exportDir string, mapping structure.ExtractMappi
 	return out
 }
 
+// maxListedLimitationUsers caps how many logins are spelled out in a
+// user-permission limitation note (#475) — instances with thousands
+// of users but only a handful holding the affected permissions were
+// producing an unreadably long PDF report.
+const maxListedLimitationUsers = 10
+
+// formatLimitationUserList renders logins for a user-permission
+// limitation note (#475): all of them when there are at most
+// maxListedLimitationUsers, otherwise only the first
+// maxListedLimitationUsers plus a count of the rest.
+func formatLimitationUserList(logins []string) string {
+	if len(logins) <= maxListedLimitationUsers {
+		return strings.Join(logins, ", ")
+	}
+	return fmt.Sprintf("first %d: %s (and %d more)",
+		maxListedLimitationUsers,
+		strings.Join(logins[:maxListedLimitationUsers], ", "),
+		len(logins)-maxListedLimitationUsers)
+}
+
 // collectUserPermissionLimitations covers #230 Y3 and Y4. SonarQube
 // Cloud does not expose a way to grant permissions to individual
 // users via API — only to groups — so any SQS user permission on a
@@ -280,12 +306,12 @@ func collectUserPermissionLimitations(exportDir string, mapping structure.Extrac
 		sort.Strings(combined)
 		notes = append(notes, fmt.Sprintf(
 			"SonarQube Cloud does not support user permissions via API. The following %d user(s) had permissions on SonarQube Server permission templates and were not migrated: %s.",
-			len(combined), strings.Join(combined, ", ")))
+			len(combined), formatLimitationUserList(combined)))
 	}
 	if globalLogins := collect("getUserPermissions"); len(globalLogins) > 0 {
 		notes = append(notes, fmt.Sprintf(
 			"SonarQube Cloud does not support user permissions via API. The following %d user(s) had global SonarQube Server permissions and were not migrated: %s.",
-			len(globalLogins), strings.Join(globalLogins, ", ")))
+			len(globalLogins), formatLimitationUserList(globalLogins)))
 	}
 	return notes
 }
@@ -563,6 +589,7 @@ func collectSection(store *common.DataStore, def sectionDef,
 	succeeded := collectSucceeded(store, def)
 	skipped := collectSkipped(store, def)
 	failed := collectFailed(failuresByType, def)
+	attachFailedSourceKeys(failed, store, def)
 	partial := collectPartial(def, configFailures, succeeded)
 	var nearPerfect []EntityItem
 
@@ -672,6 +699,7 @@ func collectSucceeded(store *common.DataStore, def sectionDef) []EntityItem {
 			Language:     jsonStr(item, "language"),
 			Organization: jsonStr(item, "sonarcloud_org_key"),
 			Detail:       jsonStr(item, def.DetailField),
+			SourceKey:    jsonStr(item, def.SourceKeyField),
 		}
 		key := entry.Organization + "\x00" + entry.Detail + "\x00" + entry.Name + "\x00" + entry.Language
 		if seen[key] {
@@ -707,6 +735,7 @@ func collectSkipped(store *common.DataStore, def sectionDef) []EntityItem {
 				Organization: jsonStr(item, "sonarqube_org_key"),
 				Detail:       "Organization skipped",
 				SkipReason:   SkipReasonOrgSkipped,
+				SourceKey:    jsonStr(item, def.SourceKeyField),
 			})
 		}
 	}
@@ -810,6 +839,36 @@ func collectFailed(failuresByType map[string][]analysis.ReportRow, def sectionDe
 		})
 	}
 	return result
+}
+
+// attachFailedSourceKeys fills in EntityItem.SourceKey for Failed-bucket
+// rows (issue #448) by matching on Name against the generate*Mappings task
+// output. Failed rows come from the analysis report ledger
+// (analysis.ReportRow), which carries the entity name but not the source
+// key, so — unlike Succeeded/Skipped — it has to be looked up separately.
+// No-op when the section has no SourceKeyField (all sections except
+// Projects).
+func attachFailedSourceKeys(items []EntityItem, store *common.DataStore, def sectionDef) {
+	if def.SourceKeyField == "" || len(items) == 0 {
+		return
+	}
+	mapped, err := store.ReadAll(def.InputTask)
+	if err != nil {
+		return
+	}
+	keyByName := make(map[string]string, len(mapped))
+	for _, item := range mapped {
+		name := jsonStr(item, def.NameField)
+		if name == "" {
+			continue
+		}
+		keyByName[name] = jsonStr(item, def.SourceKeyField)
+	}
+	for i := range items {
+		if key, ok := keyByName[items[i].Name]; ok {
+			items[i].SourceKey = key
+		}
+	}
 }
 
 // projectDataOutcome holds the per-project state of the

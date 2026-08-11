@@ -50,7 +50,8 @@ On completion, a migration summary is written into the export directory as both 
 - The **quality profiles** the project uses, with their rules restored (and any parent relationships).
 - The project's **permissions** (group permissions), **settings**, **tags**, **links**, **webhooks**, and **new code period**.
 - The project's complete **issue history** — both native SonarQube issues and **externally imported issues** (from third-party analyzers) — replayed via project-data import, with triage state (status, resolution, assignee, comments, tags) synced afterward.
-- The project's **Security Hotspots** — which land on SonarQube Cloud as **issues tagged `sqs-hotspot`**. SonarQube Cloud dropped Security Hotspots as a distinct finding kind on 1 July 2026 and converted the former hotspot rules in place into ordinary issue rules, so there is no hotspot to migrate *into*; each hotspot becomes an issue on the same rule, file and line, and the `sqs-hotspot` tag is what tells you it used to be a hotspot on SonarQube Server. Their **review status** is re-applied as an issue transition — still-to-review stays open, *safe* becomes false-positive, *fixed* and *acknowledged* become accepted — along with their **comments** and a link back to the original hotspot on the source server. A hotspot whose rule was **retired** on SonarQube Cloud rather than converted cannot be migrated at all; those are counted and logged rather than silently dropped.
+- The project's **Security Hotspots**, with their review status and comments synced.
+- The project's **DevOps platform (ALM) binding** — the project is bound on SonarQube Cloud to the repository it was bound to on SonarQube Server (issue #122). Only the **project-level** binding is replicated: the organization's own DevOps platform binding needs secrets that cannot be migrated and is read-only input here. The binding is attempted only when the source project is bound **and** the target organization is itself bound to the same platform; otherwise the project is reported as a **partial migration** explaining why. See [What gets migrated → DevOps platform bindings](#devops-platform-alm-bindings).
 
 **Not modified** (use the full [`migrate`](MIGRATE.md) command for these):
 
@@ -60,13 +61,67 @@ On completion, a migration summary is written into the export directory as both 
 - Organization-level and profile-level group permissions.
 - Default quality gate / default quality profile selection.
 - Rule tag and rule description updates.
-- ALM / DevOps platform repository bindings.
 
 > **Note on prerequisites.** A few global entities are created on the target only because the project depends on them — for example, the groups referenced by the project's group permissions, and the migration user/permissions used to perform the migration. These are created as needed so the project's own configuration resolves correctly.
 
 > **Note on issue counts.** The target issue count is normally lower than the SonarQube Server total because issues that are **CLOSED** or resolved as **FIXED** have no SonarQube Cloud counterpart and are intentionally skipped (the scanner report only recreates active findings). Open issues plus triaged ones (won't-fix / false-positive / accepted) and all externally-imported issues are migrated. Security Hotspots transfer in full, but they arrive as **issues** (see above) — so they are *counted inside* the target issue total, and SonarQube Cloud's Security Hotspots view will be empty by design. Comparing a source hotspot count against a target hotspot count therefore always reads as total loss even when every hotspot migrated correctly; filter the target project by the `sqs-hotspot` tag instead.
 
 > **Non-main branches.** Project-data import now migrates the project's **non-main branches too** — each is created on SonarQube Cloud as a **long-lived branch with its full issue history**. Before submitting a non-main branch's report, the tool performs SonarQube Cloud's **"Create analysis" handshake** (`POST {api-host}/analysis/analyses`) to register the branch and obtain an analysis id, which it embeds in the report so the Compute Engine binds the issues to the branch. All migrated branches are registered as **long-lived** so SonarQube Cloud's automatic pruning of short-lived branches (after ~30 days) never discards migrated history. A non-main branch is **skipped** only when the source server no longer has its source code (e.g. purged by housekeeping for an inactive branch) — re-analyze that branch on the source first to restore it.
+
+### DevOps platform (ALM) bindings
+<!-- updated: 2026-08-11_10:20:00 -->
+
+`transfer` replicates the project's DevOps platform binding so the migrated project is linked to the
+same repository on SonarQube Cloud. The identifier carried over per platform is:
+
+| Platform | Identifier migrated |
+| --- | --- |
+| GitHub | Repository name (`owner/repo`) |
+| GitLab | Project id |
+| Azure DevOps | Project name + repository name |
+| Bitbucket Cloud | Repository slug |
+
+**Preconditions.** Two must both hold, and both are checked before any write:
+
+1. The **source project is bound** on SonarQube Server (`GET /api/alm_settings/get_binding`). An unbound
+   project is simply left unbound on the target — nothing is reported.
+2. The **target organization is bound** to the same DevOps platform
+   (`GET /api/alm_integration/show_bound_organization`). SonarQube Cloud can only bind a project to a
+   repository of the DevOps organization its own organization is bound to.
+
+When the source project was bound but the target organization is **not** bound to that platform, the
+project's migration outcome becomes **Partial Migration** and the report's Details column reads
+*"project binding was not possible because the org itself is not bound"*. The same happens, with a
+different sentence, when the organization is bound but the repository does not exist in the bound
+DevOps organization.
+
+**Both preconditions are best-effort and never fail the migration** (issue #505). Reading them only
+enables this optional extra, so any failure degrades to "no binding" and the run continues:
+
+| What the target answers | Recorded as | Report Details |
+| --- | --- | --- |
+| `show_bound_organization` → HTTP 500 (SonarQube Cloud's **normal** answer for an org with no DevOps binding), 404 (no such org), 400/403 (token cannot administer it) | unbound | *"...because the org itself is not bound"* |
+| `show_bound_organization` → any other failure (transport error, 502/503, ...) | binding **unknown** | *"...because the target organization's DevOps platform binding could not be read"* + the API error |
+| `list_repositories` → HTTP 400 *"This organization is not bound to an ALM application"* / 403 / 404 | no repositories | the unbound-org sentence above (reported from the org binding) |
+| `list_repositories` → any other failure | repositories **unknown** | *"...because the repositories of the bound DevOps organization could not be listed"* + the API error |
+
+Only a cancelled or timed-out run still aborts these tasks. The distinction between "unbound" and
+"unknown" is deliberate: before #505 an unbound org's HTTP 500 aborted the entire `migrate` run with
+`phase 2: task getOrgBinding: ...`, and reporting an unread binding as "not bound" would state
+something the tool never observed.
+
+**On-premise DevOps platforms are never migrated.** SonarQube Cloud integrates only with the
+**cloud** platforms — GitHub.com, GitLab.com, Azure DevOps Services and Bitbucket Cloud — so a
+source project bound to GitHub Enterprise Server, self-managed GitLab or Bitbucket Server/Data
+Center has no target equivalent. Cloud vs on-premise is decided from the source ALM setting's `url`
+(its API endpoint: `api.github.com`, `gitlab.com`, `dev.azure.com`, `visualstudio.com` for Azure
+DevOps Services accounts predating the rename, `bitbucket.org`). Such a project is reported as
+**Partial Migration** with *"project binding was not possible because the source project is bound to
+an on-premise DevOps platform, which SonarQube Cloud cannot integrate with"* — before #505 the
+binding was dropped silently and the project was reported as fully migrated.
+
+A project that is **not bound at all** on the source is still left unbound on the target with
+nothing reported, which is the #122 behaviour.
 
 ---
 
@@ -75,10 +130,6 @@ On completion, a migration summary is written into the export directory as both 
 ### With a config file
 
 ```bash
-# From source
-cd go && go run . transfer -c config.json
-
-# Built binary
 sonar-migration-tool transfer -c config.json
 ```
 
@@ -126,15 +177,6 @@ Full form:
 ### With CLI flags
 
 ```bash
-# From source
-cd go && go run . transfer \
-  --source_url https://sonarqube.example.com \
-  --source_token sqp_xxx \
-  --project_key my-project \
-  --target_token squ_xxx \
-  --default_organization my-org
-
-# Built binary
 sonar-migration-tool transfer \
   --source_url https://sonarqube.example.com \
   --source_token sqp_xxx \

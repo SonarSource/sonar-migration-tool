@@ -9,14 +9,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 
-	"github.com/sonar-solutions/sq-api-go/cloud"
-	"github.com/sonar-solutions/sq-api-go/types"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
+	"github.com/sonar-solutions/sq-api-go/cloud"
+	"github.com/sonar-solutions/sq-api-go/types"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -59,6 +60,11 @@ func associateTasks() []TaskDef {
 			Name:         "setProjectLinks",
 			Dependencies: []string{"createProjects", "grantMigrationUserProjectPermissions"},
 			Run:          runSetProjectLinks,
+		},
+		{
+			Name:         "setProjectSourceLink",
+			Dependencies: []string{"createProjects", "grantMigrationUserProjectPermissions"},
+			Run:          runSetProjectSourceLink,
 		},
 		{
 			Name:         "setProjectWebhooks",
@@ -1063,6 +1069,75 @@ func runSetProjectLinks(ctx context.Context, e *Executor) error {
 				"cloud_project_key": pm.CloudKey,
 			}))
 			return nil
+		})
+	return err
+}
+
+// migratedProjectLinkName is the display name of the synthetic project
+// link added by runSetProjectSourceLink (#418), so Support (and anyone
+// browsing the SonarQube Cloud project page) can immediately tell a
+// project was created by the migration tool and trace it back to its
+// SonarQube Server origin.
+const migratedProjectLinkName = "SQS migrated project"
+
+// projectSourceLinkURL builds the SonarQube Server dashboard deep link
+// back to the original project, or "" when any component is missing.
+// baseURL is the resolved public server base (see resolveSourceBaseURL).
+func projectSourceLinkURL(baseURL, projectKey string) string {
+	if baseURL == "" || projectKey == "" {
+		return ""
+	}
+	base := strings.TrimRight(baseURL, "/")
+	return fmt.Sprintf("%s/dashboard?id=%s", base, url.QueryEscape(projectKey))
+}
+
+// runSetProjectSourceLink adds a "SQS migrated project" link to every
+// migrated SonarQube Cloud project, pointing back to the original
+// SonarQube Server project's dashboard (#418). This lets Support (and
+// anyone else) identify, from the SQC project page, which projects were
+// created by the migration tool and where they came from.
+//
+// Idempotency: before each create call, the task lists existing links
+// on the target project and skips when a link with the same name and
+// URL is already present, so re-runs don't produce duplicates.
+func runSetProjectSourceLink(ctx context.Context, e *Executor) error {
+	counter := TaskCounterFromContext(ctx)
+	err := forEachMigrateItem(ctx, e, "setProjectSourceLink", "createProjects",
+		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
+			cloudKey := extractField(item, "cloud_project_key")
+			if cloudKey == "" {
+				return nil
+			}
+			baseURL := resolveSourceBaseURL(e, extractField(item, "server_url"))
+			linkURL := projectSourceLinkURL(baseURL, extractField(item, "key"))
+			if linkURL == "" {
+				return nil
+			}
+			links, err := e.Cloud.Projects.ListLinks(ctx, cloudKey)
+			if err != nil {
+				logAPIWarn(e.Logger, "setProjectSourceLink: list existing failed (will attempt create)", err,
+					"project", cloudKey)
+				links = nil
+			}
+			for _, l := range links {
+				if l.Name == migratedProjectLinkName && l.URL == linkURL {
+					e.Logger.Info("setProjectSourceLink: link already exists, skipping", "project", cloudKey)
+					counter.Success()
+					return w.WriteOne(common.EnrichRaw(item, map[string]any{"was_preexisting": true}))
+				}
+			}
+			params := cloud.CreateLinkParams{
+				ProjectKey: cloudKey,
+				Name:       migratedProjectLinkName,
+				URL:        linkURL,
+			}
+			if err := e.Cloud.Projects.CreateLink(ctx, params); err != nil {
+				counter.Fail()
+				logAPIWarn(e.Logger, "setProjectSourceLink failed", err, "project", cloudKey, "url", linkURL)
+			} else {
+				counter.Success()
+			}
+			return w.WriteOne(item)
 		})
 	return err
 }

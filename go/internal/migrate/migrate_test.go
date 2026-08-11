@@ -191,10 +191,20 @@ func TestMatchDevOpsPlatform(t *testing.T) {
 		slug       string
 		expected   string
 	}{
-		{"github match", "github", "org/myrepo", "", "12345"},
+		// GitHub / Azure / Bitbucket Cloud bind by fully qualified slug —
+		// SonarQube Cloud resolves the repository by calling the platform
+		// with this value (verified live against GitHub: posting the
+		// numeric id 404s).
+		{"github match", "github", "org/myrepo", "", "org/myrepo"},
 		{"github no match", "github", "org/nomatch", "", ""},
+		// GitLab bindings store the numeric project id, so that is both
+		// what is matched on and what is sent back.
 		{"gitlab match", "gitlab", "12345", "", "12345"},
 		{"gitlab no match", "gitlab", "99999", "", ""},
+		// A GitLab binding must never fall back to a name match — the
+		// source only carries an opaque id, so a name guess could bind
+		// the wrong repository.
+		{"gitlab never falls back to name", "gitlab", "myrepo", "", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -203,6 +213,136 @@ func TestMatchDevOpsPlatform(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tt.expected)
 			}
 		})
+	}
+}
+
+// TestMatchDevOpsPlatformLiveShapes exercises the matcher against the
+// exact payload SonarQube Cloud's /api/alm_integration/list_repositories
+// returns — {label, installationKey, slug, linkedProjects, private},
+// with NO `id` field. The pre-#122 implementation read `id` and therefore
+// never matched anything against a live instance.
+func TestMatchDevOpsPlatformLiveShapes(t *testing.T) {
+	// Captured verbatim from sc-staging.io, org open-digital-society-1.
+	githubRepos := []json.RawMessage{
+		json.RawMessage(`{"label":"nodejs-sonar-github","installationKey":"Open-Digital-Society/nodejs-sonar-github|579847459","linkedProjects":[],"private":true,"slug":"Open-Digital-Society/nodejs-sonar-github"}`),
+		json.RawMessage(`{"label":"sonarqube-example","installationKey":"Open-Digital-Society/sonarqube-example|625940442","linkedProjects":[],"private":false,"slug":"Open-Digital-Society/sonarqube-example"}`),
+	}
+
+	tests := []struct {
+		name       string
+		alm        string
+		repository string
+		slug       string
+		repos      []json.RawMessage
+		expected   string
+	}{
+		{
+			name: "github exact slug match returns the slug",
+			alm:  "github", repository: "Open-Digital-Society/sonarqube-example",
+			repos: githubRepos, expected: "Open-Digital-Society/sonarqube-example",
+		},
+		{
+			name: "github is case insensitive",
+			alm:  "github", repository: "open-digital-society/SonarQube-Example",
+			repos: githubRepos, expected: "Open-Digital-Society/sonarqube-example",
+		},
+		{
+			// Migrating out of DevOps org "okorach" into a Cloud org bound
+			// to "Open-Digital-Society": the bare repository name still
+			// identifies the repo unambiguously, because
+			// list_repositories only returns the bound org's repos.
+			name: "github falls back to bare repository name across orgs",
+			alm:  "github", repository: "okorach/sonarqube-example",
+			repos: githubRepos, expected: "Open-Digital-Society/sonarqube-example",
+		},
+		{
+			name: "github unknown repository does not match",
+			alm:  "github", repository: "okorach/demo-actions-maven",
+			repos: githubRepos, expected: "",
+		},
+		{
+			// installationKey is "<slug>|<numeric id>"; the numeric part
+			// is the GitLab project id a SQS GitLab binding stores.
+			name: "gitlab matches the installationKey id suffix",
+			alm:  "gitlab", repository: "30452699",
+			repos: []json.RawMessage{
+				json.RawMessage(`{"label":"demo-gitlabci-maven","installationKey":"okorach/demo-gitlabci-maven|30452699","slug":"okorach/demo-gitlabci-maven"}`),
+			},
+			expected: "30452699",
+		},
+		{
+			// SonarQube Cloud labels Azure repositories
+			// "<project name> / <repository name>"; a SQS Azure binding
+			// carries the project name in `slug` and the repository name
+			// in `repository`.
+			name: "azure matches project name and repository name",
+			alm:  "azure", repository: "ddd", slug: "fooo",
+			repos: []json.RawMessage{
+				json.RawMessage(`{"label":"fooo / ddd","installationKey":"fooo/ddd|9","slug":"fooo/ddd"}`),
+			},
+			expected: "fooo/ddd",
+		},
+		{
+			name: "bitbucket cloud matches the repository slug",
+			alm:  "bitbucketcloud", repository: "my-slug",
+			repos: []json.RawMessage{
+				json.RawMessage(`{"label":"My Slug","installationKey":"okorach/my-slug|7","slug":"okorach/my-slug"}`),
+			},
+			expected: "okorach/my-slug",
+		},
+		{
+			name: "unbound project with no identifiers never matches",
+			alm:  "github", repository: "", slug: "",
+			repos: githubRepos, expected: "",
+		},
+		{
+			name: "unknown platform never matches",
+			alm:  "bitbucket", repository: "project3-BBS", slug: "project3-SLUG",
+			repos: githubRepos, expected: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MatchDevOpsPlatform(tt.alm, tt.repository, tt.slug, tt.repos)
+			if got != tt.expected {
+				t.Errorf("got %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestAlmFromURL(t *testing.T) {
+	tests := []struct{ url, want string }{
+		{"https://github.com/Open-Digital-Society", "github"},
+		{"https://gitlab.com/mygroup", "gitlab"},
+		{"https://dev.azure.com/olivierkorach", "azure"},
+		{"https://myorg.visualstudio.com", "azure"},
+		{"https://bitbucket.org/okorach/", "bitbucketcloud"},
+		{"https://bitbucket-server.your-company.com", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		if got := almFromURL(tt.url); got != tt.want {
+			t.Errorf("almFromURL(%q) = %q, want %q", tt.url, got, tt.want)
+		}
+	}
+}
+
+func TestParseBoundOrganization(t *testing.T) {
+	// Captured verbatim from sc-staging.io for a bound organization.
+	bound := json.RawMessage(`{"almOrganization":{"key":"Open-Digital-Society","url":"","almUrl":"https://github.com/Open-Digital-Society","avatar":"https://avatars.githubusercontent.com/u/101562377?v=4","personal":false}}`)
+	almURL, dopOrg := parseBoundOrganization(bound)
+	if almURL != "https://github.com/Open-Digital-Society" || dopOrg != "Open-Digital-Society" {
+		t.Fatalf("bound: got (%q, %q)", almURL, dopOrg)
+	}
+
+	// An unbound organization carries no almOrganization object.
+	almURL, dopOrg = parseBoundOrganization(json.RawMessage(`{}`))
+	if almURL != "" || dopOrg != "" {
+		t.Fatalf("unbound: got (%q, %q), want empty", almURL, dopOrg)
+	}
+	if almFromURL(almURL) != "" {
+		t.Error("unbound org must not resolve to a platform")
 	}
 }
 

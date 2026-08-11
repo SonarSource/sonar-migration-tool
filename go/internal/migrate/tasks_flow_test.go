@@ -7,17 +7,30 @@ package migrate
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // newFlowTest creates a complete test environment: mock servers, extract
 // data, and an Executor pre-loaded with the standard create* outputs.
 // The servers are closed automatically via t.Cleanup.
 func newFlowTest(t *testing.T) *Executor {
+	t.Helper()
+	e, _ := newFlowTestWithDOP(t)
+	return e
+}
+
+// newFlowTestWithDOP is newFlowTest plus the enterprise API mock's
+// DevOps-binding recorder, so a test can assert that
+// POST /dop-translation/project-bindings reached the enterprise host with
+// the expected payload (issue #122).
+func newFlowTestWithDOP(t *testing.T) (*Executor, *dopBindingRecorder) {
 	t.Helper()
 	cloudSrv := newMockCloudServer()
 	t.Cleanup(cloudSrv.Close)
@@ -27,7 +40,7 @@ func newFlowTest(t *testing.T) *Executor {
 	setupExtractData(dir)
 	e := newTestExecutor(cloudSrv, apiSrv, dir)
 	setupCreateOutputs(t, e)
-	return e
+	return e, dopRecorderOf(apiSrv)
 }
 
 // setupCreateOutputs populates the Store with mock createX outputs
@@ -321,6 +334,105 @@ func TestSetProjectTags(t *testing.T) {
 	err := reg["setProjectTags"].Run(context.Background(), e)
 	if err != nil {
 		t.Fatalf("setProjectTags: %v", err)
+	}
+}
+
+// TestSetProjectSourceLink asserts the migration adds a "SQS migrated
+// project" link back to the original SonarQube Server dashboard for
+// every migrated project (#418).
+func TestSetProjectSourceLink(t *testing.T) {
+	type call struct {
+		project string
+		name    string
+		url     string
+	}
+	var (
+		mu       sync.Mutex
+		recorded []call
+	)
+	cloudMux := http.NewServeMux()
+	cloudMux.HandleFunc("POST /api/project_links/create", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		mu.Lock()
+		recorded = append(recorded, call{
+			project: r.FormValue("projectKey"),
+			name:    r.FormValue("name"),
+			url:     r.FormValue("url"),
+		})
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	cloudMux.HandleFunc("GET /api/project_links/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"links": []map[string]any{}})
+	})
+	addDefaultCloudHandler(cloudMux)
+	e := newCustomCloudTest(t, cloudMux)
+
+	pw, _ := e.Store.Writer("createProjects")
+	data, _ := json.Marshal(map[string]any{
+		"key": "proj1", "server_url": testServerURL,
+		"cloud_project_key": "cloud-org1_proj1", "sonarcloud_org_key": testCloudOrg,
+	})
+	_ = pw.WriteOne(data)
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["setProjectSourceLink"].Run(context.Background(), e); err != nil {
+		t.Fatalf("setProjectSourceLink: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(recorded) != 1 {
+		t.Fatalf("expected 1 project_links/create call, got %d: %+v", len(recorded), recorded)
+	}
+	wantURL := "https://sq.test/dashboard?id=proj1"
+	if got := recorded[0]; got.project != "cloud-org1_proj1" || got.name != migratedProjectLinkName || got.url != wantURL {
+		t.Fatalf("unexpected create call: %+v (want project=cloud-org1_proj1 name=%q url=%q)",
+			got, migratedProjectLinkName, wantURL)
+	}
+}
+
+// TestSetProjectSourceLinkSkipsExisting asserts a re-run doesn't create a
+// duplicate link when one with the same name and URL already exists on
+// the target project.
+func TestSetProjectSourceLinkSkipsExisting(t *testing.T) {
+	var (
+		mu          sync.Mutex
+		createCalls int
+	)
+	cloudMux := http.NewServeMux()
+	cloudMux.HandleFunc("POST /api/project_links/create", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		createCalls++
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	cloudMux.HandleFunc("GET /api/project_links/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"links": []map[string]any{
+				{"name": migratedProjectLinkName, "url": "https://sq.test/dashboard?id=proj1"},
+			},
+		})
+	})
+	addDefaultCloudHandler(cloudMux)
+	e := newCustomCloudTest(t, cloudMux)
+
+	pw, _ := e.Store.Writer("createProjects")
+	data, _ := json.Marshal(map[string]any{
+		"key": "proj1", "server_url": testServerURL,
+		"cloud_project_key": "cloud-org1_proj1", "sonarcloud_org_key": testCloudOrg,
+	})
+	_ = pw.WriteOne(data)
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["setProjectSourceLink"].Run(context.Background(), e); err != nil {
+		t.Fatalf("setProjectSourceLink: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if createCalls != 0 {
+		t.Fatalf("expected no create call when link already exists, got %d", createCalls)
 	}
 }
 
@@ -679,7 +791,7 @@ func TestDeletePortfolios(t *testing.T) {
 }
 
 func TestMatchProjectReposAndBind(t *testing.T) {
-	e := newFlowTest(t)
+	e, dop := newFlowTestWithDOP(t)
 
 	// getProjectIds dependency.
 	writeItem := func(task string, data map[string]any) {
@@ -694,6 +806,13 @@ func TestMatchProjectReposAndBind(t *testing.T) {
 	writeItem("getOrgRepos", map[string]any{
 		"id": "repo-123", "slug": "myorg/myrepo", "label": "myrepo", "sonarcloud_org_key": testCloudOrg,
 	})
+	// Issue #122: the target org must itself be bound to the same DevOps
+	// platform as the source project before a binding is attempted.
+	writeItem("getOrgBinding", map[string]any{
+		"sonarcloud_org_key": testCloudOrg, "bound": true,
+		"alm": "github", "dop_organization": "myorg",
+		"alm_url": "https://github.com/myorg",
+	})
 
 	reg := BuildMigrateRegistry(RegisterAll())
 
@@ -707,9 +826,15 @@ func TestMatchProjectReposAndBind(t *testing.T) {
 	if len(items) == 0 {
 		t.Fatal("expected matchProjectRepos output")
 	}
-	repoID := extractField(items[0], "repository_id")
-	if repoID != "repo-123" {
-		t.Errorf("expected repo-123, got %q", repoID)
+	if extractBool(items[0], "binding_skipped") {
+		t.Fatalf("expected a binding record, got a skip: %s", items[0])
+	}
+	// GitHub binds by fully qualified slug, not by the numeric id.
+	if repoID := extractField(items[0], "repository_id"); repoID != "myorg/myrepo" {
+		t.Errorf("expected myorg/myrepo, got %q", repoID)
+	}
+	if projID := extractField(items[0], "project_id"); projID != "proj-id-1" {
+		t.Errorf("expected proj-id-1, got %q", projID)
 	}
 
 	// setProjectBinding.
@@ -717,6 +842,494 @@ func TestMatchProjectReposAndBind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setProjectBinding: %v", err)
 	}
+	bindings, _ := e.Store.ReadAll("setProjectBinding")
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 setProjectBinding record, got %d", len(bindings))
+	}
+	if status := extractField(bindings[0], "status"); status != "success" {
+		t.Errorf("expected status success, got %q (%s)", status, bindings[0])
+	}
+
+	// The write must have reached the ENTERPRISE host (issue #122). The
+	// standard-host mock 404s this path, so a regression to e.Cloud would
+	// surface as status=failed above and zero recorded requests here.
+	reqs := dop.All()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 POST /dop-translation/project-bindings on the enterprise host, got %d", len(reqs))
+	}
+	if reqs[0]["projectId"] != "proj-id-1" || reqs[0]["repositoryId"] != "myorg/myrepo" {
+		t.Errorf("unexpected binding payload: %v", reqs[0])
+	}
+}
+
+// TestMatchProjectReposOrgNotBound covers the issue #122 requirement that a
+// source project which WAS bound, but whose target organization is not
+// bound to the same DevOps platform, is recorded as a skip carrying the
+// exact explanation the migration report must show.
+func TestMatchProjectReposOrgNotBound(t *testing.T) {
+	cases := []struct {
+		name       string
+		orgBinding map[string]any
+	}{
+		{
+			name: "org not bound at all",
+			orgBinding: map[string]any{
+				"sonarcloud_org_key": testCloudOrg, "bound": false,
+			},
+		},
+		{
+			// The staging org is bound to GitHub, so a GitLab/Azure/
+			// Bitbucket-bound source project hits this branch.
+			name: "org bound to a different platform",
+			orgBinding: map[string]any{
+				"sonarcloud_org_key": testCloudOrg, "bound": true,
+				"alm": "gitlab", "dop_organization": "somegroup",
+				"alm_url": "https://gitlab.com/somegroup",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newFlowTest(t)
+			seedBindingInputs(t, e, tc.orgBinding)
+
+			reg := BuildMigrateRegistry(RegisterAll())
+			if err := reg["matchProjectRepos"].Run(context.Background(), e); err != nil {
+				t.Fatalf("matchProjectRepos: %v", err)
+			}
+			assertOrgNotBoundSkip(t, e)
+
+			// setProjectBinding forwards the skip verbatim without calling
+			// the DevOps binding endpoint.
+			if err := reg["setProjectBinding"].Run(context.Background(), e); err != nil {
+				t.Fatalf("setProjectBinding: %v", err)
+			}
+			assertSkipForwarded(t, e)
+		})
+	}
+}
+
+// seedBindingInputs writes the matchProjectRepos inputs: one created cloud
+// project, one bindable repository in the target org, and the target org's
+// own DevOps platform binding.
+func seedBindingInputs(t *testing.T, e *Executor, orgBinding map[string]any) {
+	t.Helper()
+	writeItem := func(task string, data map[string]any) {
+		w, _ := e.Store.Writer(task)
+		b, _ := json.Marshal(data)
+		w.WriteOne(b)
+	}
+	writeItem("getProjectIds", map[string]any{
+		"key": "cloud-org1_proj1", "id": "proj-id-1", "sonarcloud_org_key": testCloudOrg,
+	})
+	writeItem("getOrgRepos", map[string]any{
+		"id": "repo-123", "slug": "myorg/myrepo", "label": "myrepo",
+		"sonarcloud_org_key": testCloudOrg,
+	})
+	writeItem("getOrgBinding", orgBinding)
+}
+
+// assertOrgNotBoundSkip asserts matchProjectRepos produced exactly one skip
+// record carrying the issue #122 org-not-bound reason and no binding ids.
+func assertOrgNotBoundSkip(t *testing.T, e *Executor) {
+	t.Helper()
+	items, _ := e.Store.ReadAll("matchProjectRepos")
+	if len(items) != 1 {
+		t.Fatalf("expected exactly 1 skip record, got %d", len(items))
+	}
+	rec := items[0]
+	if !extractBool(rec, "binding_skipped") {
+		t.Fatalf("expected binding_skipped=true, got %s", rec)
+	}
+	if got := extractField(rec, "skip_reason"); got != BindingSkipOrgNotBound {
+		t.Errorf("skip_reason = %q, want %q", got, BindingSkipOrgNotBound)
+	}
+	const want = "project binding was not possible because the org itself is not bound"
+	if got := extractField(rec, "skip_detail"); got != want {
+		t.Errorf("skip_detail = %q, want %q", got, want)
+	}
+	// No binding must have been attempted.
+	if id := extractField(rec, "project_id"); id != "" {
+		t.Errorf("expected no project_id on a skip record, got %q", id)
+	}
+}
+
+// assertSkipForwarded asserts setProjectBinding passed the skip record
+// through untouched, without recording a write status.
+func assertSkipForwarded(t *testing.T, e *Executor) {
+	t.Helper()
+	out, _ := e.Store.ReadAll("setProjectBinding")
+	if len(out) != 1 || !extractBool(out[0], "binding_skipped") {
+		t.Fatalf("expected the skip record forwarded, got %v", out)
+	}
+	if extractField(out[0], "status") != "" {
+		t.Errorf("skip record must carry no write status: %s", out[0])
+	}
+}
+
+// TestMatchProjectReposUnboundSourceProject covers the issue #122
+// requirement that no binding is attempted when the source project is not
+// bound on the SonarQube Server side — not even a skip record, because
+// there is nothing partial about it.
+func TestMatchProjectReposUnboundSourceProject(t *testing.T) {
+	e := newFlowTest(t)
+
+	// A project mapping with no DevOps binding at all.
+	w, _ := e.Store.Writer("generateProjectMappings")
+	pm, _ := json.Marshal(map[string]any{
+		"key": "proj1", "sonarcloud_org_key": testCloudOrg,
+		"alm": "", "repository": "", "is_cloud_binding": false,
+	})
+	w.WriteOne(pm)
+
+	writeItem := func(task string, data map[string]any) {
+		wr, _ := e.Store.Writer(task)
+		b, _ := json.Marshal(data)
+		wr.WriteOne(b)
+	}
+	writeItem("getProjectIds", map[string]any{
+		"key": "cloud-org1_proj1", "id": "proj-id-1", "sonarcloud_org_key": testCloudOrg,
+	})
+	writeItem("getOrgBinding", map[string]any{
+		"sonarcloud_org_key": testCloudOrg, "bound": true, "alm": "github",
+	})
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["matchProjectRepos"].Run(context.Background(), e); err != nil {
+		t.Fatalf("matchProjectRepos: %v", err)
+	}
+	items, _ := e.Store.ReadAll("matchProjectRepos")
+	if len(items) != 0 {
+		t.Fatalf("expected no records for an unbound source project, got %d: %v", len(items), items)
+	}
+}
+
+// TestMatchProjectReposOnPremSourceBinding covers a source project bound
+// to an on-premise DevOps platform. SonarQube Cloud integrates only with
+// GitHub.com, GitLab.com, Azure DevOps Services and Bitbucket Cloud, so
+// the binding has no target equivalent — but the operator must be told,
+// rather than the project being reported as fully migrated (#505).
+func TestMatchProjectReposOnPremSourceBinding(t *testing.T) {
+	e := newFlowTest(t)
+
+	// Verbatim shape of a Bitbucket Server binding on the source:
+	// alm is set and the repository is real, but is_cloud_binding is
+	// false because the ALM url is the customer's own host.
+	w, _ := e.Store.Writer("generateProjectMappings")
+	pm, _ := json.Marshal(map[string]any{
+		"key": "proj1", "sonarcloud_org_key": testCloudOrg,
+		"alm": "bitbucket", "repository": "project3-BBS",
+		"is_cloud_binding": false,
+	})
+	w.WriteOne(pm)
+
+	writeItem := func(task string, data map[string]any) {
+		wr, _ := e.Store.Writer(task)
+		b, _ := json.Marshal(data)
+		wr.WriteOne(b)
+	}
+	writeItem("getProjectIds", map[string]any{
+		"key": "cloud-org1_proj1", "id": "proj-id-1", "sonarcloud_org_key": testCloudOrg,
+	})
+	writeItem("getOrgBinding", map[string]any{
+		"sonarcloud_org_key": testCloudOrg, "bound": true, "alm": "github",
+	})
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["matchProjectRepos"].Run(context.Background(), e); err != nil {
+		t.Fatalf("matchProjectRepos: %v", err)
+	}
+	items, _ := e.Store.ReadAll("matchProjectRepos")
+	if len(items) != 1 {
+		t.Fatalf("expected exactly one skip record, got %d: %v", len(items), items)
+	}
+	if got := extractField(items[0], "skip_reason"); got != BindingSkipOnPremPlatform {
+		t.Errorf("skip_reason = %q, want %q", got, BindingSkipOnPremPlatform)
+	}
+	if got := extractField(items[0], "skip_detail"); got != BindingSkipDetail[BindingSkipOnPremPlatform] {
+		t.Errorf("skip_detail = %q, want %q", got, BindingSkipDetail[BindingSkipOnPremPlatform])
+	}
+	// No binding was attempted, so there is no API error to quote.
+	if got := extractField(items[0], "skip_error"); got != "" {
+		t.Errorf("skip_error = %q, want empty", got)
+	}
+}
+
+// TestGetOrgBinding exercises the org DevOps-binding lookup against the
+// live response shape.
+func TestGetOrgBinding(t *testing.T) {
+	e := newFlowTest(t)
+
+	w, _ := e.Store.Writer("generateOrganizationMappings")
+	om, _ := json.Marshal(map[string]any{"sonarcloud_org_key": testCloudOrg})
+	w.WriteOne(om)
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["getOrgBinding"].Run(context.Background(), e); err != nil {
+		t.Fatalf("getOrgBinding: %v", err)
+	}
+	items, _ := e.Store.ReadAll("getOrgBinding")
+	if len(items) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(items))
+	}
+	if !extractBool(items[0], "bound") {
+		t.Errorf("expected bound=true, got %s", items[0])
+	}
+	if got := extractField(items[0], "alm"); got != "github" {
+		t.Errorf("alm = %q, want github", got)
+	}
+	if got := extractField(items[0], "dop_organization"); got != "myorg" {
+		t.Errorf("dop_organization = %q, want myorg", got)
+	}
+}
+
+// cloudUnboundOrg500Body is the verbatim body SonarQube Cloud returns
+// from show_bound_organization for an organization that is NOT bound to
+// a DevOps platform. Probed live against sc-staging.io for issue #505:
+// two of three real orgs answered HTTP 500 with exactly this, so a 500
+// here is the normal "not bound" answer rather than a transient fault.
+const cloudUnboundOrg500Body = `{"errors":[{"msg":"An unexpected error occurred. Please try again later."}]}`
+
+// newOrgTaskTest builds a flow executor whose SonarQube Cloud host
+// answers `pattern` with h (everything else: an empty JSON object), and
+// seeds the single organization mapping the org-scoped tasks iterate.
+func newOrgTaskTest(t *testing.T, pattern string, h http.HandlerFunc) *Executor {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc(pattern, h)
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	})
+	cloudSrv := httptest.NewServer(mux)
+	t.Cleanup(cloudSrv.Close)
+	apiSrv := newMockAPIServer()
+	t.Cleanup(apiSrv.Close)
+	dir := t.TempDir()
+	setupExtractData(dir)
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+
+	w, _ := e.Store.Writer("generateOrganizationMappings")
+	om, _ := json.Marshal(map[string]any{"sonarcloud_org_key": testCloudOrg})
+	w.WriteOne(om)
+	return e
+}
+
+// respondWith answers with a fixed status and body.
+func respondWith(status int, body string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(status)
+		fmt.Fprint(w, body)
+	}
+}
+
+// runOrgBindingTask runs getOrgBinding, asserts it did NOT abort the
+// migration (issue #505), and returns its single record.
+func runOrgBindingTask(t *testing.T, e *Executor) json.RawMessage {
+	t.Helper()
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["getOrgBinding"].Run(context.Background(), e); err != nil {
+		t.Fatalf("getOrgBinding must never abort the migration, got: %v", err)
+	}
+	items, _ := e.Store.ReadAll("getOrgBinding")
+	if len(items) != 1 {
+		t.Fatalf("expected 1 record, got %d: %v", len(items), items)
+	}
+	if extractBool(items[0], "bound") {
+		t.Errorf("expected bound=false, got %s", items[0])
+	}
+	return items[0]
+}
+
+// TestGetOrgBindingUnboundOrgAnswers500 is the issue #505 regression
+// test. An unbound SonarQube Cloud org answers this endpoint with HTTP
+// 500; the old code treated anything but 400/403/404 as fatal, so the
+// entire run died with "phase 2: task getOrgBinding: ...". The 500 is a
+// plain "not bound", recorded as such and never surfaced as a lookup
+// failure.
+func TestGetOrgBindingUnboundOrgAnswers500(t *testing.T) {
+	e := newOrgTaskTest(t, "GET /api/alm_integration/show_bound_organization",
+		respondWith(http.StatusInternalServerError, cloudUnboundOrg500Body))
+
+	rec := runOrgBindingTask(t, e)
+	if got := extractField(rec, "lookup_error"); got != "" {
+		t.Errorf("500 is Cloud's normal unbound answer and must not be recorded "+
+			"as a failed lookup, got lookup_error=%q", got)
+	}
+}
+
+// TestGetOrgBindingOrgNotFound404 pins the pre-existing behaviour for the
+// answer that really is a 404 — "Could not find organization with key
+// ..." — which also means there is no binding to replicate.
+func TestGetOrgBindingOrgNotFound404(t *testing.T) {
+	e := newOrgTaskTest(t, "GET /api/alm_integration/show_bound_organization",
+		respondWith(http.StatusNotFound,
+			`{"errors":[{"msg":"Could not find organization with key 'cloud-org1'"}]}`))
+
+	rec := runOrgBindingTask(t, e)
+	if got := extractField(rec, "lookup_error"); got != "" {
+		t.Errorf("a 404 is an answer, not a failed lookup, got lookup_error=%q", got)
+	}
+}
+
+// TestGetOrgBindingUnexpectedFailureDegrades covers the other half of
+// issue #505: reading an org's DevOps binding only enables the optional
+// project-binding extra, so an unexpected failure of it degrades to
+// "unknown" and lets the migration finish — while still recording WHY so
+// the report can tell it apart from a genuine unbound org.
+func TestGetOrgBindingUnexpectedFailureDegrades(t *testing.T) {
+	e := newOrgTaskTest(t, "GET /api/alm_integration/show_bound_organization",
+		respondWith(http.StatusBadGateway, `{"errors":[{"msg":"Bad gateway"}]}`))
+
+	rec := runOrgBindingTask(t, e)
+	got := extractField(rec, "lookup_error")
+	if !strings.Contains(got, "502") || !strings.Contains(got, "Bad gateway") {
+		t.Errorf("lookup_error = %q, want the underlying API error", got)
+	}
+}
+
+// TestGetOrgBindingContextCancelled: degrade-never-abort applies to
+// lookup failures, not to a run being torn down. A cancelled context must
+// still propagate, and must not be recorded as "this org is not bound".
+func TestGetOrgBindingContextCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	e := newOrgTaskTest(t, "GET /api/alm_integration/show_bound_organization",
+		func(_ http.ResponseWriter, r *http.Request) {
+			cancel() // the run is torn down while the lookup is in flight
+			select {
+			case <-r.Context().Done(): // the client aborted the request
+			case <-time.After(5 * time.Second):
+			}
+		})
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["getOrgBinding"].Run(ctx, e); err == nil {
+		t.Fatal("expected the cancellation to propagate, got nil")
+	}
+	if items, _ := e.Store.ReadAll("getOrgBinding"); len(items) != 0 {
+		t.Errorf("a cancelled lookup must not be recorded as unbound: %v", items)
+	}
+}
+
+// TestGetOrgReposUnexpectedFailureDegrades: listing an org's DevOps
+// repositories is the second best-effort lookup feeding the optional
+// project binding. It must not abort the run, and it must record why it
+// failed so the report does not claim the repository was missing from an
+// organization that was never listed (issue #505).
+func TestGetOrgReposUnexpectedFailureDegrades(t *testing.T) {
+	e := newOrgTaskTest(t, "GET /api/alm_integration/list_repositories",
+		respondWith(http.StatusServiceUnavailable, `{"errors":[{"msg":"Service Unavailable"}]}`))
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["getOrgRepos"].Run(context.Background(), e); err != nil {
+		t.Fatalf("getOrgRepos must never abort the migration, got: %v", err)
+	}
+	items, _ := e.Store.ReadAll("getOrgRepos")
+	if len(items) != 1 {
+		t.Fatalf("expected 1 marker record, got %d: %v", len(items), items)
+	}
+	if got := extractField(items[0], "repos_lookup_error"); !strings.Contains(got, "503") {
+		t.Errorf("repos_lookup_error = %q, want the underlying API error", got)
+	}
+}
+
+// TestGetOrgReposUnboundOrg: Cloud rejects list_repositories for an org
+// with no DevOps binding with HTTP 400 "This organization is not bound to
+// an ALM application". That is an answer, not a failed listing, so no
+// marker is recorded — getOrgBinding already reports the unbound org.
+func TestGetOrgReposUnboundOrg(t *testing.T) {
+	e := newOrgTaskTest(t, "GET /api/alm_integration/list_repositories",
+		respondWith(http.StatusBadRequest,
+			`{"errors":[{"msg":"This organization is not bound to an ALM application"}]}`))
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["getOrgRepos"].Run(context.Background(), e); err != nil {
+		t.Fatalf("getOrgRepos: %v", err)
+	}
+	if items, _ := e.Store.ReadAll("getOrgRepos"); len(items) != 0 {
+		t.Errorf("expected no records for an unbound org, got %v", items)
+	}
+}
+
+// TestMatchProjectReposOrgBindingUnknown is the issue #505 report-honesty
+// test: when the org's DevOps binding could not be READ, the project must
+// not be told "the org itself is not bound" — something the tool never
+// observed — but that the binding could not be read, with the API error
+// attached for the report (issue #122 asked for it to be surfaced).
+func TestMatchProjectReposOrgBindingUnknown(t *testing.T) {
+	e := newFlowTest(t)
+	const apiErr = "HTTP 502 GET https://sonarcloud.io/api/alm_integration/" +
+		"show_bound_organization?organization=cloud-org1 - Bad gateway"
+	seedBindingInputs(t, e, map[string]any{
+		"sonarcloud_org_key": testCloudOrg, "bound": false,
+		"lookup_error": apiErr,
+	})
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["matchProjectRepos"].Run(context.Background(), e); err != nil {
+		t.Fatalf("matchProjectRepos: %v", err)
+	}
+	rec := assertSingleSkip(t, e, BindingSkipOrgBindingUnknown,
+		"project binding was not possible because the target organization's "+
+			"DevOps platform binding could not be read")
+	if got := extractField(rec, "skip_error"); got != apiErr {
+		t.Errorf("skip_error = %q, want the API error %q", got, apiErr)
+	}
+
+	// setProjectBinding forwards it without attempting the write.
+	if err := reg["setProjectBinding"].Run(context.Background(), e); err != nil {
+		t.Fatalf("setProjectBinding: %v", err)
+	}
+	assertSkipForwarded(t, e)
+}
+
+// TestMatchProjectReposReposUnknown: the org IS bound, but its repository
+// listing failed. Reporting "the repository was not found in the bound
+// DevOps organization" would assert something never checked (issue #505).
+func TestMatchProjectReposReposUnknown(t *testing.T) {
+	e := newFlowTest(t)
+	const apiErr = "HTTP 503 GET https://sonarcloud.io/api/alm_integration/" +
+		"list_repositories?organization=cloud-org1 - Service Unavailable"
+	seedBindingInputsWithRepo(t, e,
+		map[string]any{
+			"sonarcloud_org_key": testCloudOrg, "bound": true,
+			"alm": "github", "dop_organization": "myorg",
+			"alm_url": "https://github.com/myorg",
+		},
+		// The marker runGetOrgRepos writes instead of repositories.
+		map[string]any{
+			"sonarcloud_org_key": testCloudOrg, "repos_lookup_error": apiErr,
+		})
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["matchProjectRepos"].Run(context.Background(), e); err != nil {
+		t.Fatalf("matchProjectRepos: %v", err)
+	}
+	rec := assertSingleSkip(t, e, BindingSkipReposUnknown,
+		"project binding was not possible because the repositories of the "+
+			"bound DevOps organization could not be listed")
+	if got := extractField(rec, "skip_error"); got != apiErr {
+		t.Errorf("skip_error = %q, want the API error %q", got, apiErr)
+	}
+}
+
+// assertSingleSkip asserts matchProjectRepos produced exactly one skip
+// record with the given reason and operator-facing detail.
+func assertSingleSkip(t *testing.T, e *Executor, reason, detail string) json.RawMessage {
+	t.Helper()
+	items, _ := e.Store.ReadAll("matchProjectRepos")
+	if len(items) != 1 || !extractBool(items[0], "binding_skipped") {
+		t.Fatalf("expected exactly 1 skip record, got %v", items)
+	}
+	if got := extractField(items[0], "skip_reason"); got != reason {
+		t.Errorf("skip_reason = %q, want %q", got, reason)
+	}
+	if got := extractField(items[0], "skip_detail"); got != detail {
+		t.Errorf("skip_detail = %q, want %q", got, detail)
+	}
+	return items[0]
 }
 
 func TestSetPortfolioProjects(t *testing.T) {
@@ -863,4 +1476,101 @@ func TestTasksWithFailingServer(t *testing.T) {
 			t.Errorf("task %q should warn-and-swallow, but returned error: %v", taskName, err)
 		}
 	}
+}
+
+// TestMatchProjectReposRepoNotFound covers the case where the target org IS
+// bound to the project's DevOps platform but the source repository does not
+// exist in the bound DevOps organization — for example migrating a project
+// bound to github.com/okorach into an org bound to github.com/other-org.
+func TestMatchProjectReposRepoNotFound(t *testing.T) {
+	e := newFlowTest(t)
+	seedBindingInputsWithRepo(t, e,
+		map[string]any{
+			"sonarcloud_org_key": testCloudOrg, "bound": true,
+			"alm": "github", "dop_organization": "other-org",
+			"alm_url": "https://github.com/other-org",
+		},
+		map[string]any{
+			"label": "unrelated", "slug": "other-org/unrelated",
+			"installationKey": "other-org/unrelated|99", "sonarcloud_org_key": testCloudOrg,
+		})
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["matchProjectRepos"].Run(context.Background(), e); err != nil {
+		t.Fatalf("matchProjectRepos: %v", err)
+	}
+	items, _ := e.Store.ReadAll("matchProjectRepos")
+	if len(items) != 1 || !extractBool(items[0], "binding_skipped") {
+		t.Fatalf("expected 1 skip record, got %v", items)
+	}
+	if got := extractField(items[0], "skip_reason"); got != BindingSkipRepoNotFound {
+		t.Errorf("skip_reason = %q, want %q", got, BindingSkipRepoNotFound)
+	}
+	want := "project binding was not possible because the repository was not found in the bound DevOps organization"
+	if got := extractField(items[0], "skip_detail"); got != want {
+		t.Errorf("skip_detail = %q, want %q", got, want)
+	}
+}
+
+// TestMatchProjectReposResolvesCloudProjectID covers the issue #122 fix for
+// SonarQube Cloud not returning an internal project id from
+// /api/projects/search: when the getProjectIds record carries no `id`, the
+// binding falls back to /api/navigation/component. Before this fix the
+// project id stayed empty and the binding was silently never created.
+func TestMatchProjectReposResolvesCloudProjectID(t *testing.T) {
+	e := newFlowTest(t)
+
+	writeItem := func(task string, data map[string]any) {
+		w, _ := e.Store.Writer(task)
+		b, _ := json.Marshal(data)
+		w.WriteOne(b)
+	}
+	// Exactly what Cloud returns: no "id" field.
+	writeItem("getProjectIds", map[string]any{
+		"key": "cloud-org1_proj1", "name": "Project 1",
+		"qualifier": "TRK", "sonarcloud_org_key": testCloudOrg,
+	})
+	writeItem("getOrgRepos", map[string]any{
+		"label": "myrepo", "slug": "myorg/myrepo",
+		"installationKey": "myorg/myrepo|123", "sonarcloud_org_key": testCloudOrg,
+	})
+	writeItem("getOrgBinding", map[string]any{
+		"sonarcloud_org_key": testCloudOrg, "bound": true,
+		"alm": "github", "dop_organization": "myorg",
+		"alm_url": "https://github.com/myorg",
+	})
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["matchProjectRepos"].Run(context.Background(), e); err != nil {
+		t.Fatalf("matchProjectRepos: %v", err)
+	}
+	items, _ := e.Store.ReadAll("matchProjectRepos")
+	if len(items) != 1 {
+		t.Fatalf("expected 1 binding record, got %d: %v", len(items), items)
+	}
+	if extractBool(items[0], "binding_skipped") {
+		t.Fatalf("expected a binding record, got a skip: %s", items[0])
+	}
+	if got := extractField(items[0], "project_id"); got != "resolved-uuid-1" {
+		t.Errorf("project_id = %q, want resolved-uuid-1 (from /api/navigation/component)", got)
+	}
+	if got := extractField(items[0], "repository_id"); got != "myorg/myrepo" {
+		t.Errorf("repository_id = %q, want myorg/myrepo", got)
+	}
+}
+
+// seedBindingInputsWithRepo is seedBindingInputs with a caller-supplied
+// repository fixture.
+func seedBindingInputsWithRepo(t *testing.T, e *Executor, orgBinding, repo map[string]any) {
+	t.Helper()
+	writeItem := func(task string, data map[string]any) {
+		w, _ := e.Store.Writer(task)
+		b, _ := json.Marshal(data)
+		w.WriteOne(b)
+	}
+	writeItem("getProjectIds", map[string]any{
+		"key": "cloud-org1_proj1", "id": "proj-id-1", "sonarcloud_org_key": testCloudOrg,
+	})
+	writeItem("getOrgRepos", repo)
+	writeItem("getOrgBinding", orgBinding)
 }

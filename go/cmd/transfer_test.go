@@ -413,12 +413,21 @@ func TestTransferTargetTasksResolveToProjectScopedPlan(t *testing.T) {
 	assertRunsBefore(t, phaseOf, "importProjectData", "syncHotspotMetadata")
 
 	// The project, its gate, its profiles, and its issue/hotspot history are
-	// all present.
+	// all present. The project's DevOps platform binding is project-scoped
+	// and included too (issue #122), along with the read-only tasks that
+	// resolve the target org's own binding and its bindable repositories.
 	assertAllInSet(t, taskSet, true, []string{
 		"createProjects", "createGates", "createProfiles",
 		"setProjectGates", "setProjectProfiles",
 		"importProjectData", "syncIssueMetadata", "syncHotspotMetadata",
+		"matchProjectRepos", "setProjectBinding", "getOrgBinding", "getOrgRepos",
 	})
+
+	// The binding needs the project to exist and the migration user to be a
+	// project admin before it can be written.
+	assertRunsBefore(t, phaseOf, "createProjects", "setProjectBinding")
+	assertRunsBefore(t, phaseOf, "matchProjectRepos", "setProjectBinding")
+	assertRunsBefore(t, phaseOf, "getOrgBinding", "matchProjectRepos")
 
 	// Project-scoped: these global / instance-wide tasks must NOT be pulled
 	// in by dependency resolution.
@@ -429,7 +438,6 @@ func TestTransferTargetTasksResolveToProjectScopedPlan(t *testing.T) {
 		"setOrgGroupPermissions", "setProfileGroupPermissions",
 		"setDefaultProfiles", "setDefaultGates",
 		"updateRuleTags", "updateRuleDescriptions",
-		"matchProjectRepos", "setProjectBinding",
 		"createMigrationGroups",
 	})
 }

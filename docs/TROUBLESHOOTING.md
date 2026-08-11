@@ -88,6 +88,43 @@ Completed tasks are skipped automatically.
 
 ---
 
+### `phase 2: task getOrgBinding: http: read on closed response body` (FIXED)
+<!-- updated: 2026-08-11_13:20:00 -->
+
+**Symptom** — `migrate` (or `transfer`) aborts early with:
+
+```
+level=ERROR msg="task failed" task=getOrgBinding err="http: read on closed response body"
+Error: phase 2: task getOrgBinding: http: read on closed response body
+```
+
+Sibling tasks running in the same phase are killed at the same moment with
+`context canceled` (`setGlobalWebhooks failed`, `createGroups: create failed`, ...), and **no
+project is created at all** — the migration produces nothing.
+
+**Cause** (issue #505) — two defects in series:
+
+1. SonarQube Cloud answers `GET /api/alm_integration/show_bound_organization` with **HTTP 500**
+   for an organization that is **not bound to a DevOps platform**. That is its normal answer for
+   an unbound org, not a transient fault.
+2. HTTP 500 is retryable, so the retrying transport exhausted its schedule — and then returned the
+   response with its body already drained and closed. Reading it produced the opaque
+   `http: read on closed response body`, destroying the real status, so the task's
+   "tolerate 400/403/404" check could never match and the run aborted.
+
+Reading an org's DevOps binding only enables the optional project-level ALM binding, so it must
+never abort a migration.
+
+**Fixed in**: the transport now returns a readable body when it gives up (the error becomes a
+proper `HTTP 500 ... `), and `getOrgBinding` / `getOrgRepos` degrade to "not bound" and continue.
+A project whose binding could not be replicated is reported as **Partial Migration** with the
+reason — see [TRANSFER.md](TRANSFER.md#devops-platform-alm-bindings).
+
+**If you are on an older build**: bind the target organization to its DevOps platform in the
+SonarQube Cloud UI before migrating, which makes the endpoint return 200 and avoids the crash.
+
+---
+
 ### No Projects Extracted
 <!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 

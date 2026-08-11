@@ -4,7 +4,7 @@
 > **Reconciled against the actual Go code on 2026-06-05.** Every row below reflects what the running binary does (`go/`, `lib/sq-api-go/`), not spec/design intent. Claims that previously described unbuilt specs or dead code have been corrected or moved. Full claim-by-claim evidence (file:line) is in [MIGRATION-FACETS-AUDIT.md](MIGRATION-FACETS-AUDIT.md).
 
 ## ✅ What IS Migrated
-<!-- updated: 2026-07-27_23:55:00 -->
+<!-- updated: 2026-08-11_10:20:00 -->
 
 The **Caveats / NOT carried** column is load-bearing — read it before relying on a row.
 
@@ -35,12 +35,15 @@ The **Caveats / NOT carried** column is load-bearing — read it before relying 
 | **Scope** | New Code Periods | project / main-branch definition (NUMBER_OF_DAYS, PREVIOUS_VERSION) | uses **`/api/settings/set`** (`sonar.leak.period[.type]`) — **not** `/api/new_code_periods/set` (404s on Cloud); **per-branch overrides are skipped**; REFERENCE_BRANCH / SPECIFIC_ANALYSIS fall back to org default | `/api/settings/set` | 020 |
 | **Scope** | Multi-Org Mapping | projects auto-grouped by ALM binding (GitHub/GitLab/Azure/Bitbucket) → Cloud orgs; DevOps-binding creation | **no key-conflict resolution** — key is always `{orgKey}_{key}`; on collision the existing project is verified-in-org and reused, else skipped (idempotent reuse, not resolution) | CSV (`organizations.csv`) + REST API | 018 |
 | **Config** | Webhooks | project + global/server webhooks auto-recreated on Cloud (global fanned out to every migrated org); list-then-create idempotency | **webhook secret is NOT carried** (source API doesn't expose it) — migrated webhooks land unsecured; global fan-out runs on the `migrate` path only (`transfer` recreates project webhooks only) | `/api/webhooks/create` | — |
+| **Project** | DevOps Platform Binding | project-level binding replicated on Cloud: GitHub repository name, GitLab project id, Azure DevOps project + repository name, Bitbucket Cloud repository slug | **only when the target org is itself bound to the same platform** — otherwise the project is reported **Partial Migration** with "project binding was not possible because the org itself is not bound". Both target-side lookups are **best-effort and never abort the run** (#505): an unbound org answers `show_bound_organization` with **HTTP 500** (Cloud's normal answer, not a fault) and is recorded unbound; any *other* failure is recorded as *unknown* and reported as "...could not be read" / "...could not be listed" with the API error, never as "not bound". A source binding to an **on-premise** platform (GitHub Enterprise Server, self-managed GitLab, Bitbucket Server) has no Cloud equivalent and is reported **Partial Migration** with "...bound to an on-premise DevOps platform, which SonarQube Cloud cannot integrate with" (#505; it used to be dropped silently). `monorepo` and `summaryCommentEnabled` are not carried over (the DOP API takes neither) | `GET /api/alm_settings/get_binding` → `GET /api/alm_integration/show_bound_organization` + `list_repositories` → `POST {api-host}/dop-translation/project-bindings` | 122 |
 
 ## ❌ What is NOT Migrated
-<!-- updated: 2026-06-08_23:03:54 -->
+<!-- updated: 2026-07-27_23:05:00 -->
 
 | Entity / Data | Reason | Notes |
 |---|---|---|
+| **Organization-level DevOps binding** | Requires DevOps platform secrets (app installation id / access token) that cannot be read from the source | The target org must already be bound, by hand, before a project binding can be created. Read-only input to the migration (issue #122) |
+| **Bitbucket Server project bindings** | SonarQube Cloud has no Bitbucket Server integration | Only Bitbucket **Cloud** bindings are migrated |
 | User accounts | Cloud authentication is delegated to an IdP (SAML/Okta/GitHub/GitLab) | No user-creation call exists. **NOTE:** the previously-claimed `users.csv` login-mapping for assignment/comment attribution is **not implemented** — comments embed the raw Server login verbatim |
 | **User Mapping (`users.csv`)** | Unimplemented (SPEC-010 is design intent only) | No `users.csv` is generated or loaded; no `user_mappings.go` exists |
 | **Measures / Metrics** | Not transferred — recomputed by the Cloud CE on re-analysis | The scanner report ships an **empty** measures map; `BuildMeasures` is dead code. (Previously claimed as "60+ keys migrated" — false) |
