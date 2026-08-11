@@ -83,10 +83,7 @@ For deeper config reference, see [ADVANCED-CONFIG.md](ADVANCED-CONFIG.md).
 
 ## Step-by-step guide
 
-All examples show both forms. Use whichever matches your setup:
-
-- **From source:** `cd go && go run . <command> [args]`
-- **Built binary:** `sonar-migration-tool <command> [args]`
+Run each command using the installed binary: `sonar-migration-tool <command> [args]`
 
 > The default `--export_directory` is `./migration-files` (created in the current working directory). You can override it with the `--export_directory` flag or the `export_directory` field in the JSON config. Every command prints `See sonar-migration-tool output results in <directory>` when it finishes.
 
@@ -104,10 +101,6 @@ All subsequent commands assume you are running from inside this directory.
 Connect to SonarQube Server and export all the data needed for migration.
 
 ```bash
-# From source
-go run . extract --source_url <URL> --source_token <TOKEN> --export_directory ./files/ [--concurrency 25] [--timeout 60]
-
-# Built binary
 sonar-migration-tool extract --source_url <URL> --source_token <TOKEN> --export_directory ./files/ [--concurrency 25] [--timeout 60]
 ```
 
@@ -132,10 +125,6 @@ For multiple servers, run `extract` once per server — `structure` aggregates t
 Reads the extracted data and generates an `organizations.csv` file.
 
 ```bash
-# From source
-go run . structure --export_directory ./files/
-
-# Built binary
 sonar-migration-tool structure --export_directory ./files/
 
 # Or reuse the extract config (export_directory is read from it)
@@ -167,10 +156,6 @@ Save the file when you are done.
 Generates the per-entity mapping CSVs (gates, profiles, groups, templates, portfolios).
 
 ```bash
-# From source
-go run . mappings --export_directory ./files/
-
-# Built binary
 sonar-migration-tool mappings --export_directory ./files/
 
 # Or reuse the extract config
@@ -197,10 +182,6 @@ You can review or edit any of these before proceeding.
 Push everything to SonarQube Cloud. You'll need your SonarQube Cloud admin token and enterprise key.
 
 ```bash
-# From source
-go run . migrate --target_token <TOKEN> --enterprise_key <ENTERPRISE_KEY> --export_directory ./files/ [--run_id <id>] [--skip_profiles]
-
-# Built binary
 sonar-migration-tool migrate --target_token <TOKEN> --enterprise_key <ENTERPRISE_KEY> --export_directory ./files/ [--run_id <id>] [--skip_profiles]
 ```
 
@@ -250,10 +231,6 @@ The tool tracks which tasks have already completed and skips them automatically.
 ### `report` — generate a migration readiness or maturity report
 
 ```bash
-# From source
-go run . report --report_type migration --export_directory ./files/
-
-# Built binary
 sonar-migration-tool report --report_type migration --export_directory ./files/
 ```
 
@@ -262,10 +239,6 @@ sonar-migration-tool report --report_type migration --export_directory ./files/
 Generates the same PDF migration summary the `migrate` step produces, but *before* migrating — from the output of `extract` + `structure` and the user-edited mapping CSVs. Useful to preview how the migration will go without touching SonarQube Cloud.
 
 ```bash
-# From source
-go run . predictive-report --export_directory ./files/
-
-# Built binary
 sonar-migration-tool predictive-report --export_directory ./files/
 
 # Or read export_directory from the same JSON config used by extract / migrate
@@ -283,10 +256,6 @@ The Global Settings section is included with the SQS-only settings predicted to 
 Parse `requests.log` into a CSV summary of API call outcomes:
 
 ```bash
-# From source
-go run . analysis_report <RUN_ID> --export_directory ./files/
-
-# Built binary
 sonar-migration-tool analysis_report <RUN_ID> --export_directory ./files/
 ```
 
@@ -295,10 +264,6 @@ sonar-migration-tool analysis_report <RUN_ID> --export_directory ./files/
 Deletes all content in every org in the enterprise:
 
 ```bash
-# From source
-go run . reset <TOKEN> <ENTERPRISE_KEY> --export_directory ./files/
-
-# Built binary
 sonar-migration-tool reset <TOKEN> <ENTERPRISE_KEY> --export_directory ./files/
 ```
 

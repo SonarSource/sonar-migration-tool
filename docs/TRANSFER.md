@@ -105,10 +105,6 @@ so such a binding has no target equivalent (only Bitbucket **Cloud** does).
 ### With a config file
 
 ```bash
-# From source
-cd go && go run . transfer -c config.json
-
-# Built binary
 sonar-migration-tool transfer -c config.json
 ```
 
@@ -156,15 +152,6 @@ Full form:
 ### With CLI flags
 
 ```bash
-# From source
-cd go && go run . transfer \
-  --source_url https://sonarqube.example.com \
-  --source_token sqp_xxx \
-  --project_key my-project \
-  --target_token squ_xxx \
-  --default_organization my-org
-
-# Built binary
 sonar-migration-tool transfer \
   --source_url https://sonarqube.example.com \
   --source_token sqp_xxx \
