@@ -6,6 +6,7 @@ package summary
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1384,6 +1385,130 @@ func TestCollectSummaryNoApplicationsLimitation(t *testing.T) {
 		if strings.Contains(msg, "Applications") {
 			t.Errorf("Limitations must NOT mention applications when none extracted, got %q", msg)
 		}
+	}
+}
+
+// #475: formatLimitationUserList must list every login when there are
+// at most maxListedLimitationUsers, and truncate to the first
+// maxListedLimitationUsers plus a remainder count otherwise — a
+// migration with thousands of users but only a handful holding the
+// affected permissions was producing an unreadably long PDF report.
+func TestFormatLimitationUserList(t *testing.T) {
+	tests := []struct {
+		name   string
+		logins []string
+		want   string
+	}{
+		{
+			name:   "empty",
+			logins: nil,
+			want:   "",
+		},
+		{
+			name:   "below limit lists everyone",
+			logins: []string{"alice", "bob", "carol", "dave"},
+			want:   "alice, bob, carol, dave",
+		},
+		{
+			name: "exactly at limit lists everyone",
+			logins: []string{
+				"u01", "u02", "u03", "u04", "u05", "u06", "u07", "u08", "u09", "u10",
+			},
+			want: "u01, u02, u03, u04, u05, u06, u07, u08, u09, u10",
+		},
+		{
+			name: "above limit truncates with remainder count",
+			logins: []string{
+				"u01", "u02", "u03", "u04", "u05", "u06", "u07", "u08", "u09", "u10", "u11", "u12",
+			},
+			want: "first 10: u01, u02, u03, u04, u05, u06, u07, u08, u09, u10 (and 2 more)",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := formatLimitationUserList(tc.logins)
+			if got != tc.want {
+				t.Errorf("formatLimitationUserList(%v) = %q, want %q", tc.logins, got, tc.want)
+			}
+		})
+	}
+}
+
+// #475: the global-permissions limitation note must truncate to the
+// first 10 logins plus a count of the rest when more than 10 users
+// held global SonarQube Server permissions.
+func TestCollectSummaryGlobalPermissionsLimitationTruncatesAt10(t *testing.T) {
+	dir := t.TempDir()
+	runDir := filepath.Join(dir, "run1")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	extractDir := filepath.Join(dir, "extract-01")
+	writeExtractMeta(t, extractDir, "https://sq.example.com")
+	var items []map[string]any
+	for i := 1; i <= 12; i++ {
+		items = append(items, map[string]any{"login": fmt.Sprintf("user%02d", i)})
+	}
+	writeTaskJSONL(t, extractDir, "getUserPermissions", items)
+
+	summary, err := CollectSummary(runDir, dir)
+	if err != nil {
+		t.Fatalf("CollectSummary: %v", err)
+	}
+	var msg string
+	for _, l := range summary.Limitations {
+		if strings.Contains(l, "had global SonarQube Server permissions") {
+			msg = l
+			break
+		}
+	}
+	if msg == "" {
+		t.Fatalf("expected a global-permissions limitation note, got %v", summary.Limitations)
+	}
+	if !strings.Contains(msg, "12 user(s)") {
+		t.Errorf("expected total count of 12, got %q", msg)
+	}
+	if !strings.Contains(msg, "first 10: user01, user02, user03, user04, user05, user06, user07, user08, user09, user10 (and 2 more)") {
+		t.Errorf("expected truncated list of first 10 with remainder count, got %q", msg)
+	}
+	if strings.Contains(msg, "user11") || strings.Contains(msg, "user12") {
+		t.Errorf("expected users beyond the first 10 to be omitted, got %q", msg)
+	}
+}
+
+// #475: when at most 10 users held global SonarQube Server
+// permissions, every login must still be listed explicitly.
+func TestCollectSummaryGlobalPermissionsLimitationListsAllBelow10(t *testing.T) {
+	dir := t.TempDir()
+	runDir := filepath.Join(dir, "run1")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	extractDir := filepath.Join(dir, "extract-01")
+	writeExtractMeta(t, extractDir, "https://sq.example.com")
+	writeTaskJSONL(t, extractDir, "getUserPermissions", []map[string]any{
+		{"login": "alice"}, {"login": "bob"}, {"login": "carol"}, {"login": "dave"},
+	})
+
+	summary, err := CollectSummary(runDir, dir)
+	if err != nil {
+		t.Fatalf("CollectSummary: %v", err)
+	}
+	var msg string
+	for _, l := range summary.Limitations {
+		if strings.Contains(l, "had global SonarQube Server permissions") {
+			msg = l
+			break
+		}
+	}
+	if msg == "" {
+		t.Fatalf("expected a global-permissions limitation note, got %v", summary.Limitations)
+	}
+	if !strings.Contains(msg, "4 user(s) had global SonarQube Server permissions and were not migrated: alice, bob, carol, dave.") {
+		t.Errorf("expected all 4 logins listed explicitly, got %q", msg)
+	}
+	if strings.Contains(msg, "first 10") || strings.Contains(msg, "more)") {
+		t.Errorf("must not truncate when at or below the limit, got %q", msg)
 	}
 }
 

@@ -239,6 +239,26 @@ func collectLimitations(runDir, exportDir string, mapping structure.ExtractMappi
 	return out
 }
 
+// maxListedLimitationUsers caps how many logins are spelled out in a
+// user-permission limitation note (#475) — instances with thousands
+// of users but only a handful holding the affected permissions were
+// producing an unreadably long PDF report.
+const maxListedLimitationUsers = 10
+
+// formatLimitationUserList renders logins for a user-permission
+// limitation note (#475): all of them when there are at most
+// maxListedLimitationUsers, otherwise only the first
+// maxListedLimitationUsers plus a count of the rest.
+func formatLimitationUserList(logins []string) string {
+	if len(logins) <= maxListedLimitationUsers {
+		return strings.Join(logins, ", ")
+	}
+	return fmt.Sprintf("first %d: %s (and %d more)",
+		maxListedLimitationUsers,
+		strings.Join(logins[:maxListedLimitationUsers], ", "),
+		len(logins)-maxListedLimitationUsers)
+}
+
 // collectUserPermissionLimitations covers #230 Y3 and Y4. SonarQube
 // Cloud does not expose a way to grant permissions to individual
 // users via API — only to groups — so any SQS user permission on a
@@ -286,12 +306,12 @@ func collectUserPermissionLimitations(exportDir string, mapping structure.Extrac
 		sort.Strings(combined)
 		notes = append(notes, fmt.Sprintf(
 			"SonarQube Cloud does not support user permissions via API. The following %d user(s) had permissions on SonarQube Server permission templates and were not migrated: %s.",
-			len(combined), strings.Join(combined, ", ")))
+			len(combined), formatLimitationUserList(combined)))
 	}
 	if globalLogins := collect("getUserPermissions"); len(globalLogins) > 0 {
 		notes = append(notes, fmt.Sprintf(
 			"SonarQube Cloud does not support user permissions via API. The following %d user(s) had global SonarQube Server permissions and were not migrated: %s.",
-			len(globalLogins), strings.Join(globalLogins, ", ")))
+			len(globalLogins), formatLimitationUserList(globalLogins)))
 	}
 	return notes
 }
