@@ -76,6 +76,7 @@ func forEachDepFiltered(ctx context.Context, e *Executor, taskName, depTask stri
 
 	e.Logger.Info("starting task", "task", taskName, "items", len(filtered))
 	prog := common.NewProgressLogger(e.Logger, taskName, len(filtered))
+	e.Progress.Registry().Register(taskName, prog)
 
 	w, err := e.Store.Writer(taskName)
 	if err != nil {

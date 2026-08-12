@@ -162,6 +162,7 @@ func forEachMigrateItemImpl(ctx context.Context, e *Executor, taskName, depTask 
 
 	e.Logger.Info("starting task", "task", taskName, "items", len(filtered))
 	prog := common.NewProgressLogger(e.Logger, taskName, len(filtered))
+	e.Progress.Registry().Register(taskName, prog)
 
 	w, err := e.Store.Writer(taskName)
 	if err != nil {
@@ -200,6 +201,7 @@ func forEachExtractItem(ctx context.Context, e *Executor, taskName, extractKey s
 
 	e.Logger.Info("starting task", "task", taskName, "items", len(items))
 	prog := common.NewProgressLogger(e.Logger, taskName, len(items))
+	e.Progress.Registry().Register(taskName, prog)
 
 	w, err := e.Store.Writer(taskName)
 	if err != nil {

@@ -25,6 +25,20 @@ func FormatHMSMillis(d time.Duration) string {
 	return fmt.Sprintf("%02d:%02d:%02d.%03d", h, m, s, ms)
 }
 
+// FormatHMS renders a duration as hh:mm:ss with zero-padded fields and no
+// sub-second precision (#520 ETA line — millisecond precision on an ETA
+// that's itself an estimate would be misleading). Negative durations clamp
+// to zero, same rationale as FormatHMSMillis.
+func FormatHMS(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	h := int64(d / time.Hour)
+	m := int64(d % time.Hour / time.Minute)
+	s := int64(d % time.Minute / time.Second)
+	return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
+}
+
 // LogTaskDuration emits the end-of-task INFO line mandated by issue
 // #311: "Task <name>: Duration hh:mm:ss.xxx".
 func LogTaskDuration(logger *slog.Logger, name string, d time.Duration) {
