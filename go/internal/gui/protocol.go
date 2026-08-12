@@ -8,12 +8,13 @@ import "github.com/sonar-solutions/sonar-migration-tool/internal/wizard"
 
 // Server-to-browser message types (prompts require a response).
 const (
-	TypePromptURL           = "prompt_url"
-	TypePromptText          = "prompt_text"
-	TypePromptPassword      = "prompt_password"
-	TypePromptConfirm       = "prompt_confirm"
-	TypePromptConfirmReview = "prompt_confirm_review"
-	TypePromptChoice        = "prompt_choice"
+	TypePromptURL                 = "prompt_url"
+	TypePromptText                = "prompt_text"
+	TypePromptPassword            = "prompt_password"
+	TypePromptConfirm             = "prompt_confirm"
+	TypePromptConfirmReview       = "prompt_confirm_review"
+	TypePromptConfirmExtractScope = "prompt_confirm_extract_scope"
+	TypePromptChoice              = "prompt_choice"
 
 	TypeDisplayWelcome        = "display_welcome"
 	TypeDisplayPhaseProgress  = "display_phase_progress"
@@ -44,24 +45,29 @@ type KVPair struct {
 
 // ServerMessage is sent from the Go server to the browser.
 type ServerMessage struct {
-	Type      string   `json:"type"`
-	ID        string   `json:"id,omitempty"`
-	Message   string   `json:"message,omitempty"`
-	Validate  bool     `json:"validate,omitempty"`
-	Default   any      `json:"default,omitempty"`
-	Title     string   `json:"title,omitempty"`
-	Details   []KVPair `json:"details,omitempty"`
-	Phase     string   `json:"phase,omitempty"`
-	Index     int      `json:"index,omitempty"`
-	Total     int      `json:"total,omitempty"`
-	Name      string   `json:"name,omitempty"`
-	Stats     []KVPair `json:"stats,omitempty"`
-	SourceURL string   `json:"source_url,omitempty"`
-	TargetURL string   `json:"target_url,omitempty"`
-	ExtractID string   `json:"extract_id,omitempty"`
+	Type        string   `json:"type"`
+	ID          string   `json:"id,omitempty"`
+	Message     string   `json:"message,omitempty"`
+	Validate    bool     `json:"validate,omitempty"`
+	Default     any      `json:"default,omitempty"`
+	Title       string   `json:"title,omitempty"`
+	Details     []KVPair `json:"details,omitempty"`
+	Phase       string   `json:"phase,omitempty"`
+	Index       int      `json:"index,omitempty"`
+	Total       int      `json:"total,omitempty"`
+	Name        string   `json:"name,omitempty"`
+	Stats       []KVPair `json:"stats,omitempty"`
+	SourceURL   string   `json:"source_url,omitempty"`
+	TargetURL   string   `json:"target_url,omitempty"`
+	ExtractID   string   `json:"extract_id,omitempty"`
 	Error       *string  `json:"error"`
 	BackEnabled bool     `json:"back_enabled,omitempty"`
 	Options     []string `json:"options,omitempty"`
+
+	// DefaultIncludeProjectData / DefaultIncludeIssueSync carry the
+	// checkbox defaults for prompt_confirm_extract_scope (#516).
+	DefaultIncludeProjectData bool `json:"default_include_project_data"`
+	DefaultIncludeIssueSync   bool `json:"default_include_issue_sync"`
 }
 
 // ClientMessage is sent from the browser to the Go server.

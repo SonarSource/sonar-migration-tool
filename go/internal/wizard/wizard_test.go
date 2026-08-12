@@ -17,10 +17,16 @@ import (
 )
 
 const (
-	testOKTrue        = "expected ok=true"
-	testSQCloudURL    = "https://sonarcloud.io/"
-	errExpectExtract  = "expected PhaseExtract, got %s"
+	testOKTrue       = "expected ok=true"
+	testSQCloudURL   = "https://sonarcloud.io/"
+	errExpectExtract = "expected PhaseExtract, got %s"
 )
+
+// ScopeResponse pre-programs a ConfirmExtractScope checkbox answer.
+type ScopeResponse struct {
+	IncludeProjectData bool
+	IncludeIssueSync   bool
+}
 
 // MockPrompter supplies pre-programmed responses for tests.
 type MockPrompter struct {
@@ -30,10 +36,11 @@ type MockPrompter struct {
 	ConfirmResponses  []bool
 	ReviewResponses   []bool
 	ChoiceResponses   []int
+	ScopeResponses    []ScopeResponse // optional; falls back to the caller's defaults when exhausted
 
 	Messages []string // captures DisplayMessage, DisplayError, etc.
 
-	urlIdx, textIdx, passIdx, confirmIdx, reviewIdx, choiceIdx int
+	urlIdx, textIdx, passIdx, confirmIdx, reviewIdx, choiceIdx, scopeIdx int
 }
 
 func (m *MockPrompter) PromptURL(msg string, validate bool) (string, error) {
@@ -81,6 +88,22 @@ func (m *MockPrompter) ConfirmReview(title string, details []KV) (bool, error) {
 	return r, nil
 }
 
+func (m *MockPrompter) ConfirmExtractScope(title string, details []KV, defaultIncludeProjectData, defaultIncludeIssueSync bool) (bool, bool, bool, error) {
+	confirmed := false
+	if m.reviewIdx < len(m.ReviewResponses) {
+		confirmed = m.ReviewResponses[m.reviewIdx]
+		m.reviewIdx++
+	}
+
+	includeProjectData, includeIssueSync := defaultIncludeProjectData, defaultIncludeIssueSync
+	if m.scopeIdx < len(m.ScopeResponses) {
+		includeProjectData = m.ScopeResponses[m.scopeIdx].IncludeProjectData
+		includeIssueSync = m.ScopeResponses[m.scopeIdx].IncludeIssueSync
+		m.scopeIdx++
+	}
+	return confirmed, includeProjectData, includeIssueSync, nil
+}
+
 func (m *MockPrompter) PromptChoice(msg string, options []string) (int, error) {
 	if m.choiceIdx >= len(m.ChoiceResponses) {
 		return 0, nil
@@ -89,7 +112,7 @@ func (m *MockPrompter) PromptChoice(msg string, options []string) (int, error) {
 	m.choiceIdx++
 	return r, nil
 }
-func (m *MockPrompter) SetBackEnabled(bool)                     { /* no-op for tests */ }
+func (m *MockPrompter) SetBackEnabled(bool)                    { /* no-op for tests */ }
 func (m *MockPrompter) DisplayWelcome()                        { /* no-op for tests */ }
 func (m *MockPrompter) DisplayPhaseProgress(phase WizardPhase) { /* no-op for tests */ }
 func (m *MockPrompter) DisplayMessage(msg string)              { m.Messages = append(m.Messages, msg) }
@@ -100,7 +123,7 @@ func (m *MockPrompter) DisplaySummary(title string, stats []KV) {
 	/* no-op for tests — summary display not asserted */
 }
 func (m *MockPrompter) DisplayResumeInfo(state *WizardState) { /* no-op for tests */ }
-func (m *MockPrompter) DisplayWizardComplete()                { /* no-op for tests */ }
+func (m *MockPrompter) DisplayWizardComplete()               { /* no-op for tests */ }
 
 // --- Resume Logic Tests ---
 
@@ -605,6 +628,29 @@ func TestMergeSeed(t *testing.T) {
 			assertPtrEqual(t, "SourceToken", state.SourceToken, c.want.SourceToken)
 			assertPtrEqual(t, "TargetToken", state.TargetToken, c.want.TargetToken)
 		})
+	}
+}
+
+// #516: IncludeProjectData / IncludeIssueSync follow the same
+// "state wins, seed fills nils" rule as the other seeded fields.
+func TestMergeSeedIncludeFlags(t *testing.T) {
+	trueVal, falseVal := true, false
+
+	state := WizardState{}
+	seed := WizardState{IncludeProjectData: &falseVal, IncludeIssueSync: &falseVal}
+	mergeSeed(&state, &seed)
+	if state.IncludeProjectData == nil || *state.IncludeProjectData {
+		t.Errorf("IncludeProjectData: got %v, want false", state.IncludeProjectData)
+	}
+	if state.IncludeIssueSync == nil || *state.IncludeIssueSync {
+		t.Errorf("IncludeIssueSync: got %v, want false", state.IncludeIssueSync)
+	}
+
+	stateWithDisk := WizardState{IncludeProjectData: &trueVal}
+	seedFalse := WizardState{IncludeProjectData: &falseVal}
+	mergeSeed(&stateWithDisk, &seedFalse)
+	if stateWithDisk.IncludeProjectData == nil || !*stateWithDisk.IncludeProjectData {
+		t.Errorf("IncludeProjectData: got %v, want true (disk wins over seed)", stateWithDisk.IncludeProjectData)
 	}
 }
 

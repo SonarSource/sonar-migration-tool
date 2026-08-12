@@ -35,8 +35,8 @@ var phaseDisplayNames = map[WizardPhase]string{
 	PhaseOrgMapping: "Organization Mapping",
 	PhaseMappings:   "Mappings",
 	PhaseValidate:   "Validate",
-	PhaseMigrate:  "Migrate",
-	PhaseComplete: "Complete",
+	PhaseMigrate:    "Migrate",
+	PhaseComplete:   "Complete",
 }
 
 // PhaseDisplayName returns the human-readable name for a phase.
@@ -228,6 +228,14 @@ func strPtr(s string) *string { return &s }
 func ptrStr(p *string) string {
 	if p == nil {
 		return ""
+	}
+	return *p
+}
+
+// ptrBoolOr safely dereferences a bool pointer, returning def for nil.
+func ptrBoolOr(p *bool, def bool) bool {
+	if p == nil {
+		return def
 	}
 	return *p
 }

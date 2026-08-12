@@ -16,9 +16,9 @@ import (
 )
 
 const (
-	testSQServerURL  = "https://sq.example.com/"
-	testCloudOrgKey  = "cloud-1"
-	testEntKey       = "my-enterprise"
+	testSQServerURL   = "https://sq.example.com/"
+	testCloudOrgKey   = "cloud-1"
+	testEntKey        = "my-enterprise"
 	errPromptExtract  = "promptExtractCredentials: %v"
 	errExpectComplete = "expected COMPLETE, got %s"
 )
@@ -236,6 +236,58 @@ func TestRunExtractWithRetrySuccess(t *testing.T) {
 	}
 }
 
+func TestRunExtractWithRetryTranslatesScopeToSkipFlags(t *testing.T) {
+	var captured extract.ExtractConfig
+	origFn := runExtractFn
+	runExtractFn = func(_ context.Context, cfg extract.ExtractConfig) ([]string, error) {
+		captured = cfg
+		return nil, nil
+	}
+	defer func() { runExtractFn = origFn }()
+
+	dir := t.TempDir()
+	includeData, includeSync := false, false
+	state := &WizardState{IncludeProjectData: &includeData, IncludeIssueSync: &includeSync}
+	p := &MockPrompter{}
+
+	if _, err := runExtractWithRetry(context.Background(), p, state, dir, testSQServerURL, "token"); err != nil {
+		t.Fatalf("runExtractWithRetry: %v", err)
+	}
+	if captured.IncludeProjectData {
+		t.Error("IncludeProjectData: want false")
+	}
+	if !captured.SkipProjectDataMigration {
+		t.Error("SkipProjectDataMigration: want true")
+	}
+	if !captured.SkipIssueSync {
+		t.Error("SkipIssueSync: want true")
+	}
+}
+
+func TestRunExtractWithRetryDefaultsToIncludeEverything(t *testing.T) {
+	var captured extract.ExtractConfig
+	origFn := runExtractFn
+	runExtractFn = func(_ context.Context, cfg extract.ExtractConfig) ([]string, error) {
+		captured = cfg
+		return nil, nil
+	}
+	defer func() { runExtractFn = origFn }()
+
+	dir := t.TempDir()
+	state := &WizardState{}
+	p := &MockPrompter{}
+
+	if _, err := runExtractWithRetry(context.Background(), p, state, dir, testSQServerURL, "token"); err != nil {
+		t.Fatalf("runExtractWithRetry: %v", err)
+	}
+	if !captured.IncludeProjectData {
+		t.Error("IncludeProjectData: want true")
+	}
+	if captured.SkipProjectDataMigration || captured.SkipIssueSync {
+		t.Error("Skip* fields: want both false")
+	}
+}
+
 func TestRunExtractWithRetrySSLError(t *testing.T) {
 	callCount := 0
 	origFn := runExtractFn
@@ -343,7 +395,7 @@ func TestPhaseMigrateSuccess(t *testing.T) {
 	}
 	p := &MockPrompter{
 		ConfirmResponses:  []bool{true},      // proceed with migration
-		PasswordResponses: []string{"token"},  // cloud token
+		PasswordResponses: []string{"token"}, // cloud token
 	}
 
 	err := phaseMigrate(context.Background(), p, state, dir)
@@ -391,6 +443,39 @@ func TestRunMigrateWithRetrySuccess(t *testing.T) {
 	}
 }
 
+func TestRunMigrateWithRetryTranslatesScopeToSkipFlags(t *testing.T) {
+	var captured migrate.MigrateConfig
+	origFn := runMigrateFn
+	runMigrateFn = func(_ context.Context, cfg migrate.MigrateConfig) (string, error) {
+		captured = cfg
+		return "test-run-01", nil
+	}
+	defer func() { runMigrateFn = origFn }()
+
+	dir := t.TempDir()
+	includeData, includeSync := false, false
+	state := &WizardState{
+		TargetURL:          strPtr(testSQCloudURL),
+		EnterpriseKey:      strPtr(testEntKey),
+		IncludeProjectData: &includeData,
+		IncludeIssueSync:   &includeSync,
+	}
+	p := &MockPrompter{}
+
+	if err := runMigrateWithRetry(context.Background(), p, state, dir, "token"); err != nil {
+		t.Fatalf("runMigrateWithRetry: %v", err)
+	}
+	if captured.IncludeProjectData {
+		t.Error("IncludeProjectData: want false")
+	}
+	if !captured.SkipProjectDataMigration {
+		t.Error("SkipProjectDataMigration: want true")
+	}
+	if !captured.SkipIssueSync {
+		t.Error("SkipIssueSync: want true")
+	}
+}
+
 // --- Full wizard run with mocked commands ---
 
 func TestRunFullWizardMocked(t *testing.T) {
@@ -419,8 +504,8 @@ func TestRunFullWizardMocked(t *testing.T) {
 	p := &MockPrompter{
 		URLResponses: []string{testSQServerURL, testSQCloudURL},
 		TextResponses: []string{
-			testEntKey,   // enterprise key
-			"cloud-org",  // cloud org key for org-1
+			testEntKey,  // enterprise key
+			"cloud-org", // cloud org key for org-1
 		},
 		PasswordResponses: []string{
 			"server-token", // extract token
@@ -487,6 +572,45 @@ func TestPromptExtractCredentialsRejectThenAccept(t *testing.T) {
 	}
 	if token != "good-token" {
 		t.Errorf("token: got %q", token)
+	}
+}
+
+func TestPromptExtractCredentialsCapturesScope(t *testing.T) {
+	state := &WizardState{}
+	p := &MockPrompter{
+		URLResponses:      []string{testSQServerURL},
+		PasswordResponses: []string{"token123"},
+		ReviewResponses:   []bool{true},
+		ScopeResponses:    []ScopeResponse{{IncludeProjectData: false, IncludeIssueSync: false}},
+	}
+
+	if _, _, err := promptExtractCredentials(p, state); err != nil {
+		t.Fatalf(errPromptExtract, err)
+	}
+	if state.IncludeProjectData == nil || *state.IncludeProjectData {
+		t.Errorf("IncludeProjectData: got %v, want false", state.IncludeProjectData)
+	}
+	if state.IncludeIssueSync == nil || *state.IncludeIssueSync {
+		t.Errorf("IncludeIssueSync: got %v, want false", state.IncludeIssueSync)
+	}
+}
+
+func TestPromptExtractCredentialsDefaultsScopeToTrue(t *testing.T) {
+	state := &WizardState{}
+	p := &MockPrompter{
+		URLResponses:      []string{testSQServerURL},
+		PasswordResponses: []string{"token123"},
+		ReviewResponses:   []bool{true},
+	}
+
+	if _, _, err := promptExtractCredentials(p, state); err != nil {
+		t.Fatalf(errPromptExtract, err)
+	}
+	if state.IncludeProjectData == nil || !*state.IncludeProjectData {
+		t.Errorf("IncludeProjectData: got %v, want true", state.IncludeProjectData)
+	}
+	if state.IncludeIssueSync == nil || !*state.IncludeIssueSync {
+		t.Errorf("IncludeIssueSync: got %v, want true", state.IncludeIssueSync)
 	}
 }
 

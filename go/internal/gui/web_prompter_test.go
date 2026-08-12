@@ -196,6 +196,55 @@ func TestConfirmReviewSendsDetails(t *testing.T) {
 	}
 }
 
+func TestConfirmExtractScopeRoundTrips(t *testing.T) {
+	sendFn, snapshot := collectMessages()
+	ctx := context.Background()
+	wp := NewWebPrompter(ctx, sendFn)
+
+	details := []wizard.KV{
+		{Key: "URL", Value: "https://sq.example.com"},
+		{Key: "Token", Value: "********"},
+	}
+
+	done := make(chan struct{})
+	var confirmed, includeProjectData, includeIssueSync bool
+
+	go func() {
+		confirmed, includeProjectData, includeIssueSync, _ = wp.ConfirmExtractScope(
+			"Source Server Credentials", details, true, true)
+		close(done)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	sent := snapshot()[0]
+	if sent.Type != TypePromptConfirmExtractScope {
+		t.Fatalf("type: got %q", sent.Type)
+	}
+	if !sent.DefaultIncludeProjectData || !sent.DefaultIncludeIssueSync {
+		t.Errorf("defaults: got %v/%v, want true/true", sent.DefaultIncludeProjectData, sent.DefaultIncludeIssueSync)
+	}
+	if len(sent.Details) != 2 {
+		t.Fatalf("details: got %d, want 2", len(sent.Details))
+	}
+
+	wp.HandleResponse(ClientMessage{ID: sent.ID, Value: map[string]any{
+		"confirmed":          true,
+		"includeProjectData": false,
+		"includeIssueSync":   false,
+	}})
+	<-done
+
+	if !confirmed {
+		t.Error("confirmed: want true")
+	}
+	if includeProjectData {
+		t.Error("includeProjectData: want false")
+	}
+	if includeIssueSync {
+		t.Error("includeIssueSync: want false")
+	}
+}
+
 func TestContextCancellation(t *testing.T) {
 	sendFn, _ := collectMessages()
 	ctx, cancel := context.WithCancel(context.Background())

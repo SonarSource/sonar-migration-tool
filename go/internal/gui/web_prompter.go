@@ -115,6 +115,21 @@ func (wp *WebPrompter) ConfirmReview(title string, details []wizard.KV) (bool, e
 	return toBool(resp.Value), nil
 }
 
+func (wp *WebPrompter) ConfirmExtractScope(title string, details []wizard.KV, defaultIncludeProjectData, defaultIncludeIssueSync bool) (bool, bool, bool, error) {
+	resp, err := wp.prompt(ServerMessage{
+		Type:                      TypePromptConfirmExtractScope,
+		Title:                     title,
+		Details:                   ToKVPairs(details),
+		DefaultIncludeProjectData: defaultIncludeProjectData,
+		DefaultIncludeIssueSync:   defaultIncludeIssueSync,
+	})
+	if err != nil {
+		return false, false, false, err
+	}
+	values, _ := resp.Value.(map[string]any)
+	return toBool(values["confirmed"]), toBool(values["includeProjectData"]), toBool(values["includeIssueSync"]), nil
+}
+
 func (wp *WebPrompter) PromptChoice(message string, options []string) (int, error) {
 	resp, err := wp.prompt(ServerMessage{
 		Type:    TypePromptChoice,

@@ -35,6 +35,13 @@ type Prompter interface {
 	// Returns true if the user confirms, false to re-enter.
 	ConfirmReview(title string, details []KV) (bool, error)
 
+	// ConfirmExtractScope displays the source credentials for review
+	// together with two dependent migration-scope choices (include
+	// project data, include issue sync) and asks the user to accept.
+	// When includeProjectData is false, includeIssueSync is forced
+	// false too, mirroring the migrate.MigrateConfig cascade (#516).
+	ConfirmExtractScope(title string, details []KV, defaultIncludeProjectData, defaultIncludeIssueSync bool) (confirmed, includeProjectData, includeIssueSync bool, err error)
+
 	// PromptChoice presents a list of options and returns the 0-based index.
 	PromptChoice(message string, options []string) (int, error)
 

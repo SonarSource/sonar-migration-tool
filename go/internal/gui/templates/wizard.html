@@ -83,6 +83,28 @@
 	white-space: nowrap;
 	width: 1%;
 }
+.checkbox-row {
+	margin: 0.5rem 0;
+}
+.checkbox-row label {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	font-size: 0.9rem;
+	cursor: pointer;
+}
+.checkbox-row input[type="checkbox"] {
+	width: 1rem;
+	height: 1rem;
+	flex-shrink: 0;
+}
+.checkbox-row input[type="checkbox"]:disabled {
+	cursor: not-allowed;
+}
+.checkbox-row label:has(input:disabled) {
+	color: var(--color-text-muted, #888);
+	cursor: not-allowed;
+}
 </style>
 
 <script>
@@ -244,6 +266,7 @@ var Wizard = (function() {
 		case 'prompt_password':
 		case 'prompt_confirm':
 		case 'prompt_confirm_review':
+		case 'prompt_confirm_extract_scope':
 		case 'prompt_choice':
 			onPrompt(msg);
 			break;
@@ -305,6 +328,9 @@ var Wizard = (function() {
 		let displayValue;
 		if (prompt.type === 'prompt_password') {
 			displayValue = '********';
+		} else if (prompt.type === 'prompt_confirm_extract_scope') {
+			displayValue = `Project data: ${value.includeProjectData ? 'Yes' : 'No'}, `
+				+ `Issue sync: ${value.includeIssueSync ? 'Yes' : 'No'}`;
 		} else if (typeof value === 'boolean') {
 			displayValue = value ? 'Yes' : 'No';
 		} else {
@@ -493,6 +519,7 @@ var Wizard = (function() {
 		case 'prompt_password': return renderPromptPassword(msg);
 		case 'prompt_confirm': return renderPromptConfirm(msg);
 		case 'prompt_confirm_review': return renderPromptConfirmReview(msg);
+		case 'prompt_confirm_extract_scope': return renderPromptConfirmExtractScope(msg);
 		case 'prompt_choice': return renderPromptChoice(msg);
 		default: return `<p>Unknown prompt type: ${escapeHTML(msg.type)}</p>`;
 		}
@@ -623,6 +650,49 @@ var Wizard = (function() {
 		return html;
 	}
 
+	function renderPromptConfirmExtractScope(msg) {
+		let html = '<div class="prompt">';
+		if (msg.title) {
+			html += `<h3>${escapeHTML(msg.title)}</h3>`;
+		}
+		if (msg.details && msg.details.length) {
+			html += '<table class="review-table"><tbody>';
+			for (const detail of msg.details) {
+				html += `<tr><td>${escapeHTML(detail.key)}</td>`;
+				html += `<td>${escapeHTML(detail.value)}</td></tr>`;
+			}
+			html += '</tbody></table>';
+		}
+		const includeData = !!msg.default_include_project_data;
+		const includeSync = !!msg.default_include_issue_sync;
+		html += `
+			<div class="checkbox-row">
+				<label>
+					<input type="checkbox" id="scope-include-project-data"
+						${includeData ? 'checked' : ''}
+						onchange="Wizard.onIncludeProjectDataChange()">
+					Migrate project data (issues, hotspots, measures)
+				</label>
+			</div>
+			<div class="checkbox-row" id="scope-issue-sync-row">
+				<label>
+					<input type="checkbox" id="scope-include-issue-sync"
+						${includeSync ? 'checked' : ''}
+						${includeData ? '' : 'disabled'}>
+					Sync issue/hotspot metadata after migration
+				</label>
+			</div>`;
+		html += `<p class="prompt-label">Are these values correct?</p>
+			<div class="button-row">
+				${backButton(msg)}
+				<button class="btn-primary"
+					onclick="Wizard.submitExtractScope(true)">Yes, continue</button>
+				<button class="btn-secondary"
+					onclick="Wizard.submitExtractScope(false)">No, re-enter</button>
+			</div></div>`;
+		return html;
+	}
+
 	function renderPromptChoice(msg) {
 		let html = `<div class="prompt">
 			<label class="prompt-label">${escapeHTML(msg.message)}</label>
@@ -695,6 +765,32 @@ var Wizard = (function() {
 			val = sel.value;
 		}
 		respond(val);
+	}
+
+	// --- Extract-scope checkbox helpers (#516) ---
+
+	function onIncludeProjectDataChange() {
+		const dataBox = document.getElementById('scope-include-project-data');
+		const syncBox = document.getElementById('scope-include-issue-sync');
+		if (!dataBox || !syncBox) {
+			return;
+		}
+		if (dataBox.checked) {
+			syncBox.disabled = false;
+		} else {
+			syncBox.checked = false;
+			syncBox.disabled = true;
+		}
+	}
+
+	function submitExtractScope(confirmed) {
+		const dataBox = document.getElementById('scope-include-project-data');
+		const syncBox = document.getElementById('scope-include-issue-sync');
+		respond({
+			confirmed: confirmed,
+			includeProjectData: dataBox ? dataBox.checked : true,
+			includeIssueSync: syncBox ? syncBox.checked : true,
+		});
 	}
 
 	// --- Response handling ---
@@ -867,6 +963,8 @@ var Wizard = (function() {
 			}
 		},
 		onCloudSelect,
+		onIncludeProjectDataChange,
+		submitExtractScope,
 		respond,
 		goBack() {
 			if (!pendingPromptId) {

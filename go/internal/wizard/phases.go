@@ -20,10 +20,14 @@ import (
 
 // Package-level function vars for external commands. Tests override these.
 var (
-	runExtractFn = func(ctx context.Context, cfg extract.ExtractConfig) ([]string, error) { return extract.RunExtract(ctx, cfg) }
+	runExtractFn = func(ctx context.Context, cfg extract.ExtractConfig) ([]string, error) {
+		return extract.RunExtract(ctx, cfg)
+	}
 	runStructureFn = func(exportDir string) error { return structure.RunStructure(exportDir) }
 	runMappingsFn  = func(exportDir string) error { return structure.RunMappings(exportDir) }
-	runMigrateFn = func(ctx context.Context, cfg migrate.MigrateConfig) (string, error) { return migrate.RunMigrate(ctx, cfg) }
+	runMigrateFn   = func(ctx context.Context, cfg migrate.MigrateConfig) (string, error) {
+		return migrate.RunMigrate(ctx, cfg)
+	}
 )
 
 // CSV file names used across phases.
@@ -81,14 +85,25 @@ func promptExtractCredentials(p Prompter, state *WizardState) (string, string, e
 			}
 		}
 
-		ok, err := p.ConfirmReview("Source Server Credentials", []KV{
+		defaultIncludeProjectData := true
+		if state.IncludeProjectData != nil {
+			defaultIncludeProjectData = *state.IncludeProjectData
+		}
+		defaultIncludeIssueSync := true
+		if state.IncludeIssueSync != nil {
+			defaultIncludeIssueSync = *state.IncludeIssueSync
+		}
+
+		ok, includeProjectData, includeIssueSync, err := p.ConfirmExtractScope("Source Server Credentials", []KV{
 			{"URL", sourceURL},
 			{"Token", "********"},
-		})
+		}, defaultIncludeProjectData, defaultIncludeIssueSync)
 		if err != nil {
 			return "", "", err
 		}
 		if ok {
+			state.IncludeProjectData = &includeProjectData
+			state.IncludeIssueSync = &includeIssueSync
 			return sourceURL, token, nil
 		}
 		state.SourceURL = nil
@@ -99,19 +114,24 @@ func promptExtractCredentials(p Prompter, state *WizardState) (string, string, e
 }
 
 func runExtractWithRetry(ctx context.Context, p Prompter, state *WizardState, exportDir, sourceURL, token string) (certConfig, error) {
+	includeProjectData := ptrBoolOr(state.IncludeProjectData, true)
+	includeIssueSync := ptrBoolOr(state.IncludeIssueSync, true)
+
 	var cert certConfig
 	for {
 		extractID := generateRunID(exportDir)
 		cfg := extract.ExtractConfig{
-			URL:                sourceURL,
-			Token:              token,
-			ExportDirectory:    exportDir,
-			ExtractID:          extractID,
-			Timeout:            120,
-			PEMFilePath:        cert.pemFile,
-			KeyFilePath:        cert.keyFile,
-			CertPassword:       cert.password,
-			IncludeProjectData: true,
+			URL:                      sourceURL,
+			Token:                    token,
+			ExportDirectory:          exportDir,
+			ExtractID:                extractID,
+			Timeout:                  120,
+			PEMFilePath:              cert.pemFile,
+			KeyFilePath:              cert.keyFile,
+			CertPassword:             cert.password,
+			IncludeProjectData:       includeProjectData,
+			SkipProjectDataMigration: !includeProjectData,
+			SkipIssueSync:            !includeIssueSync,
 		}
 
 		skipped, err := runExtractFn(ctx, cfg)
@@ -433,14 +453,19 @@ func phaseMigrate(ctx context.Context, p Prompter, state *WizardState, exportDir
 }
 
 func runMigrateWithRetry(ctx context.Context, p Prompter, state *WizardState, exportDir, token string) error {
+	includeProjectData := ptrBoolOr(state.IncludeProjectData, true)
+	includeIssueSync := ptrBoolOr(state.IncludeIssueSync, true)
+
 	for {
 		runID := generateRunID(exportDir)
 		cfg := migrate.MigrateConfig{
-			Token:              token,
-			EnterpriseKey:      ptrStr(state.EnterpriseKey),
-			URL:                ptrStr(state.TargetURL),
-			ExportDirectory:    exportDir,
-			IncludeProjectData: true,
+			Token:                    token,
+			EnterpriseKey:            ptrStr(state.EnterpriseKey),
+			URL:                      ptrStr(state.TargetURL),
+			ExportDirectory:          exportDir,
+			IncludeProjectData:       includeProjectData,
+			SkipProjectDataMigration: !includeProjectData,
+			SkipIssueSync:            !includeIssueSync,
 		}
 
 		resultID, err := runMigrateFn(ctx, cfg)
@@ -485,4 +510,3 @@ func generateAnalysisReport(p Prompter, exportDir, runID string) {
 	p.DisplayMessage(fmt.Sprintf("PDF summary report: %s", pdfPath))
 	p.DisplayMessage(fmt.Sprintf("Markdown summary report: %s", mdPath))
 }
-

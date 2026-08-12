@@ -86,6 +86,35 @@ func (p *CLIPrompter) ConfirmReview(title string, details []KV) (bool, error) {
 	return p.Confirm("Are these values correct?", false)
 }
 
+func (p *CLIPrompter) ConfirmExtractScope(title string, details []KV, defaultIncludeProjectData, defaultIncludeIssueSync bool) (bool, bool, bool, error) {
+	fmt.Printf("\n  %s\n", title)
+	for _, kv := range details {
+		fmt.Printf(kvFormat, kv.Key+":", kv.Value)
+	}
+	fmt.Println()
+
+	includeProjectData, err := p.Confirm("Migrate project data (issues, hotspots, measures)?", defaultIncludeProjectData)
+	if err != nil {
+		return false, false, false, err
+	}
+
+	includeIssueSync := false
+	if includeProjectData {
+		includeIssueSync, err = p.Confirm("Sync issue/hotspot metadata after migration?", defaultIncludeIssueSync)
+		if err != nil {
+			return false, false, false, err
+		}
+	} else {
+		displayColorLine(colorYellow, "  Issue/hotspot sync disabled: it requires project data migration.")
+	}
+
+	confirmed, err := p.Confirm("Are these values correct?", false)
+	if err != nil {
+		return false, false, false, err
+	}
+	return confirmed, includeProjectData, includeIssueSync, nil
+}
+
 func (p *CLIPrompter) PromptChoice(message string, options []string) (int, error) {
 	var result string
 	prompt := &survey.Select{Message: message, Options: options}
