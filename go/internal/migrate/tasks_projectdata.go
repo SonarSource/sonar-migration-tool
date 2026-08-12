@@ -52,6 +52,7 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 
 	e.Logger.Info("starting task", "task", "importProjectData", "items", len(projects))
 	prog := common.NewProgressLogger(e.Logger, "importProjectData", len(projects))
+	e.Progress.Registry().Register("importProjectData", prog)
 
 	g, gCtx := errgroup.WithContext(ctx)
 	g.SetLimit(cap(e.Sem))

@@ -586,6 +586,7 @@ func forEachProjectBranch(ctx context.Context, e *Executor, taskName string,
 	// denominator (#340).
 	e.Logger.Info("starting task", "task", taskName, "items", len(keys))
 	prog := common.NewProgressLogger(e.Logger, taskName, len(keys))
+	e.Progress.Registry().Register(taskName, prog)
 
 	for _, projectKey := range keys {
 		if err := iterateBranches(ctx, e, w, taskName, projectKey, branchMap[projectKey], fn); err != nil {

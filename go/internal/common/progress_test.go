@@ -240,3 +240,46 @@ func TestProgressLoggerWithExplicitInterval(t *testing.T) {
 		}
 	})
 }
+
+// Fraction (#520) feeds Tracker's blended in-flight progress — it must
+// report 0 before any Increment, a plain done/total ratio mid-task, and
+// cap at 1 once done reaches total. A task with no known total reports 1
+// (complete) since there's nothing to wait on.
+func TestProgressLoggerFraction(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	t.Run("not started", func(t *testing.T) {
+		prog := NewProgressLogger(logger, "test", 100)
+		if got := prog.Fraction(); got != 0 {
+			t.Errorf("want 0, got %v", got)
+		}
+	})
+
+	t.Run("partial", func(t *testing.T) {
+		prog := NewProgressLogger(logger, "test", 100)
+		for i := 0; i < 37; i++ {
+			prog.Increment()
+		}
+		if got := prog.Fraction(); got != 0.37 {
+			t.Errorf("want 0.37, got %v", got)
+		}
+	})
+
+	t.Run("complete", func(t *testing.T) {
+		prog := NewProgressLogger(logger, "test", 5)
+		for i := 0; i < 5; i++ {
+			prog.Increment()
+		}
+		if got := prog.Fraction(); got != 1 {
+			t.Errorf("want 1, got %v", got)
+		}
+	})
+
+	t.Run("zero total reports complete", func(t *testing.T) {
+		prog := NewProgressLogger(logger, "test", 0)
+		if got := prog.Fraction(); got != 1 {
+			t.Errorf("want 1, got %v", got)
+		}
+	})
+}

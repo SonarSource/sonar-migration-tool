@@ -25,16 +25,16 @@ import (
 
 // ExtractConfig holds all parameters for an extract run.
 type ExtractConfig struct {
-	URL             string
-	Token           string
-	ExportDirectory string
-	ExtractType     string // "all" or report type
-	PEMFilePath     string
-	KeyFilePath     string
-	CertPassword    string
-	Concurrency     int
-	Timeout         int
-	ExtractID       string
+	URL                      string
+	Token                    string
+	ExportDirectory          string
+	ExtractType              string // "all" or report type
+	PEMFilePath              string
+	KeyFilePath              string
+	CertPassword             string
+	Concurrency              int
+	Timeout                  int
+	ExtractID                string
 	TargetTask               string
 	IncludeProjectData       bool
 	SkipProjectDataMigration bool // #303. Set true to skip project-data tasks (issues, source, SCM blame).
@@ -62,8 +62,9 @@ type Executor struct {
 	Version       common.Version
 	Sem           chan struct{}
 	Logger        *slog.Logger
-	ProjectKeys   []string // non-empty → limit extraction to these project keys
-	SkipIssueSync bool     // drop additionalFields=_all + hotspot detail enrichment. #398.
+	ProjectKeys   []string        // non-empty → limit extraction to these project keys
+	SkipIssueSync bool            // drop additionalFields=_all + hotspot detail enrichment. #398.
+	Progress      *common.Tracker // run-wide progress/ETA estimator (#520)
 
 	mu              sync.Mutex
 	skippedProjects map[string]bool
@@ -138,9 +139,17 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 	executor := newExecutor(raw, store, client.BaseURL(), edition, version, cfg.Concurrency)
 	executor.ProjectKeys = cfg.ProjectKeys
 	executor.SkipIssueSync = cfg.SkipIssueSync
+
+	// Overall progress/ETA logging (#520) — every 30s for the duration of
+	// the run, stopped once phases finish (success or error).
+	executor.Progress = common.NewTracker(executor.Logger, plan, CategorizeTask, common.DefaultCategoryWeights)
+	executor.Progress.Start(ctx, 30*time.Second)
+	defer executor.Progress.Stop()
+
 	if err := executePhases(ctx, executor, plan, registry, store); err != nil {
 		return nil, err
 	}
+	executor.Progress.LogFinal()
 
 	fmt.Printf("%s v%s - Extract Complete: %s\n", smtver.ToolName, smtver.Version, extractID)
 	return executor.SkippedProjectKeys(), nil
@@ -249,6 +258,7 @@ func runPhase(ctx context.Context, e *Executor, taskNames []string, registry map
 			if err != nil {
 				return fmt.Errorf("task %s: %w", name, err)
 			}
+			e.Progress.MarkTaskComplete(name)
 			return nil
 		})
 	}

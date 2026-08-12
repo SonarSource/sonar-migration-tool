@@ -91,6 +91,7 @@ type Executor struct {
 	Sem             chan struct{}
 	Logger          *slog.Logger
 	ExcludeBranches []string
+	Progress        *common.Tracker // run-wide progress/ETA estimator (#520)
 
 	// UnsupportedLanguages is the resolved handling mode for files whose
 	// language has no quality profile on the target organization (#474):
@@ -322,6 +323,12 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 		Logger:               logger,
 	}
 
+	// Overall progress/ETA logging (#520) — every 30s for the duration of
+	// the run, stopped once phases finish (success or error).
+	executor.Progress = common.NewTracker(logger, plan, CategorizeTask, common.DefaultCategoryWeights)
+	executor.Progress.Start(ctx, 30*time.Second)
+	defer executor.Progress.Stop()
+
 	// Execute phases.
 	for i, phase := range plan {
 		logger.Info("starting phase", "phase", i+1, "tasks", len(phase))
@@ -332,6 +339,7 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 			store.MarkComplete(taskName)
 		}
 	}
+	executor.Progress.LogFinal()
 
 	fmt.Printf("%s v%s - Migration Complete: %s\n", version.ToolName, version.Version, runID)
 	return runID, nil
@@ -365,6 +373,7 @@ func runPhase(ctx context.Context, e *Executor, taskNames []string, registry map
 				e.Logger.Error("task failed", "task", name, "err", runErr)
 				return fmt.Errorf("task %s: %w", name, runErr)
 			}
+			e.Progress.MarkTaskComplete(name)
 			return nil
 		})
 	}
