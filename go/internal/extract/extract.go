@@ -149,6 +149,7 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 	if err := executePhases(ctx, executor, plan, registry, store); err != nil {
 		return nil, err
 	}
+	executor.Progress.Stop() // silence the ticker before the closing line
 	executor.Progress.LogFinal()
 
 	fmt.Printf("%s v%s - Extract Complete: %s\n", smtver.ToolName, smtver.Version, extractID)
