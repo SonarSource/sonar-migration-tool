@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/extract"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/migrate"
@@ -16,9 +17,9 @@ import (
 )
 
 const (
-	testSQServerURL  = "https://sq.example.com/"
-	testCloudOrgKey  = "cloud-1"
-	testEntKey       = "my-enterprise"
+	testSQServerURL   = "https://sq.example.com/"
+	testCloudOrgKey   = "cloud-1"
+	testEntKey        = "my-enterprise"
 	errPromptExtract  = "promptExtractCredentials: %v"
 	errExpectComplete = "expected COMPLETE, got %s"
 )
@@ -236,6 +237,36 @@ func TestRunExtractWithRetrySuccess(t *testing.T) {
 	}
 }
 
+func TestRunExtractWithRetrySetsProgressCallback(t *testing.T) {
+	var captured extract.ExtractConfig
+	origFn := runExtractFn
+	runExtractFn = func(_ context.Context, cfg extract.ExtractConfig) ([]string, error) {
+		captured = cfg
+		return nil, nil
+	}
+	defer func() { runExtractFn = origFn }()
+
+	dir := t.TempDir()
+	state := &WizardState{}
+	p := &MockPrompter{}
+
+	if _, err := runExtractWithRetry(context.Background(), p, state, dir, testSQServerURL, "token"); err != nil {
+		t.Fatalf("runExtractWithRetry: %v", err)
+	}
+	if captured.ProgressCallback == nil {
+		t.Fatal("expected ProgressCallback to be set")
+	}
+
+	captured.ProgressCallback(42, 12*time.Minute, true)
+	if len(p.OverallProgressCalls) != 1 {
+		t.Fatalf("expected 1 DisplayOverallProgress call, got %d", len(p.OverallProgressCalls))
+	}
+	got := p.OverallProgressCalls[0]
+	if got.Percent != 42 || got.Eta != 12*time.Minute || !got.Known {
+		t.Errorf("got %+v, want {42 12m true}", got)
+	}
+}
+
 func TestRunExtractWithRetrySSLError(t *testing.T) {
 	callCount := 0
 	origFn := runExtractFn
@@ -343,7 +374,7 @@ func TestPhaseMigrateSuccess(t *testing.T) {
 	}
 	p := &MockPrompter{
 		ConfirmResponses:  []bool{true},      // proceed with migration
-		PasswordResponses: []string{"token"},  // cloud token
+		PasswordResponses: []string{"token"}, // cloud token
 	}
 
 	err := phaseMigrate(context.Background(), p, state, dir)
@@ -391,6 +422,36 @@ func TestRunMigrateWithRetrySuccess(t *testing.T) {
 	}
 }
 
+func TestRunMigrateWithRetrySetsProgressCallback(t *testing.T) {
+	var captured migrate.MigrateConfig
+	origFn := runMigrateFn
+	runMigrateFn = func(_ context.Context, cfg migrate.MigrateConfig) (string, error) {
+		captured = cfg
+		return "test-run-01", nil
+	}
+	defer func() { runMigrateFn = origFn }()
+
+	dir := t.TempDir()
+	state := &WizardState{TargetURL: strPtr(testSQCloudURL), EnterpriseKey: strPtr(testEntKey)}
+	p := &MockPrompter{}
+
+	if err := runMigrateWithRetry(context.Background(), p, state, dir, "token"); err != nil {
+		t.Fatalf("runMigrateWithRetry: %v", err)
+	}
+	if captured.ProgressCallback == nil {
+		t.Fatal("expected ProgressCallback to be set")
+	}
+
+	captured.ProgressCallback(100, 0, true)
+	if len(p.OverallProgressCalls) != 1 {
+		t.Fatalf("expected 1 DisplayOverallProgress call, got %d", len(p.OverallProgressCalls))
+	}
+	got := p.OverallProgressCalls[0]
+	if got.Percent != 100 || got.Eta != 0 || !got.Known {
+		t.Errorf("got %+v, want {100 0 true}", got)
+	}
+}
+
 // --- Full wizard run with mocked commands ---
 
 func TestRunFullWizardMocked(t *testing.T) {
@@ -419,8 +480,8 @@ func TestRunFullWizardMocked(t *testing.T) {
 	p := &MockPrompter{
 		URLResponses: []string{testSQServerURL, testSQCloudURL},
 		TextResponses: []string{
-			testEntKey,   // enterprise key
-			"cloud-org",  // cloud org key for org-1
+			testEntKey,  // enterprise key
+			"cloud-org", // cloud org key for org-1
 		},
 		PasswordResponses: []string{
 			"server-token", // extract token

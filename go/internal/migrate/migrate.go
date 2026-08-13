@@ -72,6 +72,12 @@ type MigrateConfig struct {
 	// SonarQube Cloud project key from the source key, the org key, and
 	// the enterprise key. Defaults to DefaultProjectKeyPattern. Issue #138.
 	ProjectKeyPattern string
+
+	// ProgressCallback, when set, is invoked with the same run-wide
+	// percent/ETA snapshot as the #520 log line, on every tick and once
+	// more at completion. Nil for CLI callers (go/cmd/migrate.go); the
+	// GUI wizard sets it to drive a progress bar (#519).
+	ProgressCallback func(percent float64, eta time.Duration, known bool)
 }
 
 // Executor is the runtime context passed to every migrate task function.
@@ -323,10 +329,11 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 		Logger:               logger,
 	}
 
-	// Overall progress/ETA logging (#520) — every 30s for the duration of
+	// Overall progress/ETA logging (#520) — every 10s for the duration of
 	// the run, stopped once phases finish (success or error).
 	executor.Progress = common.NewTracker(logger, plan, CategorizeTask, common.DefaultCategoryWeights)
-	executor.Progress.Start(ctx, 30*time.Second)
+	executor.Progress.OnUpdate(cfg.ProgressCallback)
+	executor.Progress.Start(ctx, 10*time.Second)
 	defer executor.Progress.Stop()
 
 	// Execute phases.

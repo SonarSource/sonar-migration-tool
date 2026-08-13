@@ -32,6 +32,10 @@
 				<span class="spinner"></span>
 				<span id="processing-text">Processing...</span>
 			</div>
+			<div id="overall-progress" class="overall-progress hidden">
+				<div class="progress-track"><div id="overall-progress-fill" class="progress-fill"></div></div>
+				<span id="overall-progress-eta" class="progress-eta"></span>
+			</div>
 		</div>
 
 		<div id="event-log-card" class="card mt-2">
@@ -53,6 +57,31 @@
 	animation: spin 0.8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+.overall-progress {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	margin-top: 0.5rem;
+}
+.progress-track {
+	flex: 1;
+	height: 8px;
+	border-radius: 4px;
+	background: var(--color-border);
+	overflow: hidden;
+}
+.progress-fill {
+	height: 100%;
+	width: 0%;
+	background: var(--color-primary);
+	transition: width 0.3s ease-out;
+}
+.progress-eta {
+	font-size: 0.8rem;
+	color: var(--color-text-muted, #888);
+	white-space: nowrap;
+}
 
 .prompt .input-row {
 	display: flex;
@@ -213,6 +242,9 @@ var Wizard = (function() {
 		case 'display_phase_progress':
 			onPhaseProgress(msg);
 			break;
+		case 'display_overall_progress':
+			onOverallProgress(msg);
+			break;
 		case 'display_message':
 			showProcessing(msg.message);
 			addLogEntry(msg.message, msg.type);
@@ -289,6 +321,25 @@ var Wizard = (function() {
 		const text = `Phase ${msg.index}/${msg.total}: ${msg.name}`;
 		showProcessing(text);
 		addLogEntry(text, 'display_phase_progress');
+	}
+
+	function onOverallProgress(msg) {
+		const box = document.getElementById('overall-progress');
+		const fill = document.getElementById('overall-progress-fill');
+		const eta = document.getElementById('overall-progress-eta');
+		box.classList.remove(HIDDEN);
+		fill.style.width = `${msg.percent}%`;
+		eta.textContent = msg.known ? `ETA: ${formatETA(msg.eta_seconds)}` : 'ETA: calculating...';
+	}
+
+	// Below 2 minutes, "~1 min"/"~0 min" reads as imprecise or done-ish
+	// when it isn't — show exact seconds instead. At/above 2 minutes,
+	// round to the nearest minute per issue #519.
+	function formatETA(seconds) {
+		if (seconds < 120) {
+			return `${Math.round(seconds)}s`;
+		}
+		return `~${Math.round(seconds / 60)} min`;
 	}
 
 	// --- Phase input capture ---
@@ -795,6 +846,10 @@ var Wizard = (function() {
 		const proc = document.getElementById('processing');
 		proc.classList.add(HIDDEN);
 		proc.style.display = 'none';
+
+		const progress = document.getElementById('overall-progress');
+		progress.classList.add(HIDDEN);
+		document.getElementById('overall-progress-fill').style.width = '0%';
 	}
 
 	function hidePrompt() {

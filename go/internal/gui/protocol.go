@@ -15,15 +15,16 @@ const (
 	TypePromptConfirmReview = "prompt_confirm_review"
 	TypePromptChoice        = "prompt_choice"
 
-	TypeDisplayWelcome        = "display_welcome"
-	TypeDisplayPhaseProgress  = "display_phase_progress"
-	TypeDisplayMessage        = "display_message"
-	TypeDisplayError          = "display_error"
-	TypeDisplayWarning        = "display_warning"
-	TypeDisplaySuccess        = "display_success"
-	TypeDisplaySummary        = "display_summary"
-	TypeDisplayResumeInfo     = "display_resume_info"
-	TypeDisplayWizardComplete = "display_wizard_complete"
+	TypeDisplayWelcome         = "display_welcome"
+	TypeDisplayPhaseProgress   = "display_phase_progress"
+	TypeDisplayOverallProgress = "display_overall_progress"
+	TypeDisplayMessage         = "display_message"
+	TypeDisplayError           = "display_error"
+	TypeDisplayWarning         = "display_warning"
+	TypeDisplaySuccess         = "display_success"
+	TypeDisplaySummary         = "display_summary"
+	TypeDisplayResumeInfo      = "display_resume_info"
+	TypeDisplayWizardComplete  = "display_wizard_complete"
 
 	TypeWizardStarted  = "wizard_started"
 	TypeWizardFinished = "wizard_finished"
@@ -44,24 +45,32 @@ type KVPair struct {
 
 // ServerMessage is sent from the Go server to the browser.
 type ServerMessage struct {
-	Type      string   `json:"type"`
-	ID        string   `json:"id,omitempty"`
-	Message   string   `json:"message,omitempty"`
-	Validate  bool     `json:"validate,omitempty"`
-	Default   any      `json:"default,omitempty"`
-	Title     string   `json:"title,omitempty"`
-	Details   []KVPair `json:"details,omitempty"`
-	Phase     string   `json:"phase,omitempty"`
-	Index     int      `json:"index,omitempty"`
-	Total     int      `json:"total,omitempty"`
-	Name      string   `json:"name,omitempty"`
-	Stats     []KVPair `json:"stats,omitempty"`
-	SourceURL string   `json:"source_url,omitempty"`
-	TargetURL string   `json:"target_url,omitempty"`
-	ExtractID string   `json:"extract_id,omitempty"`
+	Type        string   `json:"type"`
+	ID          string   `json:"id,omitempty"`
+	Message     string   `json:"message,omitempty"`
+	Validate    bool     `json:"validate,omitempty"`
+	Default     any      `json:"default,omitempty"`
+	Title       string   `json:"title,omitempty"`
+	Details     []KVPair `json:"details,omitempty"`
+	Phase       string   `json:"phase,omitempty"`
+	Index       int      `json:"index,omitempty"`
+	Total       int      `json:"total,omitempty"`
+	Name        string   `json:"name,omitempty"`
+	Stats       []KVPair `json:"stats,omitempty"`
+	SourceURL   string   `json:"source_url,omitempty"`
+	TargetURL   string   `json:"target_url,omitempty"`
+	ExtractID   string   `json:"extract_id,omitempty"`
 	Error       *string  `json:"error"`
 	BackEnabled bool     `json:"back_enabled,omitempty"`
 	Options     []string `json:"options,omitempty"`
+
+	// Percent / EtaSeconds / Known carry the #520 run-wide progress
+	// snapshot for display_overall_progress (#519). No omitempty on
+	// Percent/Known: a legitimate 0% / not-yet-known message must
+	// still serialize.
+	Percent    float64 `json:"percent"`
+	EtaSeconds int     `json:"eta_seconds,omitempty"`
+	Known      bool    `json:"known"`
 }
 
 // ClientMessage is sent from the browser to the Go server.

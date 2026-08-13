@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/analysis"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/extract"
@@ -20,10 +21,14 @@ import (
 
 // Package-level function vars for external commands. Tests override these.
 var (
-	runExtractFn = func(ctx context.Context, cfg extract.ExtractConfig) ([]string, error) { return extract.RunExtract(ctx, cfg) }
+	runExtractFn = func(ctx context.Context, cfg extract.ExtractConfig) ([]string, error) {
+		return extract.RunExtract(ctx, cfg)
+	}
 	runStructureFn = func(exportDir string) error { return structure.RunStructure(exportDir) }
 	runMappingsFn  = func(exportDir string) error { return structure.RunMappings(exportDir) }
-	runMigrateFn = func(ctx context.Context, cfg migrate.MigrateConfig) (string, error) { return migrate.RunMigrate(ctx, cfg) }
+	runMigrateFn   = func(ctx context.Context, cfg migrate.MigrateConfig) (string, error) {
+		return migrate.RunMigrate(ctx, cfg)
+	}
 )
 
 // CSV file names used across phases.
@@ -112,6 +117,9 @@ func runExtractWithRetry(ctx context.Context, p Prompter, state *WizardState, ex
 			KeyFilePath:        cert.keyFile,
 			CertPassword:       cert.password,
 			IncludeProjectData: true,
+			ProgressCallback: func(percent float64, eta time.Duration, known bool) {
+				p.DisplayOverallProgress(percent, eta, known)
+			},
 		}
 
 		skipped, err := runExtractFn(ctx, cfg)
@@ -441,6 +449,9 @@ func runMigrateWithRetry(ctx context.Context, p Prompter, state *WizardState, ex
 			URL:                ptrStr(state.TargetURL),
 			ExportDirectory:    exportDir,
 			IncludeProjectData: true,
+			ProgressCallback: func(percent float64, eta time.Duration, known bool) {
+				p.DisplayOverallProgress(percent, eta, known)
+			},
 		}
 
 		resultID, err := runMigrateFn(ctx, cfg)
@@ -485,4 +496,3 @@ func generateAnalysisReport(p Prompter, exportDir, runID string) {
 	p.DisplayMessage(fmt.Sprintf("PDF summary report: %s", pdfPath))
 	p.DisplayMessage(fmt.Sprintf("Markdown summary report: %s", mdPath))
 }
-

@@ -302,6 +302,44 @@ func TestDisplayPhaseProgressFields(t *testing.T) {
 	}
 }
 
+func TestDisplayOverallProgressFields(t *testing.T) {
+	sendFn, snapshot := collectMessages()
+	ctx := context.Background()
+	wp := NewWebPrompter(ctx, sendFn)
+
+	wp.DisplayOverallProgress(42, 12*time.Minute, true)
+	msg := snapshot()[0]
+
+	if msg.Type != TypeDisplayOverallProgress {
+		t.Errorf("type: got %q", msg.Type)
+	}
+	if msg.Percent != 42 {
+		t.Errorf("percent: got %v, want 42", msg.Percent)
+	}
+	if msg.EtaSeconds != 720 {
+		t.Errorf("eta_seconds: got %d, want 720", msg.EtaSeconds)
+	}
+	if !msg.Known {
+		t.Error("known: got false, want true")
+	}
+}
+
+func TestDisplayOverallProgressUnknownETA(t *testing.T) {
+	sendFn, snapshot := collectMessages()
+	ctx := context.Background()
+	wp := NewWebPrompter(ctx, sendFn)
+
+	wp.DisplayOverallProgress(0, 0, false)
+	msg := snapshot()[0]
+
+	if msg.Percent != 0 {
+		t.Errorf("percent: got %v, want 0", msg.Percent)
+	}
+	if msg.Known {
+		t.Error("known: got true, want false")
+	}
+}
+
 func TestDisplayResumeInfoWithNilPointers(t *testing.T) {
 	sendFn, snapshot := collectMessages()
 	ctx := context.Background()

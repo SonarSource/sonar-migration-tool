@@ -12,14 +12,15 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 )
 
 const (
-	testOKTrue        = "expected ok=true"
-	testSQCloudURL    = "https://sonarcloud.io/"
-	errExpectExtract  = "expected PhaseExtract, got %s"
+	testOKTrue       = "expected ok=true"
+	testSQCloudURL   = "https://sonarcloud.io/"
+	errExpectExtract = "expected PhaseExtract, got %s"
 )
 
 // MockPrompter supplies pre-programmed responses for tests.
@@ -31,7 +32,8 @@ type MockPrompter struct {
 	ReviewResponses   []bool
 	ChoiceResponses   []int
 
-	Messages []string // captures DisplayMessage, DisplayError, etc.
+	Messages             []string // captures DisplayMessage, DisplayError, etc.
+	OverallProgressCalls []OverallProgressCall
 
 	urlIdx, textIdx, passIdx, confirmIdx, reviewIdx, choiceIdx int
 }
@@ -89,18 +91,29 @@ func (m *MockPrompter) PromptChoice(msg string, options []string) (int, error) {
 	m.choiceIdx++
 	return r, nil
 }
-func (m *MockPrompter) SetBackEnabled(bool)                     { /* no-op for tests */ }
+func (m *MockPrompter) SetBackEnabled(bool)                    { /* no-op for tests */ }
 func (m *MockPrompter) DisplayWelcome()                        { /* no-op for tests */ }
 func (m *MockPrompter) DisplayPhaseProgress(phase WizardPhase) { /* no-op for tests */ }
-func (m *MockPrompter) DisplayMessage(msg string)              { m.Messages = append(m.Messages, msg) }
-func (m *MockPrompter) DisplayError(msg string)                { m.Messages = append(m.Messages, "ERR:"+msg) }
-func (m *MockPrompter) DisplayWarning(msg string)              { m.Messages = append(m.Messages, "WARN:"+msg) }
-func (m *MockPrompter) DisplaySuccess(msg string)              { m.Messages = append(m.Messages, "OK:"+msg) }
+
+// OverallProgressCall records one DisplayOverallProgress invocation (#519).
+type OverallProgressCall struct {
+	Percent float64
+	Eta     time.Duration
+	Known   bool
+}
+
+func (m *MockPrompter) DisplayOverallProgress(percent float64, eta time.Duration, known bool) {
+	m.OverallProgressCalls = append(m.OverallProgressCalls, OverallProgressCall{percent, eta, known})
+}
+func (m *MockPrompter) DisplayMessage(msg string) { m.Messages = append(m.Messages, msg) }
+func (m *MockPrompter) DisplayError(msg string)   { m.Messages = append(m.Messages, "ERR:"+msg) }
+func (m *MockPrompter) DisplayWarning(msg string) { m.Messages = append(m.Messages, "WARN:"+msg) }
+func (m *MockPrompter) DisplaySuccess(msg string) { m.Messages = append(m.Messages, "OK:"+msg) }
 func (m *MockPrompter) DisplaySummary(title string, stats []KV) {
 	/* no-op for tests — summary display not asserted */
 }
 func (m *MockPrompter) DisplayResumeInfo(state *WizardState) { /* no-op for tests */ }
-func (m *MockPrompter) DisplayWizardComplete()                { /* no-op for tests */ }
+func (m *MockPrompter) DisplayWizardComplete()               { /* no-op for tests */ }
 
 // --- Resume Logic Tests ---
 
