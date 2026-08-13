@@ -6,6 +6,8 @@ package gui
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -337,6 +339,26 @@ func TestDisplayOverallProgressUnknownETA(t *testing.T) {
 	}
 	if msg.Known {
 		t.Error("known: got true, want false")
+	}
+}
+
+// A 0-second ETA (LogFinal's 100%/0s closing snapshot, or any tick that
+// rounds down to 0s while known) must still serialize eta_seconds — an
+// omitted field arrives as `undefined` in JS and renders "ETA: ~NaN min".
+func TestDisplayOverallProgressZeroETASerializes(t *testing.T) {
+	sendFn, snapshot := collectMessages()
+	ctx := context.Background()
+	wp := NewWebPrompter(ctx, sendFn)
+
+	wp.DisplayOverallProgress(100, 0, true)
+	msg := snapshot()[0]
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"eta_seconds":0`) {
+		t.Errorf("expected eta_seconds:0 in serialized message, got: %s", data)
 	}
 }
 

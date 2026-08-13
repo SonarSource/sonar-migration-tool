@@ -122,6 +122,8 @@ var Wizard = (function() {
 	const HIDDEN = 'hidden';
 	const ID_PROMPT_AREA = 'prompt-area';
 	const ID_PROMPT_INPUT = 'prompt-input';
+	// Below this, an ETA reads clearer as exact seconds than as "~0 min" (#519).
+	const ETA_SECONDS_AS_TEXT_THRESHOLD = 120;
 
 	const EYE_SVG = `<svg xmlns="http://www.w3.org/2000/svg"
 		viewBox="0 0 24 24" fill="currentColor"><path
@@ -336,10 +338,11 @@ var Wizard = (function() {
 	// when it isn't — show exact seconds instead. At/above 2 minutes,
 	// round to the nearest minute per issue #519.
 	function formatETA(seconds) {
-		if (seconds < 120) {
-			return `${Math.round(seconds)}s`;
+		const s = seconds || 0; // defend against a missing/undefined eta_seconds
+		if (s < ETA_SECONDS_AS_TEXT_THRESHOLD) {
+			return `${Math.round(s)}s`;
 		}
-		return `~${Math.round(seconds / 60)} min`;
+		return `~${Math.round(s / 60)} min`;
 	}
 
 	// --- Phase input capture ---

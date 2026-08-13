@@ -65,11 +65,12 @@ type ServerMessage struct {
 	Options     []string `json:"options,omitempty"`
 
 	// Percent / EtaSeconds / Known carry the #520 run-wide progress
-	// snapshot for display_overall_progress (#519). No omitempty on
-	// Percent/Known: a legitimate 0% / not-yet-known message must
-	// still serialize.
+	// snapshot for display_overall_progress (#519). No omitempty on any
+	// of the three: a legitimate 0% / 0-second ETA (e.g. LogFinal's
+	// 100%/0s closing snapshot) / not-yet-known message must still
+	// serialize, or the JS side sees `undefined` and renders "~NaN min".
 	Percent    float64 `json:"percent"`
-	EtaSeconds int     `json:"eta_seconds,omitempty"`
+	EtaSeconds int     `json:"eta_seconds"`
 	Known      bool    `json:"known"`
 }
 
