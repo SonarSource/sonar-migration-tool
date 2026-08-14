@@ -13,6 +13,8 @@ const (
 	TypePromptPassword      = "prompt_password"
 	TypePromptConfirm       = "prompt_confirm"
 	TypePromptConfirmReview = "prompt_confirm_review"
+	TypePromptExtractForm   = "prompt_extract_form"
+	TypePromptMigrateForm   = "prompt_migrate_form"
 	TypePromptChoice        = "prompt_choice"
 
 	TypeDisplayWelcome         = "display_welcome"
@@ -72,6 +74,15 @@ type ServerMessage struct {
 	Percent    float64 `json:"percent"`
 	EtaSeconds int     `json:"eta_seconds"`
 	Known      bool    `json:"known"`
+	// DefaultURL / TokenOptional / DefaultEnterpriseKey /
+	// DefaultIncludeProjectData / DefaultIncludeIssueSync carry the
+	// field defaults for prompt_extract_form and prompt_migrate_form.
+	// DefaultEnterpriseKey is only used by the latter.
+	DefaultURL                string `json:"default_url,omitempty"`
+	TokenOptional             bool   `json:"token_optional,omitempty"`
+	DefaultEnterpriseKey      string `json:"default_enterprise_key,omitempty"`
+	DefaultIncludeProjectData bool   `json:"default_include_project_data"`
+	DefaultIncludeIssueSync   bool   `json:"default_include_issue_sync"`
 }
 
 // ClientMessage is sent from the browser to the Go server.

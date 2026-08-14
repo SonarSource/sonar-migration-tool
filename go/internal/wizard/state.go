@@ -47,6 +47,12 @@ type WizardState struct {
 	MigrationRunID      *string     `json:"migration_run_id"`
 	SkippedProjects     []string    `json:"skipped_projects,omitempty"`
 
+	// IncludeProjectData / IncludeIssueSync record the #516 migration-scope
+	// checkboxes gathered on the Extract phase's credentials screen. nil
+	// means "not yet chosen" and defaults to true (migrate everything).
+	IncludeProjectData *bool `json:"include_project_data"`
+	IncludeIssueSync   *bool `json:"include_issue_sync"`
+
 	// Tokens — in-memory only. See type-level comment for rationale.
 	SourceToken *string `json:"-"`
 	TargetToken *string `json:"-"`
@@ -97,14 +103,16 @@ func resetPhaseState(state *WizardState, phase WizardPhase) {
 		state.SourceURL = nil
 		state.ExtractID = nil
 		state.SkippedProjects = nil
+		state.IncludeProjectData = nil
+		state.IncludeIssueSync = nil
 	case PhaseOrgMapping:
-		state.TargetURL = nil
-		state.EnterpriseKey = nil
 		state.OrganizationsMapped = false
 	case PhaseValidate:
 		state.ValidationPassed = false
 	case PhaseMigrate:
 		state.MigrationRunID = nil
+		state.TargetURL = nil
+		state.EnterpriseKey = nil
 	}
 }
 
