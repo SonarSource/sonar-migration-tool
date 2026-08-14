@@ -227,8 +227,22 @@ func TestRunExtractWithRetrySuccess(t *testing.T) {
 }
 
 func TestRunExtractWithRetrySetsProgressCallback(t *testing.T) {
-  state := &WizardState{}
-  if captured.ProgressCallback == nil {
+	var captured extract.ExtractConfig
+	origFn := runExtractFn
+	runExtractFn = func(_ context.Context, cfg extract.ExtractConfig) ([]string, error) {
+		captured = cfg
+		return nil, nil
+	}
+	defer func() { runExtractFn = origFn }()
+
+	dir := t.TempDir()
+	state := &WizardState{}
+	p := &MockPrompter{}
+
+	if _, err := runExtractWithRetry(context.Background(), p, state, dir, testSQServerURL, "token"); err != nil {
+		t.Fatalf("runExtractWithRetry: %v", err)
+	}
+	if captured.ProgressCallback == nil {
 		t.Fatal("expected ProgressCallback to be set")
 	}
 
@@ -239,18 +253,7 @@ func TestRunExtractWithRetrySetsProgressCallback(t *testing.T) {
 	got := p.OverallProgressCalls[0]
 	if got.Percent != 42 || got.Eta != 12*time.Minute || !got.Known {
 		t.Errorf("got %+v, want {42 12m true}", got)
-  }
-  if captured.ProgressCallback == nil {
-		t.Fatal("expected ProgressCallback to be set")
 	}
-
-	captured.ProgressCallback(42, 12*time.Minute, true)
-	if len(p.OverallProgressCalls) != 1 {
-		t.Fatalf("expected 1 DisplayOverallProgress call, got %d", len(p.OverallProgressCalls))
-	}
-	got := p.OverallProgressCalls[0]
-	if got.Percent != 42 || got.Eta != 12*time.Minute || !got.Known {
-		t.Errorf("got %+v, want {42 12m true}", got)
 }
 
 func TestRunExtractWithRetryTranslatesScopeToSkipFlags(t *testing.T) {
@@ -462,7 +465,7 @@ func TestRunMigrateWithRetrySuccess(t *testing.T) {
 }
 
 func TestRunMigrateWithRetrySetsProgressCallback(t *testing.T) {
-  var captured migrate.MigrateConfig
+	var captured migrate.MigrateConfig
 	origFn := runMigrateFn
 	runMigrateFn = func(_ context.Context, cfg migrate.MigrateConfig) (string, error) {
 		captured = cfg
@@ -471,13 +474,13 @@ func TestRunMigrateWithRetrySetsProgressCallback(t *testing.T) {
 	defer func() { runMigrateFn = origFn }()
 
 	dir := t.TempDir()
-  state := &WizardState{TargetURL: strPtr(testSQCloudURL), EnterpriseKey: strPtr(testEntKey)}
+	state := &WizardState{TargetURL: strPtr(testSQCloudURL), EnterpriseKey: strPtr(testEntKey)}
 	p := &MockPrompter{}
 
 	if err := runMigrateWithRetry(context.Background(), p, state, dir, "token"); err != nil {
 		t.Fatalf("runMigrateWithRetry: %v", err)
 	}
- 	if captured.ProgressCallback == nil {
+	if captured.ProgressCallback == nil {
 		t.Fatal("expected ProgressCallback to be set")
 	}
 
