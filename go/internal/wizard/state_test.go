@@ -29,14 +29,14 @@ func TestSaveAndLoad(t *testing.T) {
 	dir := t.TempDir()
 
 	original := &WizardState{
-		Phase:              PhaseStructure,
-		ExtractID:          strPtr("abc-123"),
-		SourceURL:          strPtr("https://sonar.example.com"),
-		TargetURL:          strPtr("https://sonarcloud.io"),
-		EnterpriseKey:      strPtr("my-enterprise"),
+		Phase:               PhaseStructure,
+		ExtractID:           strPtr("abc-123"),
+		SourceURL:           strPtr("https://sonar.example.com"),
+		TargetURL:           strPtr("https://sonarcloud.io"),
+		EnterpriseKey:       strPtr("my-enterprise"),
 		OrganizationsMapped: true,
-		ValidationPassed:   false,
-		MigrationRunID:     nil,
+		ValidationPassed:    false,
+		MigrationRunID:      nil,
 	}
 
 	if err := original.Save(dir); err != nil {
@@ -78,14 +78,14 @@ func TestLoadMissingFile(t *testing.T) {
 
 func TestJSONFormat(t *testing.T) {
 	state := &WizardState{
-		Phase:              PhaseExtract,
-		ExtractID:          strPtr("run-42"),
-		SourceURL:          strPtr("https://sq.local"),
-		TargetURL:          nil,
-		EnterpriseKey:      nil,
+		Phase:               PhaseExtract,
+		ExtractID:           strPtr("run-42"),
+		SourceURL:           strPtr("https://sq.local"),
+		TargetURL:           nil,
+		EnterpriseKey:       nil,
 		OrganizationsMapped: false,
-		ValidationPassed:   false,
-		MigrationRunID:     nil,
+		ValidationPassed:    false,
+		MigrationRunID:      nil,
 	}
 
 	data, err := json.MarshalIndent(state, "", "  ")
@@ -102,7 +102,9 @@ func TestJSONFormat(t *testing.T) {
   "enterprise_key": null,
   "organizations_mapped": false,
   "validation_passed": false,
-  "migration_run_id": null
+  "migration_run_id": null,
+  "include_project_data": null,
+  "include_issue_sync": null
 }`
 
 	if string(data) != expected {
@@ -169,16 +171,17 @@ func TestResetPhaseStateOrgMapping(t *testing.T) {
 	s := fullyPopulatedState()
 	resetPhaseState(s, PhaseOrgMapping)
 
-	if s.TargetURL != nil {
-		t.Error("TargetURL should be nil after reset")
-	}
-	if s.EnterpriseKey != nil {
-		t.Error("EnterpriseKey should be nil after reset")
-	}
 	if s.OrganizationsMapped {
 		t.Error("OrganizationsMapped should be false after reset")
 	}
-	// Unrelated fields should remain.
+	// Unrelated fields should remain — TargetURL/EnterpriseKey are now
+	// collected during the Migrate phase, not Org Mapping.
+	if s.TargetURL == nil {
+		t.Error("TargetURL should be untouched")
+	}
+	if s.EnterpriseKey == nil {
+		t.Error("EnterpriseKey should be untouched")
+	}
 	if s.SourceURL == nil {
 		t.Error("SourceURL should be untouched")
 	}
@@ -202,6 +205,12 @@ func TestResetPhaseStateMigrate(t *testing.T) {
 
 	if s.MigrationRunID != nil {
 		t.Error("MigrationRunID should be nil after reset")
+	}
+	if s.TargetURL != nil {
+		t.Error("TargetURL should be nil after reset")
+	}
+	if s.EnterpriseKey != nil {
+		t.Error("EnterpriseKey should be nil after reset")
 	}
 	if s.SourceURL == nil {
 		t.Error("SourceURL should be untouched")

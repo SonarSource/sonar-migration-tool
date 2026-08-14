@@ -66,6 +66,12 @@ func mergeSeed(state, seed *WizardState) {
 	if state.EnterpriseKey == nil && seed.EnterpriseKey != nil && *seed.EnterpriseKey != "" {
 		state.EnterpriseKey = seed.EnterpriseKey
 	}
+	if state.IncludeProjectData == nil && seed.IncludeProjectData != nil {
+		state.IncludeProjectData = seed.IncludeProjectData
+	}
+	if state.IncludeIssueSync == nil && seed.IncludeIssueSync != nil {
+		state.IncludeIssueSync = seed.IncludeIssueSync
+	}
 	// Tokens are always seeded when supplied — disk never has them
 	// (json:"-"), so the "disk wins" rule degenerates to "seed wins
 	// when present" for these two fields.

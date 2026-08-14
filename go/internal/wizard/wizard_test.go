@@ -17,23 +17,44 @@ import (
 )
 
 const (
-	testOKTrue        = "expected ok=true"
-	testSQCloudURL    = "https://sonarcloud.io/"
-	errExpectExtract  = "expected PhaseExtract, got %s"
+	testOKTrue       = "expected ok=true"
+	testSQCloudURL   = "https://sonarcloud.io/"
+	errExpectExtract = "expected PhaseExtract, got %s"
 )
+
+// ExtractFormResponse pre-programs a PromptExtractForm answer.
+type ExtractFormResponse struct {
+	URL                string
+	Token              string
+	IncludeProjectData bool
+	IncludeIssueSync   bool
+}
+
+// MigrateFormResponse pre-programs a PromptMigrateForm answer.
+type MigrateFormResponse struct {
+	URL                string
+	Token              string
+	EnterpriseKey      string
+	IncludeProjectData bool
+	IncludeIssueSync   bool
+}
 
 // MockPrompter supplies pre-programmed responses for tests.
 type MockPrompter struct {
-	URLResponses      []string
-	TextResponses     []string
-	PasswordResponses []string
-	ConfirmResponses  []bool
-	ReviewResponses   []bool
-	ChoiceResponses   []int
+	URLResponses         []string
+	TextResponses        []string
+	PasswordResponses    []string
+	ConfirmResponses     []bool
+	ReviewResponses      []bool
+	ChoiceResponses      []int
+	ExtractFormResponses []ExtractFormResponse // optional; falls back to the caller's defaults when exhausted
+	ExtractFormErr       error                 // if set, PromptExtractForm returns this error once (e.g. simulating Cancel)
+	MigrateFormResponses []MigrateFormResponse // optional; falls back to the caller's defaults when exhausted
+	MigrateFormErr       error                 // if set, PromptMigrateForm returns this error once (e.g. simulating Cancel)
 
 	Messages []string // captures DisplayMessage, DisplayError, etc.
 
-	urlIdx, textIdx, passIdx, confirmIdx, reviewIdx, choiceIdx int
+	urlIdx, textIdx, passIdx, confirmIdx, reviewIdx, choiceIdx, extractFormIdx, migrateFormIdx int
 }
 
 func (m *MockPrompter) PromptURL(msg string, validate bool) (string, error) {
@@ -81,6 +102,40 @@ func (m *MockPrompter) ConfirmReview(title string, details []KV) (bool, error) {
 	return r, nil
 }
 
+func (m *MockPrompter) PromptExtractForm(defaultURL string, tokenOptional bool, defaultIncludeProjectData, defaultIncludeIssueSync bool) (string, string, bool, bool, error) {
+	if m.ExtractFormErr != nil {
+		err := m.ExtractFormErr
+		m.ExtractFormErr = nil
+		return "", "", false, false, err
+	}
+
+	url, token := defaultURL, ""
+	includeProjectData, includeIssueSync := defaultIncludeProjectData, defaultIncludeIssueSync
+	if m.extractFormIdx < len(m.ExtractFormResponses) {
+		r := m.ExtractFormResponses[m.extractFormIdx]
+		url, token, includeProjectData, includeIssueSync = r.URL, r.Token, r.IncludeProjectData, r.IncludeIssueSync
+		m.extractFormIdx++
+	}
+	return url, token, includeProjectData, includeIssueSync, nil
+}
+
+func (m *MockPrompter) PromptMigrateForm(defaultURL string, tokenOptional bool, defaultEnterpriseKey string, defaultIncludeProjectData, defaultIncludeIssueSync bool) (string, string, string, bool, bool, error) {
+	if m.MigrateFormErr != nil {
+		err := m.MigrateFormErr
+		m.MigrateFormErr = nil
+		return "", "", "", false, false, err
+	}
+
+	url, token, entKey := defaultURL, "", defaultEnterpriseKey
+	includeProjectData, includeIssueSync := defaultIncludeProjectData, defaultIncludeIssueSync
+	if m.migrateFormIdx < len(m.MigrateFormResponses) {
+		r := m.MigrateFormResponses[m.migrateFormIdx]
+		url, token, entKey, includeProjectData, includeIssueSync = r.URL, r.Token, r.EnterpriseKey, r.IncludeProjectData, r.IncludeIssueSync
+		m.migrateFormIdx++
+	}
+	return url, token, entKey, includeProjectData, includeIssueSync, nil
+}
+
 func (m *MockPrompter) PromptChoice(msg string, options []string) (int, error) {
 	if m.choiceIdx >= len(m.ChoiceResponses) {
 		return 0, nil
@@ -89,7 +144,7 @@ func (m *MockPrompter) PromptChoice(msg string, options []string) (int, error) {
 	m.choiceIdx++
 	return r, nil
 }
-func (m *MockPrompter) SetBackEnabled(bool)                     { /* no-op for tests */ }
+func (m *MockPrompter) SetBackEnabled(bool)                    { /* no-op for tests */ }
 func (m *MockPrompter) DisplayWelcome()                        { /* no-op for tests */ }
 func (m *MockPrompter) DisplayPhaseProgress(phase WizardPhase) { /* no-op for tests */ }
 func (m *MockPrompter) DisplayMessage(msg string)              { m.Messages = append(m.Messages, msg) }
@@ -100,7 +155,7 @@ func (m *MockPrompter) DisplaySummary(title string, stats []KV) {
 	/* no-op for tests — summary display not asserted */
 }
 func (m *MockPrompter) DisplayResumeInfo(state *WizardState) { /* no-op for tests */ }
-func (m *MockPrompter) DisplayWizardComplete()                { /* no-op for tests */ }
+func (m *MockPrompter) DisplayWizardComplete()               { /* no-op for tests */ }
 
 // --- Resume Logic Tests ---
 
@@ -605,6 +660,29 @@ func TestMergeSeed(t *testing.T) {
 			assertPtrEqual(t, "SourceToken", state.SourceToken, c.want.SourceToken)
 			assertPtrEqual(t, "TargetToken", state.TargetToken, c.want.TargetToken)
 		})
+	}
+}
+
+// #516: IncludeProjectData / IncludeIssueSync follow the same
+// "state wins, seed fills nils" rule as the other seeded fields.
+func TestMergeSeedIncludeFlags(t *testing.T) {
+	trueVal, falseVal := true, false
+
+	state := WizardState{}
+	seed := WizardState{IncludeProjectData: &falseVal, IncludeIssueSync: &falseVal}
+	mergeSeed(&state, &seed)
+	if state.IncludeProjectData == nil || *state.IncludeProjectData {
+		t.Errorf("IncludeProjectData: got %v, want false", state.IncludeProjectData)
+	}
+	if state.IncludeIssueSync == nil || *state.IncludeIssueSync {
+		t.Errorf("IncludeIssueSync: got %v, want false", state.IncludeIssueSync)
+	}
+
+	stateWithDisk := WizardState{IncludeProjectData: &trueVal}
+	seedFalse := WizardState{IncludeProjectData: &falseVal}
+	mergeSeed(&stateWithDisk, &seedFalse)
+	if stateWithDisk.IncludeProjectData == nil || !*stateWithDisk.IncludeProjectData {
+		t.Errorf("IncludeProjectData: got %v, want true (disk wins over seed)", stateWithDisk.IncludeProjectData)
 	}
 }
 
