@@ -83,13 +83,13 @@ func resetPhaseState(state *WizardState, phase WizardPhase) {
 		state.IncludeProjectData = nil
 		state.IncludeIssueSync = nil
 	case PhaseOrgMapping:
-		state.TargetURL = nil
-		state.EnterpriseKey = nil
 		state.OrganizationsMapped = false
 	case PhaseValidate:
 		state.ValidationPassed = false
 	case PhaseMigrate:
 		state.MigrationRunID = nil
+		state.TargetURL = nil
+		state.EnterpriseKey = nil
 	}
 }
 

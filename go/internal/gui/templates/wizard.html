@@ -105,6 +105,13 @@
 	color: var(--color-text-muted, #888);
 	cursor: not-allowed;
 }
+.prompt input[type="url"],
+.prompt input[type="password"] {
+	margin-bottom: 0.75rem;
+}
+.prompt label.prompt-label {
+	margin-top: 0.5rem;
+}
 </style>
 
 <script>
@@ -266,7 +273,8 @@ var Wizard = (function() {
 		case 'prompt_password':
 		case 'prompt_confirm':
 		case 'prompt_confirm_review':
-		case 'prompt_confirm_extract_scope':
+		case 'prompt_extract_form':
+		case 'prompt_migrate_form':
 		case 'prompt_choice':
 			onPrompt(msg);
 			break;
@@ -316,6 +324,21 @@ var Wizard = (function() {
 
 	// --- Phase input capture ---
 
+	function formatPhaseInputValue(prompt, value) {
+		if (prompt.type === 'prompt_password') {
+			return '********';
+		}
+		if (prompt.type === 'prompt_extract_form' || prompt.type === 'prompt_migrate_form') {
+			return `URL: ${value.url}, `
+				+ `Project data: ${value.includeProjectData ? 'Yes' : 'No'}, `
+				+ `Issue sync: ${value.includeIssueSync ? 'Yes' : 'No'}`;
+		}
+		if (typeof value === 'boolean') {
+			return value ? 'Yes' : 'No';
+		}
+		return String(value);
+	}
+
 	function capturePhaseInput(prompt, value) {
 		if (!currentPhase) {
 			return;
@@ -325,17 +348,7 @@ var Wizard = (function() {
 			return;
 		}
 
-		let displayValue;
-		if (prompt.type === 'prompt_password') {
-			displayValue = '********';
-		} else if (prompt.type === 'prompt_confirm_extract_scope') {
-			displayValue = `Project data: ${value.includeProjectData ? 'Yes' : 'No'}, `
-				+ `Issue sync: ${value.includeIssueSync ? 'Yes' : 'No'}`;
-		} else if (typeof value === 'boolean') {
-			displayValue = value ? 'Yes' : 'No';
-		} else {
-			displayValue = String(value);
-		}
+		let displayValue = formatPhaseInputValue(prompt, value);
 
 		if (prompt.type === 'prompt_confirm' && latestSummary && latestSummary.stats) {
 			const orgLabel = findStat(latestSummary.stats, 'Integration Key') ||
@@ -519,7 +532,8 @@ var Wizard = (function() {
 		case 'prompt_password': return renderPromptPassword(msg);
 		case 'prompt_confirm': return renderPromptConfirm(msg);
 		case 'prompt_confirm_review': return renderPromptConfirmReview(msg);
-		case 'prompt_confirm_extract_scope': return renderPromptConfirmExtractScope(msg);
+		case 'prompt_extract_form': return renderPromptExtractForm(msg);
+		case 'prompt_migrate_form': return renderPromptMigrateForm(msg);
 		case 'prompt_choice': return renderPromptChoice(msg);
 		default: return `<p>Unknown prompt type: ${escapeHTML(msg.type)}</p>`;
 		}
@@ -650,46 +664,100 @@ var Wizard = (function() {
 		return html;
 	}
 
-	function renderPromptConfirmExtractScope(msg) {
-		let html = '<div class="prompt">';
+	function renderPromptExtractForm(msg) {
+		const includeData = !!msg.default_include_project_data;
+		// Never render checked-but-disabled: if project data is off, the
+		// sync checkbox must start unchecked too, or a submit without
+		// touching either box would send includeProjectData=false with
+		// includeIssueSync=true — the invalid combination the CLI
+		// prompter's cascade prevents.
+		const includeSync = includeData && !!msg.default_include_issue_sync;
+		const tokenPlaceholder = msg.token_optional
+			? 'Leave blank to keep the configured token'
+			: '';
+		let html = '<form class="prompt" onsubmit="return Wizard.submitExtractForm(event)">';
 		if (msg.title) {
 			html += `<h3>${escapeHTML(msg.title)}</h3>`;
 		}
-		if (msg.details && msg.details.length) {
-			html += '<table class="review-table"><tbody>';
-			for (const detail of msg.details) {
-				html += `<tr><td>${escapeHTML(detail.key)}</td>`;
-				html += `<td>${escapeHTML(detail.value)}</td></tr>`;
-			}
-			html += '</tbody></table>';
-		}
-		const includeData = !!msg.default_include_project_data;
-		const includeSync = !!msg.default_include_issue_sync;
 		html += `
+			<label class="prompt-label" for="extract-url">SonarQube Server URL</label>
+			<input type="url" id="extract-url" required placeholder="https://"
+				value="${escapeAttr(msg.default_url)}">
+			<label class="prompt-label" for="extract-token">Admin token</label>
+			<input type="password" id="extract-token" placeholder="${escapeAttr(tokenPlaceholder)}"
+				${msg.token_optional ? '' : 'required'}>
+			<div id="prompt-error" class="text-error mt-1"></div>
 			<div class="checkbox-row">
 				<label>
-					<input type="checkbox" id="scope-include-project-data"
+					<input type="checkbox" id="extract-include-project-data"
 						${includeData ? 'checked' : ''}
-						onchange="Wizard.onIncludeProjectDataChange()">
-					Migrate project data (issues, hotspots, measures)
+						onchange="Wizard.updateIssueSyncCheckbox('extract-include-project-data', 'extract-include-issue-sync')">
+					Migrate project data (files, measures, issues, SCM data, ...)
 				</label>
 			</div>
-			<div class="checkbox-row" id="scope-issue-sync-row">
+			<div class="checkbox-row">
 				<label>
-					<input type="checkbox" id="scope-include-issue-sync"
+					<input type="checkbox" id="extract-include-issue-sync"
 						${includeSync ? 'checked' : ''}
 						${includeData ? '' : 'disabled'}>
 					Sync issue/hotspot metadata after migration
 				</label>
-			</div>`;
-		html += `<p class="prompt-label">Are these values correct?</p>
+			</div>
 			<div class="button-row">
-				${backButton(msg)}
-				<button class="btn-primary"
-					onclick="Wizard.submitExtractScope(true)">Yes, continue</button>
-				<button class="btn-secondary"
-					onclick="Wizard.submitExtractScope(false)">No, re-enter</button>
-			</div></div>`;
+				<button type="button" class="btn-secondary" onclick="Wizard.cancel()">Cancel</button>
+				<button type="submit" class="btn-primary">Start Extract</button>
+			</div>`;
+		html += '</form>';
+		return html;
+	}
+
+	function renderPromptMigrateForm(msg) {
+		const includeData = !!msg.default_include_project_data;
+		// Never render checked-but-disabled: if project data is off, the
+		// sync checkbox must start unchecked too, or a submit without
+		// touching either box would send includeProjectData=false with
+		// includeIssueSync=true — the invalid combination the CLI
+		// prompter's cascade prevents.
+		const includeSync = includeData && !!msg.default_include_issue_sync;
+		const tokenPlaceholder = msg.token_optional
+			? 'Leave blank to keep the configured token'
+			: '';
+		let html = '<form class="prompt" onsubmit="return Wizard.submitMigrateForm(event)">';
+		if (msg.title) {
+			html += `<h3>${escapeHTML(msg.title)}</h3>`;
+		}
+		html += `
+			<label class="prompt-label" for="migrate-url">SonarQube Cloud URL</label>
+			<input type="url" id="migrate-url" required placeholder="https://"
+				value="${escapeAttr(msg.default_url)}">
+			<label class="prompt-label" for="migrate-token">Cloud admin token</label>
+			<input type="password" id="migrate-token" placeholder="${escapeAttr(tokenPlaceholder)}"
+				${msg.token_optional ? '' : 'required'}>
+			<label class="prompt-label" for="migrate-enterprise-key">Enterprise key</label>
+			<input type="text" id="migrate-enterprise-key" required
+				value="${escapeAttr(msg.default_enterprise_key)}">
+			<div id="prompt-error" class="text-error mt-1"></div>
+			<div class="checkbox-row">
+				<label>
+					<input type="checkbox" id="migrate-include-project-data"
+						${includeData ? 'checked' : ''}
+						onchange="Wizard.updateIssueSyncCheckbox('migrate-include-project-data', 'migrate-include-issue-sync')">
+					Migrate project data (files, measures, issues, SCM data, ...)
+				</label>
+			</div>
+			<div class="checkbox-row">
+				<label>
+					<input type="checkbox" id="migrate-include-issue-sync"
+						${includeSync ? 'checked' : ''}
+						${includeData ? '' : 'disabled'}>
+					Sync issue/hotspot metadata after migration
+				</label>
+			</div>
+			<div class="button-row">
+				<button type="button" class="btn-secondary" onclick="Wizard.cancel()">Cancel</button>
+				<button type="submit" class="btn-primary">Start Migrate</button>
+			</div>`;
+		html += '</form>';
 		return html;
 	}
 
@@ -769,9 +837,9 @@ var Wizard = (function() {
 
 	// --- Extract-scope checkbox helpers (#516) ---
 
-	function onIncludeProjectDataChange() {
-		const dataBox = document.getElementById('scope-include-project-data');
-		const syncBox = document.getElementById('scope-include-issue-sync');
+	function updateIssueSyncCheckbox(dataId, syncId) {
+		const dataBox = document.getElementById(dataId);
+		const syncBox = document.getElementById(syncId);
 		if (!dataBox || !syncBox) {
 			return;
 		}
@@ -783,14 +851,64 @@ var Wizard = (function() {
 		}
 	}
 
-	function submitExtractScope(confirmed) {
-		const dataBox = document.getElementById('scope-include-project-data');
-		const syncBox = document.getElementById('scope-include-issue-sync');
+	function submitExtractForm(event) {
+		event.preventDefault();
+
+		const urlInput = document.getElementById('extract-url');
+		const tokenInput = document.getElementById('extract-token');
+		const dataBox = document.getElementById('extract-include-project-data');
+		const syncBox = document.getElementById('extract-include-issue-sync');
+		const errEl = document.getElementById('prompt-error');
+
+		const url = urlInput.value.trim();
+		if (!isValidURL(url)) {
+			if (errEl) {
+				errEl.textContent = 'Please enter a valid HTTP or HTTPS URL';
+			}
+			return false;
+		}
+		if (errEl) {
+			errEl.textContent = '';
+		}
+
 		respond({
-			confirmed: confirmed,
+			url,
+			token: tokenInput.value.trim(),
 			includeProjectData: dataBox ? dataBox.checked : true,
 			includeIssueSync: syncBox ? syncBox.checked : true,
 		});
+		return false;
+	}
+
+	function submitMigrateForm(event) {
+		event.preventDefault();
+
+		const urlInput = document.getElementById('migrate-url');
+		const tokenInput = document.getElementById('migrate-token');
+		const enterpriseKeyInput = document.getElementById('migrate-enterprise-key');
+		const dataBox = document.getElementById('migrate-include-project-data');
+		const syncBox = document.getElementById('migrate-include-issue-sync');
+		const errEl = document.getElementById('prompt-error');
+
+		const url = urlInput.value.trim();
+		if (!isValidURL(url)) {
+			if (errEl) {
+				errEl.textContent = 'Please enter a valid HTTP or HTTPS URL';
+			}
+			return false;
+		}
+		if (errEl) {
+			errEl.textContent = '';
+		}
+
+		respond({
+			url,
+			token: tokenInput.value.trim(),
+			enterpriseKey: enterpriseKeyInput.value.trim(),
+			includeProjectData: dataBox ? dataBox.checked : true,
+			includeIssueSync: syncBox ? syncBox.checked : true,
+		});
+		return false;
 	}
 
 	// --- Response handling ---
@@ -963,8 +1081,9 @@ var Wizard = (function() {
 			}
 		},
 		onCloudSelect,
-		onIncludeProjectDataChange,
-		submitExtractScope,
+		updateIssueSyncCheckbox,
+		submitExtractForm,
+		submitMigrateForm,
 		respond,
 		goBack() {
 			if (!pendingPromptId) {

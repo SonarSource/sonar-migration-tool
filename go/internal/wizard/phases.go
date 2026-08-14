@@ -64,53 +64,26 @@ func phaseExtract(ctx context.Context, p Prompter, state *WizardState, exportDir
 }
 
 func promptExtractCredentials(p Prompter, state *WizardState) (string, string, error) {
-	for {
-		sourceURL := ptrStr(state.SourceURL)
-		if sourceURL == "" {
-			var err error
-			sourceURL, err = p.PromptURL("SonarQube Server URL:", true)
-			if err != nil {
-				return "", "", err
-			}
-		}
+	defaultIncludeProjectData := ptrBoolOr(state.IncludeProjectData, true)
+	defaultIncludeIssueSync := ptrBoolOr(state.IncludeIssueSync, true)
 
-		// #388: --config can pre-fill the token; only prompt when it
-		// hasn't been seeded.
-		token := ptrStr(state.SourceToken)
-		if token == "" {
-			var err error
-			token, err = p.PromptPassword("Admin token:")
-			if err != nil {
-				return "", "", err
-			}
-		}
+	// #388: --config can pre-fill the token; the form field is left
+	// optional when that's the case, so the operator isn't forced to
+	// retype a token that's already known.
+	tokenOptional := ptrStr(state.SourceToken) != ""
 
-		defaultIncludeProjectData := true
-		if state.IncludeProjectData != nil {
-			defaultIncludeProjectData = *state.IncludeProjectData
-		}
-		defaultIncludeIssueSync := true
-		if state.IncludeIssueSync != nil {
-			defaultIncludeIssueSync = *state.IncludeIssueSync
-		}
-
-		ok, includeProjectData, includeIssueSync, err := p.ConfirmExtractScope("Source Server Credentials", []KV{
-			{"URL", sourceURL},
-			{"Token", "********"},
-		}, defaultIncludeProjectData, defaultIncludeIssueSync)
-		if err != nil {
-			return "", "", err
-		}
-		if ok {
-			state.IncludeProjectData = &includeProjectData
-			state.IncludeIssueSync = &includeIssueSync
-			return sourceURL, token, nil
-		}
-		state.SourceURL = nil
-		// Reject + re-prompt for the token too — operator may have
-		// confirmed because the typed value was wrong.
-		state.SourceToken = nil
+	url, token, includeProjectData, includeIssueSync, err := p.PromptExtractForm(
+		ptrStr(state.SourceURL), tokenOptional, defaultIncludeProjectData, defaultIncludeIssueSync)
+	if err != nil {
+		return "", "", err
 	}
+	if token == "" {
+		token = ptrStr(state.SourceToken)
+	}
+
+	state.IncludeProjectData = &includeProjectData
+	state.IncludeIssueSync = &includeIssueSync
+	return url, token, nil
 }
 
 func runExtractWithRetry(ctx context.Context, p Prompter, state *WizardState, exportDir, sourceURL, token string) (certConfig, error) {
@@ -226,10 +199,6 @@ func displayStructureSummary(p Prompter, exportDir string) {
 // --- Phase 3: Organization Mapping ---
 
 func phaseOrgMapping(ctx context.Context, p Prompter, state *WizardState, exportDir string) error {
-	if err := promptCloudCredentials(p, state); err != nil {
-		return err
-	}
-
 	if err := mapAllOrganizations(p, exportDir); err != nil {
 		return err
 	}
@@ -237,43 +206,6 @@ func phaseOrgMapping(ctx context.Context, p Prompter, state *WizardState, export
 	state.OrganizationsMapped = true
 	state.Phase = PhaseMappings
 	return state.Save(exportDir)
-}
-
-func promptCloudCredentials(p Prompter, state *WizardState) error {
-	for {
-		targetURL := ptrStr(state.TargetURL)
-		if targetURL == "" {
-			var err error
-			targetURL, err = p.PromptURL("SonarQube Cloud URL:", true)
-			if err != nil {
-				return err
-			}
-		}
-
-		entKey := ptrStr(state.EnterpriseKey)
-		if entKey == "" {
-			var err error
-			entKey, err = p.PromptText("Enterprise key:", "")
-			if err != nil {
-				return err
-			}
-		}
-
-		ok, err := p.ConfirmReview("Cloud Credentials", []KV{
-			{"URL", targetURL},
-			{"Enterprise Key", entKey},
-		})
-		if err != nil {
-			return err
-		}
-		if ok {
-			state.TargetURL = strPtr(targetURL)
-			state.EnterpriseKey = strPtr(entKey)
-			return nil
-		}
-		state.TargetURL = nil
-		state.EnterpriseKey = nil
-	}
 }
 
 func mapAllOrganizations(p Prompter, exportDir string) error {
@@ -429,27 +361,38 @@ func countOrgStatus(orgs []map[string]any) (active, skipped int) {
 
 func phaseMigrate(ctx context.Context, p Prompter, state *WizardState, exportDir string) error {
 	p.DisplayWarning("Migration will create and modify resources in SonarQube Cloud.")
-	ok, err := p.Confirm("Proceed with migration?", false)
+
+	token, err := promptMigrateCredentials(p, state)
 	if err != nil {
 		return err
 	}
-	if !ok {
-		p.DisplayMessage("Migration skipped. You can resume later.")
-		return fmt.Errorf("migration declined by user")
-	}
-
-	// #388: --config can pre-fill the cloud token; only prompt when
-	// the wizard wasn't seeded with one.
-	token := ptrStr(state.TargetToken)
-	if token == "" {
-		var err error
-		token, err = p.PromptPassword("Cloud admin token:")
-		if err != nil {
-			return err
-		}
-	}
 
 	return runMigrateWithRetry(ctx, p, state, exportDir, token)
+}
+
+func promptMigrateCredentials(p Prompter, state *WizardState) (string, error) {
+	defaultIncludeProjectData := ptrBoolOr(state.IncludeProjectData, true)
+	defaultIncludeIssueSync := ptrBoolOr(state.IncludeIssueSync, true)
+
+	// #388: --config can pre-fill the token; the form field is left
+	// optional when that's the case, so the operator isn't forced to
+	// retype a token that's already known.
+	tokenOptional := ptrStr(state.TargetToken) != ""
+
+	url, token, enterpriseKey, includeProjectData, includeIssueSync, err := p.PromptMigrateForm(
+		ptrStr(state.TargetURL), tokenOptional, ptrStr(state.EnterpriseKey), defaultIncludeProjectData, defaultIncludeIssueSync)
+	if err != nil {
+		return "", err
+	}
+	if token == "" {
+		token = ptrStr(state.TargetToken)
+	}
+
+	state.TargetURL = strPtr(url)
+	state.EnterpriseKey = strPtr(enterpriseKey)
+	state.IncludeProjectData = &includeProjectData
+	state.IncludeIssueSync = &includeIssueSync
+	return token, nil
 }
 
 func runMigrateWithRetry(ctx context.Context, p Prompter, state *WizardState, exportDir, token string) error {

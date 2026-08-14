@@ -196,52 +196,168 @@ func TestConfirmReviewSendsDetails(t *testing.T) {
 	}
 }
 
-func TestConfirmExtractScopeRoundTrips(t *testing.T) {
+func TestPromptExtractFormRoundTrips(t *testing.T) {
 	sendFn, snapshot := collectMessages()
 	ctx := context.Background()
 	wp := NewWebPrompter(ctx, sendFn)
 
-	details := []wizard.KV{
-		{Key: "URL", Value: "https://sq.example.com"},
-		{Key: "Token", Value: "********"},
-	}
-
 	done := make(chan struct{})
-	var confirmed, includeProjectData, includeIssueSync bool
+	var url, token string
+	var includeProjectData, includeIssueSync bool
 
 	go func() {
-		confirmed, includeProjectData, includeIssueSync, _ = wp.ConfirmExtractScope(
-			"Source Server Credentials", details, true, true)
+		url, token, includeProjectData, includeIssueSync, _ = wp.PromptExtractForm(
+			"https://sq.example.com", true, true, true)
 		close(done)
 	}()
 
 	time.Sleep(20 * time.Millisecond)
 	sent := snapshot()[0]
-	if sent.Type != TypePromptConfirmExtractScope {
+	if sent.Type != TypePromptExtractForm {
 		t.Fatalf("type: got %q", sent.Type)
+	}
+	if sent.DefaultURL != "https://sq.example.com" {
+		t.Errorf("default_url: got %q", sent.DefaultURL)
+	}
+	if !sent.TokenOptional {
+		t.Error("token_optional: got false, want true")
 	}
 	if !sent.DefaultIncludeProjectData || !sent.DefaultIncludeIssueSync {
 		t.Errorf("defaults: got %v/%v, want true/true", sent.DefaultIncludeProjectData, sent.DefaultIncludeIssueSync)
 	}
-	if len(sent.Details) != 2 {
-		t.Fatalf("details: got %d, want 2", len(sent.Details))
-	}
 
 	wp.HandleResponse(ClientMessage{ID: sent.ID, Value: map[string]any{
-		"confirmed":          true,
+		"url":                "https://sq.other.com",
+		"token":              "secret",
 		"includeProjectData": false,
 		"includeIssueSync":   false,
 	}})
 	<-done
 
-	if !confirmed {
-		t.Error("confirmed: want true")
+	if url != "https://sq.other.com" {
+		t.Errorf("url: got %q", url)
+	}
+	if token != "secret" {
+		t.Errorf("token: got %q", token)
 	}
 	if includeProjectData {
 		t.Error("includeProjectData: want false")
 	}
 	if includeIssueSync {
 		t.Error("includeIssueSync: want false")
+	}
+}
+
+func TestPromptExtractFormCancelledByContext(t *testing.T) {
+	sendFn, _ := collectMessages()
+	ctx, cancel := context.WithCancel(context.Background())
+	wp := NewWebPrompter(ctx, sendFn)
+
+	done := make(chan struct{})
+	var err error
+
+	go func() {
+		_, _, _, _, err = wp.PromptExtractForm("https://sq.example.com", false, true, true)
+		close(done)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("PromptExtractForm did not return after cancel")
+	}
+
+	if err != context.Canceled {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestPromptMigrateFormRoundTrips(t *testing.T) {
+	sendFn, snapshot := collectMessages()
+	ctx := context.Background()
+	wp := NewWebPrompter(ctx, sendFn)
+
+	done := make(chan struct{})
+	var url, token, enterpriseKey string
+	var includeProjectData, includeIssueSync bool
+
+	go func() {
+		url, token, enterpriseKey, includeProjectData, includeIssueSync, _ = wp.PromptMigrateForm(
+			"https://sonarcloud.io", true, "my-enterprise", true, true)
+		close(done)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	sent := snapshot()[0]
+	if sent.Type != TypePromptMigrateForm {
+		t.Fatalf("type: got %q", sent.Type)
+	}
+	if sent.DefaultURL != "https://sonarcloud.io" {
+		t.Errorf("default_url: got %q", sent.DefaultURL)
+	}
+	if !sent.TokenOptional {
+		t.Error("token_optional: got false, want true")
+	}
+	if sent.DefaultEnterpriseKey != "my-enterprise" {
+		t.Errorf("default_enterprise_key: got %q", sent.DefaultEnterpriseKey)
+	}
+	if !sent.DefaultIncludeProjectData || !sent.DefaultIncludeIssueSync {
+		t.Errorf("defaults: got %v/%v, want true/true", sent.DefaultIncludeProjectData, sent.DefaultIncludeIssueSync)
+	}
+
+	wp.HandleResponse(ClientMessage{ID: sent.ID, Value: map[string]any{
+		"url":                "https://other.sonarcloud.io",
+		"token":              "secret",
+		"enterpriseKey":      "other-enterprise",
+		"includeProjectData": false,
+		"includeIssueSync":   false,
+	}})
+	<-done
+
+	if url != "https://other.sonarcloud.io" {
+		t.Errorf("url: got %q", url)
+	}
+	if token != "secret" {
+		t.Errorf("token: got %q", token)
+	}
+	if enterpriseKey != "other-enterprise" {
+		t.Errorf("enterpriseKey: got %q", enterpriseKey)
+	}
+	if includeProjectData {
+		t.Error("includeProjectData: want false")
+	}
+	if includeIssueSync {
+		t.Error("includeIssueSync: want false")
+	}
+}
+
+func TestPromptMigrateFormCancelledByContext(t *testing.T) {
+	sendFn, _ := collectMessages()
+	ctx, cancel := context.WithCancel(context.Background())
+	wp := NewWebPrompter(ctx, sendFn)
+
+	done := make(chan struct{})
+	var err error
+
+	go func() {
+		_, _, _, _, _, err = wp.PromptMigrateForm("https://sonarcloud.io", false, "my-enterprise", true, true)
+		close(done)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("PromptMigrateForm did not return after cancel")
+	}
+
+	if err != context.Canceled {
+		t.Errorf("expected context.Canceled, got %v", err)
 	}
 }
 

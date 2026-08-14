@@ -115,19 +115,37 @@ func (wp *WebPrompter) ConfirmReview(title string, details []wizard.KV) (bool, e
 	return toBool(resp.Value), nil
 }
 
-func (wp *WebPrompter) ConfirmExtractScope(title string, details []wizard.KV, defaultIncludeProjectData, defaultIncludeIssueSync bool) (bool, bool, bool, error) {
+func (wp *WebPrompter) PromptExtractForm(defaultURL string, tokenOptional bool, defaultIncludeProjectData, defaultIncludeIssueSync bool) (string, string, bool, bool, error) {
 	resp, err := wp.prompt(ServerMessage{
-		Type:                      TypePromptConfirmExtractScope,
-		Title:                     title,
-		Details:                   ToKVPairs(details),
+		Type:                      TypePromptExtractForm,
+		Title:                     "Source Server Credentials",
+		DefaultURL:                defaultURL,
+		TokenOptional:             tokenOptional,
 		DefaultIncludeProjectData: defaultIncludeProjectData,
 		DefaultIncludeIssueSync:   defaultIncludeIssueSync,
 	})
 	if err != nil {
-		return false, false, false, err
+		return "", "", false, false, err
 	}
 	values, _ := resp.Value.(map[string]any)
-	return toBool(values["confirmed"]), toBool(values["includeProjectData"]), toBool(values["includeIssueSync"]), nil
+	return toString(values["url"]), toString(values["token"]), toBool(values["includeProjectData"]), toBool(values["includeIssueSync"]), nil
+}
+
+func (wp *WebPrompter) PromptMigrateForm(defaultURL string, tokenOptional bool, defaultEnterpriseKey string, defaultIncludeProjectData, defaultIncludeIssueSync bool) (string, string, string, bool, bool, error) {
+	resp, err := wp.prompt(ServerMessage{
+		Type:                      TypePromptMigrateForm,
+		Title:                     "Target Cloud Credentials",
+		DefaultURL:                defaultURL,
+		TokenOptional:             tokenOptional,
+		DefaultEnterpriseKey:      defaultEnterpriseKey,
+		DefaultIncludeProjectData: defaultIncludeProjectData,
+		DefaultIncludeIssueSync:   defaultIncludeIssueSync,
+	})
+	if err != nil {
+		return "", "", "", false, false, err
+	}
+	values, _ := resp.Value.(map[string]any)
+	return toString(values["url"]), toString(values["token"]), toString(values["enterpriseKey"]), toBool(values["includeProjectData"]), toBool(values["includeIssueSync"]), nil
 }
 
 func (wp *WebPrompter) PromptChoice(message string, options []string) (int, error) {

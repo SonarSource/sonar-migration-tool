@@ -171,16 +171,17 @@ func TestResetPhaseStateOrgMapping(t *testing.T) {
 	s := fullyPopulatedState()
 	resetPhaseState(s, PhaseOrgMapping)
 
-	if s.TargetURL != nil {
-		t.Error("TargetURL should be nil after reset")
-	}
-	if s.EnterpriseKey != nil {
-		t.Error("EnterpriseKey should be nil after reset")
-	}
 	if s.OrganizationsMapped {
 		t.Error("OrganizationsMapped should be false after reset")
 	}
-	// Unrelated fields should remain.
+	// Unrelated fields should remain — TargetURL/EnterpriseKey are now
+	// collected during the Migrate phase, not Org Mapping.
+	if s.TargetURL == nil {
+		t.Error("TargetURL should be untouched")
+	}
+	if s.EnterpriseKey == nil {
+		t.Error("EnterpriseKey should be untouched")
+	}
 	if s.SourceURL == nil {
 		t.Error("SourceURL should be untouched")
 	}
@@ -204,6 +205,12 @@ func TestResetPhaseStateMigrate(t *testing.T) {
 
 	if s.MigrationRunID != nil {
 		t.Error("MigrationRunID should be nil after reset")
+	}
+	if s.TargetURL != nil {
+		t.Error("TargetURL should be nil after reset")
+	}
+	if s.EnterpriseKey != nil {
+		t.Error("EnterpriseKey should be nil after reset")
 	}
 	if s.SourceURL == nil {
 		t.Error("SourceURL should be untouched")

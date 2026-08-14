@@ -86,33 +86,87 @@ func (p *CLIPrompter) ConfirmReview(title string, details []KV) (bool, error) {
 	return p.Confirm("Are these values correct?", false)
 }
 
-func (p *CLIPrompter) ConfirmExtractScope(title string, details []KV, defaultIncludeProjectData, defaultIncludeIssueSync bool) (bool, bool, bool, error) {
-	fmt.Printf("\n  %s\n", title)
-	for _, kv := range details {
-		fmt.Printf(kvFormat, kv.Key+":", kv.Value)
+func (p *CLIPrompter) PromptExtractForm(defaultURL string, tokenOptional bool, defaultIncludeProjectData, defaultIncludeIssueSync bool) (string, string, bool, bool, error) {
+	url := defaultURL
+	if url == "" {
+		var err error
+		url, err = p.PromptURL("SonarQube Server URL:", true)
+		if err != nil {
+			return "", "", false, false, err
+		}
 	}
-	fmt.Println()
 
-	includeProjectData, err := p.Confirm("Migrate project data (issues, hotspots, measures)?", defaultIncludeProjectData)
+	var token string
+	if !tokenOptional {
+		var err error
+		token, err = p.PromptPassword("Admin token:")
+		if err != nil {
+			return "", "", false, false, err
+		}
+	}
+
+	includeProjectData, err := p.Confirm("Migrate project data (files, measures, issues, SCM data, ...)?", defaultIncludeProjectData)
 	if err != nil {
-		return false, false, false, err
+		return "", "", false, false, err
 	}
 
 	includeIssueSync := false
 	if includeProjectData {
 		includeIssueSync, err = p.Confirm("Sync issue/hotspot metadata after migration?", defaultIncludeIssueSync)
 		if err != nil {
-			return false, false, false, err
+			return "", "", false, false, err
 		}
 	} else {
 		displayColorLine(colorYellow, "  Issue/hotspot sync disabled: it requires project data migration.")
 	}
 
-	confirmed, err := p.Confirm("Are these values correct?", false)
-	if err != nil {
-		return false, false, false, err
+	return url, token, includeProjectData, includeIssueSync, nil
+}
+
+func (p *CLIPrompter) PromptMigrateForm(defaultURL string, tokenOptional bool, defaultEnterpriseKey string, defaultIncludeProjectData, defaultIncludeIssueSync bool) (string, string, string, bool, bool, error) {
+	url := defaultURL
+	if url == "" {
+		var err error
+		url, err = p.PromptURL("SonarQube Cloud URL:", true)
+		if err != nil {
+			return "", "", "", false, false, err
+		}
 	}
-	return confirmed, includeProjectData, includeIssueSync, nil
+
+	var token string
+	if !tokenOptional {
+		var err error
+		token, err = p.PromptPassword("Cloud admin token:")
+		if err != nil {
+			return "", "", "", false, false, err
+		}
+	}
+
+	entKey := defaultEnterpriseKey
+	if entKey == "" {
+		var err error
+		entKey, err = p.PromptText("Enterprise key:", "")
+		if err != nil {
+			return "", "", "", false, false, err
+		}
+	}
+
+	includeProjectData, err := p.Confirm("Migrate project data (files, measures, issues, SCM data, ...)?", defaultIncludeProjectData)
+	if err != nil {
+		return "", "", "", false, false, err
+	}
+
+	includeIssueSync := false
+	if includeProjectData {
+		includeIssueSync, err = p.Confirm("Sync issue/hotspot metadata after migration?", defaultIncludeIssueSync)
+		if err != nil {
+			return "", "", "", false, false, err
+		}
+	} else {
+		displayColorLine(colorYellow, "  Issue/hotspot sync disabled: it requires project data migration.")
+	}
+
+	return url, token, entKey, includeProjectData, includeIssueSync, nil
 }
 
 func (p *CLIPrompter) PromptChoice(message string, options []string) (int, error) {

@@ -22,25 +22,39 @@ const (
 	errExpectExtract = "expected PhaseExtract, got %s"
 )
 
-// ScopeResponse pre-programs a ConfirmExtractScope checkbox answer.
-type ScopeResponse struct {
+// ExtractFormResponse pre-programs a PromptExtractForm answer.
+type ExtractFormResponse struct {
+	URL                string
+	Token              string
+	IncludeProjectData bool
+	IncludeIssueSync   bool
+}
+
+// MigrateFormResponse pre-programs a PromptMigrateForm answer.
+type MigrateFormResponse struct {
+	URL                string
+	Token              string
+	EnterpriseKey      string
 	IncludeProjectData bool
 	IncludeIssueSync   bool
 }
 
 // MockPrompter supplies pre-programmed responses for tests.
 type MockPrompter struct {
-	URLResponses      []string
-	TextResponses     []string
-	PasswordResponses []string
-	ConfirmResponses  []bool
-	ReviewResponses   []bool
-	ChoiceResponses   []int
-	ScopeResponses    []ScopeResponse // optional; falls back to the caller's defaults when exhausted
+	URLResponses         []string
+	TextResponses        []string
+	PasswordResponses    []string
+	ConfirmResponses     []bool
+	ReviewResponses      []bool
+	ChoiceResponses      []int
+	ExtractFormResponses []ExtractFormResponse // optional; falls back to the caller's defaults when exhausted
+	ExtractFormErr       error                 // if set, PromptExtractForm returns this error once (e.g. simulating Cancel)
+	MigrateFormResponses []MigrateFormResponse // optional; falls back to the caller's defaults when exhausted
+	MigrateFormErr       error                 // if set, PromptMigrateForm returns this error once (e.g. simulating Cancel)
 
 	Messages []string // captures DisplayMessage, DisplayError, etc.
 
-	urlIdx, textIdx, passIdx, confirmIdx, reviewIdx, choiceIdx, scopeIdx int
+	urlIdx, textIdx, passIdx, confirmIdx, reviewIdx, choiceIdx, extractFormIdx, migrateFormIdx int
 }
 
 func (m *MockPrompter) PromptURL(msg string, validate bool) (string, error) {
@@ -88,20 +102,38 @@ func (m *MockPrompter) ConfirmReview(title string, details []KV) (bool, error) {
 	return r, nil
 }
 
-func (m *MockPrompter) ConfirmExtractScope(title string, details []KV, defaultIncludeProjectData, defaultIncludeIssueSync bool) (bool, bool, bool, error) {
-	confirmed := false
-	if m.reviewIdx < len(m.ReviewResponses) {
-		confirmed = m.ReviewResponses[m.reviewIdx]
-		m.reviewIdx++
+func (m *MockPrompter) PromptExtractForm(defaultURL string, tokenOptional bool, defaultIncludeProjectData, defaultIncludeIssueSync bool) (string, string, bool, bool, error) {
+	if m.ExtractFormErr != nil {
+		err := m.ExtractFormErr
+		m.ExtractFormErr = nil
+		return "", "", false, false, err
 	}
 
+	url, token := defaultURL, ""
 	includeProjectData, includeIssueSync := defaultIncludeProjectData, defaultIncludeIssueSync
-	if m.scopeIdx < len(m.ScopeResponses) {
-		includeProjectData = m.ScopeResponses[m.scopeIdx].IncludeProjectData
-		includeIssueSync = m.ScopeResponses[m.scopeIdx].IncludeIssueSync
-		m.scopeIdx++
+	if m.extractFormIdx < len(m.ExtractFormResponses) {
+		r := m.ExtractFormResponses[m.extractFormIdx]
+		url, token, includeProjectData, includeIssueSync = r.URL, r.Token, r.IncludeProjectData, r.IncludeIssueSync
+		m.extractFormIdx++
 	}
-	return confirmed, includeProjectData, includeIssueSync, nil
+	return url, token, includeProjectData, includeIssueSync, nil
+}
+
+func (m *MockPrompter) PromptMigrateForm(defaultURL string, tokenOptional bool, defaultEnterpriseKey string, defaultIncludeProjectData, defaultIncludeIssueSync bool) (string, string, string, bool, bool, error) {
+	if m.MigrateFormErr != nil {
+		err := m.MigrateFormErr
+		m.MigrateFormErr = nil
+		return "", "", "", false, false, err
+	}
+
+	url, token, entKey := defaultURL, "", defaultEnterpriseKey
+	includeProjectData, includeIssueSync := defaultIncludeProjectData, defaultIncludeIssueSync
+	if m.migrateFormIdx < len(m.MigrateFormResponses) {
+		r := m.MigrateFormResponses[m.migrateFormIdx]
+		url, token, entKey, includeProjectData, includeIssueSync = r.URL, r.Token, r.EnterpriseKey, r.IncludeProjectData, r.IncludeIssueSync
+		m.migrateFormIdx++
+	}
+	return url, token, entKey, includeProjectData, includeIssueSync, nil
 }
 
 func (m *MockPrompter) PromptChoice(msg string, options []string) (int, error) {

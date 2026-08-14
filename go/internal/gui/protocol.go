@@ -8,13 +8,14 @@ import "github.com/sonar-solutions/sonar-migration-tool/internal/wizard"
 
 // Server-to-browser message types (prompts require a response).
 const (
-	TypePromptURL                 = "prompt_url"
-	TypePromptText                = "prompt_text"
-	TypePromptPassword            = "prompt_password"
-	TypePromptConfirm             = "prompt_confirm"
-	TypePromptConfirmReview       = "prompt_confirm_review"
-	TypePromptConfirmExtractScope = "prompt_confirm_extract_scope"
-	TypePromptChoice              = "prompt_choice"
+	TypePromptURL           = "prompt_url"
+	TypePromptText          = "prompt_text"
+	TypePromptPassword      = "prompt_password"
+	TypePromptConfirm       = "prompt_confirm"
+	TypePromptConfirmReview = "prompt_confirm_review"
+	TypePromptExtractForm   = "prompt_extract_form"
+	TypePromptMigrateForm   = "prompt_migrate_form"
+	TypePromptChoice        = "prompt_choice"
 
 	TypeDisplayWelcome        = "display_welcome"
 	TypeDisplayPhaseProgress  = "display_phase_progress"
@@ -64,10 +65,15 @@ type ServerMessage struct {
 	BackEnabled bool     `json:"back_enabled,omitempty"`
 	Options     []string `json:"options,omitempty"`
 
+	// DefaultURL / TokenOptional / DefaultEnterpriseKey /
 	// DefaultIncludeProjectData / DefaultIncludeIssueSync carry the
-	// checkbox defaults for prompt_confirm_extract_scope (#516).
-	DefaultIncludeProjectData bool `json:"default_include_project_data"`
-	DefaultIncludeIssueSync   bool `json:"default_include_issue_sync"`
+	// field defaults for prompt_extract_form and prompt_migrate_form.
+	// DefaultEnterpriseKey is only used by the latter.
+	DefaultURL                string `json:"default_url,omitempty"`
+	TokenOptional             bool   `json:"token_optional,omitempty"`
+	DefaultEnterpriseKey      string `json:"default_enterprise_key,omitempty"`
+	DefaultIncludeProjectData bool   `json:"default_include_project_data"`
+	DefaultIncludeIssueSync   bool   `json:"default_include_issue_sync"`
 }
 
 // ClientMessage is sent from the browser to the Go server.
