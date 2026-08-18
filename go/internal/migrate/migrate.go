@@ -72,6 +72,12 @@ type MigrateConfig struct {
 	// SonarQube Cloud project key from the source key, the org key, and
 	// the enterprise key. Defaults to DefaultProjectKeyPattern. Issue #138.
 	ProjectKeyPattern string
+
+	// ProgressCallback, when set, is invoked with the same run-wide
+	// percent/ETA snapshot as the #520 log line, on every tick and once
+	// more at completion. Nil for CLI callers (go/cmd/migrate.go); the
+	// GUI wizard sets it to drive a progress bar (#519).
+	ProgressCallback func(percent float64, eta time.Duration, known bool)
 }
 
 // Executor is the runtime context passed to every migrate task function.
@@ -128,27 +134,127 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 	base := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})
 	logger := slog.New(newEventHandler(base, collector))
 
-	// Validate the project-key renaming pattern syntax before anything
-	// else — a malformed pattern is a config error the operator must fix
-	// (issue #138). The org-prefix collision guard runs later once the
-	// Cloud client exists.
-	if err := ValidateProjectKeyPattern(cfg.ProjectKeyPattern); err != nil {
-		return "", common.NewExitError(2, fmt.Errorf("invalid project_key_pattern: %w", err))
-	}
-
-	// Validate the SQC org mapping and apply --default_organization
-	// fallback if requested (issues #279 + #281). Done before any API
-	// client setup so the failure or warning surfaces immediately.
-	appliedDefault, err := applyOrgMapping(cfg.ExportDirectory, cfg.DefaultOrganization, logger)
+	appliedDefault, err := validateMigrateConfig(cfg, logger)
 	if err != nil {
 		return "", err
 	}
 
+	clients := newMigrateClients(cfg, logger)
+
+	// Verify every SQC organization the migration will touch exists and
+	// is visible to the token, and that the project-key pattern doesn't
+	// collide with one (issues #283, #138). Done early so a config error
+	// aborts the run before any extract data is touched.
+	if err := validateMigrateOrgs(ctx, clients.Cloud, cfg, appliedDefault); err != nil {
+		return "", err
+	}
+
+	mp, err := prepareMigratePlan(cfg, logger)
+	if err != nil {
+		return "", err
+	}
+	runIDOut = mp.RunID
+
+	// Best-effort run artifacts: written on every exit path (success or
+	// error) without altering retErr or panicking.
+	defer func() {
+		tm.CompletedAt = time.Now()
+		writeMigrateRunArtifacts(mp.RunDir, tm, retErr, cfg.ProjectKeyPattern, collector, logger)
+		// End-of-command timing line (#311) — paired with the per-task
+		// lines from runPhase so operators get a complete duration view.
+		common.LogCommandDuration(logger, "migrate", tm.StartedAt)
+	}()
+
+	defer writeRateLimitArtifact(mp.RunDir, clients.RateLimitTracker, logger)
+
+	// Filter completed tasks for resumability.
+	store := common.NewDataStore(mp.RunDir)
+	phases := filterCompleted(mp.Plan, store)
+
+	executor := &Executor{
+		Cloud:                clients.Cloud,
+		CloudAPI:             clients.CloudAPI,
+		Raw:                  clients.Raw,
+		RawAPI:               clients.RawAPI,
+		Extract:              nil, // Will be set per-task based on extract mapping
+		Store:                store,
+		CloudURL:             clients.CloudURL,
+		APIURL:               clients.APIURL,
+		EntKey:               cfg.EnterpriseKey,
+		Edition:              mp.Edition,
+		ExportDir:            cfg.ExportDirectory,
+		Mapping:              mp.Mapping,
+		Sem:                  make(chan struct{}, cfg.Concurrency),
+		ExcludeBranches:      cfg.ExcludeBranches,
+		UnsupportedLanguages: cfg.UnsupportedLanguages,
+		ProjectKeyPattern:    cfg.ProjectKeyPattern,
+		Logger:               logger,
+	}
+
+	// Overall progress/ETA logging (#520) — every 10s for the duration of
+	// the run, stopped once phases finish (success or error).
+	executor.Progress = common.NewTracker(logger, phases, CategorizeTask, common.DefaultCategoryWeights)
+	executor.Progress.OnUpdate(cfg.ProgressCallback)
+	executor.Progress.Start(ctx, 10*time.Second)
+	defer executor.Progress.Stop()
+
+	// Execute phases.
+	for i, phase := range phases {
+		logger.Info("starting phase", "phase", i+1, "tasks", len(phase))
+		if err := runPhase(ctx, executor, phase, mp.Registry, i+1, tm); err != nil {
+			return runIDOut, fmt.Errorf("phase %d: %w", i+1, err)
+		}
+		for _, taskName := range phase {
+			store.MarkComplete(taskName)
+		}
+	}
+	executor.Progress.LogFinal()
+
+	fmt.Printf("%s v%s - Migration Complete: %s\n", version.ToolName, version.Version, runIDOut)
+	return runIDOut, nil
+}
+
+// validateMigrateConfig validates the project-key renaming pattern syntax
+// and the SQC org mapping, applying the --default_organization fallback if
+// requested (issues #138, #279, #281). Both checks run before any API
+// client setup so a config error surfaces immediately.
+func validateMigrateConfig(cfg MigrateConfig, logger *slog.Logger) (appliedDefault bool, err error) {
+	if err := ValidateProjectKeyPattern(cfg.ProjectKeyPattern); err != nil {
+		return false, common.NewExitError(2, fmt.Errorf("invalid project_key_pattern: %w", err))
+	}
+	return applyOrgMapping(cfg.ExportDirectory, cfg.DefaultOrganization, logger)
+}
+
+// validateMigrateOrgs verifies every SQC organization the migration will
+// touch exists and is visible to the token (issue #283), and that the
+// project-key pattern's static prefix — used in place of
+// <ORGANIZATION_KEY> — doesn't collide with a real org (issue #138).
+func validateMigrateOrgs(ctx context.Context, cc *cloud.Client, cfg MigrateConfig, appliedDefault bool) error {
+	if err := validateOrgsExist(ctx, cc.Organizations, cfg.ExportDirectory, cfg.EnterpriseKey, cfg.DefaultOrganization, appliedDefault); err != nil {
+		return err
+	}
+	return validatePatternOrgCollision(ctx, cc.Organizations, cfg.ProjectKeyPattern)
+}
+
+// migrateClients bundles the Cloud API clients, raw readers, and
+// rate-limit tracker a migrate run wires together before executing tasks.
+type migrateClients struct {
+	Cloud            *cloud.Client
+	CloudAPI         *cloud.Client
+	Raw              *common.RawClient
+	RawAPI           *common.RawClient
+	CloudURL         string
+	APIURL           string
+	RateLimitTracker *RateLimitTracker
+}
+
+// newMigrateClients builds the standard and enterprise Cloud API clients
+// for a migrate run, wiring retry, rate-limit, and (when cfg.Debug is set)
+// full HTTP request/response logging into each one.
+func newMigrateClients(cfg MigrateConfig, logger *slog.Logger) *migrateClients {
 	cloudURL := cfg.URL
 	apiURL := strings.Replace(cloudURL, "https://", "https://api.", 1)
 
-	// Create Cloud clients with retry logging — and, when --debug is set,
-	// full HTTP request/response logging.
 	retryLog := func(method, url string, status, attempt, total int) {
 		logger.Warn("retrying request",
 			"method", method, "endpoint", url,
@@ -185,35 +291,38 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 	}
 	cloudClient := sqapi.NewCloudClient(cloudURL, cfg.Token, clientOpts...)
 	apiClient := sqapi.NewCloudClient(apiURL, cfg.Token, clientOpts...)
-	cc := cloud.New(cloudClient)
-	apiCC := cloud.New(apiClient)
 
-	// Verify every SQC organization the migration will touch exists and
-	// is visible to the token (issue #283). Done early so a typo aborts
-	// the run before any extract data is touched.
-	if err := validateOrgsExist(ctx, cc.Organizations, cfg.ExportDirectory, cfg.EnterpriseKey, cfg.DefaultOrganization, appliedDefault); err != nil {
-		return "", err
+	return &migrateClients{
+		Cloud:            cloud.New(cloudClient),
+		CloudAPI:         cloud.New(apiClient),
+		Raw:              common.NewRawClient(cloudClient.HTTPClient(), cloudClient.BaseURL()),
+		RawAPI:           common.NewRawClient(apiClient.HTTPClient(), apiClient.BaseURL()),
+		CloudURL:         cloudClient.BaseURL(),
+		APIURL:           apiClient.BaseURL(),
+		RateLimitTracker: rateLimitTracker,
 	}
+}
 
-	// When the key pattern carries a static prefix instead of <ORGANIZATION_KEY>,
-	// that prefix is shared by every project and could be mistaken for an
-	// organization-scoped key. Abort if it collides with a real SQC org
-	// (issue #138).
-	if err := validatePatternOrgCollision(ctx, cc.Organizations, cfg.ProjectKeyPattern); err != nil {
-		return "", err
-	}
+// migratePlan bundles the resolved extract mapping, task registry, and
+// dependency-resolved phase plan a migrate run executes.
+type migratePlan struct {
+	Mapping  structure.ExtractMapping
+	Edition  common.Edition
+	RunID    string
+	RunDir   string
+	Registry map[string]*TaskDef
+	Plan     [][]string
+}
 
-	// Create RawClients for read operations.
-	raw := common.NewRawClient(cloudClient.HTTPClient(), cloudClient.BaseURL())
-	rawAPI := common.NewRawClient(apiClient.HTTPClient(), apiClient.BaseURL())
-
-	// Resolve extract mapping.
+// prepareMigratePlan resolves the extract mapping, creates the run
+// directory, and builds the dependency-resolved phase plan for the
+// requested target tasks — persisting the plan metadata for a fresh run.
+func prepareMigratePlan(cfg MigrateConfig, logger *slog.Logger) (*migratePlan, error) {
 	mapping, err := structure.GetUniqueExtracts(cfg.ExportDirectory)
 	if err != nil {
-		return "", fmt.Errorf("scanning extracts: %w", err)
+		return nil, fmt.Errorf("scanning extracts: %w", err)
 	}
 
-	// Determine edition.
 	edition := common.Edition(cfg.Edition)
 
 	// Generate or resume run ID.
@@ -224,43 +333,10 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 	}
 	runDir := filepath.Join(cfg.ExportDirectory, runID)
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		return "", fmt.Errorf("creating run dir: %w", err)
+		return nil, fmt.Errorf("creating run dir: %w", err)
 	}
-	runIDOut = runID
 
-	// Best-effort run artifacts: written on every exit path (success or
-	// error) without altering retErr or panicking.
-	defer func() {
-		tm.CompletedAt = time.Now()
-		meta := RunMeta{
-			StartedAt:         tm.StartedAt,
-			CompletedAt:       tm.CompletedAt,
-			OverallStatus:     computeStatus(retErr, tm),
-			Phases:            tm.phasesSnapshot(),
-			Tasks:             tm.tasksSnapshot(),
-			ProjectKeyPattern: cfg.ProjectKeyPattern,
-		}
-		if b, err := json.MarshalIndent(meta, "", "  "); err == nil {
-			_ = os.WriteFile(filepath.Join(runDir, "run_meta.json"), b, 0o644)
-		}
-		if err := writeRunEvents(runDir, collector); err != nil {
-			logger.Warn("writing run events", "err", err)
-		}
-		// End-of-command timing line (#311) — paired with the per-task
-		// lines from runPhase so operators get a complete duration view.
-		common.LogCommandDuration(logger, "migrate", tm.StartedAt)
-	}()
-
-	defer func() {
-		if writeErr := rateLimitTracker.WriteJSON(filepath.Join(runDir, RateLimitEventsFile)); writeErr != nil {
-			logger.Warn("failed to write rate-limit events artefact", "err", writeErr)
-		}
-	}()
-
-	// Build task registry and plan.
-	allDefs := RegisterAll()
-	registry := BuildMigrateRegistry(allDefs)
-	registry = FilterByEdition(registry, edition)
+	registry := FilterByEdition(BuildMigrateRegistry(RegisterAll()), edition)
 
 	// Project-data migration covers importProjectData + the trailing
 	// issue/hotspot sync pair. Skipping it necessarily skips the
@@ -284,65 +360,57 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 	targets := MigrateTargetTasks(registry, cfg.TargetTask, cfg.SkipProfiles, cfg.IncludeProjectData, cfg.SkipIssueSync, cfg.SkipProjectDataMigration, cfg.TargetTasks)
 	taskSet := ResolveDependencies(targets, registry)
 	if taskSet == nil {
-		return "", fmt.Errorf("cannot resolve dependencies for target tasks")
+		return nil, fmt.Errorf("cannot resolve dependencies for target tasks")
 	}
 
 	plan, err := PlanPhases(taskSet, registry)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	// Write or load plan metadata.
+	// Write plan metadata for a fresh run.
 	if createPlan {
-		if err := writeMigrateMeta(runDir, plan, runID, edition, cloudURL, targets, registry); err != nil {
-			return "", err
+		if err := writeMigrateMeta(runDir, plan, runID, edition, cfg.URL, targets, registry); err != nil {
+			return nil, err
 		}
 	}
 
-	// Filter completed tasks for resumability.
-	store := common.NewDataStore(runDir)
-	plan = filterCompleted(plan, store)
+	return &migratePlan{
+		Mapping:  mapping,
+		Edition:  edition,
+		RunID:    runID,
+		RunDir:   runDir,
+		Registry: registry,
+		Plan:     plan,
+	}, nil
+}
 
-	executor := &Executor{
-		Cloud:                cc,
-		CloudAPI:             apiCC,
-		Raw:                  raw,
-		RawAPI:               rawAPI,
-		Extract:              nil, // Will be set per-task based on extract mapping
-		Store:                store,
-		CloudURL:             cloudClient.BaseURL(),
-		APIURL:               apiClient.BaseURL(),
-		EntKey:               cfg.EnterpriseKey,
-		Edition:              edition,
-		ExportDir:            cfg.ExportDirectory,
-		Mapping:              mapping,
-		Sem:                  make(chan struct{}, cfg.Concurrency),
-		ExcludeBranches:      cfg.ExcludeBranches,
-		UnsupportedLanguages: cfg.UnsupportedLanguages,
-		ProjectKeyPattern:    cfg.ProjectKeyPattern,
-		Logger:               logger,
+// writeMigrateRunArtifacts best-effort persists run_meta.json and the
+// collected run-events log on every exit path (success or error) without
+// altering retErr or panicking.
+func writeMigrateRunArtifacts(runDir string, tm *RunTimings, retErr error, keyPattern string, collector *eventCollector, logger *slog.Logger) {
+	meta := RunMeta{
+		StartedAt:         tm.StartedAt,
+		CompletedAt:       tm.CompletedAt,
+		OverallStatus:     computeStatus(retErr, tm),
+		Phases:            tm.phasesSnapshot(),
+		Tasks:             tm.tasksSnapshot(),
+		ProjectKeyPattern: keyPattern,
 	}
-
-	// Overall progress/ETA logging (#520) — every 30s for the duration of
-	// the run, stopped once phases finish (success or error).
-	executor.Progress = common.NewTracker(logger, plan, CategorizeTask, common.DefaultCategoryWeights)
-	executor.Progress.Start(ctx, 30*time.Second)
-	defer executor.Progress.Stop()
-
-	// Execute phases.
-	for i, phase := range plan {
-		logger.Info("starting phase", "phase", i+1, "tasks", len(phase))
-		if err := runPhase(ctx, executor, phase, registry, i+1, tm); err != nil {
-			return runIDOut, fmt.Errorf("phase %d: %w", i+1, err)
-		}
-		for _, taskName := range phase {
-			store.MarkComplete(taskName)
-		}
+	if b, err := json.MarshalIndent(meta, "", "  "); err == nil {
+		_ = os.WriteFile(filepath.Join(runDir, "run_meta.json"), b, 0o644)
 	}
-	executor.Progress.LogFinal()
+	if err := writeRunEvents(runDir, collector); err != nil {
+		logger.Warn("writing run events", "err", err)
+	}
+}
 
-	fmt.Printf("%s v%s - Migration Complete: %s\n", version.ToolName, version.Version, runID)
-	return runID, nil
+// writeRateLimitArtifact best-effort persists the rate-limit events
+// collected during the run, for later PDF reporting.
+func writeRateLimitArtifact(runDir string, tracker *RateLimitTracker, logger *slog.Logger) {
+	if writeErr := tracker.WriteJSON(filepath.Join(runDir, RateLimitEventsFile)); writeErr != nil {
+		logger.Warn("failed to write rate-limit events artefact", "err", writeErr)
+	}
 }
 
 func runPhase(ctx context.Context, e *Executor, taskNames []string, registry map[string]*TaskDef, phaseIdx int, tm *RunTimings) error {

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/analysis"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/extract"
@@ -105,6 +106,9 @@ func runExtractWithRetry(ctx context.Context, p Prompter, state *WizardState, ex
 			IncludeProjectData:       includeProjectData,
 			SkipProjectDataMigration: !includeProjectData,
 			SkipIssueSync:            !includeIssueSync,
+			ProgressCallback: func(percent float64, eta time.Duration, known bool) {
+				p.DisplayOverallProgress(percent, eta, known)
+			},
 		}
 
 		skipped, err := runExtractFn(ctx, cfg)
@@ -409,6 +413,9 @@ func runMigrateWithRetry(ctx context.Context, p Prompter, state *WizardState, ex
 			IncludeProjectData:       includeProjectData,
 			SkipProjectDataMigration: !includeProjectData,
 			SkipIssueSync:            !includeIssueSync,
+			ProgressCallback: func(percent float64, eta time.Duration, known bool) {
+				p.DisplayOverallProgress(percent, eta, known)
+			},
 		}
 
 		resultID, err := runMigrateFn(ctx, cfg)

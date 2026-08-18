@@ -121,6 +121,8 @@ type Tracker struct {
 	mu        sync.Mutex
 	completed map[string]bool
 
+	onUpdate func(percent float64, eta time.Duration, known bool)
+
 	stopOnce sync.Once
 	stopCh   chan struct{}
 	doneCh   chan struct{}
@@ -159,6 +161,19 @@ func (t *Tracker) Registry() *ProgressRegistry {
 	return t.registry
 }
 
+// OnUpdate registers fn to be called with the same (percent, eta, known)
+// values as each log line — from the periodic ticker (#520) and from
+// LogFinal's closing 100% snapshot. Used by the GUI (#519) to drive a
+// progress bar without touching CLI behavior: callers that never call
+// OnUpdate get no extra work, and a nil receiver is a no-op so it's safe
+// to call unconditionally on a Tracker built from an unset config field.
+func (t *Tracker) OnUpdate(fn func(percent float64, eta time.Duration, known bool)) {
+	if t == nil {
+		return
+	}
+	t.onUpdate = fn
+}
+
 // MarkTaskComplete records that a task's Run function has returned
 // successfully — it now counts as 100% of its category's per-task share
 // regardless of whether it had a registered item-level logger. A nil
@@ -174,8 +189,17 @@ func (t *Tracker) MarkTaskComplete(name string) {
 }
 
 // Start launches a goroutine that logs the overall progress/ETA line every
-// interval until ctx is done or Stop is called.
+// interval until ctx is done or Stop is called. It also immediately pushes
+// one snapshot through OnUpdate (log-free) so a GUI progress bar appears
+// at 0% right away instead of staying hidden for the first interval — or,
+// on a run shorter than interval, staying hidden until LogFinal (#519).
+// The #520 log cadence itself is untouched: the first log line still
+// waits for the first real tick.
 func (t *Tracker) Start(ctx context.Context, interval time.Duration) {
+	if t.onUpdate != nil {
+		percent, eta, known := t.snapshot()
+		t.onUpdate(percent, eta, known)
+	}
 	go func() {
 		defer close(t.doneCh)
 		ticker := time.NewTicker(interval)
@@ -209,11 +233,14 @@ func (t *Tracker) logOnce() {
 		etaStr = FormatHMS(eta)
 	}
 	t.logger.Info(fmt.Sprintf("-----> Overall progress: %d%% - ETA: %s", int(percent), etaStr))
+	if t.onUpdate != nil {
+		t.onUpdate(percent, eta, known)
+	}
 }
 
 // LogFinal emits the closing "-----> Overall progress: 100% - ETA: 00:00:00"
 // line. Call it once, explicitly, right after a run finishes all phases
-// successfully — unlike logOnce (driven by the 30s ticker, and derived from
+// successfully — unlike logOnce (driven by the periodic ticker, and derived from
 // the live snapshot), this always reports exactly 100%/00:00:00 rather than
 // whatever the last snapshot happened to compute, so operators get an
 // unambiguous "done" line even if the run completed between ticks. Do not
@@ -223,6 +250,9 @@ func (t *Tracker) LogFinal() {
 		return
 	}
 	t.logger.Info(fmt.Sprintf("-----> Overall progress: 100%% - ETA: %s", FormatHMS(0)))
+	if t.onUpdate != nil {
+		t.onUpdate(100, 0, true)
+	}
 }
 
 // snapshot computes the current overall percentage (0-100) and ETA. known

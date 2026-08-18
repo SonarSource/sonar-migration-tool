@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/wizard"
 )
@@ -190,6 +191,15 @@ func (wp *WebPrompter) DisplayPhaseProgress(phase wizard.WizardPhase) {
 		Index: wizard.PhaseIndex(phase),
 		Total: wizard.PhaseCount(),
 		Name:  wizard.PhaseDisplayName(phase),
+	})
+}
+
+func (wp *WebPrompter) DisplayOverallProgress(percent float64, eta time.Duration, known bool) {
+	wp.sendFn(ServerMessage{
+		Type:       TypeDisplayOverallProgress,
+		Percent:    percent,
+		EtaSeconds: int(eta.Seconds()),
+		Known:      known,
 	})
 }
 

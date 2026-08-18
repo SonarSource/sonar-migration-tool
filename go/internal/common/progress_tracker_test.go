@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"math"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -214,6 +215,115 @@ func TestTrackerLogFinal(t *testing.T) {
 func TestTrackerLogFinalNilSafe(t *testing.T) {
 	var tr *Tracker
 	tr.LogFinal() // must not panic
+}
+
+// OnUpdate's callback (#519) must fire with the same values as the log
+// line on every tick, so a GUI progress bar stays in sync with the #520
+// log output without re-deriving the snapshot itself.
+func TestTrackerOnUpdateFiresFromTicker(t *testing.T) {
+	logger := testLogger()
+
+	plan := [][]string{{"general-1", "config-1"}}
+	tr := NewTracker(logger, plan, categorizeByPrefix, DefaultCategoryWeights)
+	registerPartial(tr, "config-1", 1, 2) // non-zero progress so ETA becomes known
+
+	type update struct {
+		percent float64
+		eta     time.Duration
+		known   bool
+	}
+	var mu sync.Mutex
+	var got []update
+	tr.OnUpdate(func(percent float64, eta time.Duration, known bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, update{percent, eta, known})
+	})
+
+	tr.Start(context.Background(), 10*time.Millisecond)
+	time.Sleep(35 * time.Millisecond)
+	tr.Stop()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) == 0 {
+		t.Fatal("expected at least one OnUpdate call")
+	}
+	for _, u := range got {
+		if !u.known {
+			t.Errorf("update %+v: known = false, want true (progress > 0)", u)
+		}
+		if u.percent <= 0 {
+			t.Errorf("update %+v: percent <= 0, want > 0", u)
+		}
+	}
+}
+
+// Start must push one OnUpdate snapshot immediately, without waiting for
+// the first tick — time.NewTicker only fires after a full interval, so
+// without this a GUI progress bar would stay hidden for the whole
+// interval, or (on a run shorter than interval) never show anything
+// before LogFinal's single closing call. Uses a long interval so only
+// the immediate call, never a real tick, could produce a result (#519).
+func TestTrackerOnUpdateFiresImmediatelyOnStart(t *testing.T) {
+	plan := [][]string{{"general-1", "config-1"}}
+	tr := NewTracker(testLogger(), plan, categorizeByPrefix, DefaultCategoryWeights)
+	registerPartial(tr, "config-1", 1, 2)
+
+	var mu sync.Mutex
+	var calls int
+	tr.OnUpdate(func(percent float64, eta time.Duration, known bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+	})
+
+	tr.Start(context.Background(), time.Hour)
+	defer tr.Stop()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Errorf("calls = %d, want exactly 1 (the immediate snapshot, no tick could have fired)", calls)
+	}
+}
+
+// LogFinal must push the fixed 100%/0s closing snapshot through OnUpdate
+// too, so the GUI snaps its bar to "done" immediately rather than waiting
+// for the next tick.
+func TestTrackerOnUpdateFiresFromLogFinal(t *testing.T) {
+	plan := [][]string{{"general-1", "config-1"}}
+	tr := NewTracker(testLogger(), plan, categorizeByPrefix, DefaultCategoryWeights)
+	registerPartial(tr, "config-1", 1, 2)
+
+	var gotPercent float64
+	var gotETA time.Duration
+	var gotKnown bool
+	tr.OnUpdate(func(percent float64, eta time.Duration, known bool) {
+		gotPercent, gotETA, gotKnown = percent, eta, known
+	})
+
+	tr.LogFinal()
+
+	if gotPercent != 100 {
+		t.Errorf("percent = %v, want 100", gotPercent)
+	}
+	if gotETA != 0 {
+		t.Errorf("eta = %v, want 0", gotETA)
+	}
+	if !gotKnown {
+		t.Error("known = false, want true")
+	}
+}
+
+// OnUpdate must be a no-op on a nil *Tracker, same nil-safety contract as
+// the rest of the type (production call sites set it unconditionally via
+// e.Progress.OnUpdate(cfg.ProgressCallback) even when Progress is unset).
+func TestTrackerOnUpdateNilSafe(t *testing.T) {
+	var tr *Tracker
+	tr.OnUpdate(func(percent float64, eta time.Duration, known bool) {
+		t.Error("callback must never be invoked via a nil Tracker")
+	}) // must not panic
 }
 
 // Registry/MarkTaskComplete must be safe to call on a nil *Tracker so

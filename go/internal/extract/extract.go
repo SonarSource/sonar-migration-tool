@@ -51,6 +51,11 @@ type ExtractConfig struct {
 	// requested projects are fetched and all downstream per-project tasks
 	// naturally scope to the same set.
 	ProjectKeys []string
+	// ProgressCallback, when set, is invoked with the same run-wide
+	// percent/ETA snapshot as the #520 log line, on every tick and once
+	// more at completion. Nil for CLI callers (go/cmd/extract.go); the
+	// GUI wizard sets it to drive a progress bar (#519).
+	ProgressCallback func(percent float64, eta time.Duration, known bool)
 }
 
 // Executor is the runtime context passed to every task function.
@@ -140,10 +145,11 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 	executor.ProjectKeys = cfg.ProjectKeys
 	executor.SkipIssueSync = cfg.SkipIssueSync
 
-	// Overall progress/ETA logging (#520) — every 30s for the duration of
+	// Overall progress/ETA logging (#520) — every 10s for the duration of
 	// the run, stopped once phases finish (success or error).
 	executor.Progress = common.NewTracker(executor.Logger, plan, CategorizeTask, common.DefaultCategoryWeights)
-	executor.Progress.Start(ctx, 30*time.Second)
+	executor.Progress.OnUpdate(cfg.ProgressCallback)
+	executor.Progress.Start(ctx, 10*time.Second)
 	defer executor.Progress.Stop()
 
 	if err := executePhases(ctx, executor, plan, registry, store); err != nil {

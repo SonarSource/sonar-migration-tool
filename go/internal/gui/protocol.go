@@ -17,15 +17,16 @@ const (
 	TypePromptMigrateForm   = "prompt_migrate_form"
 	TypePromptChoice        = "prompt_choice"
 
-	TypeDisplayWelcome        = "display_welcome"
-	TypeDisplayPhaseProgress  = "display_phase_progress"
-	TypeDisplayMessage        = "display_message"
-	TypeDisplayError          = "display_error"
-	TypeDisplayWarning        = "display_warning"
-	TypeDisplaySuccess        = "display_success"
-	TypeDisplaySummary        = "display_summary"
-	TypeDisplayResumeInfo     = "display_resume_info"
-	TypeDisplayWizardComplete = "display_wizard_complete"
+	TypeDisplayWelcome         = "display_welcome"
+	TypeDisplayPhaseProgress   = "display_phase_progress"
+	TypeDisplayOverallProgress = "display_overall_progress"
+	TypeDisplayMessage         = "display_message"
+	TypeDisplayError           = "display_error"
+	TypeDisplayWarning         = "display_warning"
+	TypeDisplaySuccess         = "display_success"
+	TypeDisplaySummary         = "display_summary"
+	TypeDisplayResumeInfo      = "display_resume_info"
+	TypeDisplayWizardComplete  = "display_wizard_complete"
 
 	TypeWizardStarted  = "wizard_started"
 	TypeWizardFinished = "wizard_finished"
@@ -65,6 +66,14 @@ type ServerMessage struct {
 	BackEnabled bool     `json:"back_enabled,omitempty"`
 	Options     []string `json:"options,omitempty"`
 
+	// Percent / EtaSeconds / Known carry the #520 run-wide progress
+	// snapshot for display_overall_progress (#519). No omitempty on any
+	// of the three: a legitimate 0% / 0-second ETA (e.g. LogFinal's
+	// 100%/0s closing snapshot) / not-yet-known message must still
+	// serialize, or the JS side sees `undefined` and renders "~NaN min".
+	Percent    float64 `json:"percent"`
+	EtaSeconds int     `json:"eta_seconds"`
+	Known      bool    `json:"known"`
 	// DefaultURL / TokenOptional / DefaultEnterpriseKey /
 	// DefaultIncludeProjectData / DefaultIncludeIssueSync carry the
 	// field defaults for prompt_extract_form and prompt_migrate_form.

@@ -6,6 +6,8 @@ package gui
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -464,6 +466,64 @@ func TestDisplayPhaseProgressFields(t *testing.T) {
 	}
 	if msg.Name != "Structure" {
 		t.Errorf("name: got %q", msg.Name)
+	}
+}
+
+func TestDisplayOverallProgressFields(t *testing.T) {
+	sendFn, snapshot := collectMessages()
+	ctx := context.Background()
+	wp := NewWebPrompter(ctx, sendFn)
+
+	wp.DisplayOverallProgress(42, 12*time.Minute, true)
+	msg := snapshot()[0]
+
+	if msg.Type != TypeDisplayOverallProgress {
+		t.Errorf("type: got %q", msg.Type)
+	}
+	if msg.Percent != 42 {
+		t.Errorf("percent: got %v, want 42", msg.Percent)
+	}
+	if msg.EtaSeconds != 720 {
+		t.Errorf("eta_seconds: got %d, want 720", msg.EtaSeconds)
+	}
+	if !msg.Known {
+		t.Error("known: got false, want true")
+	}
+}
+
+func TestDisplayOverallProgressUnknownETA(t *testing.T) {
+	sendFn, snapshot := collectMessages()
+	ctx := context.Background()
+	wp := NewWebPrompter(ctx, sendFn)
+
+	wp.DisplayOverallProgress(0, 0, false)
+	msg := snapshot()[0]
+
+	if msg.Percent != 0 {
+		t.Errorf("percent: got %v, want 0", msg.Percent)
+	}
+	if msg.Known {
+		t.Error("known: got true, want false")
+	}
+}
+
+// A 0-second ETA (LogFinal's 100%/0s closing snapshot, or any tick that
+// rounds down to 0s while known) must still serialize eta_seconds — an
+// omitted field arrives as `undefined` in JS and renders "ETA: ~NaN min".
+func TestDisplayOverallProgressZeroETASerializes(t *testing.T) {
+	sendFn, snapshot := collectMessages()
+	ctx := context.Background()
+	wp := NewWebPrompter(ctx, sendFn)
+
+	wp.DisplayOverallProgress(100, 0, true)
+	msg := snapshot()[0]
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"eta_seconds":0`) {
+		t.Errorf("expected eta_seconds:0 in serialized message, got: %s", data)
 	}
 }
 

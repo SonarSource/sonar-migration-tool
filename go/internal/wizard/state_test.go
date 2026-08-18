@@ -76,6 +76,46 @@ func TestLoadMissingFile(t *testing.T) {
 	}
 }
 
+// A zero-byte state file is exactly what a pre-atomic-write Save left
+// behind when killed mid-write (Ctrl-C, crash) — Load must treat it like
+// a missing file rather than surfacing "unexpected end of JSON input".
+func TestLoadEmptyFileTreatedAsFresh(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, stateFileName), []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
+	state, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load empty file: %v", err)
+	}
+	if state.Phase != PhaseInit {
+		t.Errorf("expected phase %q for empty file, got %q", PhaseInit, state.Phase)
+	}
+}
+
+// Save must not leave a stray temp file behind in the directory —
+// the atomic write's temp file is renamed over the final path, not left
+// alongside it.
+func TestSaveLeavesNoTempFile(t *testing.T) {
+	dir := t.TempDir()
+	state := NewWizardState()
+	if err := state.Save(dir); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != stateFileName {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Errorf("expected only %q in directory, got %v", stateFileName, names)
+	}
+}
+
 func TestJSONFormat(t *testing.T) {
 	state := &WizardState{
 		Phase:               PhaseExtract,

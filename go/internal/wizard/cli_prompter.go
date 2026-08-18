@@ -7,6 +7,7 @@ package wizard
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/AlecAivazis/survey/v2"
 )
@@ -189,6 +190,13 @@ func (p *CLIPrompter) SetBackEnabled(bool) { /* no-op for CLI */ }
 
 func (p *CLIPrompter) DisplayWelcome() {
 	fmt.Println(welcomeBanner)
+}
+
+// DisplayOverallProgress is a no-op for the CLI (#519 is scoped to the GUI).
+func (p *CLIPrompter) DisplayOverallProgress(percent float64, eta time.Duration, known bool) {
+	// Terminal users already see the #520 "-----> Overall progress" line
+	// on stderr from the extract/migrate logger itself, so a second
+	// rendering here would just be duplicate/competing output.
 }
 
 func (p *CLIPrompter) DisplayPhaseProgress(phase WizardPhase) {

@@ -4,7 +4,10 @@
 
 package wizard
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 // ErrBack is returned by prompt methods when the user clicks the Back button.
 var ErrBack = errors.New("back")
@@ -61,6 +64,13 @@ type Prompter interface {
 	// Display methods (output only, no return).
 	DisplayWelcome()
 	DisplayPhaseProgress(phase WizardPhase)
+
+	// DisplayOverallProgress reports the run-wide percent/ETA snapshot
+	// computed by common.Tracker (#520) for the extract/migrate step
+	// currently in flight. known is false until enough progress has
+	// been made to extrapolate an ETA. Fired roughly every 10s plus
+	// once more at completion (#519).
+	DisplayOverallProgress(percent float64, eta time.Duration, known bool)
 	DisplayMessage(msg string)
 	DisplayError(msg string)
 	DisplayWarning(msg string)
