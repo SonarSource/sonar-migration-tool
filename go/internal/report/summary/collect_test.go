@@ -1667,9 +1667,10 @@ func TestCollectLimitations_GlobalProjectDataSkipped(t *testing.T) {
 	}
 }
 
-// #323: encodeSyncStats must emit "ack=N" alongside i=/h= when any
-// ACKNOWLEDGED hotspots had to be left in TO_REVIEW. Only emitted
-// when N > 0 so unrelated projects keep their compact marker.
+// #323 / #527: encodeSyncStats must emit "ack=N" alongside i=/h= when
+// any ACKNOWLEDGED hotspots were inventoried (counted in the
+// denominator but never state-synced). Only emitted when N > 0 so
+// unrelated projects keep their compact marker.
 func TestEncodeSyncStatsAckSegment(t *testing.T) {
 	cases := []struct {
 		name string
@@ -1736,10 +1737,10 @@ func TestCollectSyncStatsReadsAcknowledgedDemoted(t *testing.T) {
 	}
 }
 
-// #323: collectSyncOutcome must route a project to NearPerfect when
-// the hotspot record carries acknowledged_demoted > 0 — even if
+// #323 / #527: collectSyncOutcome must route a project to NearPerfect
+// when the hotspot record carries acknowledged_demoted > 0 — even if
 // line_mismatch and not_found are both zero (everything matched
-// cleanly, but ACKNOWLEDGED hotspots couldn't preserve their state).
+// cleanly, but ACKNOWLEDGED hotspots are never state-synced by policy).
 func TestCollectSyncOutcomeNearPerfectOnAcknowledgedDemoted(t *testing.T) {
 	dir := t.TempDir()
 	writeTaskJSONL(t, dir, "syncHotspotMetadata", []map[string]any{

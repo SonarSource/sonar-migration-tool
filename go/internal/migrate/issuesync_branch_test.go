@@ -68,11 +68,14 @@ func TestResolveAndSyncIssueLookupError(t *testing.T) {
 	}
 }
 
-// A cloud-search failure during hotspot resolution is reported as a lookup
-// error, exercising the branch-aware call site. The lookup goes through
-// /api/issues/search: since 2026-07-01 the migrated hotspot is an issue on the
-// target, so /api/hotspots/search is never consulted (#423).
-func TestResolveAndSyncHotspotLookupError(t *testing.T) {
+// A cloud-search failure during the bulk index build (#527) is surfaced as an
+// error rather than silently producing an empty index — the caller
+// (syncProjectHotspots) treats this as a whole-branch failure and skips
+// resolving that branch's hotspots this run, rather than misreporting them
+// as not_found. The lookup goes through /api/issues/search: since
+// 2026-07-01 the migrated hotspot is an issue on the target, so
+// /api/hotspots/search is never consulted (#423).
+func TestBuildCloudIssueIndexLookupError(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/issues/search", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -83,10 +86,9 @@ func TestResolveAndSyncHotspotLookupError(t *testing.T) {
 	defer apiSrv.Close()
 	e := newTestExecutor(cloudSrv, apiSrv, t.TempDir())
 
-	src := matchableHotspot{Key: "h1", RuleKey: "rk1", Component: "src-proj:src/app.go", Line: 10, Branch: "develop"}
-	got := resolveAndSyncHotspot(context.Background(), e, "cloud-proj", "cloud-org", "", "src-proj", src, nil)
-	if got != syncOutcomeLookupError {
-		t.Fatalf("want syncOutcomeLookupError, got %v", got)
+	_, err := buildCloudIssueIndex(context.Background(), e, "cloud-proj", "cloud-org", "develop", []string{"rk1"})
+	if err == nil {
+		t.Fatal("want an error from buildCloudIssueIndex on a cloud search failure")
 	}
 }
 
@@ -158,7 +160,11 @@ func TestResolveAndSyncHotspotNotFound(t *testing.T) {
 	e := newTestExecutor(cloudSrv, apiSrv, t.TempDir())
 
 	src := matchableHotspot{Key: "h1", RuleKey: "rk1", Component: "src-proj:src/app.go", Line: 10, Message: "Review this"}
-	got := resolveAndSyncHotspot(context.Background(), e, "cloud-proj", "cloud-org", "", "src-proj", src, nil)
+	idx, err := buildCloudIssueIndex(context.Background(), e, "cloud-proj", "cloud-org", "", []string{src.RuleKey})
+	if err != nil {
+		t.Fatalf("buildCloudIssueIndex: %v", err)
+	}
+	got := resolveAndSyncHotspot(context.Background(), e, "cloud-proj", "", "src-proj", src, classifyHotspotForSync(src), idx, nil)
 	if got != syncOutcomeNotFound {
 		t.Fatalf("want syncOutcomeNotFound, got %v", got)
 	}
@@ -185,7 +191,11 @@ func TestResolveAndSyncHotspotLineMismatch(t *testing.T) {
 	e := newTestExecutor(cloudSrv, apiSrv, t.TempDir())
 
 	src := matchableHotspot{Key: "h1", RuleKey: "rk1", Component: "src-proj:src/app.go", Line: 10, Message: "Review this"}
-	got := resolveAndSyncHotspot(context.Background(), e, "cloud-proj", "cloud-org", "", "src-proj", src, nil)
+	idx, err := buildCloudIssueIndex(context.Background(), e, "cloud-proj", "cloud-org", "", []string{src.RuleKey})
+	if err != nil {
+		t.Fatalf("buildCloudIssueIndex: %v", err)
+	}
+	got := resolveAndSyncHotspot(context.Background(), e, "cloud-proj", "", "src-proj", src, classifyHotspotForSync(src), idx, nil)
 	if got != syncOutcomeLineMismatch {
 		t.Fatalf("want syncOutcomeLineMismatch, got %v", got)
 	}

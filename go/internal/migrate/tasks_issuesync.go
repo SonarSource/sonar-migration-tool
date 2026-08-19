@@ -285,6 +285,16 @@ const metadataSyncTag = "metadata-synchronized"
 // Assignee was previously a trigger but was dropped per the issue spec:
 // auto-assigned issues (e.g. via "default assignee") are common and
 // inflate the actionable set without carrying real triage signal.
+//
+// #527 / --fast_sync note: syncProjectIssues only ever visits, tags, and
+// back-links issues that pass this filter — an untouched issue (OPEN, no
+// custom tags, no comments) never reaches the per-item Cloud lookup at
+// all, unconditionally, regardless of the --fast_sync flag. So --fast_sync
+// has no additional effect on the issue path today; its effect is visible
+// only on the hotspot path (tasks_hotspotsync.go's syncOneHotspotAsIssue),
+// which — unlike this one — still resolves and tags every hotspot by
+// default so #423's identifiability guarantee holds even for hotspots
+// with zero user changes.
 func hasManualChanges(iss matchableIssue) bool {
 	status := strings.ToUpper(iss.Status)
 	resolution := strings.ToUpper(iss.Resolution)

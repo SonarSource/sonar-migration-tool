@@ -1444,10 +1444,14 @@ func renderSyncStatsLine(payload string) string {
 	return strings.Join(segments, "; ")
 }
 
-// formatAckDemotedSegment renders the #323 ACKNOWLEDGED-demotion
-// segment: "N ACKNOWLEDGED hotspot(s) left as TO_REVIEW (status not
-// supported on SonarQube Cloud)". Skipped silently when N is invalid
-// or zero.
+// formatAckDemotedSegment renders the ACKNOWLEDGED-hotspot segment: "N
+// ACKNOWLEDGED hotspot(s) inventoried but not state-synced (comments
+// still synced if present)". ACKNOWLEDGED hotspots are counted in the
+// %-synced denominator but are never state-transitioned, by policy
+// (#527) — not because SonarQube Cloud can't represent the state, as
+// the wording previously implied (Cloud's issue model expresses
+// ACKNOWLEDGED faithfully as ACCEPTED; see scanreport.HotspotIssueStatus).
+// Skipped silently when N is invalid or zero.
 func formatAckDemotedSegment(value string) string {
 	n, err := strconv.Atoi(value)
 	if err != nil || n <= 0 {
@@ -1457,7 +1461,7 @@ func formatAckDemotedSegment(value string) string {
 	if n != 1 {
 		noun = "hotspots"
 	}
-	return fmt.Sprintf("%d ACKNOWLEDGED %s left as TO_REVIEW (status not supported on SonarQube Cloud)", n, noun)
+	return fmt.Sprintf("%d ACKNOWLEDGED %s inventoried but not state-synced (comments still synced if present)", n, noun)
 }
 
 func formatSyncStatSegment(label, fraction string) string {

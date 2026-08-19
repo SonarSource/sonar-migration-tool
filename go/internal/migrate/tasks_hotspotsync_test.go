@@ -5,6 +5,11 @@
 package migrate
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -156,5 +161,187 @@ func TestDedupeActionableHotspotsOffsetDistinguishesCoLocated(t *testing.T) {
 	}
 	if !offsets[17] || !offsets[35] {
 		t.Errorf("expected both column offsets (17, 35) preserved as distinct reps, got %v", offsets)
+	}
+}
+
+// #527: a comment counts as user-created only when its Login is
+// non-empty — blank/whitespace-only logins are treated as
+// SonarQube-technical.
+func TestHotspotHasUserComment(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []hotspotComment
+		want bool
+	}{
+		{"no comments", nil, false},
+		{"blank login", []hotspotComment{{Login: "", Markdown: "auto note"}}, false},
+		{"whitespace-only login", []hotspotComment{{Login: "   ", Markdown: "auto note"}}, false},
+		{"real login", []hotspotComment{{Login: "alice", Markdown: "reviewed"}}, true},
+		{"mixed — one real among technical", []hotspotComment{{Login: ""}, {Login: "bob"}}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hotspotHasUserComment(tc.in); got != tc.want {
+				t.Errorf("hotspotHasUserComment(%+v) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// #527: eligibility rule — not TO_REVIEW, or a user comment, makes a
+// hotspot eligible for full sync; REVIEWED+ACKNOWLEDGED is always
+// flagged as acknowledged regardless of the eligible verdict.
+func TestHotspotSyncEligibility(t *testing.T) {
+	tests := []struct {
+		name           string
+		status         string
+		resolution     string
+		hasUserComment bool
+		wantEligible   bool
+		wantAck        bool
+	}{
+		{"TO_REVIEW, no comment — excluded", "TO_REVIEW", "", false, false, false},
+		{"TO_REVIEW, user comment — eligible", "TO_REVIEW", "", true, true, false},
+		{"REVIEWED+SAFE — eligible", "REVIEWED", "SAFE", false, true, false},
+		{"REVIEWED+FIXED — eligible", "REVIEWED", "FIXED", false, true, false},
+		{"REVIEWED+ACKNOWLEDGED, no comment — eligible+ack", "REVIEWED", "ACKNOWLEDGED", false, true, true},
+		{"REVIEWED+ACKNOWLEDGED, user comment — eligible+ack", "REVIEWED", "ACKNOWLEDGED", true, true, true},
+		{"case-insensitive / whitespace", "  reviewed  ", " acknowledged ", false, true, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotEligible, gotAck := HotspotSyncEligibility(tc.status, tc.resolution, tc.hasUserComment)
+			if gotEligible != tc.wantEligible || gotAck != tc.wantAck {
+				t.Errorf("HotspotSyncEligibility(%q, %q, %v) = (%v, %v), want (%v, %v)",
+					tc.status, tc.resolution, tc.hasUserComment, gotEligible, gotAck, tc.wantEligible, tc.wantAck)
+			}
+		})
+	}
+}
+
+// #527: classifyHotspotForSync wraps HotspotSyncEligibility into the
+// three dispatch buckets, deriving hasUserComment from Comments.
+func TestClassifyHotspotForSync(t *testing.T) {
+	tests := []struct {
+		name string
+		h    matchableHotspot
+		want hotspotSyncCategory
+	}{
+		{"TO_REVIEW, no comment — excluded", matchableHotspot{Status: "TO_REVIEW"}, hotspotCategoryExcluded},
+		{
+			"TO_REVIEW, technical comment only — excluded",
+			matchableHotspot{Status: "TO_REVIEW", Comments: []hotspotComment{{Login: ""}}},
+			hotspotCategoryExcluded,
+		},
+		{
+			"TO_REVIEW, user comment — eligible",
+			matchableHotspot{Status: "TO_REVIEW", Comments: []hotspotComment{{Login: "alice"}}},
+			hotspotCategoryEligible,
+		},
+		{"REVIEWED+SAFE — eligible", matchableHotspot{Status: "REVIEWED", Resolution: "SAFE"}, hotspotCategoryEligible},
+		{"REVIEWED+ACKNOWLEDGED — acknowledged", matchableHotspot{Status: "REVIEWED", Resolution: "ACKNOWLEDGED"}, hotspotCategoryAcknowledged},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyHotspotForSync(tc.h); got != tc.want {
+				t.Errorf("classifyHotspotForSync(%+v) = %v, want %v", tc.h, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestChunkStrings(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []string
+		n    int
+		want [][]string
+	}{
+		{"empty", nil, 3, nil},
+		{"n<=0", []string{"a"}, 0, nil},
+		{"exact multiple", []string{"a", "b", "c", "d"}, 2, [][]string{{"a", "b"}, {"c", "d"}}},
+		{"remainder", []string{"a", "b", "c"}, 2, [][]string{{"a", "b"}, {"c"}}},
+		{"n larger than input", []string{"a", "b"}, 60, [][]string{{"a", "b"}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := chunkStrings(tc.in, tc.n)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("chunkStrings(%v, %d) = %v, want %v", tc.in, tc.n, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestGroupHotspotsByBranch(t *testing.T) {
+	in := []matchableHotspot{
+		{Key: "a", Branch: "main"},
+		{Key: "b", Branch: "develop"},
+		{Key: "c", Branch: "main"},
+		{Key: "d"}, // no branch — empty-string bucket
+	}
+	got := groupHotspotsByBranch(in)
+	if len(got["main"]) != 2 || len(got["develop"]) != 1 || len(got[""]) != 1 {
+		t.Fatalf("unexpected grouping: %+v", got)
+	}
+}
+
+func TestDistinctRuleKeys(t *testing.T) {
+	in := []matchableHotspot{
+		{RuleKey: "java:S2245"},
+		{RuleKey: "java:S2077"},
+		{RuleKey: "java:S2245"},
+		{RuleKey: ""},
+	}
+	got := distinctRuleKeys(in)
+	want := []string{"java:S2077", "java:S2245"} // sorted
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("distinctRuleKeys(...) = %v, want %v", got, want)
+	}
+}
+
+// #527: buildCloudIssueIndex must chunk rule keys to stay under the
+// per-request cap, issue one search per chunk, and index results by
+// (bare file path, rule key) — the same scope the per-hotspot search
+// used, just fetched once for the whole branch.
+func TestBuildCloudIssueIndexChunksAndIndexes(t *testing.T) {
+	var searchCalls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/issues/search", func(w http.ResponseWriter, r *http.Request) {
+		searchCalls++
+		rules := r.URL.Query().Get("rules")
+		var issues []map[string]any
+		for i, rk := range strings.Split(rules, ",") {
+			issues = append(issues, map[string]any{
+				"key": rk + "-issue", "rule": rk, "component": "proj:src/Main.java", "line": 10 + i,
+			})
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"issues": issues,
+			"paging": map[string]any{"pageIndex": 1, "pageSize": 500, "total": len(issues)},
+		})
+	})
+	e := newCustomCloudTest(t, mux)
+
+	ruleKeys := make([]string, 0, 125)
+	for i := 0; i < 125; i++ {
+		ruleKeys = append(ruleKeys, "java:S"+strconv.Itoa(1000+i))
+	}
+
+	idx, err := buildCloudIssueIndex(context.Background(), e, "proj", "org", "main", ruleKeys)
+	if err != nil {
+		t.Fatalf("buildCloudIssueIndex: %v", err)
+	}
+	wantChunks := (len(ruleKeys) + cloudIssueSearchRuleChunkSize - 1) / cloudIssueSearchRuleChunkSize
+	if searchCalls != wantChunks {
+		t.Errorf("expected %d chunked search calls for %d rule keys, got %d", wantChunks, len(ruleKeys), searchCalls)
+	}
+	if len(idx) != len(ruleKeys) {
+		t.Errorf("expected %d indexed (file, rule) entries, got %d", len(ruleKeys), len(idx))
+	}
+	sample := ruleKeys[0]
+	candidates := idx[cloudIssueIndexKey{File: "src/Main.java", RuleKey: sample}]
+	if len(candidates) != 1 || candidates[0].Key != sample+"-issue" {
+		t.Errorf("expected indexed candidate for %q, got %+v", sample, candidates)
 	}
 }
