@@ -1329,35 +1329,23 @@ func TestCollectSummaryNCDFallbackMovesProjectToPartial(t *testing.T) {
 	}
 
 	// Project A → Partial with the explanatory Issue.
-	var sawA bool
-	for _, p := range projSection.Partial {
-		if p.Name != "Project A" {
-			continue
-		}
-		sawA = true
-		joined := strings.Join(p.Issues, " | ")
-		if !strings.Contains(joined, "reference branch") {
-			t.Errorf("Project A Partial Issues must mention the substituted NCD type, got %q", joined)
-		}
-		if !strings.Contains(joined, "replaced by the org default") {
-			t.Errorf("Project A Partial Issues must mention org-default substitution, got %q", joined)
-		}
+	projA := findItemByName(projSection.Partial, "Project A")
+	if projA == nil {
+		t.Fatalf("Project A must appear in Partial, got Partial=%v", projSection.Partial)
 	}
-	if !sawA {
-		t.Errorf("Project A must appear in Partial, got Partial=%v", projSection.Partial)
+	joined := strings.Join(projA.Issues, " | ")
+	if !strings.Contains(joined, "reference branch") {
+		t.Errorf("Project A Partial Issues must mention the substituted NCD type, got %q", joined)
+	}
+	if !strings.Contains(joined, "replaced by the org default") {
+		t.Errorf("Project A Partial Issues must mention org-default substitution, got %q", joined)
 	}
 
-	// Project B (supported NCD type) → stays in Succeeded.
-	var sawB bool
-	for _, p := range projSection.Succeeded {
-		if p.Name == "Project B" {
-			sawB = true
-		}
-		if p.Name == "Project A" {
-			t.Errorf("Project A must NOT remain in Succeeded after Partial move")
-		}
+	// Project B (supported NCD type) → stays in Succeeded; Project A must not.
+	if findItemByName(projSection.Succeeded, "Project A") != nil {
+		t.Errorf("Project A must NOT remain in Succeeded after Partial move")
 	}
-	if !sawB {
+	if findItemByName(projSection.Succeeded, "Project B") == nil {
 		t.Errorf("Project B must remain in Succeeded, got Succeeded=%v", projSection.Succeeded)
 	}
 }
@@ -1518,6 +1506,17 @@ func findSection(s *MigrationSummary, name string) *Section {
 	for i := range s.Sections {
 		if s.Sections[i].Name == name {
 			return &s.Sections[i]
+		}
+	}
+	return nil
+}
+
+// findItemByName returns a pointer to the first item in items whose Name
+// matches, or nil if none does.
+func findItemByName(items []EntityItem, name string) *EntityItem {
+	for i := range items {
+		if items[i].Name == name {
+			return &items[i]
 		}
 	}
 	return nil

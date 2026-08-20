@@ -433,6 +433,67 @@ type syncHotspotResult struct {
 	Error string
 }
 
+// classifiedHotspot pairs a source hotspot with the sync category
+// classifyHotspotForSync assigned it, computed once up front so the
+// dispatch loop doesn't re-derive it per goroutine.
+type classifiedHotspot struct {
+	h   matchableHotspot
+	cat hotspotSyncCategory
+}
+
+// hotspotCategoryCounts tallies a project's hotspots by sync category,
+// for logging and for the #527 %-synced reporting denominator.
+type hotspotCategoryCounts struct {
+	eligible, ack, excluded, triaged int
+}
+
+// classifyAndCountHotspots classifies every hotspot for dispatch and
+// tallies the category counts, in one pass. Split out of
+// syncProjectHotspots to keep that function's cognitive complexity low.
+func classifyAndCountHotspots(all []matchableHotspot) ([]classifiedHotspot, hotspotCategoryCounts) {
+	items := make([]classifiedHotspot, 0, len(all))
+	var counts hotspotCategoryCounts
+	for _, h := range all {
+		if hotspotHasManualChanges(h) {
+			counts.triaged++
+		}
+		cat := classifyHotspotForSync(h)
+		switch cat {
+		case hotspotCategoryEligible:
+			counts.eligible++
+		case hotspotCategoryAcknowledged:
+			counts.ack++
+		default:
+			counts.excluded++
+		}
+		items = append(items, classifiedHotspot{h: h, cat: cat})
+	}
+	return items, counts
+}
+
+// buildBranchIndexes builds one cloudIssueIndex per branch present among
+// all's hotspots (#527's bulk-fetch, see buildCloudIssueIndex). A branch
+// whose index build fails is recorded in the returned failure set rather
+// than aborting the whole project — its hotspots are skipped this run.
+// Split out of syncProjectHotspots to keep that function's cognitive
+// complexity low.
+func buildBranchIndexes(ctx context.Context, e *Executor, input syncHotspotInput, all []matchableHotspot) (map[string]cloudIssueIndex, map[string]bool) {
+	byBranch := groupHotspotsByBranch(all)
+	indexes := make(map[string]cloudIssueIndex, len(byBranch))
+	failedBranches := make(map[string]bool, len(byBranch))
+	for branch, hs := range byBranch {
+		idx, err := buildCloudIssueIndex(ctx, e, input.CloudKey, input.OrgKey, branch, distinctRuleKeys(hs))
+		if err != nil {
+			logAPIWarn(e.Logger, "syncHotspotMetadata: bulk candidate index build failed", err,
+				"project", input.CloudKey, "branch", branch, "rules", len(distinctRuleKeys(hs)))
+			failedBranches[branch] = true
+			continue
+		}
+		indexes[branch] = idx
+	}
+	return indexes, failedBranches
+}
+
 // syncProjectHotspots synchronises hotspot metadata for a single
 // project using the targeted per-actionable-source-hotspot search
 // approach introduced in #356. Replaces the previous fetch-all + FIFO
@@ -486,29 +547,9 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 	//     state-transitioned, always counted in the denominator.
 	//   - hotspotCategoryEligible: tagged + fully state/comment synced,
 	//     counted in the denominator.
-	type classified struct {
-		h   matchableHotspot
-		cat hotspotSyncCategory
-	}
-	items := make([]classified, 0, len(all))
-	var eligibleCount, ackCount, excludedCount, triaged int
-	for _, h := range all {
-		if hotspotHasManualChanges(h) {
-			triaged++
-		}
-		cat := classifyHotspotForSync(h)
-		switch cat {
-		case hotspotCategoryEligible:
-			eligibleCount++
-		case hotspotCategoryAcknowledged:
-			ackCount++
-		default:
-			excludedCount++
-		}
-		items = append(items, classified{h: h, cat: cat})
-	}
-	result.Stats.Actionable = int64(eligibleCount + ackCount)
-	result.Stats.AckDemoted = int64(ackCount)
+	items, counts := classifyAndCountHotspots(all)
+	result.Stats.Actionable = int64(counts.eligible + counts.ack)
+	result.Stats.AckDemoted = int64(counts.ack)
 	if len(items) == 0 {
 		e.Logger.Info("syncHotspotMetadata: no source hotspots to sync", "project", input.CloudKey, "source_total", len(sourceHotspots))
 		return result
@@ -526,10 +567,10 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 	e.Logger.Info("syncHotspotMetadata: syncing hotspots as issues",
 		"project", input.CloudKey,
 		"source_total", len(sourceHotspots),
-		"eligible", eligibleCount,
-		"acknowledged", ackCount,
-		"excluded", excludedCount,
-		"carrying_triage", triaged,
+		"eligible", counts.eligible,
+		"acknowledged", counts.ack,
+		"excluded", counts.excluded,
+		"carrying_triage", counts.triaged,
 	)
 
 	// 3. Bulk-fetch Cloud issue candidates once per (project, branch) —
@@ -537,19 +578,7 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 	// which was the actual cost driver since every hotspot (eligible or
 	// not) had to be resolved for tagging (#423). Built as an in-memory
 	// index; per-hotspot resolution below is then a zero-network lookup.
-	byBranch := groupHotspotsByBranch(all)
-	indexes := make(map[string]cloudIssueIndex, len(byBranch))
-	failedBranches := make(map[string]bool, len(byBranch))
-	for branch, hs := range byBranch {
-		idx, err := buildCloudIssueIndex(ctx, e, input.CloudKey, input.OrgKey, branch, distinctRuleKeys(hs))
-		if err != nil {
-			logAPIWarn(e.Logger, "syncHotspotMetadata: bulk candidate index build failed", err,
-				"project", input.CloudKey, "branch", branch, "rules", len(distinctRuleKeys(hs)))
-			failedBranches[branch] = true
-			continue
-		}
-		indexes[branch] = idx
-	}
+	indexes, failedBranches := buildBranchIndexes(ctx, e, input, all)
 
 	// 4. Resolve + dispatch every hotspot from the cached index. Race-
 	// safety: items/indexes are read-only from here, each goroutine takes
@@ -558,14 +587,15 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 	// setting over the (often localhost) connection URL (#321).
 	baseURL := resolveSourceBaseURL(e, input.ServerURL)
 
+	resolveParams := hotspotResolveParams{CloudKey: input.CloudKey, BaseURL: baseURL, SourceKey: input.ServerKey}
 	var a, b, c atomic.Int64
 	label := "Project key " + input.CloudKey + " hotspot sync:"
 	runProjectSyncLoop(ctx, e, items, label, 10,
-		func(gctx context.Context, it classified) {
+		func(gctx context.Context, it classifiedHotspot) {
 			if failedBranches[it.h.Branch] {
 				return
 			}
-			outcome := resolveAndSyncHotspot(gctx, e, input.CloudKey, baseURL, input.ServerKey, it.h, it.cat, indexes[it.h.Branch], counter)
+			outcome := resolveAndSyncHotspot(gctx, e, resolveParams, it.h, it.cat, indexes[it.h.Branch], counter)
 			switch outcome {
 			case syncOutcomeSynced:
 				if it.cat == hotspotCategoryEligible {
@@ -583,11 +613,21 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 	return result
 }
 
+// hotspotResolveParams bundles the per-project constants resolveAndSyncHotspot
+// needs alongside each hotspot, keeping the function's parameter count
+// within the project's limit — every hotspot in a project shares the same
+// CloudKey/BaseURL/SourceKey.
+type hotspotResolveParams struct {
+	CloudKey  string
+	BaseURL   string
+	SourceKey string
+}
+
 // resolveAndSyncHotspot resolves the source hotspot's target issue from
 // the pre-built per-branch cloudIssueIndex (#527) — a plain map lookup,
 // no network call — then applies whatever sync the hotspot's category
 // calls for. Returns the case a/b/c outcome.
-func resolveAndSyncHotspot(ctx context.Context, e *Executor, cloudKey, baseURL, sourceKey string, src matchableHotspot, cat hotspotSyncCategory, index cloudIssueIndex, counter *TaskCounter) syncOutcome {
+func resolveAndSyncHotspot(ctx context.Context, e *Executor, p hotspotResolveParams, src matchableHotspot, cat hotspotSyncCategory, index cloudIssueIndex, counter *TaskCounter) syncOutcome {
 	// Strip "projectKey:" and any trailing "moduleKey:" segments so the bare
 	// file path can be used against the index. Multi-module (monorepo)
 	// projects add a module key after the project key; SonarCloud has no
@@ -606,7 +646,7 @@ func resolveAndSyncHotspot(ctx context.Context, e *Executor, cloudKey, baseURL, 
 	target, outcome := classifyIssueCandidatesByLine(candidates, src.Line)
 	switch outcome {
 	case syncOutcomeSynced:
-		if err := syncOneHotspotAsIssue(ctx, e, src, target, baseURL, sourceKey, cat); err != nil {
+		if err := syncOneHotspotAsIssue(ctx, e, src, target, p.BaseURL, p.SourceKey, cat); err != nil {
 			counter.Fail()
 			logAPIWarn(e.Logger, "syncHotspotMetadata: hotspot sync failed", err,
 				"source_key", src.Key, "cloud_key", target.Key)

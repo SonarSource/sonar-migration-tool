@@ -164,7 +164,7 @@ func TestResolveAndSyncHotspotNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildCloudIssueIndex: %v", err)
 	}
-	got := resolveAndSyncHotspot(context.Background(), e, "cloud-proj", "", "src-proj", src, classifyHotspotForSync(src), idx, nil)
+	got := resolveAndSyncHotspot(context.Background(), e, hotspotResolveParams{CloudKey: "cloud-proj", SourceKey: "src-proj"}, src, classifyHotspotForSync(src), idx, nil)
 	if got != syncOutcomeNotFound {
 		t.Fatalf("want syncOutcomeNotFound, got %v", got)
 	}
@@ -195,7 +195,7 @@ func TestResolveAndSyncHotspotLineMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildCloudIssueIndex: %v", err)
 	}
-	got := resolveAndSyncHotspot(context.Background(), e, "cloud-proj", "", "src-proj", src, classifyHotspotForSync(src), idx, nil)
+	got := resolveAndSyncHotspot(context.Background(), e, hotspotResolveParams{CloudKey: "cloud-proj", SourceKey: "src-proj"}, src, classifyHotspotForSync(src), idx, nil)
 	if got != syncOutcomeLineMismatch {
 		t.Fatalf("want syncOutcomeLineMismatch, got %v", got)
 	}

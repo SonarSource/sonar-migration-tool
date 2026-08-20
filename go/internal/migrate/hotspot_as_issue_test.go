@@ -247,7 +247,7 @@ func TestResolveAndSyncHotspotSearchesIssuesNotHotspots(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildCloudIssueIndex: %v", err)
 	}
-	outcome := resolveAndSyncHotspot(context.Background(), e, "proj", "", "srcProj", src, classifyHotspotForSync(src), idx, counter)
+	outcome := resolveAndSyncHotspot(context.Background(), e, hotspotResolveParams{CloudKey: "proj", SourceKey: "srcProj"}, src, classifyHotspotForSync(src), idx, counter)
 	if outcome != syncOutcomeSynced {
 		t.Fatalf("outcome = %v, want synced", outcome)
 	}
@@ -404,13 +404,7 @@ func TestSyncOneHotspotAsIssueCategoryGating(t *testing.T) {
 			if gotTransition != tc.wantTransition {
 				t.Errorf("transitions = %v, want transition applied = %v", rec.transitions, tc.wantTransition)
 			}
-			gotCommentCalls := 0
-			for _, c := range rec.comments {
-				if strings.Contains(c, "user note") {
-					gotCommentCalls++
-				}
-			}
-			if gotCommentCalls != tc.wantCommentCalls {
+			if gotCommentCalls := countMatchingComments(rec.comments, "user note"); gotCommentCalls != tc.wantCommentCalls {
 				t.Errorf("review-comment calls = %d, want %d (comments=%v)", gotCommentCalls, tc.wantCommentCalls, rec.comments)
 			}
 			if !slices.Contains(rec.tagsSet, scanreport.HotspotIssueTag) {
@@ -418,6 +412,17 @@ func TestSyncOneHotspotAsIssueCategoryGating(t *testing.T) {
 			}
 		})
 	}
+}
+
+// countMatchingComments counts how many recorded comment bodies contain substr.
+func countMatchingComments(comments []string, substr string) int {
+	n := 0
+	for _, c := range comments {
+		if strings.Contains(c, substr) {
+			n++
+		}
+	}
+	return n
 }
 
 // #527 (fast_sync follow-up): with e.FastSync=true, hotspotCategoryExcluded
@@ -515,7 +520,7 @@ func TestResolveAndSyncHotspotNotFoundWhenNoIssueOnLine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildCloudIssueIndex: %v", err)
 	}
-	got := resolveAndSyncHotspot(context.Background(), e, "proj", "", "src", src, classifyHotspotForSync(src), idx, NewTaskCounter("t"))
+	got := resolveAndSyncHotspot(context.Background(), e, hotspotResolveParams{CloudKey: "proj", SourceKey: "src"}, src, classifyHotspotForSync(src), idx, NewTaskCounter("t"))
 	if got != syncOutcomeNotFound {
 		t.Errorf("outcome = %v, want not_found", got)
 	}
@@ -534,7 +539,7 @@ func TestResolveAndSyncHotspotLineMismatchWhenAmbiguous(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildCloudIssueIndex: %v", err)
 	}
-	got := resolveAndSyncHotspot(context.Background(), e, "proj", "", "src", src, classifyHotspotForSync(src), idx, NewTaskCounter("t"))
+	got := resolveAndSyncHotspot(context.Background(), e, hotspotResolveParams{CloudKey: "proj", SourceKey: "src"}, src, classifyHotspotForSync(src), idx, NewTaskCounter("t"))
 	if got != syncOutcomeLineMismatch {
 		t.Errorf("outcome = %v, want line_mismatch", got)
 	}
@@ -559,7 +564,7 @@ func TestResolveAndSyncHotspotUnmatchableSource(t *testing.T) {
 			})
 			e := newCustomCloudTest(t, mux)
 
-			got := resolveAndSyncHotspot(context.Background(), e, "proj", "", "src", tc.src, classifyHotspotForSync(tc.src), nil, NewTaskCounter("t"))
+			got := resolveAndSyncHotspot(context.Background(), e, hotspotResolveParams{CloudKey: "proj", SourceKey: "src"}, tc.src, classifyHotspotForSync(tc.src), nil, NewTaskCounter("t"))
 			if got != syncOutcomeNotFound {
 				t.Errorf("outcome = %v, want not_found", got)
 			}
