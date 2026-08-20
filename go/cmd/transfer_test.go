@@ -36,6 +36,7 @@ func newTransferTestCmd() *cobra.Command {
 	f.String(flagKeyFilePath, "", "")
 	f.String(flagCertPassword, "", "")
 	f.Bool(flagDebug, false, "")
+	f.Bool(flagFastSync, false, "")
 	return cmd
 }
 
@@ -144,6 +145,7 @@ func TestResolveTransferConfig_CLIOverridesConfig(t *testing.T) {
 		"--key_file_path", "/cli/key",
 		"--cert_password", "cli-pass",
 		"--debug",
+		"--" + flagFastSync,
 	}
 	if err := cmd.ParseFlags(args); err != nil {
 		t.Fatal(err)
@@ -173,11 +175,46 @@ func TestResolveTransferConfig_CLIOverridesConfig(t *testing.T) {
 		{"keyFilePath", cfg.keyFilePath, "/cli/key"},
 		{"certPassword", cfg.certPassword, "cli-pass"},
 		{"debug", cfg.debug, true},
+		{"fastSync", cfg.fastSync, true},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
 			t.Errorf("%s: got %v, want %v", c.name, c.got, c.want)
 		}
+	}
+}
+
+// Issue #527: --fast_sync loads from the config file when the CLI flag
+// is absent, and defaults to false when neither is set.
+func TestResolveTransferConfig_FastSync(t *testing.T) {
+	path := writeTransferConfig(t, `{
+		"fast_sync": true,
+		"source": {"url": "https://sq.example.com", "token": "tok"},
+		"target": {"url": "https://sonarcloud.io/", "token": "ct", "default_organization": "org"}
+	}`)
+	cmd := newTransferTestCmd()
+	if err := cmd.ParseFlags([]string{"-c", path}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := resolveTransferConfig(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.fastSync {
+		t.Error("expected config file's fast_sync=true to be used")
+	}
+
+	// Default: neither flag nor config sets it.
+	cmd2 := newTransferTestCmd()
+	if err := cmd2.ParseFlags(nil); err != nil {
+		t.Fatal(err)
+	}
+	cfg2, err := resolveTransferConfig(cmd2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg2.fastSync {
+		t.Error("expected fast_sync to default to false")
 	}
 }
 

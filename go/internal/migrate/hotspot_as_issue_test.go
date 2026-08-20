@@ -75,7 +75,7 @@ func TestSyncOneHotspotAsIssueAppliesSQSHotspotTag(t *testing.T) {
 	src := matchableHotspot{Key: "hs-1", RuleKey: "java:S2245", Component: "proj:src/Main.java", Line: 12, Status: "TO_REVIEW"}
 	target := matchableIssue{Key: "cloud-issue-1", Line: 12}
 
-	if err := syncOneHotspotAsIssue(context.Background(), e, src, target, "", ""); err != nil {
+	if err := syncOneHotspotAsIssue(context.Background(), e, src, target, "", "", classifyHotspotForSync(src)); err != nil {
 		t.Fatalf("syncOneHotspotAsIssue: %v", err)
 	}
 
@@ -103,7 +103,7 @@ func TestSyncOneHotspotAsIssueTagsUntriagedHotspot(t *testing.T) {
 	src := matchableHotspot{Key: "hs-untriaged", RuleKey: "java:S2077", Line: 4, Status: "TO_REVIEW"}
 	target := matchableIssue{Key: "cloud-issue-1", Line: 4}
 
-	if err := syncOneHotspotAsIssue(context.Background(), e, src, target, "", ""); err != nil {
+	if err := syncOneHotspotAsIssue(context.Background(), e, src, target, "", "", classifyHotspotForSync(src)); err != nil {
 		t.Fatalf("syncOneHotspotAsIssue: %v", err)
 	}
 
@@ -143,8 +143,11 @@ func TestSyncOneHotspotAsIssueStatusMapping(t *testing.T) {
 		{"TO_REVIEW needs no transition", "TO_REVIEW", "", []string{"accept", "falsepositive"}, ""},
 		{"REVIEWED+SAFE becomes a false positive", "REVIEWED", "SAFE", []string{"accept", "falsepositive"}, "falsepositive"},
 		{"REVIEWED+FIXED is accepted", "REVIEWED", "FIXED", []string{"accept", "falsepositive"}, "accept"},
-		{"REVIEWED+ACKNOWLEDGED is accepted, not downgraded to SAFE", "REVIEWED", "ACKNOWLEDGED", []string{"accept", "falsepositive"}, "accept"},
-		{"accept is skipped when the target does not offer it", "REVIEWED", "ACKNOWLEDGED", []string{"confirm"}, ""},
+		{"REVIEWED+FIXED is skipped when accept is not offered (#322)", "REVIEWED", "FIXED", []string{"confirm"}, ""},
+		// #527: ACKNOWLEDGED is never state-transitioned, regardless of what
+		// the target offers — it is tagged/inventoried and comment-synced
+		// only if it carries a user comment, but never re-triaged.
+		{"REVIEWED+ACKNOWLEDGED is never transitioned", "REVIEWED", "ACKNOWLEDGED", []string{"accept", "falsepositive"}, ""},
 	}
 
 	for _, tc := range tests {
@@ -157,7 +160,7 @@ func TestSyncOneHotspotAsIssueStatusMapping(t *testing.T) {
 			src := matchableHotspot{Key: "hs-1", RuleKey: "java:S2245", Line: 12, Status: tc.status, Resolution: tc.resolution}
 			target := matchableIssue{Key: "cloud-issue-1", Line: 12, Transitions: tc.cloudTransits}
 
-			if err := syncOneHotspotAsIssue(context.Background(), e, src, target, "", ""); err != nil {
+			if err := syncOneHotspotAsIssue(context.Background(), e, src, target, "", "", classifyHotspotForSync(src)); err != nil {
 				t.Fatalf("syncOneHotspotAsIssue: %v", err)
 			}
 
@@ -240,7 +243,11 @@ func TestResolveAndSyncHotspotSearchesIssuesNotHotspots(t *testing.T) {
 		Component: "proj:src/Main.java", Line: 12, Status: "REVIEWED", Resolution: "SAFE",
 	}
 	counter := NewTaskCounter("test")
-	outcome := resolveAndSyncHotspot(context.Background(), e, "proj", "org", "", "srcProj", src, counter)
+	idx, err := buildCloudIssueIndex(context.Background(), e, "proj", "org", "", []string{src.RuleKey})
+	if err != nil {
+		t.Fatalf("buildCloudIssueIndex: %v", err)
+	}
+	outcome := resolveAndSyncHotspot(context.Background(), e, hotspotResolveParams{CloudKey: "proj", SourceKey: "srcProj"}, src, classifyHotspotForSync(src), idx, counter)
 	if outcome != syncOutcomeSynced {
 		t.Fatalf("outcome = %v, want synced", outcome)
 	}
@@ -276,7 +283,7 @@ func TestSyncOneHotspotAsIssueAddsSourceLinkComment(t *testing.T) {
 	src := matchableHotspot{Key: "hs-42", RuleKey: "java:S2245", Line: 12, Status: "TO_REVIEW", Branch: "main"}
 	target := matchableIssue{Key: "cloud-issue-1", Line: 12}
 
-	if err := syncOneHotspotAsIssue(context.Background(), e, src, target, "https://sq.example.com", "srcProj"); err != nil {
+	if err := syncOneHotspotAsIssue(context.Background(), e, src, target, "https://sq.example.com", "srcProj", classifyHotspotForSync(src)); err != nil {
 		t.Fatalf("syncOneHotspotAsIssue: %v", err)
 	}
 
@@ -311,7 +318,7 @@ func TestSyncOneHotspotAsIssueSourceLinkIsIdempotent(t *testing.T) {
 		Comments: []issueComment{{Markdown: hotspotSourceLinkMarker + "(https://sq.example.com/security_hotspots?id=srcProj&hotspots=hs-42)"}},
 	}
 
-	if err := syncOneHotspotAsIssue(context.Background(), e, src, target, "https://sq.example.com", "srcProj"); err != nil {
+	if err := syncOneHotspotAsIssue(context.Background(), e, src, target, "https://sq.example.com", "srcProj", classifyHotspotForSync(src)); err != nil {
 		t.Fatalf("syncOneHotspotAsIssue: %v", err)
 	}
 
@@ -337,7 +344,7 @@ func TestSyncOneHotspotAsIssueMigratesReviewComments(t *testing.T) {
 	}
 	target := matchableIssue{Key: "cloud-issue-1", Line: 12, Transitions: []string{"falsepositive"}}
 
-	if err := syncOneHotspotAsIssue(context.Background(), e, src, target, "", ""); err != nil {
+	if err := syncOneHotspotAsIssue(context.Background(), e, src, target, "", "", classifyHotspotForSync(src)); err != nil {
 		t.Fatalf("syncOneHotspotAsIssue: %v", err)
 	}
 
@@ -351,6 +358,123 @@ func TestSyncOneHotspotAsIssueMigratesReviewComments(t *testing.T) {
 	}
 	if !got {
 		t.Errorf("review comment not migrated; comments = %v", rec.comments)
+	}
+}
+
+// #527: syncOneHotspotAsIssue must gate the transition and comment
+// steps by category, while back-link and tag stay unconditional when
+// e.FastSync is false (the default — asserted implicitly here since
+// newCustomCloudTest's Executor has the zero value, FastSync: false).
+func TestSyncOneHotspotAsIssueCategoryGating(t *testing.T) {
+	comments := []hotspotComment{{Login: "alice", Markdown: "user note"}}
+
+	tests := []struct {
+		name             string
+		cat              hotspotSyncCategory
+		comments         []hotspotComment
+		wantTransition   bool
+		wantCommentCalls int
+	}{
+		{"excluded — no transition, no comments", hotspotCategoryExcluded, comments, false, 0},
+		{"acknowledged, no user comment — no transition, no comments", hotspotCategoryAcknowledged, nil, false, 0},
+		{"acknowledged, user comment — no transition, comments synced", hotspotCategoryAcknowledged, comments, false, 1},
+		{"eligible — transition + comments", hotspotCategoryEligible, comments, true, 1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &hotspotIssueSyncRecorder{}
+			mux := http.NewServeMux()
+			rec.mount(mux)
+			e := newCustomCloudTest(t, mux)
+
+			src := matchableHotspot{
+				Key: "hs-1", RuleKey: "java:S2245", Line: 12,
+				Status: "REVIEWED", Resolution: "SAFE", Comments: tc.comments,
+			}
+			target := matchableIssue{Key: "cloud-issue-1", Line: 12, Transitions: []string{"falsepositive"}}
+
+			if err := syncOneHotspotAsIssue(context.Background(), e, src, target, "", "", tc.cat); err != nil {
+				t.Fatalf("syncOneHotspotAsIssue: %v", err)
+			}
+
+			rec.mu.Lock()
+			defer rec.mu.Unlock()
+			gotTransition := len(rec.transitions) > 0
+			if gotTransition != tc.wantTransition {
+				t.Errorf("transitions = %v, want transition applied = %v", rec.transitions, tc.wantTransition)
+			}
+			if gotCommentCalls := countMatchingComments(rec.comments, "user note"); gotCommentCalls != tc.wantCommentCalls {
+				t.Errorf("review-comment calls = %d, want %d (comments=%v)", gotCommentCalls, tc.wantCommentCalls, rec.comments)
+			}
+			if !slices.Contains(rec.tagsSet, scanreport.HotspotIssueTag) {
+				t.Errorf("expected sqs-hotspot tag regardless of category, tags = %v", rec.tagsSet)
+			}
+		})
+	}
+}
+
+// countMatchingComments counts how many recorded comment bodies contain substr.
+func countMatchingComments(comments []string, substr string) int {
+	n := 0
+	for _, c := range comments {
+		if strings.Contains(c, substr) {
+			n++
+		}
+	}
+	return n
+}
+
+// #527 (fast_sync follow-up): with e.FastSync=true, hotspotCategoryExcluded
+// hotspots must get neither a back-link comment nor a tag — the two write
+// calls that dominated the cost of syncing untouched hotspots. Every other
+// category must be unaffected by the flag: ACKNOWLEDGED and eligible
+// hotspots are never "zero user changes," so they keep the #423 guarantee
+// regardless of fast_sync.
+func TestSyncOneHotspotAsIssueFastSyncSkipsTagAndBacklinkForExcludedOnly(t *testing.T) {
+	tests := []struct {
+		name     string
+		cat      hotspotSyncCategory
+		fastSync bool
+		wantTag  bool
+	}{
+		{"excluded, fast_sync on — no tag, no back-link", hotspotCategoryExcluded, true, false},
+		{"excluded, fast_sync off (default) — tag + back-link", hotspotCategoryExcluded, false, true},
+		{"acknowledged, fast_sync on — tag + back-link still applied", hotspotCategoryAcknowledged, true, true},
+		{"eligible, fast_sync on — tag + back-link still applied", hotspotCategoryEligible, true, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &hotspotIssueSyncRecorder{}
+			mux := http.NewServeMux()
+			rec.mount(mux)
+			e := newCustomCloudTest(t, mux)
+			e.FastSync = tc.fastSync
+
+			src := matchableHotspot{Key: "hs-1", RuleKey: "java:S2245", Line: 12, Status: "TO_REVIEW", Branch: "main"}
+			target := matchableIssue{Key: "cloud-issue-1", Line: 12}
+
+			if err := syncOneHotspotAsIssue(context.Background(), e, src, target, "https://sq.example.com", "srcProj", tc.cat); err != nil {
+				t.Fatalf("syncOneHotspotAsIssue: %v", err)
+			}
+
+			rec.mu.Lock()
+			defer rec.mu.Unlock()
+			gotTag := slices.Contains(rec.tagsSet, scanreport.HotspotIssueTag)
+			if gotTag != tc.wantTag {
+				t.Errorf("tag applied = %v, want %v (tags=%v)", gotTag, tc.wantTag, rec.tagsSet)
+			}
+			gotBackLink := false
+			for _, c := range rec.comments {
+				if strings.Contains(c, hotspotSourceLinkMarker) {
+					gotBackLink = true
+				}
+			}
+			if gotBackLink != tc.wantTag {
+				t.Errorf("back-link posted = %v, want %v (comments=%v)", gotBackLink, tc.wantTag, rec.comments)
+			}
+		})
 	}
 }
 
@@ -387,11 +511,16 @@ func hotspotAt(line int) matchableHotspot {
 func TestResolveAndSyncHotspotNotFoundWhenNoIssueOnLine(t *testing.T) {
 	mux := http.NewServeMux()
 	mountIssueSearch(mux, []map[string]any{
-		{"key": "other", "rule": "java:S2245", "line": 99, "issueStatus": "OPEN"},
+		{"key": "other", "rule": "java:S2245", "component": "proj:src/Main.java", "line": 99, "issueStatus": "OPEN"},
 	})
 	e := newCustomCloudTest(t, mux)
 
-	got := resolveAndSyncHotspot(context.Background(), e, "proj", "org", "", "src", hotspotAt(12), NewTaskCounter("t"))
+	src := hotspotAt(12)
+	idx, err := buildCloudIssueIndex(context.Background(), e, "proj", "org", "", []string{src.RuleKey})
+	if err != nil {
+		t.Fatalf("buildCloudIssueIndex: %v", err)
+	}
+	got := resolveAndSyncHotspot(context.Background(), e, hotspotResolveParams{CloudKey: "proj", SourceKey: "src"}, src, classifyHotspotForSync(src), idx, NewTaskCounter("t"))
 	if got != syncOutcomeNotFound {
 		t.Errorf("outcome = %v, want not_found", got)
 	}
@@ -400,12 +529,17 @@ func TestResolveAndSyncHotspotNotFoundWhenNoIssueOnLine(t *testing.T) {
 func TestResolveAndSyncHotspotLineMismatchWhenAmbiguous(t *testing.T) {
 	mux := http.NewServeMux()
 	mountIssueSearch(mux, []map[string]any{
-		{"key": "a", "rule": "java:S2245", "line": 12, "issueStatus": "OPEN"},
-		{"key": "b", "rule": "java:S2245", "line": 12, "issueStatus": "OPEN"},
+		{"key": "a", "rule": "java:S2245", "component": "proj:src/Main.java", "line": 12, "issueStatus": "OPEN"},
+		{"key": "b", "rule": "java:S2245", "component": "proj:src/Main.java", "line": 12, "issueStatus": "OPEN"},
 	})
 	e := newCustomCloudTest(t, mux)
 
-	got := resolveAndSyncHotspot(context.Background(), e, "proj", "org", "", "src", hotspotAt(12), NewTaskCounter("t"))
+	src := hotspotAt(12)
+	idx, err := buildCloudIssueIndex(context.Background(), e, "proj", "org", "", []string{src.RuleKey})
+	if err != nil {
+		t.Fatalf("buildCloudIssueIndex: %v", err)
+	}
+	got := resolveAndSyncHotspot(context.Background(), e, hotspotResolveParams{CloudKey: "proj", SourceKey: "src"}, src, classifyHotspotForSync(src), idx, NewTaskCounter("t"))
 	if got != syncOutcomeLineMismatch {
 		t.Errorf("outcome = %v, want line_mismatch", got)
 	}
@@ -430,7 +564,7 @@ func TestResolveAndSyncHotspotUnmatchableSource(t *testing.T) {
 			})
 			e := newCustomCloudTest(t, mux)
 
-			got := resolveAndSyncHotspot(context.Background(), e, "proj", "org", "", "src", tc.src, NewTaskCounter("t"))
+			got := resolveAndSyncHotspot(context.Background(), e, hotspotResolveParams{CloudKey: "proj", SourceKey: "src"}, tc.src, classifyHotspotForSync(tc.src), nil, NewTaskCounter("t"))
 			if got != syncOutcomeNotFound {
 				t.Errorf("outcome = %v, want not_found", got)
 			}
@@ -461,7 +595,7 @@ func TestSyncOneHotspotAsIssueSurfacesTagFailure(t *testing.T) {
 
 	src := matchableHotspot{Key: "hs-1", RuleKey: "java:S2245", Line: 12, Status: "TO_REVIEW"}
 	target := matchableIssue{Key: "cloud-1", Line: 12}
-	err := syncOneHotspotAsIssue(context.Background(), e, src, target, "", "")
+	err := syncOneHotspotAsIssue(context.Background(), e, src, target, "", "", classifyHotspotForSync(src))
 	if err == nil || !strings.Contains(err.Error(), "tags") {
 		t.Errorf("err = %v, want a tag failure", err)
 	}
@@ -486,7 +620,7 @@ func TestSyncOneHotspotAsIssueToleratesSourceLinkFailure(t *testing.T) {
 
 	src := matchableHotspot{Key: "hs-1", RuleKey: "java:S2245", Line: 12, Status: "TO_REVIEW"}
 	target := matchableIssue{Key: "cloud-1", Line: 12}
-	if err := syncOneHotspotAsIssue(context.Background(), e, src, target, "https://sq.example.com", "p"); err != nil {
+	if err := syncOneHotspotAsIssue(context.Background(), e, src, target, "https://sq.example.com", "p", classifyHotspotForSync(src)); err != nil {
 		t.Errorf("a failed back-link must not fail the sync, got %v", err)
 	}
 

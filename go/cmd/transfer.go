@@ -41,6 +41,7 @@ const (
 	flagExportDir                = "export_dir"
 	flagSkipIssueSync            = "skip_issue_sync"
 	flagSkipProjectDataMigration = "skip_project_data_migration"
+	flagFastSync                 = "fast_sync"
 	flagConcurrency              = "concurrency"
 	flagTimeout                  = "timeout"
 	flagPEMFilePath              = "pem_file_path"
@@ -172,6 +173,7 @@ func init() {
 	f.String(flagExportDir, "./migration-files/", "Working directory for intermediate files (maps to export_directory)")
 	f.Bool(flagSkipIssueSync, false, "Skip the final per-issue and per-hotspot metadata sync (#299). Same semantics as the skip_issue_sync config-file field — defaults to false (sync happens); pass the flag to skip.")
 	f.Bool(flagSkipProjectDataMigration, false, "Skip the entire project-data migration: importProjectData and the trailing per-issue/per-hotspot sync (#303). Defaults to false (data is migrated); pass the flag to skip.")
+	f.Bool(flagFastSync, false, "Skip tagging and back-linking hotspots/issues with zero user changes on the source (original state, no comments, no custom tags). Defaults to false (every hotspot is tagged and back-linked). #527.")
 	f.Int(flagConcurrency, 0, "Max concurrent requests (default: 25) (maps to concurrency)")
 	f.Int(flagTimeout, 0, "HTTP request timeout in seconds (maps to timeout; default: 60)")
 	f.String(flagPEMFilePath, "", "Path to client mTLS PEM file for the source server (maps to source.pem_file_path)")
@@ -207,6 +209,7 @@ type transferConfig struct {
 	debug                    bool
 	excludeBranches          []string
 	unsupportedLanguages     string
+	fastSync                 bool
 }
 
 func applyFlagString(cmd *cobra.Command, name string, target *string) {
@@ -297,6 +300,7 @@ func loadTransferFileDefaults(path string) (transferConfig, error) {
 	cfg.debug = migrateCfg.Debug
 	cfg.excludeBranches = migrateCfg.ExcludeBranches
 	cfg.unsupportedLanguages = migrateCfg.UnsupportedLanguages
+	cfg.fastSync = migrateCfg.FastSync
 	return cfg, nil
 }
 
@@ -349,6 +353,7 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 		cfg.excludeBranches, _ = cmd.Flags().GetStringSlice(flagExcludeBranches)
 	}
 	applyFlagString(cmd, flagUnsupportedLanguages, &cfg.unsupportedLanguages)
+	applyFlagBool(cmd, flagFastSync, &cfg.fastSync)
 
 	if cfg.exportDir == "" {
 		cfg.exportDir = "./migration-files/"
@@ -550,6 +555,7 @@ func runTransferMigrate(ctx context.Context, cfg transferConfig) (string, error)
 		Debug:                    cfg.debug,
 		ExcludeBranches:          cfg.excludeBranches,
 		UnsupportedLanguages:     cfg.unsupportedLanguages,
+		FastSync:                 cfg.fastSync,
 		ProjectKeyPattern:        cfg.projectKeyPattern,
 	})
 	if err != nil {

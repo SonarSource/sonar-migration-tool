@@ -315,9 +315,8 @@ func TestProjectIssuesFullTaskSkipIssueSync(t *testing.T) {
 }
 
 // #398: with SkipIssueSync=true the hotspot task must NOT fetch
-// /api/hotspots/show per REVIEWED hotspot — that round-trip exists
-// only to enrich the record with comments + rule for the migrate-side
-// sync.
+// /api/hotspots/show per hotspot — that round-trip exists only to
+// enrich the record with comments + rule for the migrate-side sync.
 func TestProjectHotspotsFullTaskSkipsDetailEnrichment(t *testing.T) {
 	var (
 		mu       sync.Mutex
@@ -360,6 +359,80 @@ func TestProjectHotspotsFullTaskSkipsDetailEnrichment(t *testing.T) {
 	defer mu.Unlock()
 	if showHits != 0 {
 		t.Errorf("expected zero /api/hotspots/show calls with SkipIssueSync=true, got %d", showHits)
+	}
+}
+
+// #527: a TO_REVIEW hotspot can carry a user comment on SonarQube Server
+// without its status ever changing, and the sync-eligibility rule treats
+// that comment as grounds to sync it. That case can only be detected if
+// extraction fetches /api/hotspots/show for TO_REVIEW hotspots too, not
+// only REVIEWED ones.
+func TestProjectHotspotsFullTaskEnrichesToReviewHotspots(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		showHits []string
+	)
+	srv, e := newSrvExecutor(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/hotspots/search":
+			status := r.URL.Query().Get("status")
+			if status == "TO_REVIEW" {
+				json.NewEncoder(w).Encode(map[string]any{
+					"hotspots": []map[string]any{
+						{"key": "hs-tr", "status": "TO_REVIEW", "line": 5, "ruleKey": "rk1"},
+					},
+					"paging": map[string]any{"pageIndex": 1, "pageSize": 500, "total": 1},
+				})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"hotspots": []map[string]any{},
+				"paging":   map[string]any{"pageIndex": 1, "pageSize": 500, "total": 0},
+			})
+		case "/api/hotspots/show":
+			mu.Lock()
+			showHits = append(showHits, r.URL.Query().Get("hotspot"))
+			mu.Unlock()
+			json.NewEncoder(w).Encode(map[string]any{
+				"key": "hs-tr",
+				"comment": []map[string]any{
+					{"login": "alice", "markdown": "still worth a look", "createdAt": "2026-01-01T00:00:00+0000"},
+				},
+				"rule": map[string]any{"key": "rk1"},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	defer srv.Close()
+
+	if err := projectHotspotsFullTask()(ctx(t), e); err != nil {
+		t.Fatalf("projectHotspotsFullTask: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(showHits) != 1 || showHits[0] != "hs-tr" {
+		t.Fatalf("expected /api/hotspots/show to be called once for hs-tr, got %v", showHits)
+	}
+
+	items, err := e.Store.ReadAll("getProjectHotspotsFull")
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 extracted hotspot, got %d", len(items))
+	}
+	var got struct {
+		Comment []struct {
+			Login string `json:"login"`
+		} `json:"comment"`
+	}
+	if err := json.Unmarshal(items[0], &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Comment) != 1 || got.Comment[0].Login != "alice" {
+		t.Errorf("expected the TO_REVIEW hotspot's comment to be merged in, got %s", items[0])
 	}
 }
 

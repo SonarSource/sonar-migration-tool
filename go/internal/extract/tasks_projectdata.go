@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
+	"golang.org/x/sync/errgroup"
 )
 
 var htmlTagRe = regexp.MustCompile(`<[^>]+>`)
@@ -120,8 +121,8 @@ func projectIssuesFullTask() func(ctx context.Context, e *Executor) error {
 	}
 }
 
-// projectHotspotsFullTask extracts all hotspots per project per branch.
-// For REVIEWED hotspots, it fetches detail via /api/hotspots/show to get
+// projectHotspotsFullTask extracts all hotspots per project per branch,
+// fetching detail via /api/hotspots/show for every hotspot to get
 // comments and ruleKey.
 //
 // SonarQube Server's /api/hotspots/search applies a TO_REVIEW default
@@ -186,37 +187,55 @@ func projectHotspotsFullTask() func(ctx context.Context, e *Executor) error {
 				}
 
 				enriched := enrichAll(all, meta)
-				// enrichHotspotDetails issues one /api/hotspots/show
-				// call per REVIEWED hotspot purely to pick up comments
-				// + rule — data only the migrate-side hotspot sync
-				// would consume. Skip when opted out. #398.
+				// enrichHotspotDetails issues one /api/hotspots/show call
+				// per hotspot to pick up comments + rule — data only the
+				// migrate-side hotspot sync would consume. Skip when
+				// opted out. #398.
 				if !e.SkipIssueSync {
-					enrichHotspotDetails(ctx, e, enriched)
+					if err := enrichHotspotDetails(ctx, e, enriched); err != nil {
+						return err
+					}
 				}
 				return w.WriteChunk(enriched)
 			})
 	}
 }
 
-// enrichHotspotDetails fetches /api/hotspots/show for each REVIEWED hotspot
-// and merges the detail (comments, rule) into the enriched items in-place.
-func enrichHotspotDetails(ctx context.Context, e *Executor, enriched []json.RawMessage) {
-	for i, item := range enriched {
-		status := extractField(item, "status")
-		if status != "REVIEWED" {
-			continue
-		}
-		hotspotKey := extractField(item, "key")
+// enrichHotspotDetails fetches /api/hotspots/show for every hotspot and
+// merges the detail (comments, rule) into the enriched items in-place.
+//
+// Every hotspot is fetched, not just REVIEWED ones: SonarQube Server
+// lets a user comment on a TO_REVIEW hotspot without changing its
+// status, and #527's sync-eligibility rule treats such a comment as
+// grounds to sync it — a case that can never be detected if TO_REVIEW
+// comments are never fetched. Parallelized with the executor's
+// semaphore since the item count is no longer bounded to the smaller
+// REVIEWED subset.
+func enrichHotspotDetails(ctx context.Context, e *Executor, enriched []json.RawMessage) error {
+	g, ctx := errgroup.WithContext(ctx)
+	for i := range enriched {
+		hotspotKey := extractField(enriched[i], "key")
 		if hotspotKey == "" {
 			continue
 		}
-		detail, err := e.Raw.Get(ctx, "api/hotspots/show", url.Values{"hotspot": {hotspotKey}})
-		if err != nil {
-			e.Logger.Debug("hotspot detail fetch failed", "hotspot", hotspotKey, "err", err)
-			continue
-		}
-		enriched[i] = mergeHotspotDetail(item, detail)
+		g.Go(func() error {
+			if err := acquireSem(ctx, e.Sem); err != nil {
+				return err
+			}
+			defer func() { <-e.Sem }()
+			detail, err := e.Raw.Get(ctx, "api/hotspots/show", url.Values{"hotspot": {hotspotKey}})
+			if err != nil {
+				e.Logger.Debug("hotspot detail fetch failed", "hotspot", hotspotKey, "err", err)
+				return nil
+			}
+			// enriched[i] is written by exactly one goroutine (index i is
+			// fixed per closure) so concurrent writes to disjoint slice
+			// elements are safe.
+			enriched[i] = mergeHotspotDetail(enriched[i], detail)
+			return nil
+		})
 	}
+	return g.Wait()
 }
 
 func mergeHotspotDetail(base, detail json.RawMessage) json.RawMessage {

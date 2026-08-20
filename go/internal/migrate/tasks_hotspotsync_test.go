@@ -5,6 +5,12 @@
 package migrate
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -156,5 +162,403 @@ func TestDedupeActionableHotspotsOffsetDistinguishesCoLocated(t *testing.T) {
 	}
 	if !offsets[17] || !offsets[35] {
 		t.Errorf("expected both column offsets (17, 35) preserved as distinct reps, got %v", offsets)
+	}
+}
+
+// #527: a comment counts as user-created only when its Login is
+// non-empty — blank/whitespace-only logins are treated as
+// SonarQube-technical.
+func TestHotspotHasUserComment(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []hotspotComment
+		want bool
+	}{
+		{"no comments", nil, false},
+		{"blank login", []hotspotComment{{Login: "", Markdown: "auto note"}}, false},
+		{"whitespace-only login", []hotspotComment{{Login: "   ", Markdown: "auto note"}}, false},
+		{"real login", []hotspotComment{{Login: "alice", Markdown: "reviewed"}}, true},
+		{"mixed — one real among technical", []hotspotComment{{Login: ""}, {Login: "bob"}}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hotspotHasUserComment(tc.in); got != tc.want {
+				t.Errorf("hotspotHasUserComment(%+v) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// #527: eligibility rule — not TO_REVIEW, or a user comment, makes a
+// hotspot eligible for full sync; REVIEWED+ACKNOWLEDGED is always
+// flagged as acknowledged regardless of the eligible verdict.
+func TestHotspotSyncEligibility(t *testing.T) {
+	tests := []struct {
+		name           string
+		status         string
+		resolution     string
+		hasUserComment bool
+		wantEligible   bool
+		wantAck        bool
+	}{
+		{"TO_REVIEW, no comment — excluded", "TO_REVIEW", "", false, false, false},
+		{"TO_REVIEW, user comment — eligible", "TO_REVIEW", "", true, true, false},
+		{"REVIEWED+SAFE — eligible", "REVIEWED", "SAFE", false, true, false},
+		{"REVIEWED+FIXED — eligible", "REVIEWED", "FIXED", false, true, false},
+		{"REVIEWED+ACKNOWLEDGED, no comment — eligible+ack", "REVIEWED", "ACKNOWLEDGED", false, true, true},
+		{"REVIEWED+ACKNOWLEDGED, user comment — eligible+ack", "REVIEWED", "ACKNOWLEDGED", true, true, true},
+		{"case-insensitive / whitespace", "  reviewed  ", " acknowledged ", false, true, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotEligible, gotAck := HotspotSyncEligibility(tc.status, tc.resolution, tc.hasUserComment)
+			if gotEligible != tc.wantEligible || gotAck != tc.wantAck {
+				t.Errorf("HotspotSyncEligibility(%q, %q, %v) = (%v, %v), want (%v, %v)",
+					tc.status, tc.resolution, tc.hasUserComment, gotEligible, gotAck, tc.wantEligible, tc.wantAck)
+			}
+		})
+	}
+}
+
+// #527: classifyHotspotForSync wraps HotspotSyncEligibility into the
+// three dispatch buckets, deriving hasUserComment from Comments.
+func TestClassifyHotspotForSync(t *testing.T) {
+	tests := []struct {
+		name string
+		h    matchableHotspot
+		want hotspotSyncCategory
+	}{
+		{"TO_REVIEW, no comment — excluded", matchableHotspot{Status: "TO_REVIEW"}, hotspotCategoryExcluded},
+		{
+			"TO_REVIEW, technical comment only — excluded",
+			matchableHotspot{Status: "TO_REVIEW", Comments: []hotspotComment{{Login: ""}}},
+			hotspotCategoryExcluded,
+		},
+		{
+			"TO_REVIEW, user comment — eligible",
+			matchableHotspot{Status: "TO_REVIEW", Comments: []hotspotComment{{Login: "alice"}}},
+			hotspotCategoryEligible,
+		},
+		{"REVIEWED+SAFE — eligible", matchableHotspot{Status: "REVIEWED", Resolution: "SAFE"}, hotspotCategoryEligible},
+		{"REVIEWED+ACKNOWLEDGED — acknowledged", matchableHotspot{Status: "REVIEWED", Resolution: "ACKNOWLEDGED"}, hotspotCategoryAcknowledged},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyHotspotForSync(tc.h); got != tc.want {
+				t.Errorf("classifyHotspotForSync(%+v) = %v, want %v", tc.h, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestChunkStrings(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []string
+		n    int
+		want [][]string
+	}{
+		{"empty", nil, 3, nil},
+		{"n<=0", []string{"a"}, 0, nil},
+		{"exact multiple", []string{"a", "b", "c", "d"}, 2, [][]string{{"a", "b"}, {"c", "d"}}},
+		{"remainder", []string{"a", "b", "c"}, 2, [][]string{{"a", "b"}, {"c"}}},
+		{"n larger than input", []string{"a", "b"}, 60, [][]string{{"a", "b"}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := chunkStrings(tc.in, tc.n)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("chunkStrings(%v, %d) = %v, want %v", tc.in, tc.n, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestGroupHotspotsByBranch(t *testing.T) {
+	in := []matchableHotspot{
+		{Key: "a", Branch: "main"},
+		{Key: "b", Branch: "develop"},
+		{Key: "c", Branch: "main"},
+		{Key: "d"}, // no branch — empty-string bucket
+	}
+	got := groupHotspotsByBranch(in)
+	if len(got["main"]) != 2 || len(got["develop"]) != 1 || len(got[""]) != 1 {
+		t.Fatalf("unexpected grouping: %+v", got)
+	}
+}
+
+func TestDistinctRuleKeys(t *testing.T) {
+	in := []matchableHotspot{
+		{RuleKey: "java:S2245"},
+		{RuleKey: "java:S2077"},
+		{RuleKey: "java:S2245"},
+		{RuleKey: ""},
+	}
+	got := distinctRuleKeys(in)
+	want := []string{"java:S2077", "java:S2245"} // sorted
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("distinctRuleKeys(...) = %v, want %v", got, want)
+	}
+}
+
+// #527: buildCloudIssueIndex must chunk rule keys to stay under the
+// per-request cap, issue one search per chunk, and index results by
+// (bare file path, rule key) — the same scope the per-hotspot search
+// used, just fetched once for the whole branch.
+func TestBuildCloudIssueIndexChunksAndIndexes(t *testing.T) {
+	var searchCalls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/issues/search", func(w http.ResponseWriter, r *http.Request) {
+		searchCalls++
+		rules := r.URL.Query().Get("rules")
+		var issues []map[string]any
+		for i, rk := range strings.Split(rules, ",") {
+			issues = append(issues, map[string]any{
+				"key": rk + "-issue", "rule": rk, "component": "proj:src/Main.java", "line": 10 + i,
+			})
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"issues": issues,
+			"paging": map[string]any{"pageIndex": 1, "pageSize": 500, "total": len(issues)},
+		})
+	})
+	e := newCustomCloudTest(t, mux)
+
+	ruleKeys := make([]string, 0, 125)
+	for i := 0; i < 125; i++ {
+		ruleKeys = append(ruleKeys, "java:S"+strconv.Itoa(1000+i))
+	}
+
+	idx, err := buildCloudIssueIndex(context.Background(), e, "proj", "org", "main", ruleKeys)
+	if err != nil {
+		t.Fatalf("buildCloudIssueIndex: %v", err)
+	}
+	wantChunks := (len(ruleKeys) + cloudIssueSearchRuleChunkSize - 1) / cloudIssueSearchRuleChunkSize
+	if searchCalls != wantChunks {
+		t.Errorf("expected %d chunked search calls for %d rule keys, got %d", wantChunks, len(ruleKeys), searchCalls)
+	}
+	if len(idx) != len(ruleKeys) {
+		t.Errorf("expected %d indexed (file, rule) entries, got %d", len(ruleKeys), len(idx))
+	}
+	sample := ruleKeys[0]
+	candidates := idx[cloudIssueIndexKey{File: "src/Main.java", RuleKey: sample}]
+	if len(candidates) != 1 || candidates[0].Key != sample+"-issue" {
+		t.Errorf("expected indexed candidate for %q, got %+v", sample, candidates)
+	}
+}
+
+// #323: HotspotHasManualChanges is the exported, raw-field counterpart of
+// hotspotHasManualChanges used by the predict pipeline, which only has the
+// extract's status/resolution/hasComments in hand (no matchableHotspot).
+func TestHotspotHasManualChanges_Exported(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      string
+		resolution  string
+		hasComments bool
+		want        bool
+	}{
+		{"TO_REVIEW, no comments — skip", "TO_REVIEW", "", false, false},
+		{"TO_REVIEW, comments — sync", "TO_REVIEW", "", true, true},
+		{"REVIEWED, no resolution — skip", "REVIEWED", "", false, false},
+		{"REVIEWED + SAFE — sync", "REVIEWED", "SAFE", false, true},
+		{"REVIEWED + ACKNOWLEDGED — sync", "REVIEWED", "ACKNOWLEDGED", false, true},
+		{"REVIEWED + FIXED — sync", "REVIEWED", "FIXED", false, true},
+		{"REVIEWED + unknown resolution — skip", "REVIEWED", "WHATEVER", false, false},
+		{"REVIEWED + unknown resolution + comments — sync", "REVIEWED", "WHATEVER", true, true},
+		{"case-insensitive", "reviewed", "safe", false, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := HotspotHasManualChanges(tc.status, tc.resolution, tc.hasComments); got != tc.want {
+				t.Errorf("HotspotHasManualChanges(%q, %q, %v) = %v, want %v", tc.status, tc.resolution, tc.hasComments, got, tc.want)
+			}
+		})
+	}
+}
+
+// #323: IsAcknowledgedResolution isolates the ACKNOWLEDGED literal so the
+// predict pipeline doesn't duplicate it.
+func TestIsAcknowledgedResolution(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"exact match", "ACKNOWLEDGED", true},
+		{"case-insensitive", "acknowledged", true},
+		{"surrounding whitespace", "  Acknowledged  ", true},
+		{"different resolution", "SAFE", false},
+		{"empty", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsAcknowledgedResolution(tc.in); got != tc.want {
+				t.Errorf("IsAcknowledgedResolution(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// #527: classifyAndCountHotspots must classify every hotspot and tally
+// the category counts (and the separate, informational "triaged" count)
+// in a single pass.
+func TestClassifyAndCountHotspots(t *testing.T) {
+	in := []matchableHotspot{
+		{Key: "excluded-1", Status: "TO_REVIEW"},
+		{Key: "eligible-1", Status: "REVIEWED", Resolution: "SAFE"},
+		{Key: "eligible-2", Status: "TO_REVIEW", Comments: []hotspotComment{{Login: "alice"}}},
+		{Key: "ack-1", Status: "REVIEWED", Resolution: "ACKNOWLEDGED"},
+		{Key: "ack-2", Status: "REVIEWED", Resolution: "ACKNOWLEDGED", Comments: []hotspotComment{{Login: "bob"}}},
+	}
+	items, counts := classifyAndCountHotspots(in)
+
+	if len(items) != len(in) {
+		t.Fatalf("expected %d classified items, got %d", len(in), len(items))
+	}
+	if counts.eligible != 2 {
+		t.Errorf("eligible = %d, want 2", counts.eligible)
+	}
+	if counts.ack != 2 {
+		t.Errorf("ack = %d, want 2", counts.ack)
+	}
+	if counts.excluded != 1 {
+		t.Errorf("excluded = %d, want 1", counts.excluded)
+	}
+	// hotspotHasManualChanges (the separate, #356 "triaged" signal) only
+	// counts REVIEWED+{SAFE,ACKNOWLEDGED,FIXED} or any comment — every
+	// hotspot here except excluded-1 trips it.
+	if counts.triaged != 4 {
+		t.Errorf("triaged = %d, want 4", counts.triaged)
+	}
+
+	byKey := make(map[string]hotspotSyncCategory, len(items))
+	for _, it := range items {
+		byKey[it.h.Key] = it.cat
+	}
+	want := map[string]hotspotSyncCategory{
+		"excluded-1": hotspotCategoryExcluded,
+		"eligible-1": hotspotCategoryEligible,
+		"eligible-2": hotspotCategoryEligible,
+		"ack-1":      hotspotCategoryAcknowledged,
+		"ack-2":      hotspotCategoryAcknowledged,
+	}
+	if !reflect.DeepEqual(byKey, want) {
+		t.Errorf("category assignment = %+v, want %+v", byKey, want)
+	}
+}
+
+// #527: buildBranchIndexes must build one index per distinct branch found
+// among the given hotspots, and record a branch as failed (without
+// aborting the others) when its search call errors.
+func TestBuildBranchIndexes(t *testing.T) {
+	var mainCalls, devCalls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/issues/search", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("branch") {
+		case "main":
+			mainCalls++
+			json.NewEncoder(w).Encode(map[string]any{
+				"issues": []map[string]any{
+					{"key": "iss-main", "rule": "java:S2245", "component": "proj:src/Main.java", "line": 12},
+				},
+				"paging": map[string]any{"pageIndex": 1, "pageSize": 500, "total": 1},
+			})
+		case "develop":
+			devCalls++
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			t.Errorf("unexpected branch %q", r.URL.Query().Get("branch"))
+		}
+	})
+	e := newCustomCloudTest(t, mux)
+
+	all := []matchableHotspot{
+		{Key: "h1", RuleKey: "java:S2245", Branch: "main"},
+		{Key: "h2", RuleKey: "java:S2245", Branch: "develop"},
+	}
+	indexes, failed := buildBranchIndexes(context.Background(), e, syncHotspotInput{CloudKey: "proj", OrgKey: "org"}, all)
+
+	// The HTTP client retries transient 5xx errors, so develop's failing
+	// search may be attempted more than once — only main's success count
+	// is exact.
+	if mainCalls != 1 {
+		t.Fatalf("expected exactly one successful search call for main, got %d", mainCalls)
+	}
+	if devCalls == 0 {
+		t.Fatalf("expected at least one search attempt for develop, got 0")
+	}
+	if failed["develop"] != true {
+		t.Errorf("develop branch should be marked failed, got %v", failed)
+	}
+	if failed["main"] {
+		t.Errorf("main branch should not be marked failed")
+	}
+	idx, ok := indexes["main"]
+	if !ok {
+		t.Fatalf("expected an index for main, got %v", indexes)
+	}
+	if _, ok := indexes["develop"]; ok {
+		t.Errorf("failed branch develop must not have an index entry")
+	}
+	candidates := idx[cloudIssueIndexKey{File: "src/Main.java", RuleKey: "java:S2245"}]
+	if len(candidates) != 1 || candidates[0].Key != "iss-main" {
+		t.Errorf("expected main's index to contain iss-main, got %+v", candidates)
+	}
+}
+
+// #527: runSyncHotspotMetadata is the task's Run function — it reads
+// createProjects, syncs each project's hotspots, and writes one
+// syncHotspotMetadata record per project with the eligible/acknowledged
+// stats. End-to-end exercise of the whole per-project pipeline.
+func TestRunSyncHotspotMetadataWritesRecord(t *testing.T) {
+	rec := &hotspotIssueSyncRecorder{}
+	mux := http.NewServeMux()
+	rec.mount(mux)
+	e := newCustomCloudTest(t, mux)
+
+	writeExtractMetaJSON(t, e.ExportDir, "extract-01", testServerURL)
+	writeJSONL(filepath.Join(e.ExportDir, "extract-01", "getProjectHotspotsFull"), []map[string]any{
+		// Eligible: REVIEWED+SAFE, matches the recorder's fixed search
+		// result (java:S2245 @ proj:src/Main.java:12) — gets synced.
+		{"key": "h1", "project": "proj1", "status": "REVIEWED", "resolution": "SAFE", "ruleKey": "java:S2245", "component": "proj:src/Main.java", "line": 12},
+		// Excluded: TO_REVIEW, no comment, a different line so it does
+		// NOT dedupe with h1 — never counted as actionable regardless
+		// of whether it finds a Cloud counterpart.
+		{"key": "h2", "project": "proj1", "status": "TO_REVIEW", "ruleKey": "java:S2245", "component": "proj:src/Main.java", "line": 50},
+	})
+	writeTaskJSONL(t, e, "createProjects", []map[string]any{
+		{"cloud_project_key": "cloud_proj1", "sonarcloud_org_key": "org1", "server_url": testServerURL, "key": "proj1"},
+	})
+
+	if err := runSyncHotspotMetadata(context.Background(), e); err != nil {
+		t.Fatalf("runSyncHotspotMetadata: %v", err)
+	}
+
+	items, err := e.Store.ReadAll("syncHotspotMetadata")
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 syncHotspotMetadata record, got %d: %s", len(items), items)
+	}
+	var got struct {
+		CloudProjectKey string `json:"cloud_project_key"`
+		Synced          int    `json:"synced"`
+		Actionable      int    `json:"actionable"`
+	}
+	if err := json.Unmarshal(items[0], &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.CloudProjectKey != "cloud_proj1" {
+		t.Errorf("cloud_project_key = %q, want cloud_proj1", got.CloudProjectKey)
+	}
+	// Only h1 (eligible) counts toward actionable/synced; h2 (excluded)
+	// is tagged/back-linked but contributes to neither.
+	if got.Actionable != 1 {
+		t.Errorf("actionable = %d, want 1 (only h1 is eligible)", got.Actionable)
+	}
+	if got.Synced != 1 {
+		t.Errorf("synced = %d, want 1", got.Synced)
 	}
 }
