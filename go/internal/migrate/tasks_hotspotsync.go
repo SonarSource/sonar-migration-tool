@@ -596,6 +596,9 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 				return
 			}
 			outcome := resolveAndSyncHotspot(gctx, e, resolveParams, it.h, it.cat, indexes[it.h.Branch], counter)
+			if it.cat == hotspotCategoryExcluded {
+				return // tagged only; not in the denominator, so not counted as b/c
+			}
 			switch outcome {
 			case syncOutcomeSynced:
 				if it.cat == hotspotCategoryEligible {
