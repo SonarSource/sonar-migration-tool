@@ -73,6 +73,16 @@ func fullySeededSummary() *MigrationSummary {
 			{Phase: 0, Task: "importProjectData", Duration: 15 * time.Second, OK: false,
 				Err: "CE task failed"},
 		},
+		// #530 — the run-metadata phase breakdown. Built by hand here
+		// (rather than via buildPhaseBreakdown) so this fixture's numbers
+		// are independent of the Tasks slice above and stay stable if
+		// that slice changes.
+		PhaseBreakdown: []PhaseBreakdownEntry{
+			{Name: "Global objects provisioning", Duration: 10 * time.Second},
+			{Name: "Projects configuration provisioning", Duration: 45 * time.Second},
+			{Name: "Project data migration", Duration: 15 * time.Second},
+			{Name: "Issue and Hotspot sync", Duration: 20 * time.Second},
+		},
 		Failures: []FailureRow{
 			{
 				EntityType:   "Project",
@@ -188,6 +198,18 @@ func TestRenderMarkdownStructuralContract(t *testing.T) {
 	}
 	if !strings.Contains(got, "/api/ce/submit") && !strings.Contains(got, "already exists") {
 		t.Errorf("expected failure-ledger error content in output")
+	}
+
+	// #530 — the run-metadata phase-duration breakdown bullets.
+	for _, want := range []string{
+		"- Global objects provisioning:",
+		"- Projects configuration provisioning:",
+		"- Project data migration:",
+		"- Issue and Hotspot sync:",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected run-metadata phase-breakdown bullet %q in markdown output", want)
+		}
 	}
 
 	// Branch-skip reason must surface (in the Warnings branch-skip table and

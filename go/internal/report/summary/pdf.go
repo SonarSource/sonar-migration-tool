@@ -1883,9 +1883,10 @@ func renderKVTable(pdf *fpdf.Fpdf, title string, headers []string, widths []floa
 
 // renderRunMetadata renders the "Run metadata" section: a small key/value
 // block with the run's Started / Completed timestamps, total elapsed wall
-// time, and overall status. The Run ID already appears on the title page,
-// so it is intentionally omitted here. No-op for predictive reports,
-// where StartedAt is the zero time.
+// time, a duration breakdown across the 4 coarse migration phases (#530),
+// and overall status. The Run ID already appears on the title page, so
+// it is intentionally omitted here. No-op for predictive reports, where
+// StartedAt is the zero time.
 func renderRunMetadata(pdf *fpdf.Fpdf, summary *MigrationSummary) {
 	if summary.StartedAt.IsZero() {
 		return
@@ -1896,8 +1897,11 @@ func renderRunMetadata(pdf *fpdf.Fpdf, summary *MigrationSummary) {
 		{"Started", summary.StartedAt.Format(dateTimeLayout)},
 		{"Completed", summary.CompletedAt.Format(dateTimeLayout)},
 		{"Total elapsed", formatDuration(summary.TotalElapsed)},
-		{"Overall status", summary.OverallStatus},
 	}
+	for _, ph := range summary.PhaseBreakdown {
+		rows = append(rows, []string{ph.Name, formatDuration(ph.Duration)})
+	}
+	rows = append(rows, []string{"Overall status", summary.OverallStatus})
 	// No per-table sub-heading (the section heading already names it);
 	// pass an empty title so renderKVTable only draws the column header.
 	renderKVTable(pdf, "", []string{"Field", "Value"}, []float64{50, 130}, rows)

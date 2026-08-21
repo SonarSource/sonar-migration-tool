@@ -44,10 +44,17 @@ type MigrationSummary struct {
 	OverallStatus string
 	Phases        []PhaseTiming
 	Tasks         []TaskTiming
-	Failures      []FailureRow
-	Warnings      WarningLedger
-	Branches      []BranchStat
-	Throughput    ThroughputStats
+	// PhaseBreakdown sums Tasks' durations into the four coarse phases
+	// the Run metadata section reports (#530): Global objects
+	// provisioning, Projects configuration provisioning, Project data
+	// migration, and Issue and Hotspot sync. Populated by
+	// buildPhaseBreakdown from the same migrate.CategorizeTask mapping
+	// the live progress bar uses (#520), so the two always agree.
+	PhaseBreakdown []PhaseBreakdownEntry
+	Failures       []FailureRow
+	Warnings       WarningLedger
+	Branches       []BranchStat
+	Throughput     ThroughputStats
 
 	// RateLimit is populated only when API rate limiting materially
 	// impacted the run (one or more tasks failed on 429, total pause
@@ -133,6 +140,15 @@ type TaskTiming struct {
 	Duration time.Duration
 	OK       bool
 	Err      string
+}
+
+// PhaseBreakdownEntry captures the total wall-clock time spent across all
+// tasks belonging to one of the four coarse phases the Run metadata
+// section reports (#530). Coarser than PhaseTiming, which is keyed by the
+// raw execution-plan phase index instead.
+type PhaseBreakdownEntry struct {
+	Name     string
+	Duration time.Duration
 }
 
 // FailureRow describes a single entity-level failure for the failures table.
