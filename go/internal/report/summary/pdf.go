@@ -1444,10 +1444,14 @@ func renderSyncStatsLine(payload string) string {
 	return strings.Join(segments, "; ")
 }
 
-// formatAckDemotedSegment renders the #323 ACKNOWLEDGED-demotion
-// segment: "N ACKNOWLEDGED hotspot(s) left as TO_REVIEW (status not
-// supported on SonarQube Cloud)". Skipped silently when N is invalid
-// or zero.
+// formatAckDemotedSegment renders the ACKNOWLEDGED-hotspot segment: "N
+// ACKNOWLEDGED hotspot(s) inventoried but not state-synced (comments
+// still synced if present)". ACKNOWLEDGED hotspots are counted in the
+// %-synced denominator but are never state-transitioned, by policy
+// (#527) — not because SonarQube Cloud can't represent the state, as
+// the wording previously implied (Cloud's issue model expresses
+// ACKNOWLEDGED faithfully as ACCEPTED; see scanreport.HotspotIssueStatus).
+// Skipped silently when N is invalid or zero.
 func formatAckDemotedSegment(value string) string {
 	n, err := strconv.Atoi(value)
 	if err != nil || n <= 0 {
@@ -1457,7 +1461,7 @@ func formatAckDemotedSegment(value string) string {
 	if n != 1 {
 		noun = "hotspots"
 	}
-	return fmt.Sprintf("%d ACKNOWLEDGED %s left as TO_REVIEW (status not supported on SonarQube Cloud)", n, noun)
+	return fmt.Sprintf("%d ACKNOWLEDGED %s inventoried but not state-synced (comments still synced if present)", n, noun)
 }
 
 func formatSyncStatSegment(label, fraction string) string {
@@ -1879,9 +1883,10 @@ func renderKVTable(pdf *fpdf.Fpdf, title string, headers []string, widths []floa
 
 // renderRunMetadata renders the "Run metadata" section: a small key/value
 // block with the run's Started / Completed timestamps, total elapsed wall
-// time, and overall status. The Run ID already appears on the title page,
-// so it is intentionally omitted here. No-op for predictive reports,
-// where StartedAt is the zero time.
+// time, a duration breakdown across the 4 coarse migration phases (#530),
+// and overall status. The Run ID already appears on the title page, so
+// it is intentionally omitted here. No-op for predictive reports, where
+// StartedAt is the zero time.
 func renderRunMetadata(pdf *fpdf.Fpdf, summary *MigrationSummary) {
 	if summary.StartedAt.IsZero() {
 		return
@@ -1892,8 +1897,11 @@ func renderRunMetadata(pdf *fpdf.Fpdf, summary *MigrationSummary) {
 		{"Started", summary.StartedAt.Format(dateTimeLayout)},
 		{"Completed", summary.CompletedAt.Format(dateTimeLayout)},
 		{"Total elapsed", formatDuration(summary.TotalElapsed)},
-		{"Overall status", summary.OverallStatus},
 	}
+	for _, ph := range summary.PhaseBreakdown {
+		rows = append(rows, []string{ph.Name, formatDuration(ph.Duration)})
+	}
+	rows = append(rows, []string{"Overall status", summary.OverallStatus})
 	// No per-table sub-heading (the section heading already names it);
 	// pass an empty title so renderKVTable only draws the column header.
 	renderKVTable(pdf, "", []string{"Field", "Value"}, []float64{50, 130}, rows)

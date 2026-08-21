@@ -51,6 +51,12 @@ type configFileShape struct {
 	// language with no target quality profile are handled (#474):
 	// "exclude" (default), "skip", or "warn".
 	UnsupportedLanguages string `json:"unsupported_languages"`
+	// FastSync skips tagging and back-linking hotspots (and issues) that
+	// have zero user changes on the source — original state, no comments,
+	// no custom tags (#527). Defaults to false (every hotspot is tagged
+	// and back-linked, current behavior). Same FlexibleBool semantics as
+	// skip_issue_sync.
+	FastSync *FlexibleBool `json:"fast_sync"`
 
 	// Shape 2 (command-sectioned).
 	Migrate *configFileShape `json:"migrate"`
@@ -104,6 +110,8 @@ type unifiedTargetBlock struct {
 	ExcludeBranches     []string `json:"exclude_branches"`
 	// UnsupportedLanguages — see configFileShape.UnsupportedLanguages (#474).
 	UnsupportedLanguages string `json:"unsupported_languages"`
+	// FastSync — see configFileShape.FastSync (#527).
+	FastSync *FlexibleBool `json:"fast_sync"`
 }
 
 type sonarCloudBlock struct {
@@ -176,6 +184,12 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		// #474 — target.unsupported_languages wins, else the top-level field.
 		cfg.UnsupportedLanguages = resolveUnsupportedLanguages(
 			cfg.UnsupportedLanguages, s.UnsupportedLanguages)
+		// #527 — target.fast_sync wins, else the top-level field, else false.
+		var targetFastSync *FlexibleBool
+		if s.Target != nil {
+			targetFastSync = s.Target.FastSync
+		}
+		cfg.FastSync = resolveFastSync(targetFastSync, s.FastSync)
 		if cfg.Concurrency == 0 {
 			cfg.Concurrency = s.Concurrency
 		}
@@ -203,6 +217,9 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		if s.SkipProjectDataMigration != nil && s.SkipProjectDataMigration.Set {
 			cfg.SkipProjectDataMigration = s.SkipProjectDataMigration.Value
 		}
+		if s.FastSync != nil && s.FastSync.Set {
+			cfg.FastSync = s.FastSync.Value
+		}
 		return cfg
 	case s.Migrate != nil:
 		cfg := s.Migrate.toMigrateConfig()
@@ -215,6 +232,10 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		}
 		if s.SkipProjectDataMigration != nil && s.SkipProjectDataMigration.Set {
 			cfg.SkipProjectDataMigration = s.SkipProjectDataMigration.Value
+		}
+		// Same outer-wins-else-inner semantics for fast_sync (#527).
+		if s.FastSync != nil && s.FastSync.Set {
+			cfg.FastSync = s.FastSync.Value
 		}
 		return cfg
 	default:
@@ -240,6 +261,9 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		}
 		if s.SkipProjectDataMigration != nil && s.SkipProjectDataMigration.Set {
 			cfg.SkipProjectDataMigration = s.SkipProjectDataMigration.Value
+		}
+		if s.FastSync != nil && s.FastSync.Set {
+			cfg.FastSync = s.FastSync.Value
 		}
 		return cfg
 	}

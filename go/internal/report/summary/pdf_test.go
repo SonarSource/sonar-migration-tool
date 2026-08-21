@@ -622,12 +622,12 @@ func TestSuccessDetailsDroppedUserPermsLine(t *testing.T) {
 	}
 }
 
-// #356 / #323: per-project sync stats marker renders a one-line "x% of
-// items with manual changes synced" comment plus an "N ACKNOWLEDGED
-// hotspot(s) left as TO_REVIEW" segment when hotspots had to be
-// demoted. The line renders in both actual and predictive reports —
-// the predict pipeline synthesizes hotspot stats from the extract
-// (#323).
+// #356 / #323 / #527: per-project sync stats marker renders a one-line
+// "x% of items with manual changes synced" comment plus an "N
+// ACKNOWLEDGED hotspot(s) inventoried but not state-synced" segment
+// when ACKNOWLEDGED hotspots were counted in the denominator. The line
+// renders in both actual and predictive reports — the predict pipeline
+// synthesizes hotspot stats from the extract (#323).
 func TestSuccessDetailsSyncStatsLine(t *testing.T) {
 	item := EntityItem{Detail: "acme_proj|syncStats:i=42/50,h=10/12"}
 
@@ -662,18 +662,18 @@ func TestSuccessDetailsSyncStatsLine(t *testing.T) {
 			t.Errorf("did not expect sync line for plain detail, got %q", got)
 		}
 	})
-	t.Run("ack= segment renders ACKNOWLEDGED-demoted callout (#323)", func(t *testing.T) {
+	t.Run("ack= segment renders ACKNOWLEDGED callout (#527)", func(t *testing.T) {
 		got := successDetails(EntityItem{Detail: "p|syncStats:h=8/10,ack=2"}, false, false, false)
 		if !strings.Contains(got, "80% of hotspots with manual changes synced (8/10)") {
 			t.Errorf("expected hotspot sync line, got %q", got)
 		}
-		if !strings.Contains(got, "2 ACKNOWLEDGED hotspots left as TO_REVIEW") {
-			t.Errorf("expected ACKNOWLEDGED-demoted callout, got %q", got)
+		if !strings.Contains(got, "2 ACKNOWLEDGED hotspots inventoried but not state-synced") {
+			t.Errorf("expected ACKNOWLEDGED callout, got %q", got)
 		}
 	})
-	t.Run("ack=1 uses singular noun (#323)", func(t *testing.T) {
+	t.Run("ack=1 uses singular noun (#527)", func(t *testing.T) {
 		got := successDetails(EntityItem{Detail: "p|syncStats:ack=1"}, false, false, false)
-		if !strings.Contains(got, "1 ACKNOWLEDGED hotspot left as TO_REVIEW") {
+		if !strings.Contains(got, "1 ACKNOWLEDGED hotspot inventoried but not state-synced") {
 			t.Errorf("expected singular noun for ack=1, got %q", got)
 		}
 		if strings.Contains(got, "hotspots ") {

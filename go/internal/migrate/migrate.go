@@ -68,6 +68,12 @@ type MigrateConfig struct {
 	// DefaultUnsupportedLanguages.
 	UnsupportedLanguages string
 
+	// FastSync skips tagging and back-linking hotspots (and issues) that
+	// have zero user changes on the source — original state (TO_REVIEW /
+	// OPEN), no user comment, no custom tags (#527). Defaults to false:
+	// every hotspot is tagged and back-linked, the pre-#527 behavior.
+	FastSync bool
+
 	// ProjectKeyPattern is the template used to derive each target
 	// SonarQube Cloud project key from the source key, the org key, and
 	// the enterprise key. Defaults to DefaultProjectKeyPattern. Issue #138.
@@ -103,6 +109,9 @@ type Executor struct {
 	// language has no quality profile on the target organization (#474):
 	// UnsupportedLanguagesExclude / Skip / Warn.
 	UnsupportedLanguages string
+
+	// FastSync — see MigrateConfig.FastSync (#527).
+	FastSync bool
 
 	// ProjectKeyPattern is the resolved target-key template (issue #138),
 	// consumed by every task that derives a SonarQube Cloud project key
@@ -187,6 +196,7 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 		Sem:                  make(chan struct{}, cfg.Concurrency),
 		ExcludeBranches:      cfg.ExcludeBranches,
 		UnsupportedLanguages: cfg.UnsupportedLanguages,
+		FastSync:             cfg.FastSync,
 		ProjectKeyPattern:    cfg.ProjectKeyPattern,
 		Logger:               logger,
 	}

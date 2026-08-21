@@ -86,6 +86,7 @@ func init() {
 	f.String(flagPEMFilePath, "", "Path to client mTLS PEM file for the source server (maps to source.pem_file_path)")
 	f.String(flagKeyFilePath, "", "Path to client mTLS key file for the source server (maps to source.key_file_path)")
 	f.String(flagCertPassword, "", "Password for the source server mTLS client certificate (maps to source.cert_password)")
+	f.Bool(flagFastSync, false, "Skip tagging and back-linking hotspots/issues with zero user changes on the source (original state, no comments, no custom tags). Defaults to false (every hotspot is tagged and back-linked). #527.")
 	// --debug is inherited from the persistent root flag; see cmd/root.go.
 }
 
@@ -108,6 +109,7 @@ type syncIssuesConfig struct {
 	keyFilePath         string
 	certPassword        string
 	debug               bool
+	fastSync            bool
 }
 
 // loadSyncIssuesFileDefaults reads the shared --config file via the same
@@ -150,6 +152,7 @@ func loadSyncIssuesFileDefaults(path string) (syncIssuesConfig, error) {
 	cfg.certPassword = extractCfg.CertPassword
 
 	cfg.debug = migrateCfg.Debug
+	cfg.fastSync = migrateCfg.FastSync
 	return cfg, nil
 }
 
@@ -182,6 +185,7 @@ func resolveSyncIssuesConfig(cmd *cobra.Command) (syncIssuesConfig, error) {
 	applyFlagString(cmd, flagKeyFilePath, &cfg.keyFilePath)
 	applyFlagString(cmd, flagCertPassword, &cfg.certPassword)
 	applyFlagBool(cmd, flagDebug, &cfg.debug)
+	applyFlagBool(cmd, flagFastSync, &cfg.fastSync)
 
 	if cfg.exportDir == "" {
 		cfg.exportDir = "./migration-files/"
@@ -252,6 +256,7 @@ func runSyncIssuesCmd(cmd *cobra.Command, _ []string) error {
 		DefaultOrganization: cfg.defaultOrganization,
 		ProjectKeys:         cfg.projectKeys,
 		Debug:               cfg.debug,
+		FastSync:            cfg.fastSync,
 	})
 	if err != nil {
 		return fmt.Errorf("sync-issues failed: %w", err)
@@ -260,7 +265,7 @@ func runSyncIssuesCmd(cmd *cobra.Command, _ []string) error {
 	fmt.Printf("Projects synced: %d\n", summary.ProjectsSynced)
 	fmt.Printf("Issues:   %d actionable, %d synced, %d skipped (ambiguous or not found)\n",
 		summary.IssuesActionable, summary.IssuesSynced, summary.IssuesLineMismatch+summary.IssuesNotFound)
-	fmt.Printf("Hotspots: %d actionable, %d synced, %d acknowledged->to_review, %d skipped (ambiguous or not found)\n",
+	fmt.Printf("Hotspots: %d actionable, %d synced, %d acknowledged (not state-synced), %d skipped (ambiguous or not found)\n",
 		summary.HotspotsActionable, summary.HotspotsSynced, summary.HotspotsAckDemoted, summary.HotspotsLineMismatch+summary.HotspotsNotFound)
 	fmt.Println("Sync complete.")
 	return nil

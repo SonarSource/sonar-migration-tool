@@ -112,6 +112,76 @@ func IsAcknowledgedResolution(resolution string) bool {
 	return strings.EqualFold(strings.TrimSpace(resolution), "ACKNOWLEDGED")
 }
 
+// hotspotHasUserComment reports whether at least one comment on the
+// hotspot was authored by a real user, as opposed to a technical
+// comment SonarQube itself might create (#527). A non-empty Login is
+// the signal: system/automated comments carry no (or a blank) login.
+func hotspotHasUserComment(comments []hotspotComment) bool {
+	for _, c := range comments {
+		if strings.TrimSpace(c.Login) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// HotspotSyncEligibility implements #527's sync-eligibility rule:
+//
+//   - eligible: the hotspot's status is not TO_REVIEW, OR it carries a
+//     user (non-technical) comment. Eligible hotspots get the full
+//     state-transition + comment sync.
+//   - acknowledged: the hotspot is REVIEWED + ACKNOWLEDGED. This is
+//     orthogonal to eligible (an ACKNOWLEDGED hotspot is always
+//     "eligible" by the first clause, since its status is REVIEWED) but
+//     callers MUST treat it as an override: never apply the state
+//     transition, and only sync comments when hasUserComment is true.
+//     ACKNOWLEDGED hotspots are always inventoried in the reporting
+//     denominator, whether or not they carry a user comment.
+//
+// A hotspot that is neither eligible nor acknowledged (TO_REVIEW, no
+// user comment) is excluded from sync entirely — it is still resolved
+// against the target and tagged (#423), but gets no state/comment sync
+// and is not counted in the %-synced denominator.
+func HotspotSyncEligibility(status, resolution string, hasUserComment bool) (eligible, acknowledged bool) {
+	s := strings.ToUpper(strings.TrimSpace(status))
+	r := strings.ToUpper(strings.TrimSpace(resolution))
+	acknowledged = s == "REVIEWED" && r == "ACKNOWLEDGED"
+	eligible = s != "TO_REVIEW" || hasUserComment
+	return eligible, acknowledged
+}
+
+// hotspotSyncCategory buckets a source hotspot for dispatch and
+// reporting (#527).
+type hotspotSyncCategory int
+
+const (
+	// hotspotCategoryExcluded — TO_REVIEW with no user comment. Still
+	// resolved against Cloud and tagged (#423), but gets no
+	// transition/comment sync and is not counted in the %-synced
+	// denominator.
+	hotspotCategoryExcluded hotspotSyncCategory = iota
+	// hotspotCategoryAcknowledged — REVIEWED + ACKNOWLEDGED. Always
+	// tagged and always counted in the denominator; comment-synced only
+	// when it carries a user comment; never state-transitioned.
+	hotspotCategoryAcknowledged
+	// hotspotCategoryEligible — full sync: state transition + comments.
+	hotspotCategoryEligible
+)
+
+// classifyHotspotForSync applies HotspotSyncEligibility to a
+// matchableHotspot, deriving hasUserComment from its parsed comments.
+func classifyHotspotForSync(h matchableHotspot) hotspotSyncCategory {
+	eligible, acknowledged := HotspotSyncEligibility(h.Status, h.Resolution, hotspotHasUserComment(h.Comments))
+	switch {
+	case acknowledged:
+		return hotspotCategoryAcknowledged
+	case eligible:
+		return hotspotCategoryEligible
+	default:
+		return hotspotCategoryExcluded
+	}
+}
+
 // hotspotResolutionPriority orders source resolutions from most to
 // least "cautious" — used by dedupeActionableHotspots when several
 // source-branch records collapse to the same cloud hotspot. The most
@@ -205,6 +275,107 @@ func dedupeActionableHotspots(in []matchableHotspot) []matchableHotspot {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
+// Bulk Cloud issue index (#527)
+// ---------------------------------------------------------------------------
+
+// cloudIssueIndexKey mirrors the (file, rule) scope that
+// findCloudIssueCandidates used to search per-hotspot.
+type cloudIssueIndexKey struct {
+	File    string
+	RuleKey string
+}
+
+// cloudIssueIndex is a read-only-after-build, per-branch cache of Cloud
+// issue candidates keyed by (bare file path, rule key). Built once per
+// (project, branch) via buildCloudIssueIndex instead of issuing one
+// /api/issues/search call per source hotspot — the per-item search was
+// the actual cost #527 wants eliminated, since every hotspot still has
+// to be resolved and tagged regardless of sync eligibility (#423).
+type cloudIssueIndex map[cloudIssueIndexKey][]matchableIssue
+
+// cloudIssueSearchRuleChunkSize caps how many rule keys are joined into
+// one `rules=` query parameter per buildCloudIssueIndex request.
+// SonarQube doesn't document a hard limit on rules= cardinality, but
+// reverse proxies commonly cap the request line around 8KB; 60 keys
+// keeps every chunk's encoded query well under that even for long
+// "repo:RuleKey" names.
+const cloudIssueSearchRuleChunkSize = 60
+
+// buildCloudIssueIndex fetches every Cloud issue whose rule is in
+// ruleKeys, scoped to the whole project on the given branch, and
+// indexes results by (bare file path, rule key) — the same scope/shape
+// findCloudIssueCandidates used per-hotspot, just fetched once for the
+// whole branch instead of once per source item (#527).
+func buildCloudIssueIndex(ctx context.Context, e *Executor, cloudKey, orgKey, branch string, ruleKeys []string) (cloudIssueIndex, error) {
+	idx := make(cloudIssueIndex)
+	for _, chunk := range chunkStrings(ruleKeys, cloudIssueSearchRuleChunkSize) {
+		params := url.Values{}
+		params.Set("componentKeys", cloudKey)
+		params.Set("organization", orgKey)
+		params.Set("rules", strings.Join(chunk, ","))
+		if branch != "" {
+			params.Set("branch", branch)
+		}
+		// Same statuses/fields findCloudIssueCandidates asked for per-item.
+		params.Set("issueStatuses", "OPEN,CONFIRMED,FALSE_POSITIVE,ACCEPTED")
+		params.Set("additionalFields", "transitions,comments")
+		apiIssues, err := e.Cloud.Issues.SearchAll(ctx, params)
+		if err != nil {
+			return idx, err
+		}
+		for _, ai := range apiIssues {
+			m := apiIssueToMatchable(ai)
+			key := cloudIssueIndexKey{File: stripProjectKeyPrefix(m.Component), RuleKey: m.Rule}
+			idx[key] = append(idx[key], m)
+		}
+	}
+	return idx, nil
+}
+
+// chunkStrings splits ss into slices of at most n elements each.
+func chunkStrings(ss []string, n int) [][]string {
+	if n <= 0 || len(ss) == 0 {
+		return nil
+	}
+	var out [][]string
+	for i := 0; i < len(ss); i += n {
+		end := i + n
+		if end > len(ss) {
+			end = len(ss)
+		}
+		out = append(out, ss[i:end])
+	}
+	return out
+}
+
+// groupHotspotsByBranch buckets hotspots by their (source) Branch field
+// so one buildCloudIssueIndex call is issued per (project, branch) pair
+// — /api/issues/search resolves componentKeys against a single branch.
+func groupHotspotsByBranch(hotspots []matchableHotspot) map[string][]matchableHotspot {
+	out := make(map[string][]matchableHotspot)
+	for _, h := range hotspots {
+		out[h.Branch] = append(out[h.Branch], h)
+	}
+	return out
+}
+
+// distinctRuleKeys returns the de-duplicated, sorted set of RuleKey
+// values across hotspots (sorted for deterministic chunk boundaries).
+func distinctRuleKeys(hotspots []matchableHotspot) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, h := range hotspots {
+		if h.RuleKey == "" || seen[h.RuleKey] {
+			continue
+		}
+		seen[h.RuleKey] = true
+		out = append(out, h.RuleKey)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ---------------------------------------------------------------------------
 // Main task entry point
 // ---------------------------------------------------------------------------
 
@@ -262,6 +433,67 @@ type syncHotspotResult struct {
 	Error string
 }
 
+// classifiedHotspot pairs a source hotspot with the sync category
+// classifyHotspotForSync assigned it, computed once up front so the
+// dispatch loop doesn't re-derive it per goroutine.
+type classifiedHotspot struct {
+	h   matchableHotspot
+	cat hotspotSyncCategory
+}
+
+// hotspotCategoryCounts tallies a project's hotspots by sync category,
+// for logging and for the #527 %-synced reporting denominator.
+type hotspotCategoryCounts struct {
+	eligible, ack, excluded, triaged int
+}
+
+// classifyAndCountHotspots classifies every hotspot for dispatch and
+// tallies the category counts, in one pass. Split out of
+// syncProjectHotspots to keep that function's cognitive complexity low.
+func classifyAndCountHotspots(all []matchableHotspot) ([]classifiedHotspot, hotspotCategoryCounts) {
+	items := make([]classifiedHotspot, 0, len(all))
+	var counts hotspotCategoryCounts
+	for _, h := range all {
+		if hotspotHasManualChanges(h) {
+			counts.triaged++
+		}
+		cat := classifyHotspotForSync(h)
+		switch cat {
+		case hotspotCategoryEligible:
+			counts.eligible++
+		case hotspotCategoryAcknowledged:
+			counts.ack++
+		default:
+			counts.excluded++
+		}
+		items = append(items, classifiedHotspot{h: h, cat: cat})
+	}
+	return items, counts
+}
+
+// buildBranchIndexes builds one cloudIssueIndex per branch present among
+// all's hotspots (#527's bulk-fetch, see buildCloudIssueIndex). A branch
+// whose index build fails is recorded in the returned failure set rather
+// than aborting the whole project — its hotspots are skipped this run.
+// Split out of syncProjectHotspots to keep that function's cognitive
+// complexity low.
+func buildBranchIndexes(ctx context.Context, e *Executor, input syncHotspotInput, all []matchableHotspot) (map[string]cloudIssueIndex, map[string]bool) {
+	byBranch := groupHotspotsByBranch(all)
+	indexes := make(map[string]cloudIssueIndex, len(byBranch))
+	failedBranches := make(map[string]bool, len(byBranch))
+	for branch, hs := range byBranch {
+		idx, err := buildCloudIssueIndex(ctx, e, input.CloudKey, input.OrgKey, branch, distinctRuleKeys(hs))
+		if err != nil {
+			logAPIWarn(e.Logger, "syncHotspotMetadata: bulk candidate index build failed", err,
+				"project", input.CloudKey, "branch", branch, "rules", len(distinctRuleKeys(hs)))
+			failedBranches[branch] = true
+			continue
+		}
+		indexes[branch] = idx
+	}
+	return indexes, failedBranches
+}
+
 // syncProjectHotspots synchronises hotspot metadata for a single
 // project using the targeted per-actionable-source-hotspot search
 // approach introduced in #356. Replaces the previous fetch-all + FIFO
@@ -283,22 +515,6 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 	if len(sourceHotspots) == 0 {
 		return result
 	}
-	// Every source hotspot needs a target visit now, not only the triaged
-	// ones. SonarQube Cloud dropped hotspots on 2026-07-01, so each one lands
-	// as an ordinary issue and has to be tagged `sqs-hotspot` to stay
-	// identifiable as a former hotspot (#423) — including TO_REVIEW hotspots,
-	// which carry no triage at all and were previously filtered out here.
-	//
-	// hotspotHasManualChanges is retained because the predict pipeline still
-	// uses it to report how many hotspots carry migratable triage.
-	actionable := make([]matchableHotspot, 0, len(sourceHotspots))
-	triaged := 0
-	for _, h := range sourceHotspots {
-		if hotspotHasManualChanges(h) {
-			triaged++
-		}
-		actionable = append(actionable, h)
-	}
 	// #323 follow-up: the source extract carries one hotspot record per
 	// branch of the SQS project, but a single SQC hotspot exists per
 	// (file, line, rule). Without dedup, two source records that map
@@ -309,14 +525,32 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 	// ACKNOWLEDGED demotion is lost. Dedup by (component, ruleKey,
 	// line) before dispatch, picking the most cautious resolution per
 	// group so an ACK on any branch wins over SAFE/FIXED on another.
-	preDedupCount := len(actionable)
-	actionable = dedupeActionableHotspots(actionable)
-	if dropped := preDedupCount - len(actionable); dropped > 0 {
+	preDedupCount := len(sourceHotspots)
+	all := dedupeActionableHotspots(sourceHotspots)
+	if dropped := preDedupCount - len(all); dropped > 0 {
 		e.Logger.Info("syncHotspotMetadata: deduplicated cross-branch source hotspots",
-			"project", input.CloudKey, "before", preDedupCount, "after", len(actionable), "dropped", dropped)
+			"project", input.CloudKey, "before", preDedupCount, "after", len(all), "dropped", dropped)
 	}
-	result.Stats.Actionable = int64(len(actionable))
-	if len(actionable) == 0 {
+
+	// Every source hotspot still needs a target visit: SonarQube Cloud
+	// dropped hotspots on 2026-07-01, so each one lands as an ordinary
+	// issue and has to be tagged `sqs-hotspot` to stay identifiable as a
+	// former hotspot (#423), regardless of whether it needs a state/
+	// comment sync. What #527 changes is which hotspots get that
+	// state/comment sync applied, and what counts toward the %-synced
+	// denominator:
+	//
+	//   - hotspotCategoryExcluded    (TO_REVIEW, no user comment): tagged
+	//     only, not counted in the denominator.
+	//   - hotspotCategoryAcknowledged (REVIEWED+ACKNOWLEDGED): tagged
+	//     always, comment-synced only with a user comment, never
+	//     state-transitioned, always counted in the denominator.
+	//   - hotspotCategoryEligible: tagged + fully state/comment synced,
+	//     counted in the denominator.
+	items, counts := classifyAndCountHotspots(all)
+	result.Stats.Actionable = int64(counts.eligible + counts.ack)
+	result.Stats.AckDemoted = int64(counts.ack)
+	if len(items) == 0 {
 		e.Logger.Info("syncHotspotMetadata: no source hotspots to sync", "project", input.CloudKey, "source_total", len(sourceHotspots))
 		return result
 	}
@@ -333,47 +567,72 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 	e.Logger.Info("syncHotspotMetadata: syncing hotspots as issues",
 		"project", input.CloudKey,
 		"source_total", len(sourceHotspots),
-		"to_sync", len(actionable),
-		"carrying_triage", triaged,
+		"eligible", counts.eligible,
+		"acknowledged", counts.ack,
+		"excluded", counts.excluded,
+		"carrying_triage", counts.triaged,
 	)
 
-	// 3 + 4. Per-actionable-source: targeted search + resolve by
-	// (ruleKey, line). Race-safety: actionable is read-only, each
-	// goroutine takes one hotspot by value, stats counters are
-	// atomic.
+	// 3. Bulk-fetch Cloud issue candidates once per (project, branch) —
+	// #527: this replaces the previous one-search-per-hotspot approach,
+	// which was the actual cost driver since every hotspot (eligible or
+	// not) had to be resolved for tagging (#423). Built as an in-memory
+	// index; per-hotspot resolution below is then a zero-network lookup.
+	indexes, failedBranches := buildBranchIndexes(ctx, e, input, all)
+
+	// 4. Resolve + dispatch every hotspot from the cached index. Race-
+	// safety: items/indexes are read-only from here, each goroutine takes
+	// one item by value, stats counters are atomic.
 	// Public base URL for back-links — prefer the SQS sonar.core.serverBaseURL
 	// setting over the (often localhost) connection URL (#321).
 	baseURL := resolveSourceBaseURL(e, input.ServerURL)
 
-	var a, b, c, ack atomic.Int64
+	resolveParams := hotspotResolveParams{CloudKey: input.CloudKey, BaseURL: baseURL, SourceKey: input.ServerKey}
+	var a, b, c atomic.Int64
 	label := "Project key " + input.CloudKey + " hotspot sync:"
-	runProjectSyncLoop(ctx, e, actionable, label, 10,
-		func(gctx context.Context, src matchableHotspot) {
-			outcome := resolveAndSyncHotspot(gctx, e, input.CloudKey, input.OrgKey, baseURL, input.ServerKey, src, counter)
+	runProjectSyncLoop(ctx, e, items, label, 10,
+		func(gctx context.Context, it classifiedHotspot) {
+			if failedBranches[it.h.Branch] {
+				return
+			}
+			outcome := resolveAndSyncHotspot(gctx, e, resolveParams, it.h, it.cat, indexes[it.h.Branch], counter)
+			if it.cat == hotspotCategoryExcluded {
+				return // tagged only; not in the denominator, so not counted as b/c
+			}
 			switch outcome {
 			case syncOutcomeSynced:
-				a.Add(1)
+				if it.cat == hotspotCategoryEligible {
+					a.Add(1)
+				}
 			case syncOutcomeLineMismatch:
 				b.Add(1)
 			case syncOutcomeNotFound:
 				c.Add(1)
-			case syncOutcomeAckDemoted:
-				ack.Add(1)
 			}
 		})
 	result.Stats.A = a.Load()
 	result.Stats.B = b.Load()
 	result.Stats.C = c.Load()
-	result.Stats.AckDemoted = ack.Load()
 	return result
 }
 
-// resolveAndSyncHotspot searches Cloud for hotspots in the source
-// hotspot's file, then resolves via the scored matcher (matchscore.go,
-// issue #412). Returns the case a/b/c/lookup outcome.
-func resolveAndSyncHotspot(ctx context.Context, e *Executor, cloudKey, orgKey, baseURL, sourceKey string, src matchableHotspot, counter *TaskCounter) syncOutcome {
+// hotspotResolveParams bundles the per-project constants resolveAndSyncHotspot
+// needs alongside each hotspot, keeping the function's parameter count
+// within the project's limit — every hotspot in a project shares the same
+// CloudKey/BaseURL/SourceKey.
+type hotspotResolveParams struct {
+	CloudKey  string
+	BaseURL   string
+	SourceKey string
+}
+
+// resolveAndSyncHotspot resolves the source hotspot's target issue from
+// the pre-built per-branch cloudIssueIndex (#527) — a plain map lookup,
+// no network call — then applies whatever sync the hotspot's category
+// calls for. Returns the case a/b/c outcome.
+func resolveAndSyncHotspot(ctx context.Context, e *Executor, p hotspotResolveParams, src matchableHotspot, cat hotspotSyncCategory, index cloudIssueIndex, counter *TaskCounter) syncOutcome {
 	// Strip "projectKey:" and any trailing "moduleKey:" segments so the bare
-	// file path can be used in the cloud search. Multi-module (monorepo)
+	// file path can be used against the index. Multi-module (monorepo)
 	// projects add a module key after the project key; SonarCloud has no
 	// module layer so only the plain file path matches the cloud component.
 	filePath := stripProjectKeyPrefix(src.Component)
@@ -383,19 +642,14 @@ func resolveAndSyncHotspot(ctx context.Context, e *Executor, cloudKey, orgKey, b
 	}
 	// The target counterpart is an ISSUE, not a hotspot: SonarQube Cloud has
 	// had no hotspots since 2026-07-01, so /api/hotspots/search can never
-	// return the migrated finding. Reuse the issue matcher, which additionally
-	// scopes the search server-side by rule — something the hotspot endpoint
-	// never accepted (#423).
-	candidates, err := findCloudIssueCandidates(ctx, e, cloudKey, orgKey, filePath, src.RuleKey, src.Branch)
-	if err != nil {
-		logAPIWarn(e.Logger, "syncHotspotMetadata: cloud candidate lookup failed", err,
-			"project", cloudKey, "source_key", src.Key, "file", filePath, "branch", src.Branch)
-		return syncOutcomeLookupError
-	}
+	// return the migrated finding. The index was built from the issue
+	// matcher's shape, which additionally scopes by rule — something the
+	// hotspot endpoint never accepted (#423).
+	candidates := index[cloudIssueIndexKey{File: filePath, RuleKey: src.RuleKey}]
 	target, outcome := classifyIssueCandidatesByLine(candidates, src.Line)
 	switch outcome {
 	case syncOutcomeSynced:
-		if err := syncOneHotspotAsIssue(ctx, e, src, target, baseURL, sourceKey); err != nil {
+		if err := syncOneHotspotAsIssue(ctx, e, src, target, p.BaseURL, p.SourceKey, cat); err != nil {
 			counter.Fail()
 			logAPIWarn(e.Logger, "syncHotspotMetadata: hotspot sync failed", err,
 				"source_key", src.Key, "cloud_key", target.Key)
@@ -427,34 +681,58 @@ func resolveAndSyncHotspot(ctx context.Context, e *Executor, cloudKey, orgKey, b
 // sqs-hotspot tag applied last so its presence signals that everything before
 // it completed.
 //
-// Unlike the issue sync, this runs for EVERY hotspot, including a TO_REVIEW one
-// with no triage and no comments, because the tag itself is the deliverable:
+// This runs for EVERY hotspot, including a TO_REVIEW one with no triage and
+// no comments, because the back-link and tag are normally always applied:
 // with no hotspot concept left on the target, the tag is the only thing that
-// keeps a former hotspot identifiable.
-func syncOneHotspotAsIssue(ctx context.Context, e *Executor, src matchableHotspot, target matchableIssue, baseURL, projectKey string) error {
+// keeps a former hotspot identifiable (#423). Which of the transition/
+// comment steps actually run depends on cat, per #527's eligibility rules:
+//
+//   - hotspotCategoryEligible: transition + comments, as before.
+//   - hotspotCategoryAcknowledged: never transitioned (the state is not
+//     synced by policy, not because Cloud can't represent it); comments
+//     synced only if the hotspot carries a user comment.
+//   - hotspotCategoryExcluded: neither transition nor comments.
+//
+// e.FastSync (#527 follow-up) additionally skips the back-link and tag
+// steps for hotspotCategoryExcluded hotspots — TO_REVIEW with no user
+// comment is "zero user changes" on the source, and back-linking to a
+// hotspot nobody will ever review has no audience. It's opt-in (default
+// false) because it trades away #423's identifiability guarantee for
+// exactly this subset. ACKNOWLEDGED is deliberately excluded from this
+// skip: reaching that state is itself a user action, so it's never
+// "zero changes" even without a comment.
+func syncOneHotspotAsIssue(ctx context.Context, e *Executor, src matchableHotspot, target matchableIssue, baseURL, projectKey string, cat hotspotSyncCategory) error {
+	var firstErr error
+	skipTagAndLink := e.FastSync && cat == hotspotCategoryExcluded
+
 	// 1. Review state. The hotspot's status/resolution maps onto the unified
 	// issue-status enum, and the existing issue machinery turns that into a
 	// transition — including gating "accept" on the Cloud issue actually
-	// offering it (#322).
-	//
-	// ACKNOWLEDGED no longer has to be demoted to SAFE. That conflation was
-	// forced by Cloud's hotspot API having no ACKNOWLEDGED resolution; the
-	// issue model expresses it faithfully as ACCEPTED.
-	synthetic := matchableIssue{
-		Key:         src.Key,
-		IssueStatus: scanreport.HotspotIssueStatus(src.Status, src.Resolution),
-		Resolution:  src.Resolution,
-	}
-	var firstErr error
-	if syncIssueTransition(ctx, e, target.Key, synthetic, target.Transitions) {
-		firstErr = fmt.Errorf("transition to %s failed", synthetic.IssueStatus)
+	// offering it (#322). Skipped for ACKNOWLEDGED and excluded hotspots.
+	if cat == hotspotCategoryEligible {
+		synthetic := matchableIssue{
+			Key:         src.Key,
+			IssueStatus: scanreport.HotspotIssueStatus(src.Status, src.Resolution),
+			Resolution:  src.Resolution,
+		}
+		if syncIssueTransition(ctx, e, target.Key, synthetic, target.Transitions) {
+			firstErr = fmt.Errorf("transition to %s failed", synthetic.IssueStatus)
+		}
 	}
 
-	// 2. Review comments, via the issue comment path.
-	if len(src.Comments) > 0 {
+	// 2. Review comments, via the issue comment path. Eligible hotspots
+	// always sync comments; ACKNOWLEDGED hotspots only when they carry a
+	// user comment (#527); excluded hotspots never do.
+	syncComments := cat == hotspotCategoryEligible ||
+		(cat == hotspotCategoryAcknowledged && hotspotHasUserComment(src.Comments))
+	if syncComments && len(src.Comments) > 0 {
 		if syncIssueComments(ctx, e, target.Key, hotspotCommentsAsIssueComments(src.Comments), target.Comments) && firstErr == nil {
 			firstErr = fmt.Errorf("one or more comments failed")
 		}
+	}
+
+	if skipTagAndLink {
+		return firstErr
 	}
 
 	// 3. Back-link to the origin (#321). It still points at the source

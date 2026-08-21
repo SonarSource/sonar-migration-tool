@@ -26,6 +26,7 @@ func newMigrateTestCmd() *cobra.Command {
 	f.String("target_task", "", "")
 	f.Bool("skip_profiles", false, "")
 	f.Bool("debug", false, "")
+	f.Bool(flagFastSync, false, "")
 	f.String("default_organization", "", "")
 	// Deprecated aliases — registered so tests can exercise back-compat (#406).
 	f.String("token", "", "")
@@ -63,6 +64,49 @@ func TestBuildMigrateConfig_DefaultOrganization_CLIOverridesConfig(t *testing.T)
 	}
 	if cfg.DefaultOrganization != "cli-default" {
 		t.Errorf("CLI flag should override config, got %q", cfg.DefaultOrganization)
+	}
+}
+
+// Issue #527: --fast_sync overrides the config file's fast_sync value.
+func TestBuildMigrateConfig_FastSync_CLIOverridesConfig(t *testing.T) {
+	path := writeMigrateConfig(t, `{
+		"fast_sync": false,
+		"target": {
+			"url": "https://sonarcloud.io/",
+			"token": "t"
+		}
+	}`)
+	cmd := newMigrateTestCmd()
+	_ = cmd.Flags().Set("config", path)
+	_ = cmd.Flags().Set(flagFastSync, "true")
+
+	cfg, err := buildMigrateConfig(cmd, nil)
+	if err != nil {
+		t.Fatalf("buildMigrateConfig: %v", err)
+	}
+	if !cfg.FastSync {
+		t.Error("CLI --fast_sync should override config file's false, got FastSync=false")
+	}
+}
+
+// Config file value is used when --fast_sync is absent.
+func TestBuildMigrateConfig_FastSync_ConfigOnly(t *testing.T) {
+	path := writeMigrateConfig(t, `{
+		"fast_sync": true,
+		"target": {
+			"url": "https://sonarcloud.io/",
+			"token": "t"
+		}
+	}`)
+	cmd := newMigrateTestCmd()
+	_ = cmd.Flags().Set("config", path)
+
+	cfg, err := buildMigrateConfig(cmd, nil)
+	if err != nil {
+		t.Fatalf("buildMigrateConfig: %v", err)
+	}
+	if !cfg.FastSync {
+		t.Error("expected config file's fast_sync=true to be used, got FastSync=false")
 	}
 }
 

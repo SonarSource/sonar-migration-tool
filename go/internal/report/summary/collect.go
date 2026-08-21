@@ -132,6 +132,7 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 		sum.OverallStatus = rt.OverallStatus
 		sum.Phases = rt.Phases
 		sum.Tasks = rt.Tasks
+		sum.PhaseBreakdown = buildPhaseBreakdown(rt.Tasks)
 		sum.Failures = rt.Failures
 		sum.Warnings = rt.Warnings
 		sum.Branches = rt.Branches

@@ -5,6 +5,10 @@
 - Started: 2026-06-05 12:00:00
 - Completed: 2026-06-05 12:01:30
 - Total elapsed: 1m30s
+- Global objects provisioning: 10s
+- Projects configuration provisioning: 45s
+- Project data migration: 15s
+- Issue and Hotspot sync: 20s
 - Overall status: partial
 
 ## Executive Summary
