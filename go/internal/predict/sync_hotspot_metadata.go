@@ -17,10 +17,14 @@ import (
 // extract's getProjectHotspotsFull task and emits one synthetic
 // syncHotspotMetadata JSONL record per project so the predictive
 // report can surface the same sync stats / NearPerfect routing as the
-// real migrate (#323). The predict pipeline can compute the
-// ACKNOWLEDGED demotion count exactly (it depends only on source-side
-// resolution); it cannot predict line_mismatch / not_found and
-// assumes a 1:1 match for non-ACKNOWLEDGED actionable hotspots.
+// real migrate (#323). It applies the same sync-eligibility rule real
+// migrate uses (migrate.HotspotSyncEligibility, #527): a hotspot counts
+// toward "actionable" only if it is not TO_REVIEW, has a user comment,
+// or is ACKNOWLEDGED (inventoried but never state-synced). The predict
+// pipeline can compute this exactly (it depends only on source-side
+// status/resolution/comments); it cannot predict line_mismatch /
+// not_found and assumes a 1:1 match for eligible, non-ACKNOWLEDGED
+// hotspots.
 //
 // Schema matches what runSyncHotspotMetadata writes in real migrate
 // so the existing collectSyncStats / collectSyncOutcome paths render
@@ -43,9 +47,13 @@ func synthesizeSyncHotspotMetadata(exportDir, runDir string, extractMapping stru
 	// Index (server_url, source key) → cloud_project_key.
 	cloudByProject := buildCloudByProject(projects)
 
+	// eligible/ack mirror the real-migrate hotspotSyncCategory split
+	// (#527): eligible hotspots would get a full state/comment sync,
+	// ACKNOWLEDGED ones are inventoried but never state-transitioned.
+	// Excluded hotspots (TO_REVIEW, no user comment) are not counted.
 	type counts struct {
-		actionable int
-		ack        int
+		eligible int
+		ack      int
 	}
 	perProject := make(map[string]*counts, len(cloudByProject))
 
@@ -60,8 +68,9 @@ func synthesizeSyncHotspotMetadata(exportDir, runDir string, extractMapping stru
 		}
 		status := jsonStringField(item.Data, "status")
 		resolution := jsonStringField(item.Data, "resolution")
-		hasComments := jsonHasNonEmptyArray(item.Data, "comment")
-		if !migrate.HotspotHasManualChanges(status, resolution, hasComments) {
+		hasUserComment := jsonHasUserComment(item.Data)
+		eligible, acknowledged := migrate.HotspotSyncEligibility(status, resolution, hasUserComment)
+		if !eligible && !acknowledged {
 			continue
 		}
 		c, ok := perProject[cloudKey]
@@ -69,9 +78,10 @@ func synthesizeSyncHotspotMetadata(exportDir, runDir string, extractMapping stru
 			c = &counts{}
 			perProject[cloudKey] = c
 		}
-		c.actionable++
-		if migrate.IsAcknowledgedResolution(resolution) {
+		if acknowledged {
 			c.ack++
+		} else {
+			c.eligible++
 		}
 	}
 
@@ -86,11 +96,11 @@ func synthesizeSyncHotspotMetadata(exportDir, runDir string, extractMapping stru
 	for cloudKey, c := range perProject {
 		rec := map[string]any{
 			"cloud_project_key":    cloudKey,
-			"synced":               c.actionable - c.ack,
+			"synced":               c.eligible,
 			"line_mismatch":        0,
 			"not_found":            0,
 			"acknowledged_demoted": c.ack,
-			"actionable":           c.actionable,
+			"actionable":           c.eligible + c.ack,
 		}
 		b, err := json.Marshal(rec)
 		if err != nil {
@@ -103,15 +113,16 @@ func synthesizeSyncHotspotMetadata(exportDir, runDir string, extractMapping stru
 	return nil
 }
 
-// jsonHasNonEmptyArray reports whether the named top-level field is a
-// JSON array with at least one element. Used to detect hotspot
-// comment presence without parsing the full comment shape.
-func jsonHasNonEmptyArray(raw json.RawMessage, key string) bool {
+// jsonHasUserComment reports whether the hotspot's raw JSON "comment"
+// array contains at least one entry with a non-empty "login" — the
+// #527 "user comment" signal, mirroring migrate.hotspotHasUserComment
+// for the raw-JSON extract shape.
+func jsonHasUserComment(raw json.RawMessage) bool {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return false
 	}
-	v, ok := obj[key]
+	v, ok := obj["comment"]
 	if !ok {
 		return false
 	}
@@ -119,5 +130,10 @@ func jsonHasNonEmptyArray(raw json.RawMessage, key string) bool {
 	if err := json.Unmarshal(v, &arr); err != nil {
 		return false
 	}
-	return len(arr) > 0
+	for _, c := range arr {
+		if jsonStringField(c, "login") != "" {
+			return true
+		}
+	}
+	return false
 }
