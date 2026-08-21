@@ -126,33 +126,55 @@ func fetchCETasks(ctx context.Context, e *Executor, taskName string, taskTypes [
 		})
 		<-e.Sem
 		if err != nil {
-			if common.IsHTTPError(err, 400) {
-				if allowedTypes == nil {
-					var httpErr *common.HTTPError
-					if errors.As(err, &httpErr) {
-						if valid, ok := parseValidCETaskTypes(httpErr.Message()); ok {
-							allowedTypes = make(map[string]bool, len(valid))
-							for _, v := range valid {
-								allowedTypes[v] = true
-							}
-						}
-					}
-				}
-				if !loggedFirstUnsupported {
-					e.Logger.Info(taskName+" skipped task type", "type", taskType, "err", err)
-					loggedFirstUnsupported = true
-				} else {
-					e.Logger.Warn(taskName+" skipped task type", "type", taskType, "err", err)
-				}
-				continue
+			if !common.IsHTTPError(err, 400) {
+				return err
 			}
-			return err
+			if allowedTypes == nil {
+				allowedTypes = allowedCETaskTypesFromError(err)
+			}
+			logUnsupportedCETaskType(e, taskName, taskType, err, &loggedFirstUnsupported)
+			continue
 		}
 		if err := w.WriteChunk(enrichAll(items, map[string]any{"serverUrl": e.ServerURL})); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// allowedCETaskTypesFromError extracts the server's real supported CE
+// task types from a 400 response's error message (issue #533). Returns
+// nil when the error isn't an *common.HTTPError or its message doesn't
+// match the expected "must be one of: [...]" shape — callers then fall
+// back to the pre-#533 per-type warning behavior.
+func allowedCETaskTypesFromError(err error) map[string]bool {
+	var httpErr *common.HTTPError
+	if !errors.As(err, &httpErr) {
+		return nil
+	}
+	valid, ok := parseValidCETaskTypes(httpErr.Message())
+	if !ok {
+		return nil
+	}
+	allowed := make(map[string]bool, len(valid))
+	for _, v := range valid {
+		allowed[v] = true
+	}
+	return allowed
+}
+
+// logUnsupportedCETaskType logs a "skipped task type" message: INFO for
+// the first occurrence this run (expected on many servers, not a
+// problem), WARN for any later occurrence — only reachable when the
+// error message didn't parse and fetchCETasks falls back to warning on
+// every unsupported type (issue #533).
+func logUnsupportedCETaskType(e *Executor, taskName, taskType string, err error, loggedFirst *bool) {
+	if !*loggedFirst {
+		e.Logger.Info(taskName+" skipped task type", "type", taskType, "err", err)
+		*loggedFirst = true
+		return
+	}
+	e.Logger.Warn(taskName+" skipped task type", "type", taskType, "err", err)
 }
 
 // forEachProjectCE runs a per-project CE/analysis query across task types.
