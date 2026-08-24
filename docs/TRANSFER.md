@@ -185,19 +185,35 @@ sonar-migration-tool transfer \
   --default_organization my-org
 ```
 
+`--project_key` is always compiled as a full-match regex, implicitly anchored
+with `^` and `$` (issue #529). A plain key like `my-project` matches only
+itself, so single-project usage is unaffected. A pattern transfers every
+source project whose key **fully** matches it in one run:
+
+```bash
+# Transfers every project whose key starts with "BANKING_" — not a key
+# that merely contains "BANKING_" somewhere in the middle.
+sonar-migration-tool transfer \
+  --source_url https://sonarqube.example.com \
+  --source_token sqp_xxx \
+  --project_key "BANKING_.+" \
+  --target_token squ_xxx \
+  --default_organization my-org
+```
+
 Omit `--project_key` to transfer **every** project visible to the token (in which case the rest of the manual workflow applies — see [MIGRATE.md](MIGRATE.md) for the per-project `organizations.csv` mapping step).
 
 ---
 
 ## Flags
-<!-- updated: 2026-07-27_23:05:00 -->
+<!-- updated: 2026-08-21_00:00:00 -->
 
 | Flag | Config key | Description |
 |------|------------|-------------|
 | `-c, --config` | — | Path to a JSON configuration file (see [ADVANCED-CONFIG.md](ADVANCED-CONFIG.md)) |
 | `--source_url` | `source.url` | SonarQube Server URL |
 | `--source_token` | `source.token` | SonarQube Server token |
-| `--project_key` | `project_key` | Project key to transfer. Omit to transfer every project visible to the token. |
+| `--project_key` | `project_key` | Project key (or regexp) to transfer. Always compiled as a full-match regex, implicitly anchored with `^` and `$` — a plain key matches only itself; a pattern like `BANKING_.+` transfers every project whose key starts with `BANKING_`. Omit to transfer every project visible to the token. |
 | `--target_url` | `target.url` | SonarQube Cloud URL (default: `https://sonarcloud.io/`) |
 | `--target_token` | `target.token` | SonarQube Cloud token |
 | `--default_organization` | `target.default_organization` | SonarQube Cloud organization key |

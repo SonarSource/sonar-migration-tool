@@ -5,6 +5,11 @@
 package cmd
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -14,6 +19,33 @@ import (
 	"github.com/sonar-solutions/sonar-migration-tool/internal/migrate"
 	"github.com/spf13/cobra"
 )
+
+// newProjectListingMockServer serves the endpoints extract.ListAllProjectKeys
+// needs (version detection, edition detection, and a paginated,
+// unfiltered /api/projects/search), returning the given project keys.
+func newProjectListingMockServer(t *testing.T, keys []string) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/server/version", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "2025.4.0.12345")
+	})
+	mux.HandleFunc("GET /api/system/info", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"edition": "developer"})
+	})
+	mux.HandleFunc("GET /api/projects/search", func(w http.ResponseWriter, r *http.Request) {
+		components := make([]map[string]any, 0, len(keys))
+		for _, k := range keys {
+			components = append(components, map[string]any{"key": k, "qualifier": "TRK"})
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"paging":     map[string]any{"total": len(keys)},
+			"components": components,
+		})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
 
 // newTransferTestCmd mirrors transferCmd's flag set so resolveTransferConfig
 // can be exercised in isolation without invoking RunE.
@@ -328,6 +360,40 @@ func TestValidateTransferConfig_UnsupportedLanguages(t *testing.T) {
 	}
 }
 
+// #529: --project_key is always compiled as an anchored regex; an
+// uncompilable pattern must be rejected up front, naming the flag.
+func TestValidateTransferConfig_InvalidRegex(t *testing.T) {
+	cfg := transferConfig{
+		sourceURL:           "https://sq.example.com",
+		sourceToken:         "sq-tok",
+		projectKey:          "BANKING_(",
+		targetToken:         "sc-tok",
+		defaultOrganization: "my-org",
+	}
+	err := validateTransferConfig(cfg)
+	if err == nil {
+		t.Fatal("expected an error for an uncompilable --project_key pattern")
+	}
+	if !contains(err.Error(), "--"+flagProjectKey) {
+		t.Errorf("error %q does not mention --%s", err.Error(), flagProjectKey)
+	}
+}
+
+// A plain literal key (the overwhelmingly common case) must still pass
+// validation — it's a trivially valid regex that matches only itself.
+func TestValidateTransferConfig_PlainKeyIsValidPattern(t *testing.T) {
+	cfg := transferConfig{
+		sourceURL:           "https://sq.example.com",
+		sourceToken:         "sq-tok",
+		projectKey:          "my-project",
+		targetToken:         "sc-tok",
+		defaultOrganization: "my-org",
+	}
+	if err := validateTransferConfig(cfg); err != nil {
+		t.Errorf("expected no error for a plain key, got %v", err)
+	}
+}
+
 // #383: a misspelled --project_key passes validation but silently
 // returns zero projects from /api/projects/search?projects=<typo>.
 // ensureTransferProjectExtracted closes that gap by checking the
@@ -353,7 +419,7 @@ func TestEnsureTransferProjectExtracted_MissingProject(t *testing.T) {
 		projectKey: "missspelled-key",
 		exportDir:  dir,
 	}
-	err := ensureTransferProjectExtracted(cfg)
+	err := ensureTransferProjectExtracted(cfg, []string{"missspelled-key"})
 	if err == nil {
 		t.Fatal("expected error for misspelled project key, got nil")
 	}
@@ -361,6 +427,34 @@ func TestEnsureTransferProjectExtracted_MissingProject(t *testing.T) {
 		if !contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err.Error(), want)
 		}
+	}
+}
+
+// #529: with multiple matched keys, ensureTransferProjectExtracted must
+// name only the ones actually missing from the extract, not the whole set.
+func TestEnsureTransferProjectExtracted_MultipleKeysOneMissing(t *testing.T) {
+	dir := t.TempDir()
+	srvURL := "http://localhost:10000"
+
+	extractDir := filepath.Join(dir, "2026-06-12-01")
+	if err := os.MkdirAll(filepath.Join(extractDir, "getProjects"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, extractDir, "extract.json", `{"url":"`+srvURL+`/"}`)
+	writeFile(t, filepath.Join(extractDir, "getProjects"), "results.1.jsonl",
+		`{"key":"BANKING_a","serverUrl":"`+srvURL+`/"}`+"\n"+
+			`{"key":"BANKING_b","serverUrl":"`+srvURL+`/"}`+"\n")
+
+	cfg := transferConfig{sourceURL: srvURL, projectKey: "BANKING_.+", exportDir: dir}
+	err := ensureTransferProjectExtracted(cfg, []string{"BANKING_a", "BANKING_b", "BANKING_c"})
+	if err == nil {
+		t.Fatal("expected error naming the missing key, got nil")
+	}
+	if !contains(err.Error(), "BANKING_c") {
+		t.Errorf("error %q should name the missing key BANKING_c", err.Error())
+	}
+	if contains(err.Error(), "BANKING_a") || contains(err.Error(), "BANKING_b") {
+		t.Errorf("error %q should not name the keys that WERE extracted", err.Error())
 	}
 }
 
@@ -389,7 +483,7 @@ func TestEnsureTransferProjectExtracted_PresentProject(t *testing.T) {
 				`{"key":"my-project","serverUrl":"`+c.recordURL+`"}`+"\n")
 
 			cfg := transferConfig{sourceURL: c.cfgURL, projectKey: "my-project", exportDir: dir}
-			if err := ensureTransferProjectExtracted(cfg); err != nil {
+			if err := ensureTransferProjectExtracted(cfg, []string{"my-project"}); err != nil {
 				t.Errorf("expected no error, got %v", err)
 			}
 		})
@@ -507,4 +601,54 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// #529: resolveTransferProjectKeys must return every source project key
+// that fully matches --project_key as an anchored (^...$) regex — a
+// substring match (e.g. a key with "BANKING_" in the middle) must NOT be
+// included.
+func TestResolveTransferProjectKeys_PatternMatchesAnchored(t *testing.T) {
+	srv := newProjectListingMockServer(t, []string{
+		"BANKING_core", "BANKING_payments", "other-project", "not-BANKING_at-all",
+	})
+
+	cfg := transferConfig{sourceURL: srv.URL, sourceToken: "tok", projectKey: "BANKING_.+"}
+	got, err := resolveTransferProjectKeys(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("resolveTransferProjectKeys: %v", err)
+	}
+	want := []string{"BANKING_core", "BANKING_payments"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v (sorted, anchored match only)", got, want)
+	}
+}
+
+// A plain literal key must resolve to itself only, even among other
+// projects whose keys share a substring.
+func TestResolveTransferProjectKeys_LiteralKeyMatchesItself(t *testing.T) {
+	srv := newProjectListingMockServer(t, []string{"my-project", "my-project-2", "other"})
+
+	cfg := transferConfig{sourceURL: srv.URL, sourceToken: "tok", projectKey: "my-project"}
+	got, err := resolveTransferProjectKeys(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("resolveTransferProjectKeys: %v", err)
+	}
+	if want := []string{"my-project"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// A pattern matching nothing on the source must produce a clear error
+// rather than silently proceeding with zero projects.
+func TestResolveTransferProjectKeys_NoMatchIsAnError(t *testing.T) {
+	srv := newProjectListingMockServer(t, []string{"other-project"})
+
+	cfg := transferConfig{sourceURL: srv.URL, sourceToken: "tok", projectKey: "BANKING_.+"}
+	_, err := resolveTransferProjectKeys(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected an error when the pattern matches no source project")
+	}
+	if !contains(err.Error(), "BANKING_.+") {
+		t.Errorf("error %q should name the pattern", err.Error())
+	}
 }
