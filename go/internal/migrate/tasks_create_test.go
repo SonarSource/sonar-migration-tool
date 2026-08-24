@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -289,9 +290,21 @@ func TestCreateProjects_AlreadyExistsInDifferentOrg(t *testing.T) {
 	}
 
 	items, _ := e.Store.ReadAll("createProjects")
-	if len(items) != 0 {
-		t.Fatalf("expected NO createProjects records when key exists in another org, got %d: %s",
+	// #525: an explicit failure record is written (not omitted) so the
+	// report can show a real diagnosis instead of relying on the generic
+	// requests.log HTTP-status scan.
+	if len(items) != 1 {
+		t.Fatalf("expected exactly 1 createProjects record when key exists in another org, got %d: %s",
 			len(items), items)
+	}
+	if status := extractField(items[0], "status"); status != "failed" {
+		t.Errorf(`expected status "failed", got %q: %s`, status, items[0])
+	}
+	errMsg := extractField(items[0], "error")
+	for _, want := range []string{"different", "organization", "unique across the entire enterprise"} {
+		if !strings.Contains(errMsg, want) {
+			t.Errorf("error message %q does not mention %q", errMsg, want)
+		}
 	}
 }
 

@@ -100,9 +100,27 @@ func runCreateProjects(ctx context.Context, e *Executor) error {
 				}
 				if !exists {
 					counter.Fail()
-					e.Logger.Warn("createProjects: key already exists but project is not in target org, skipping",
+					e.Logger.Warn("createProjects: key already exists but project is not in target org",
 						"source_key", key, "cloud_key", cloudKey, "org", orgKey)
-					return nil
+					// #525: write an explicit failure record instead of
+					// silently dropping the project. Without this, the
+					// project only ends up in the report's Failed bucket
+					// incidentally (via a generic requests.log HTTP-status
+					// scan) with SonarQube Cloud's raw "already exists"
+					// string, which doesn't explain that the conflict is
+					// cross-organization or what to do about it.
+					msg := fmt.Sprintf(
+						"project key %q already exists under a different SonarQube Cloud organization than %q — "+
+							"SonarQube Cloud project keys must be unique across the entire enterprise; "+
+							"rename the conflicting project on the target, or choose a different --project_key_pattern",
+						cloudKey, orgKey)
+					result := common.EnrichRaw(item, map[string]any{
+						"cloud_project_key":  cloudKey,
+						"sonarcloud_org_key": orgKey,
+						"status":             "failed",
+						"error":              msg,
+					})
+					return w.WriteOne(result)
 				}
 				counter.Success()
 				e.Logger.Info("createProjects: already exists", "source_key", key, "cloud_key", cloudKey, "org", orgKey)
