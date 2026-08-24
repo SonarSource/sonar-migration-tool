@@ -301,7 +301,7 @@ func TestCreateProjects_AlreadyExistsInDifferentOrg(t *testing.T) {
 		t.Errorf(`expected status "failed", got %q: %s`, status, items[0])
 	}
 	errMsg := extractField(items[0], "error")
-	for _, want := range []string{"different", "organization", "unique across the entire enterprise"} {
+	for _, want := range []string{"different", "organization", "unique across the entire SonarQube Cloud instance"} {
 		if !strings.Contains(errMsg, want) {
 			t.Errorf("error message %q does not mention %q", errMsg, want)
 		}

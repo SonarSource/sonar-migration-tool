@@ -111,7 +111,8 @@ func runCreateProjects(ctx context.Context, e *Executor) error {
 					// cross-organization or what to do about it.
 					msg := fmt.Sprintf(
 						"project key %q already exists under a different SonarQube Cloud organization than %q — "+
-							"SonarQube Cloud project keys must be unique across the entire enterprise; "+
+							"SonarQube Cloud project keys must be unique across the entire SonarQube Cloud instance "+
+							"(not just within one enterprise or organization); "+
 							"rename the conflicting project on the target, or choose a different --project_key_pattern",
 						cloudKey, orgKey)
 					result := common.EnrichRaw(item, map[string]any{
