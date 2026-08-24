@@ -186,6 +186,32 @@ func initClient(ctx context.Context, cfg ExtractConfig) (*sqapi.Client, *RawClie
 	return client, raw, version, edition, nil
 }
 
+// ListAllProjectKeys connects to the source SonarQube Server and returns
+// every project key visible to the token, unfiltered, across all pages.
+// Used to resolve a --project_key regex pattern (#529) before the real,
+// key-scoped extract run — the only call that should fan out across
+// every matched project's per-project tasks. Reuses initClient, so this
+// pre-flight call gets the same version detection, auth and mTLS
+// handling as the real extract run.
+func ListAllProjectKeys(ctx context.Context, cfg ExtractConfig) ([]string, error) {
+	cfg.applyDefaults()
+	_, raw, _, _, err := initClient(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	items, err := raw.GetPaginated(ctx, PaginatedOpts{Path: "api/projects/search", ResultKey: "components"})
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(items))
+	for _, item := range items {
+		if k := common.ExtractField(item, "key"); k != "" {
+			keys = append(keys, k)
+		}
+	}
+	return keys, nil
+}
+
 func prepareExtractDir(cfg ExtractConfig) (string, string, error) {
 	extractID := cfg.ExtractID
 	if extractID == "" {

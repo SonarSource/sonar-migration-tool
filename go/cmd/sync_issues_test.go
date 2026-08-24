@@ -34,6 +34,7 @@ func newSyncIssuesTestCmd() *cobra.Command {
 	f.String(flagKeyFilePath, "", "")
 	f.String(flagCertPassword, "", "")
 	f.Bool(flagDebug, false, "")
+	f.Bool(flagFastSync, false, "")
 	return cmd
 }
 
@@ -138,6 +139,40 @@ func TestResolveSyncIssuesConfig_CLIOverridesConfig(t *testing.T) {
 	}
 	if want := []string{"proj-a", "proj-b"}; !reflect.DeepEqual(cfg.projectKeys, want) {
 		t.Errorf("projectKeys: got %v, want %v", cfg.projectKeys, want)
+	}
+}
+
+// Issue #527: --fast_sync overrides the config file; the config file
+// value is used when the flag is absent; defaults to false otherwise.
+func TestResolveSyncIssuesConfig_FastSync(t *testing.T) {
+	path := writeSyncIssuesConfig(t, `{
+		"fast_sync": false,
+		"source": {"url": "https://sq.example.com", "token": "tok"},
+		"target": {"token": "ct", "default_organization": "org"}
+	}`)
+
+	cmd := newSyncIssuesTestCmd()
+	if err := cmd.ParseFlags([]string{"-c", path, "--" + flagFastSync}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := resolveSyncIssuesConfig(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.fastSync {
+		t.Error("CLI --fast_sync should override config file's false")
+	}
+
+	cmd2 := newSyncIssuesTestCmd()
+	if err := cmd2.ParseFlags([]string{"-c", path}); err != nil {
+		t.Fatal(err)
+	}
+	cfg2, err := resolveSyncIssuesConfig(cmd2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg2.fastSync {
+		t.Error("expected config file's fast_sync=false to be used when flag absent")
 	}
 }
 

@@ -11,6 +11,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -41,6 +43,7 @@ const (
 	flagExportDir                = "export_dir"
 	flagSkipIssueSync            = "skip_issue_sync"
 	flagSkipProjectDataMigration = "skip_project_data_migration"
+	flagFastSync                 = "fast_sync"
 	flagConcurrency              = "concurrency"
 	flagTimeout                  = "timeout"
 	flagPEMFilePath              = "pem_file_path"
@@ -97,28 +100,39 @@ var transferTargetTasks = []string{
 
 var transferCmd = &cobra.Command{
 	Use:   "transfer",
-	Short: "Transfer a single project from " + sqServerName + " to " + scCloudName,
-	Long: `Transfer migrates a ` + sqServerName + ` project to ` + scCloudName + ` in one command.
+	Short: "Transfer one or more projects from " + sqServerName + " to " + scCloudName,
+	Long: `Transfer migrates one or more ` + sqServerName + ` projects to ` + scCloudName + ` in one command.
 
 It chains extract → structure → mappings → migrate automatically, eliminating
 the manual CSV-editing step. Credentials for both sides are required.
 
-Transfer is project-scoped. It migrates the specified project together with
-the quality gate and quality profiles it uses, its permissions and project
-settings, and the project's full issue and Security Hotspot history —
-including externally imported issues — with triage state preserved. Global
-entities such as portfolios, global settings, permission templates, and
-default gate/profile selection are not modified; use the migrate command for
-a full instance migration.
+Transfer is project-scoped. --project_key is always compiled as a full-match
+regex, implicitly anchored with ^ and $ (#529) — a plain key like "my-project"
+matches only itself, while a pattern like "BANKING_.+" transfers every source
+project whose key starts with "BANKING_" (not just one containing that
+substring). Every matched project migrates together with the quality gate and
+quality profiles it uses, its permissions and project settings, and its full
+issue and Security Hotspot history — including externally imported issues —
+with triage state preserved. Global entities such as portfolios, global
+settings, permission templates, and default gate/profile selection are not
+modified; use the migrate command for a full instance migration.
 
 Issue and hotspot project data is always extracted and imported for transfer
 unless --skip_project_data_migration is passed.
 
-Example (flags):
+Example (flags, single project):
   sonar-migration-tool transfer \
     --source_url https://sonarqube.example.com \
     --source_token sqp_xxx \
     --project_key my-project \
+    --target_token squ_xxx \
+    --default_organization my-org
+
+Example (flags, every project matching a pattern):
+  sonar-migration-tool transfer \
+    --source_url https://sonarqube.example.com \
+    --source_token sqp_xxx \
+    --project_key "BANKING_.+" \
     --target_token squ_xxx \
     --default_organization my-org
 
@@ -162,7 +176,7 @@ func init() {
 	f.StringP(flagConfig, "c", "", "Path to JSON configuration file (common shape with source / target sections)")
 	f.String(flagSourceURL, "", sqServerName+" URL (maps to source.url)")
 	f.String(flagSourceToken, "", sqServerName+" token (maps to source.token)")
-	f.String(flagProjectKey, "", "Project key to transfer (required; transfer is project-scoped — also accepts top-level project_key in the config file)")
+	f.String(flagProjectKey, "", "Project key (or regexp) to transfer (required; transfer is project-scoped — also accepts top-level project_key in the config file). Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"BANKING_.+\" matches every key starting with BANKING_, not just a key containing that substring. #529.")
 	f.String(flagTargetURL, "", scCloudName+" URL (maps to target.url, default: https://sonarcloud.io/)")
 	f.String(flagTargetToken, "", scCloudName+" token (maps to target.token)")
 	f.String(flagDefaultOrg, "", scCloudName+" organization key (maps to target.default_organization)")
@@ -172,6 +186,7 @@ func init() {
 	f.String(flagExportDir, "./migration-files/", "Working directory for intermediate files (maps to export_directory)")
 	f.Bool(flagSkipIssueSync, false, "Skip the final per-issue and per-hotspot metadata sync (#299). Same semantics as the skip_issue_sync config-file field — defaults to false (sync happens); pass the flag to skip.")
 	f.Bool(flagSkipProjectDataMigration, false, "Skip the entire project-data migration: importProjectData and the trailing per-issue/per-hotspot sync (#303). Defaults to false (data is migrated); pass the flag to skip.")
+	f.Bool(flagFastSync, false, "Skip tagging and back-linking hotspots/issues with zero user changes on the source (original state, no comments, no custom tags). Defaults to false (every hotspot is tagged and back-linked). #527.")
 	f.Int(flagConcurrency, 0, "Max concurrent requests (default: 25) (maps to concurrency)")
 	f.Int(flagTimeout, 0, "HTTP request timeout in seconds (maps to timeout; default: 60)")
 	f.String(flagPEMFilePath, "", "Path to client mTLS PEM file for the source server (maps to source.pem_file_path)")
@@ -207,6 +222,7 @@ type transferConfig struct {
 	debug                    bool
 	excludeBranches          []string
 	unsupportedLanguages     string
+	fastSync                 bool
 }
 
 func applyFlagString(cmd *cobra.Command, name string, target *string) {
@@ -297,6 +313,7 @@ func loadTransferFileDefaults(path string) (transferConfig, error) {
 	cfg.debug = migrateCfg.Debug
 	cfg.excludeBranches = migrateCfg.ExcludeBranches
 	cfg.unsupportedLanguages = migrateCfg.UnsupportedLanguages
+	cfg.fastSync = migrateCfg.FastSync
 	return cfg, nil
 }
 
@@ -349,6 +366,7 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 		cfg.excludeBranches, _ = cmd.Flags().GetStringSlice(flagExcludeBranches)
 	}
 	applyFlagString(cmd, flagUnsupportedLanguages, &cfg.unsupportedLanguages)
+	applyFlagBool(cmd, flagFastSync, &cfg.fastSync)
 
 	if cfg.exportDir == "" {
 		cfg.exportDir = "./migration-files/"
@@ -378,12 +396,28 @@ func validateTransferConfig(cfg transferConfig) error {
 	if cfg.projectKey == "" {
 		return fmt.Errorf("project key is required (--%s or project_key in config file) — transfer is project-scoped by design", flagProjectKey)
 	}
+	// #529 — --project_key is always compiled as an anchored regex (a
+	// literal key with no metacharacters matches only itself). Reject an
+	// invalid pattern up front rather than failing deep in extract.
+	if _, err := anchoredProjectKeyPattern(cfg.projectKey); err != nil {
+		return fmt.Errorf("invalid --%s pattern %q: %w", flagProjectKey, cfg.projectKey, err)
+	}
 	// #474 — reject an unknown handling mode up front rather than silently
 	// falling back to the default after the extract phase has already run.
 	if _, err := migrate.ParseUnsupportedLanguageMode(cfg.unsupportedLanguages); err != nil {
 		return fmt.Errorf("--%s: %w", flagUnsupportedLanguages, err)
 	}
 	return nil
+}
+
+// anchoredProjectKeyPattern compiles pattern as a full-match regex,
+// implicitly anchored with ^ and $ (#529) — "BANKING_.+" matches only
+// keys starting with "BANKING_", never a key with that substring
+// somewhere in the middle. A plain literal key with no regex
+// metacharacters matches only itself, so single-project usage behaves
+// exactly as before.
+func anchoredProjectKeyPattern(pattern string) (*regexp.Regexp, error) {
+	return regexp.Compile("^(?:" + pattern + ")$")
 }
 
 func runTransfer(cmd *cobra.Command, _ []string) error {
@@ -444,11 +478,52 @@ func warnSkippedProjects(skipped []string) {
 	}
 }
 
+// resolveTransferProjectKeys lists every project on the source and
+// returns those whose key fully matches cfg.projectKey as an anchored
+// regex (#529) — a literal key with no metacharacters matches only
+// itself, preserving today's single-project behavior. Prints a one-line
+// confirmation of the matched set so a broad pattern's blast radius is
+// visible before extraction starts.
+func resolveTransferProjectKeys(ctx context.Context, cfg transferConfig) ([]string, error) {
+	re, err := anchoredProjectKeyPattern(cfg.projectKey)
+	if err != nil {
+		// Already validated by validateTransferConfig; defensive only.
+		return nil, fmt.Errorf("invalid --%s pattern %q: %w", flagProjectKey, cfg.projectKey, err)
+	}
+	allKeys, err := extract.ListAllProjectKeys(ctx, extract.ExtractConfig{
+		URL:          cfg.sourceURL,
+		Token:        cfg.sourceToken,
+		Timeout:      cfg.timeout,
+		PEMFilePath:  cfg.pemFilePath,
+		KeyFilePath:  cfg.keyFilePath,
+		CertPassword: cfg.certPassword,
+		Debug:        cfg.debug,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing projects on %s: %w", cfg.sourceURL, err)
+	}
+	var matched []string
+	for _, k := range allKeys {
+		if re.MatchString(k) {
+			matched = append(matched, k)
+		}
+	}
+	if len(matched) == 0 {
+		return nil, fmt.Errorf(
+			"no project on %s matches --%s %q "+
+				"(keys are case-sensitive; verify with GET /api/projects/search)",
+			cfg.sourceURL, flagProjectKey, cfg.projectKey)
+	}
+	sort.Strings(matched)
+	fmt.Printf("Matched %d project(s) for --%s %q: %s\n", len(matched), flagProjectKey, cfg.projectKey, strings.Join(matched, ", "))
+	return matched, nil
+}
+
 func runTransferExtract(ctx context.Context, cfg transferConfig) ([]string, error) {
 	printPhase(1, 4, "Extracting from "+sqServerName+"...")
-	var projectKeys []string
-	if cfg.projectKey != "" {
-		projectKeys = []string{cfg.projectKey}
+	projectKeys, err := resolveTransferProjectKeys(ctx, cfg)
+	if err != nil {
+		return nil, err
 	}
 	skipped, err := extract.RunExtract(ctx, extract.ExtractConfig{
 		URL:             cfg.sourceURL,
@@ -470,24 +545,26 @@ func runTransferExtract(ctx context.Context, cfg transferConfig) ([]string, erro
 	if err != nil {
 		return nil, fmt.Errorf("extract failed: %w", err)
 	}
-	// #383: validateTransferConfig already required a project key, but
-	// it doesn't catch misspellings — /api/projects/search?projects=<typo>
-	// returns 200 with zero components, the extract chain silently writes
-	// nothing, and downstream phases fail with a confusing "no projects
-	// found" once mappings runs. Verify post-extract that the requested
+	// #383 / #529: validateTransferConfig already required a project key
+	// pattern, but resolveTransferProjectKeys and validateTransferConfig
+	// don't catch every downstream failure mode — e.g. a matched project
+	// deleted or losing permissions between the pre-flight listing and
+	// the real extract call. Verify post-extract that every matched
 	// project actually surfaced in getProjects; if not, abort with a
-	// clear error that names the exact value the operator typed.
-	if err := ensureTransferProjectExtracted(cfg); err != nil {
+	// clear error naming the missing key(s) rather than letting
+	// downstream phases fail with a confusing "no projects found".
+	if err := ensureTransferProjectExtracted(cfg, projectKeys); err != nil {
 		return nil, err
 	}
 	return skipped, nil
 }
 
 // ensureTransferProjectExtracted reads the latest extract's getProjects
-// records for the configured source URL and returns an error when the
-// configured --project_key isn't among them. Called only when
-// cfg.projectKey is non-empty (validateTransferConfig enforces that).
-func ensureTransferProjectExtracted(cfg transferConfig) error {
+// records for the configured source URL and returns an error naming any
+// of wantKeys that isn't among them. wantKeys is the project-key set
+// resolveTransferProjectKeys already matched against --project_key
+// (#529).
+func ensureTransferProjectExtracted(cfg transferConfig, wantKeys []string) error {
 	mapping, err := structure.GetUniqueExtracts(cfg.exportDir)
 	if err != nil {
 		return fmt.Errorf("scanning extract directory %s: %w", cfg.exportDir, err)
@@ -496,18 +573,26 @@ func ensureTransferProjectExtracted(cfg transferConfig) error {
 	// The extract pipeline normalises URLs with a trailing slash; the
 	// config may or may not. Strip slashes on both sides before matching.
 	wantURL := strings.TrimRight(cfg.sourceURL, "/")
+	extracted := make(map[string]bool, len(items))
 	for _, item := range items {
 		if strings.TrimRight(item.ServerURL, "/") != wantURL {
 			continue
 		}
-		if common.ExtractField(item.Data, "key") == cfg.projectKey {
-			return nil
+		extracted[common.ExtractField(item.Data, "key")] = true
+	}
+	var missing []string
+	for _, k := range wantKeys {
+		if !extracted[k] {
+			missing = append(missing, k)
 		}
 	}
+	if len(missing) == 0 {
+		return nil
+	}
 	return fmt.Errorf(
-		"project %q does not exist on source server %s — check the --%s value "+
+		"project(s) %s matched --%s %q but do not exist on source server %s "+
 			"(keys are case-sensitive; verify with GET /api/projects/search?projects=%s)",
-		cfg.projectKey, cfg.sourceURL, flagProjectKey, cfg.projectKey)
+		strings.Join(missing, ", "), flagProjectKey, cfg.projectKey, cfg.sourceURL, strings.Join(missing, ","))
 }
 
 func runTransferStructure(cfg transferConfig) error {
@@ -550,6 +635,7 @@ func runTransferMigrate(ctx context.Context, cfg transferConfig) (string, error)
 		Debug:                    cfg.debug,
 		ExcludeBranches:          cfg.excludeBranches,
 		UnsupportedLanguages:     cfg.unsupportedLanguages,
+		FastSync:                 cfg.fastSync,
 		ProjectKeyPattern:        cfg.projectKeyPattern,
 	})
 	if err != nil {

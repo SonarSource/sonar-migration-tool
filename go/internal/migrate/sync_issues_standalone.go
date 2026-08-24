@@ -47,6 +47,9 @@ type SyncIssuesConfig struct {
 	ProjectKeys []string
 
 	Debug bool
+
+	// FastSync — see MigrateConfig.FastSync (#527).
+	FastSync bool
 }
 
 func (cfg *SyncIssuesConfig) applyDefaults() {
@@ -162,6 +165,7 @@ func RunSyncIssues(ctx context.Context, cfg SyncIssuesConfig) (SyncIssuesSummary
 		Mapping:           mapping,
 		Sem:               make(chan struct{}, cfg.Concurrency),
 		ProjectKeyPattern: cfg.ProjectKeyPattern,
+		FastSync:          cfg.FastSync,
 		Logger:            logger,
 	}
 

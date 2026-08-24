@@ -1329,35 +1329,23 @@ func TestCollectSummaryNCDFallbackMovesProjectToPartial(t *testing.T) {
 	}
 
 	// Project A → Partial with the explanatory Issue.
-	var sawA bool
-	for _, p := range projSection.Partial {
-		if p.Name != "Project A" {
-			continue
-		}
-		sawA = true
-		joined := strings.Join(p.Issues, " | ")
-		if !strings.Contains(joined, "reference branch") {
-			t.Errorf("Project A Partial Issues must mention the substituted NCD type, got %q", joined)
-		}
-		if !strings.Contains(joined, "replaced by the org default") {
-			t.Errorf("Project A Partial Issues must mention org-default substitution, got %q", joined)
-		}
+	projA := findItemByName(projSection.Partial, "Project A")
+	if projA == nil {
+		t.Fatalf("Project A must appear in Partial, got Partial=%v", projSection.Partial)
 	}
-	if !sawA {
-		t.Errorf("Project A must appear in Partial, got Partial=%v", projSection.Partial)
+	joined := strings.Join(projA.Issues, " | ")
+	if !strings.Contains(joined, "reference branch") {
+		t.Errorf("Project A Partial Issues must mention the substituted NCD type, got %q", joined)
+	}
+	if !strings.Contains(joined, "replaced by the org default") {
+		t.Errorf("Project A Partial Issues must mention org-default substitution, got %q", joined)
 	}
 
-	// Project B (supported NCD type) → stays in Succeeded.
-	var sawB bool
-	for _, p := range projSection.Succeeded {
-		if p.Name == "Project B" {
-			sawB = true
-		}
-		if p.Name == "Project A" {
-			t.Errorf("Project A must NOT remain in Succeeded after Partial move")
-		}
+	// Project B (supported NCD type) → stays in Succeeded; Project A must not.
+	if findItemByName(projSection.Succeeded, "Project A") != nil {
+		t.Errorf("Project A must NOT remain in Succeeded after Partial move")
 	}
-	if !sawB {
+	if findItemByName(projSection.Succeeded, "Project B") == nil {
 		t.Errorf("Project B must remain in Succeeded, got Succeeded=%v", projSection.Succeeded)
 	}
 }
@@ -1523,6 +1511,17 @@ func findSection(s *MigrationSummary, name string) *Section {
 	return nil
 }
 
+// findItemByName returns a pointer to the first item in items whose Name
+// matches, or nil if none does.
+func findItemByName(items []EntityItem, name string) *EntityItem {
+	for i := range items {
+		if items[i].Name == name {
+			return &items[i]
+		}
+	}
+	return nil
+}
+
 func writeExtractMeta(t *testing.T, extractDir, url string) {
 	t.Helper()
 	if err := os.MkdirAll(extractDir, 0o755); err != nil {
@@ -1667,9 +1666,10 @@ func TestCollectLimitations_GlobalProjectDataSkipped(t *testing.T) {
 	}
 }
 
-// #323: encodeSyncStats must emit "ack=N" alongside i=/h= when any
-// ACKNOWLEDGED hotspots had to be left in TO_REVIEW. Only emitted
-// when N > 0 so unrelated projects keep their compact marker.
+// #323 / #527: encodeSyncStats must emit "ack=N" alongside i=/h= when
+// any ACKNOWLEDGED hotspots were inventoried (counted in the
+// denominator but never state-synced). Only emitted when N > 0 so
+// unrelated projects keep their compact marker.
 func TestEncodeSyncStatsAckSegment(t *testing.T) {
 	cases := []struct {
 		name string
@@ -1736,10 +1736,10 @@ func TestCollectSyncStatsReadsAcknowledgedDemoted(t *testing.T) {
 	}
 }
 
-// #323: collectSyncOutcome must route a project to NearPerfect when
-// the hotspot record carries acknowledged_demoted > 0 — even if
+// #323 / #527: collectSyncOutcome must route a project to NearPerfect
+// when the hotspot record carries acknowledged_demoted > 0 — even if
 // line_mismatch and not_found are both zero (everything matched
-// cleanly, but ACKNOWLEDGED hotspots couldn't preserve their state).
+// cleanly, but ACKNOWLEDGED hotspots are never state-synced by policy).
 func TestCollectSyncOutcomeNearPerfectOnAcknowledgedDemoted(t *testing.T) {
 	dir := t.TempDir()
 	writeTaskJSONL(t, dir, "syncHotspotMetadata", []map[string]any{

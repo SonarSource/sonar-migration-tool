@@ -292,6 +292,76 @@ func TestLoadMigrateConfigFile_SkipIssueSync(t *testing.T) {
 	}
 }
 
+// Issue #527: top-level `fast_sync` parses into MigrateConfig.FastSync
+// one-for-one. Defaults to false (every hotspot is tagged and back-linked).
+func TestLoadMigrateConfigFile_FastSync(t *testing.T) {
+	cases := []struct {
+		name     string
+		body     string
+		wantFast bool
+	}{
+		{"absent (default)", `{"target": {"url": "u", "token": "t"}}`, false},
+		{"top-level true", `{"fast_sync": true, "target": {"url": "u", "token": "t"}}`, true},
+		{"top-level false", `{"fast_sync": false, "target": {"url": "u", "token": "t"}}`, false},
+		{"top-level string on", `{"fast_sync": "on", "target": {"url": "u", "token": "t"}}`, true},
+		{
+			"target overrides top-level (target true, top false)",
+			`{"fast_sync": false, "target": {"url": "u", "token": "t", "fast_sync": true}}`,
+			true,
+		},
+		{
+			"target overrides top-level (target false, top true)",
+			`{"fast_sync": true, "target": {"url": "u", "token": "t", "fast_sync": false}}`,
+			false,
+		},
+		{
+			"target unset falls back to top-level",
+			`{"fast_sync": true, "target": {"url": "u", "token": "t"}}`,
+			true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := dir + "/fast_sync.json"
+			if err := os.WriteFile(path, []byte(c.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadMigrateConfigFile(path)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if cfg.FastSync != c.wantFast {
+				t.Errorf("FastSync: got %v, want %v", cfg.FastSync, c.wantFast)
+			}
+		})
+	}
+}
+
+// Issue #527: fast_sync also parses in the "migrate"-sectioned shape, with
+// the outer (command-sectioned) field winning when both are set.
+func TestLoadMigrateConfigFile_FastSync_MigrateSectionedShape(t *testing.T) {
+	body := `{
+  "fast_sync": true,
+  "migrate": {
+    "url": "u", "token": "t",
+    "fast_sync": false
+  }
+}`
+	dir := t.TempDir()
+	path := dir + "/fast_sync_sectioned.json"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadMigrateConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.FastSync {
+		t.Errorf("FastSync: got false, want true (outer wins)")
+	}
+}
+
 // Issue #281: target.default_organization parses into
 // MigrateConfig.DefaultOrganization.
 func TestLoadMigrateConfigFileUnifiedShape_DefaultOrganization(t *testing.T) {
