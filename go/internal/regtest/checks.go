@@ -180,7 +180,10 @@ func totalsByProject(category, api, sqsParam, scParam string) func(context.Conte
 	}
 }
 
-var checkIssueTotals = totalsByProject("Issues", "api/issues/search", "projectKeys", "projects")
+// SQS's api/issues/search has no "projectKeys" param (it silently ignores
+// unknown params and returns the whole-instance total) — the real param is
+// "components". SC's api/issues/search does accept "projects" directly.
+var checkIssueTotals = totalsByProject("Issues", "api/issues/search", "components", "projects")
 
 func checkIssueDistribution(filterKey, filterValue string) func(ctx context.Context, s *Suite) []CheckResult {
 	return func(ctx context.Context, s *Suite) []CheckResult {
@@ -191,7 +194,7 @@ func checkIssueDistribution(filterKey, filterValue string) func(ctx context.Cont
 		var results []CheckResult
 		for _, proj := range projects {
 			sqsCount, err := countWithFilter(ctx, s.sqsRaw, "api/issues/search",
-				urlParams("projectKeys", proj), filterKey, filterValue)
+				urlParams("components", proj), filterKey, filterValue)
 			if err != nil {
 				results = append(results, makeError("Issues", fmt.Sprintf("%s: %s", filterValue, proj), err))
 				continue
@@ -211,7 +214,10 @@ func checkIssueDistribution(filterKey, filterValue string) func(ctx context.Cont
 
 // ── Hotspots ──────────────────────────────────────────────────────────
 
-var checkHotspotTotals = totalsByProject("Hotspots", "api/hotspots/search", "projectKey", "projectKey")
+// SQS's api/hotspots/search param is "project" (singular); SC's is
+// "projectKey". Using "projectKey" on the SQS side is silently accepted
+// but ignored, so it must not be reused verbatim from the SC side.
+var checkHotspotTotals = totalsByProject("Hotspots", "api/hotspots/search", "project", "projectKey")
 
 func checkHotspotByStatus(status string) func(ctx context.Context, s *Suite) []CheckResult {
 	return func(ctx context.Context, s *Suite) []CheckResult {
@@ -222,7 +228,7 @@ func checkHotspotByStatus(status string) func(ctx context.Context, s *Suite) []C
 		var results []CheckResult
 		for _, proj := range projects {
 			sqsCount, err := countWithFilter(ctx, s.sqsRaw, "api/hotspots/search",
-				urlParams("projectKey", proj), "status", status)
+				urlParams("project", proj), "status", status)
 			if err != nil {
 				results = append(results, makeError("Hotspots", fmt.Sprintf("%s: %s", status, proj), err))
 				continue
@@ -642,8 +648,11 @@ func checkGlobalSettings(ctx context.Context, s *Suite) []CheckResult {
 	if err != nil {
 		return []CheckResult{makeError("Settings", nameGlobalSettings, err)}
 	}
+	// Global (org-level, non-project) settings are fetched with
+	// "organization", not "component" — SC's api/settings/values treats
+	// an org key passed as "component" as an unknown component and 404s.
 	scCount, err := queryCount(ctx, s.scRaw, apiSettingsValues,
-		urlParams("component", s.cfg.SCOrg), "settings")
+		urlParams("organization", s.cfg.SCOrg), "settings")
 	if err != nil {
 		return []CheckResult{makeError("Settings", nameGlobalSettings, err)}
 	}
