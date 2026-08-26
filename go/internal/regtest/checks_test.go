@@ -303,6 +303,108 @@ func writeProjectSettingsResponse(w http.ResponseWriter, r *http.Request, settin
 	}
 }
 
+// TestCheckIssueDistributionQueriesFilteredCounts exercises the SQS/SC
+// issue-count comparison path in the closure returned by
+// checkIssueDistribution, verifying both the filter parameter and the
+// project-key parameter names documented above checkIssueTotals: SQS takes
+// "componentKeys", SC takes "projects".
+func TestCheckIssueDistributionQueriesFilteredCounts(t *testing.T) {
+	sqs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/issues/search" {
+			if got := r.URL.Query().Get("severities"); got != "MAJOR" {
+				t.Errorf("SQS request missing severities=MAJOR filter, got %q", got)
+			}
+			if got := r.URL.Query().Get("componentKeys"); got != "proj-a" {
+				t.Errorf("SQS request missing componentKeys=proj-a, got %q", got)
+			}
+			_, _ = w.Write([]byte(`{"paging":{"pageIndex":1,"pageSize":1,"total":5}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer sqs.Close()
+	sc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/issues/search" {
+			if got := r.URL.Query().Get("projects"); got == "" {
+				t.Errorf("SC request missing projects param")
+			}
+			_, _ = w.Write([]byte(`{"paging":{"pageIndex":1,"pageSize":1,"total":3}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer sc.Close()
+
+	s := newTestSuite(t, sqs, sc)
+	s.cfg.ProjectKeys = []string{"proj-a"}
+
+	check := checkIssueDistribution("severities", "MAJOR")
+	results := check(context.Background(), s)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if r.SQSValue != "5" || r.SCValue != "3" {
+		t.Errorf("got SQS=%s SC=%s, want 5/3", r.SQSValue, r.SCValue)
+	}
+	if r.Match {
+		t.Errorf("expected Match=false for differing counts")
+	}
+}
+
+// TestCheckHotspotByStatusQueriesFilteredCounts exercises the SQS/SC
+// hotspot-count comparison path in the closure returned by
+// checkHotspotByStatus, verifying the project-key parameter names
+// documented above checkHotspotTotals: SQS takes "project" (singular), SC
+// takes "projectKey".
+func TestCheckHotspotByStatusQueriesFilteredCounts(t *testing.T) {
+	sqs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/hotspots/search" {
+			if got := r.URL.Query().Get("status"); got != "TO_REVIEW" {
+				t.Errorf("SQS request missing status=TO_REVIEW filter, got %q", got)
+			}
+			if got := r.URL.Query().Get("project"); got != "proj-a" {
+				t.Errorf("SQS request missing project=proj-a, got %q", got)
+			}
+			_, _ = w.Write([]byte(`{"paging":{"pageIndex":1,"pageSize":1,"total":4}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer sqs.Close()
+	sc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/hotspots/search" {
+			if got := r.URL.Query().Get("projectKey"); got == "" {
+				t.Errorf("SC request missing projectKey param")
+			}
+			_, _ = w.Write([]byte(`{"paging":{"pageIndex":1,"pageSize":1,"total":4}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer sc.Close()
+
+	s := newTestSuite(t, sqs, sc)
+	s.cfg.ProjectKeys = []string{"proj-a"}
+
+	check := checkHotspotByStatus("TO_REVIEW")
+	results := check(context.Background(), s)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if r.SQSValue != "4" || r.SCValue != "4" {
+		t.Errorf("got SQS=%s SC=%s, want 4/4", r.SQSValue, r.SCValue)
+	}
+	if !r.Match {
+		t.Errorf("expected Match=true for equal counts")
+	}
+}
+
 func itoa(n int) string {
 	if n == 0 {
 		return "0"
