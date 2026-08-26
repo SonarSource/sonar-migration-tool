@@ -5,6 +5,8 @@ Migrate your SonarQube Server to SonarQube Cloud — projects, configuration, so
 
 The tool ships as a single static binary. No installer, no runtime dependencies. Download it, run one command, and your projects land in SonarQube Cloud with their full issue history intact.
 
+See [what's new](WHATSNEW.md) in the latest release.
+
 ---
 
 ## Contents
