@@ -93,10 +93,12 @@ func phaseByIndex(idx int) WizardPhase {
 }
 
 // generateRunID creates an ISO-date-prefixed run ID like
-// "2026-04-20-01" (issue #108). YYYY-MM-DD sorts chronologically
+// "2026-04-20-0001" (issue #108). YYYY-MM-DD sorts chronologically
 // when run directories are listed alphabetically and is
-// internationally readable. Mirrors migrate.generateRunID — keep
-// them in sync.
+// internationally readable. The sequence number is zero-padded to
+// four digits so lexicographic and numeric ordering agree up to
+// 9999 runs/day (#542). Mirrors migrate.generateRunID — keep them in
+// sync.
 func generateRunID(directory string) string {
 	today := time.Now().UTC().Format("2006-01-02")
 	entries, _ := os.ReadDir(directory)
@@ -106,7 +108,7 @@ func generateRunID(directory string) string {
 			count++
 		}
 	}
-	return fmt.Sprintf("%s-%02d", today, count+1)
+	return fmt.Sprintf("%s-%04d", today, count+1)
 }
 
 // isSSLError walks the error chain looking for TLS/certificate errors.

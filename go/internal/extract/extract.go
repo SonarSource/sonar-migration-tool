@@ -367,8 +367,10 @@ func detectEdition(ctx context.Context, raw *RawClient) (Edition, error) {
 }
 
 // generateRunID returns an ISO-date-prefixed extract ID (issue
-// #108). Format: "YYYY-MM-DD-NN". See migrate.generateRunID for the
-// rationale — the two helpers are deliberately kept in sync.
+// #108). Format: "YYYY-MM-DD-NNNN", zero-padded to four digits so
+// lexicographic and numeric ordering agree up to 9999 runs/day
+// (#542). See migrate.generateRunID for the rationale — the two
+// helpers are deliberately kept in sync.
 func generateRunID(directory string) string {
 	today := time.Now().UTC().Format("2006-01-02")
 	prefix := today + "-"
@@ -390,7 +392,7 @@ func generateRunID(directory string) string {
 			maxN = n
 		}
 	}
-	return fmt.Sprintf("%s-%02d", today, maxN+1)
+	return fmt.Sprintf("%s-%04d", today, maxN+1)
 }
 
 // extractMeta groups the parameters for writeMetadata. Version stays as

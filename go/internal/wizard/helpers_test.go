@@ -332,18 +332,20 @@ func TestGenerateRunID(t *testing.T) {
 	if id == "" {
 		t.Error("generateRunID should return non-empty string")
 	}
-	if id[len(id)-3:] != "-01" {
-		t.Errorf("expected -01 suffix, got %q", id)
+	if id[len(id)-5:] != "-0001" {
+		t.Errorf("expected -0001 suffix, got %q", id)
 	}
 	// Issue #108 — the date prefix is ISO (YYYY-MM-DD), not the
 	// previous US format (MM-DD-YYYY). The ISO format starts with
 	// the four-digit year and sorts chronologically. We don't
 	// hard-code today's date (test would drift) but pin the shape:
-	// id must be at least YYYY-MM-DD-NN = 13 chars, must start with
-	// today's UTC year, and the 5th character must be a hyphen.
+	// id must be at least YYYY-MM-DD-NNNN = 15 chars (#542 — the
+	// sequence number is zero-padded to four digits so lexicographic
+	// and numeric ordering agree up to 9999 runs/day), must start
+	// with today's UTC year, and the 5th character must be a hyphen.
 	want := time.Now().UTC().Format("2006")
-	if len(id) < 13 {
-		t.Fatalf("id too short for ISO format YYYY-MM-DD-NN: %q", id)
+	if len(id) < 15 {
+		t.Fatalf("id too short for ISO format YYYY-MM-DD-NNNN: %q", id)
 	}
 	if id[:4] != want {
 		t.Errorf("id must start with current UTC year %q, got %q (full id %q)", want, id[:4], id)

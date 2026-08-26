@@ -494,8 +494,11 @@ func (cfg *MigrateConfig) applyDefaults() {
 }
 
 // generateRunID returns an ISO-date-prefixed run ID (issue #108).
-// Format: "YYYY-MM-DD-NN" where NN is the next sequence number for
-// the current day in the given directory.
+// Format: "YYYY-MM-DD-NNNN" where NNNN is the next sequence number for
+// the current day in the given directory, zero-padded to four digits
+// so that lexicographic and numeric ordering agree up to 9999 runs/day
+// (#542 — the previous two-digit padding let a 3-digit run number like
+// "-101" sort lexicographically *before* "-99").
 //
 // The implementation finds the highest existing sequence number for
 // today and returns max+1. The earlier (count+1) approach broke once
@@ -524,7 +527,7 @@ func generateRunID(directory string) string {
 			maxN = n
 		}
 	}
-	return fmt.Sprintf("%s-%02d", today, maxN+1)
+	return fmt.Sprintf("%s-%04d", today, maxN+1)
 }
 
 func writeMigrateMeta(dir string, plan [][]string, runID string, edition common.Edition, url string, targets []string, registry map[string]*TaskDef) error {

@@ -13,6 +13,7 @@ import (
 	"sort"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/analysis"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/report/maturity"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/report/migration"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
@@ -29,8 +30,11 @@ const (
 // YYYY-MM-DD-NN format introduced for issue #108 (e.g.
 // "2026-04-27-01"). Accepting both keeps run directories from
 // previous releases visible in the GUI history list and resumable
-// via --run_id.
-var runIDPattern = regexp.MustCompile(`^(\d{2}-\d{2}-\d{4}|\d{4}-\d{2}-\d{2})-\d{2}$`)
+// via --run_id. The trailing counter is zero-padded to a minimum of
+// two digits but grows unpadded past 99, so it must match "two or
+// more digits", not exactly two (#542) — a fixed \d{2} would silently
+// drop every run past the 99th of a day from the history list.
+var runIDPattern = regexp.MustCompile(`^(\d{2}-\d{2}-\d{4}|\d{4}-\d{2}-\d{2})-\d{2,}$`)
 
 // RunInfo summarises a single run directory for the history list.
 type RunInfo struct {
@@ -106,7 +110,7 @@ func loadAnalysis(exportDir, runID string) []analysis.ReportRow {
 func RunsListHandler(exportDir string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		runs := fetchRunList(exportDir)
-		sort.Slice(runs, func(i, j int) bool { return runs[i].RunID > runs[j].RunID })
+		sort.Slice(runs, func(i, j int) bool { return common.RunIDAfter(runs[i].RunID, runs[j].RunID) })
 		writeJSON(w, http.StatusOK, runs)
 	}
 }

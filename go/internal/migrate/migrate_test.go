@@ -445,16 +445,16 @@ func TestMigrateTargetTasksExplicitListHonorsSkipIssueSync(t *testing.T) {
 func TestGenerateRunID_HandlesNumberingGaps(t *testing.T) {
 	today := time.Now().UTC().Format("2006-01-02")
 
-	t.Run("empty directory yields -01", func(t *testing.T) {
+	t.Run("empty directory yields -0001", func(t *testing.T) {
 		dir := t.TempDir()
 		got := generateRunID(dir)
-		want := today + "-01"
+		want := today + "-0001"
 		if got != want {
 			t.Errorf("want %q, got %q", want, got)
 		}
 	})
 
-	t.Run("dirs -10..-19 with gaps below yields -20 (not -11 collision)", func(t *testing.T) {
+	t.Run("dirs -10..-19 with gaps below yields -0020 (not -11 collision)", func(t *testing.T) {
 		dir := t.TempDir()
 		for i := 10; i <= 19; i++ {
 			if err := os.MkdirAll(filepath.Join(dir, fmt.Sprintf("%s-%02d", today, i)), 0o755); err != nil {
@@ -462,7 +462,7 @@ func TestGenerateRunID_HandlesNumberingGaps(t *testing.T) {
 			}
 		}
 		got := generateRunID(dir)
-		want := today + "-20"
+		want := today + "-0020"
 		if got != want {
 			t.Errorf("want %q (max+1), got %q", want, got)
 		}
@@ -476,7 +476,7 @@ func TestGenerateRunID_HandlesNumberingGaps(t *testing.T) {
 			}
 		}
 		got := generateRunID(dir)
-		want := today + "-43"
+		want := today + "-0043"
 		if got != want {
 			t.Errorf("want %q, got %q", want, got)
 		}
@@ -489,7 +489,7 @@ func TestGenerateRunID_HandlesNumberingGaps(t *testing.T) {
 			t.Fatalf("mkdir: %v", err)
 		}
 		got := generateRunID(dir)
-		want := today + "-01"
+		want := today + "-0001"
 		if got != want {
 			t.Errorf("foreign-day dir should not affect count: want %q, got %q", want, got)
 		}
@@ -505,8 +505,26 @@ func TestGenerateRunID_HandlesNumberingGaps(t *testing.T) {
 		if !strings.HasPrefix(got, today+"-") {
 			t.Errorf("expected today-prefixed ID, got %q", got)
 		}
-		if got != today+"-01" {
-			t.Errorf("non-numeric suffix should be ignored: want %q, got %q", today+"-01", got)
+		if got != today+"-0001" {
+			t.Errorf("non-numeric suffix should be ignored: want %q, got %q", today+"-0001", got)
+		}
+	})
+
+	// #542 — the sequence number is zero-padded to four digits so
+	// that among IDs generated after this fix, lexicographic order
+	// keeps matching numeric order past the 99th run of a day (a
+	// pre-existing, non-padded "-99" dir from before this fix is a
+	// separate, unavoidable transition case handled by
+	// common.RunIDAfter instead, not by generateRunID's own output).
+	t.Run("crossing the 99->100 boundary still zero-pads to four digits", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, today+"-99"), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		got := generateRunID(dir)
+		want := today + "-0100"
+		if got != want {
+			t.Errorf("want %q, got %q", want, got)
 		}
 	})
 }
