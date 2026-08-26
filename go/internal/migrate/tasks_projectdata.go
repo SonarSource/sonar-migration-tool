@@ -398,16 +398,16 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	// Include ALL FIL components, not just those with source code; external
 	// issues can reference files without source. CloudVoyager does the same.
 	components := loadExtractedComponents(e, input.ServerURL, input.ServerKey, input.Branch)
-	sources := loadExtractedSources(e, input.ServerURL, input.ServerKey, input.Branch)
+	// Source text and per-line syntax highlighting come from the same
+	// extract task, so one pass yields both. Without the highlighting the
+	// migrated source renders as raw, uncolored text (issue #420).
+	sources, syntaxHighlighting := loadBranchSourceData(e, input.ServerURL, input.ServerKey, input.Branch)
 	activeRules := loadExtractedActiveRules(e, input.ServerURL, input.ServerKey)
 	// Per-file measures (ncloc et al.) — without these the branch renders as
 	// "main branch is empty". Real per-line SCM blame — without it the Code
 	// view shows no author/date per line.
 	componentMeasures := loadComponentMeasures(e, input.ServerURL, input.ServerKey, input.Branch)
 	scmByComponent := loadExtractedSCM(e, input.ServerURL, input.ServerKey, input.Branch)
-	// Per-line syntax highlighting (colors in the Code view); without it the
-	// migrated source renders as raw, uncolored text (issue #420).
-	syntaxHighlighting := loadExtractedSyntaxHighlighting(e, input.ServerURL, input.ServerKey, input.Branch)
 
 	if len(components) == 0 {
 		return nil, branchReportMeta{}, &importResult{Status: "skipped"}, nil
@@ -811,84 +811,66 @@ type sourceRecord struct {
 	Source    string
 }
 
-func loadExtractedSources(e *Executor, serverURL, serverKey, branch string) []sourceRecord {
-	items, err := readExtractItems(e, "getProjectSourceCode")
-	if err != nil {
-		return nil
-	}
-	var sources []sourceRecord
-	for _, item := range items {
-		if item.ServerURL != serverURL {
-			continue
-		}
-		if extractField(item.Data, "projectKey") != serverKey {
-			continue
-		}
-		if extractField(item.Data, "branch") != branch {
-			continue
-		}
-		sources = append(sources, sourceRecord{
-			Component: extractField(item.Data, "key"),
-			Source:    extractField(item.Data, "source"),
-		})
-	}
-	return sources
-}
+// loadBranchSourceData reads getProjectSourceCode once for a branch and
+// returns both the source text and the per-line highlighted HTML. The
+// highlighting is parsed into protobuf rules later by
+// scanreport.BuildSyntaxHighlighting so the migrated Code view renders with
+// colors (issue #420).
+//
+// This was two functions each doing a full pass over the whole instance's
+// source corpus. Reading once halves the I/O, and streaming with a
+// two-stage decode means a record belonging to another project costs a
+// three-field header rather than a copy of its full text and highlighting.
+func loadBranchSourceData(e *Executor, serverURL, serverKey, branch string) ([]sourceRecord, []scanreport.HighlightInput) {
+	scope := extractScope{ServerURL: serverURL, ProjectKey: serverKey, Branch: branch}
 
-// loadExtractedSyntaxHighlighting reads the per-line highlighted HTML captured
-// alongside source code (getProjectSourceCode → "highlightedLines") for the
-// given branch, returning one HighlightInput per file. The highlighting is
-// parsed into protobuf rules later by scanreport.BuildSyntaxHighlighting so the
-// migrated Code view renders with colors (issue #420).
-func loadExtractedSyntaxHighlighting(e *Executor, serverURL, serverKey, branch string) []scanreport.HighlightInput {
-	items, err := readExtractItems(e, "getProjectSourceCode")
-	if err != nil {
-		return nil
-	}
+	var sources []sourceRecord
 	var inputs []scanreport.HighlightInput
-	for _, item := range items {
-		if item.ServerURL != serverURL {
-			continue
-		}
+
+	for item, hdr := range scopedExtractItems(e, "getProjectSourceCode", scope) {
 		var rec struct {
-			Key              string   `json:"key"`
-			ProjectKey       string   `json:"projectKey"`
-			Branch           string   `json:"branch"`
+			Source           string   `json:"source"`
 			HighlightedLines []string `json:"highlightedLines"`
 		}
 		if err := json.Unmarshal(item.Data, &rec); err != nil {
 			continue
 		}
-		if rec.ProjectKey != serverKey || rec.Branch != branch || rec.Key == "" {
-			continue
+
+		// Note the asymmetry, which is load-bearing: a record with an
+		// empty key still contributes a sourceRecord because its length
+		// feeds the #425 purged-source decision, but it cannot produce a
+		// HighlightInput because highlighting is keyed by component.
+		sources = append(sources, sourceRecord{Component: hdr.Key, Source: rec.Source})
+
+		if hdr.Key != "" && len(rec.HighlightedLines) > 0 {
+			inputs = append(inputs, scanreport.HighlightInput{
+				Component: hdr.Key,
+				Lines:     rec.HighlightedLines,
+			})
 		}
-		if len(rec.HighlightedLines) == 0 {
-			continue
-		}
-		inputs = append(inputs, scanreport.HighlightInput{
-			Component: rec.Key,
-			Lines:     rec.HighlightedLines,
-		})
 	}
+	return sources, inputs
+}
+
+// loadExtractedSources returns just the source text for a branch.
+// Retained so the existing per-loader tests keep exercising the same
+// contract; production goes through loadBranchSourceData.
+func loadExtractedSources(e *Executor, serverURL, serverKey, branch string) []sourceRecord {
+	sources, _ := loadBranchSourceData(e, serverURL, serverKey, branch)
+	return sources
+}
+
+// loadExtractedSyntaxHighlighting returns just the per-line highlighted
+// HTML for a branch. See loadExtractedSources on why this remains.
+func loadExtractedSyntaxHighlighting(e *Executor, serverURL, serverKey, branch string) []scanreport.HighlightInput {
+	_, inputs := loadBranchSourceData(e, serverURL, serverKey, branch)
 	return inputs
 }
 
 func loadExtractedIssues(e *Executor, serverURL, serverKey, branch string) []scanreport.IssueInput {
-	items, err := readExtractItems(e, "getProjectIssuesFull")
-	if err != nil {
-		return nil
-	}
+	scope := extractScope{ServerURL: serverURL, ProjectKey: serverKey, Branch: branch}
 	var issues []scanreport.IssueInput
-	for _, item := range items {
-		if item.ServerURL != serverURL {
-			continue
-		}
-		if extractField(item.Data, "projectKey") != serverKey {
-			continue
-		}
-		if extractField(item.Data, "branch") != branch {
-			continue
-		}
+	for item := range scopedExtractItems(e, "getProjectIssuesFull", scope) {
 		// Exclude CLOSED issues and issues resolved by code fix (FIXED).
 		// These have no Cloud counterpart — the scanner report only creates
 		// them as OPEN, so recreating CLOSED/FIXED would create phantom issues.
@@ -928,24 +910,12 @@ func loadExtractedIssues(e *Executor, serverURL, serverKey, branch string) []sca
 // CloudVoyager's is-external-issue.js: issues from repos NOT in
 // sonarCloudRuleRepos or prefixed with "external_" are external.
 func loadExtractedExternalIssues(e *Executor, serverURL, serverKey, branch string) ([]scanreport.ExternalIssueInput, []scanreport.AdHocRuleInput) {
-	items, err := readExtractItems(e, "getProjectIssuesFull")
-	if err != nil {
-		return nil, nil
-	}
+	scope := extractScope{ServerURL: serverURL, ProjectKey: serverKey, Branch: branch}
 	seenRules := make(map[string]bool)
 	var extIssues []scanreport.ExternalIssueInput
 	var adHocRules []scanreport.AdHocRuleInput
 
-	for _, item := range items {
-		if item.ServerURL != serverURL {
-			continue
-		}
-		if extractField(item.Data, "projectKey") != serverKey {
-			continue
-		}
-		if extractField(item.Data, "branch") != branch {
-			continue
-		}
+	for item := range scopedExtractItems(e, "getProjectIssuesFull", scope) {
 		issue, rule, ok := classifyExternalIssue(item.Data)
 		if !ok {
 			continue
@@ -1047,26 +1017,9 @@ func extractImpactInputs(data json.RawMessage, field string) []scanreport.Impact
 // The review state is carried through here so the metadata-sync phase can
 // reproduce it as issue triage.
 func loadExtractedHotspots(e *Executor, serverURL, serverKey, branch string) []scanreport.HotspotInput {
-	items, err := readExtractItems(e, "getProjectHotspotsFull")
-	if err != nil {
-		return nil
-	}
+	scope := extractScope{ServerURL: serverURL, ProjectKey: serverKey, Branch: branch}
 	var hotspots []scanreport.HotspotInput
-	for _, item := range items {
-		if item.ServerURL != serverURL {
-			continue
-		}
-		projKey := extractField(item.Data, "project")
-		if projKey == "" {
-			projKey = extractField(item.Data, "projectKey")
-		}
-		if projKey != serverKey {
-			continue
-		}
-		br := extractField(item.Data, "branch")
-		if br != "" && br != branch {
-			continue
-		}
+	for item := range scopedHotspotItems(e, scope) {
 		ruleKey := extractField(item.Data, "ruleKey")
 		if ruleKey == "" {
 			// Try nested rule.key
@@ -1166,21 +1119,9 @@ func extractNestedRuleKey(data json.RawMessage) string {
 }
 
 func loadExtractedComponents(e *Executor, serverURL, serverKey, branch string) []scanreport.ComponentInput {
-	items, err := readExtractItems(e, "getProjectComponentTree")
-	if err != nil {
-		return nil
-	}
+	scope := extractScope{ServerURL: serverURL, ProjectKey: serverKey, Branch: branch}
 	var components []scanreport.ComponentInput
-	for _, item := range items {
-		if item.ServerURL != serverURL {
-			continue
-		}
-		if extractField(item.Data, "projectKey") != serverKey {
-			continue
-		}
-		if extractField(item.Data, "branch") != branch {
-			continue
-		}
+	for item := range scopedExtractItems(e, "getProjectComponentTree", scope) {
 		lines := extractInt32Field(item.Data, "lines")
 		if lines == 0 {
 			lines = extractMeasureInt32(item.Data, "ncloc")
@@ -1202,22 +1143,10 @@ func loadExtractedComponents(e *Executor, serverURL, serverKey, branch string) [
 // packaged report carries no measures-*.pb, SonarCloud's CE computes a null
 // project ncloc, and the migrated branch renders as "main branch is empty".
 func loadComponentMeasures(e *Executor, serverURL, serverKey, branch string) []scanreport.MeasureInput {
-	items, err := readExtractItems(e, "getProjectComponentTree")
-	if err != nil {
-		return nil
-	}
+	scope := extractScope{ServerURL: serverURL, ProjectKey: serverKey, Branch: branch}
 	var measures []scanreport.MeasureInput
-	for _, item := range items {
-		if item.ServerURL != serverURL {
-			continue
-		}
-		if extractField(item.Data, "projectKey") != serverKey {
-			continue
-		}
-		if extractField(item.Data, "branch") != branch {
-			continue
-		}
-		key := extractField(item.Data, "key")
+	for item, hdr := range scopedExtractItems(e, "getProjectComponentTree", scope) {
+		key := hdr.Key
 		if key == "" {
 			continue
 		}
@@ -1281,22 +1210,10 @@ type blameLine struct {
 // this data and shipped synthetic changesets; loading it lets the report carry
 // real per-line author/date/revision for the SonarCloud Code view.
 func loadExtractedSCM(e *Executor, serverURL, serverKey, branch string) map[string][]blameLine {
-	items, err := readExtractItems(e, "getProjectSCMData")
-	if err != nil {
-		return nil
-	}
+	scope := extractScope{ServerURL: serverURL, ProjectKey: serverKey, Branch: branch}
 	result := make(map[string][]blameLine)
-	for _, item := range items {
-		if item.ServerURL != serverURL {
-			continue
-		}
-		if extractField(item.Data, "projectKey") != serverKey {
-			continue
-		}
-		if extractField(item.Data, "branch") != branch {
-			continue
-		}
-		key := extractField(item.Data, "key")
+	for item, hdr := range scopedExtractItems(e, "getProjectSCMData", scope) {
+		key := hdr.Key
 		if key == "" {
 			continue
 		}
