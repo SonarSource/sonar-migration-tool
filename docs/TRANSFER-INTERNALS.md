@@ -61,7 +61,7 @@ statement of `runTransfer`.
         |       ->  GET api/system/info  --|403|-->  api/navigation/global
         |                                            (detectEdition)
         |
-        +-- prepareExtractDir  ->  mkdir exportDir/<runID>/   (runID = date-NN, max+1)
+        +-- prepareExtractDir  ->  mkdir exportDir/<runID>/   (runID = date-NNNN, max+1)
         |
         +-- buildPlan:  RegisterAll -> Registry -> FilterByEdition(edition)
         |       targets = ALL "get*" tasks   (minus 6 projectData tasks if skip)
@@ -439,7 +439,7 @@ flowchart TB
     subgraph MG["☁️ STEP 4 of 4 — MIGRATE   (creates everything on SonarCloud using the CSV tables as instructions)"]
         direction TB
 
-        MG_INIT["🔧 Set up and connect<br/><i>Applies default settings (concurrency=25, target=sonarcloud.io, enterprise edition).<br/>Checks that every target organisation in the CSV files actually exists on SonarCloud.<br/>Opens two API connections: one to the main SonarCloud website,<br/>one to its separate API subdomain (needed for scan report uploads).<br/>Assigns a unique run ID like '2026-06-09-01' so results are easy to find later.<br/>If you said to skip project data, issue sync is also automatically skipped.</i>"]
+        MG_INIT["🔧 Set up and connect<br/><i>Applies default settings (concurrency=25, target=sonarcloud.io, enterprise edition).<br/>Checks that every target organisation in the CSV files actually exists on SonarCloud.<br/>Opens two API connections: one to the main SonarCloud website,<br/>one to its separate API subdomain (needed for scan report uploads).<br/>Assigns a unique run ID like '2026-06-09-0001' so results are easy to find later.<br/>If you said to skip project data, issue sync is also automatically skipped.</i>"]
 
         MG_RES["📐 Plan the migration tasks<br/><i>Figures out all the tasks needed to migrate the 14 project-level items.<br/>Traces every dependency (e.g. 'set project profile' needs 'create profile' first)<br/>to build a complete set of ~25 tasks.<br/>Sorts them into 6 ordered phases using a topological sort algorithm.<br/>Saves the plan to plan.json so a crashed run can be resumed later.</i>"]
 
@@ -479,7 +479,7 @@ flowchart TB
     P5 -. "saves upload results" .-> IMPORTED
     P6 -. "saves sync results" .-> SYNCED
 
-    P6 --> RUNID["📬 Finish migrate, hand off to reports<br/><i>Returns the run ID (e.g. '2026-06-09-01') so reports can find the right folder.<br/>Even if a phase errored, the run ID is still returned so you get a partial report.<br/>Saves three housekeeping files: run summary metadata, a log of every API event,<br/>and a log of any rate-limit events from SonarCloud.</i>"]
+    P6 --> RUNID["📬 Finish migrate, hand off to reports<br/><i>Returns the run ID (e.g. '2026-06-09-0001') so reports can find the right folder.<br/>Even if a phase errored, the run ID is still returned so you get a partial report.<br/>Saves three housekeeping files: run summary metadata, a log of every API event,<br/>and a log of any rate-limit events from SonarCloud.</i>"]
 
     %% ===================== REPORTS =====================
     subgraph RP["📊 REPORTS   (generates your summary files — a failure here does NOT fail the migration)"]
