@@ -133,7 +133,9 @@ type recordHeader struct {
 }
 
 // matches reports whether a record belongs to the given scope. An empty
-// scope Branch matches any branch; an empty record Branch never excludes.
+// scope Branch matches any branch; otherwise the record's branch must be
+// exactly equal (a record with no branch does NOT match a concrete
+// branch — see hotspotHeader.matches for the task that differs).
 func (h recordHeader) matches(scope extractScope) bool {
 	if h.ProjectKey != scope.ProjectKey {
 		return false
