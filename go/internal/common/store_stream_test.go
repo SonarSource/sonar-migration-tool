@@ -33,6 +33,13 @@ func writeStoreChunks(t *testing.T, taskDir string, chunks [][]string) {
 	}
 }
 
+// Shared assertion message and fixture task name, so neither literal is
+// repeated across every test.
+const (
+	errRecordsFmt = "Records: %v"
+	taskName      = "someTask"
+)
+
 // collectRecords drains the iterator, returning records and the first error.
 func collectRecords(seq func(func(json.RawMessage, error) bool)) ([]json.RawMessage, error) {
 	var out []json.RawMessage
@@ -52,16 +59,16 @@ func collectRecords(seq func(func(json.RawMessage, error) bool)) ([]json.RawMess
 func TestRecordsMatchesReadAllAcrossChunks(t *testing.T) {
 	dir := t.TempDir()
 	ds := NewDataStore(dir)
-	writeStoreChunks(t, filepath.Join(dir, "someTask"), [][]string{
+	writeStoreChunks(t, filepath.Join(dir, taskName), [][]string{
 		{`{"n":1}`, `{"n":2}`},
 		{`{"n":3}`},
 	})
 
-	streamed, err := collectRecords(ds.Records("someTask"))
+	streamed, err := collectRecords(ds.Records(taskName))
 	if err != nil {
-		t.Fatalf("Records: %v", err)
+		t.Fatalf(errRecordsFmt, err)
 	}
-	slurped, err := ds.ReadAll("someTask")
+	slurped, err := ds.ReadAll(taskName)
 	if err != nil {
 		t.Fatalf("ReadAll: %v", err)
 	}
@@ -104,7 +111,7 @@ func TestRecordsMissingDirYieldsNothing(t *testing.T) {
 func TestRecordsAbortsOnFileError(t *testing.T) {
 	dir := t.TempDir()
 	ds := NewDataStore(dir)
-	taskDir := filepath.Join(dir, "someTask")
+	taskDir := filepath.Join(dir, taskName)
 	writeStoreChunks(t, taskDir, [][]string{{`{"n":1}`}})
 
 	bad := filepath.Join(taskDir, "results.2.jsonl")
@@ -113,12 +120,12 @@ func TestRecordsAbortsOnFileError(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(bad, 0o600) })
 
-	_, err := collectRecords(ds.Records("someTask"))
+	_, err := collectRecords(ds.Records(taskName))
 	if err == nil {
 		t.Error("Records should surface the per-file error")
 	}
 
-	if _, err := ds.ReadAll("someTask"); err == nil {
+	if _, err := ds.ReadAll(taskName); err == nil {
 		t.Error("ReadAll should still return the error")
 	}
 }
@@ -140,7 +147,7 @@ func TestRecordsSanitizesTaskName(t *testing.T) {
 
 	got, err := collectRecords(ds.Records("getTemplateGroupsScanners:apply"))
 	if err != nil {
-		t.Fatalf("Records: %v", err)
+		t.Fatalf(errRecordsFmt, err)
 	}
 	if len(got) != 1 || string(got[0]) != `{"k":"v"}` {
 		t.Errorf("got %v, want the single written record", got)
@@ -151,7 +158,7 @@ func TestRecordsSanitizesTaskName(t *testing.T) {
 func TestRecordsStopsEarly(t *testing.T) {
 	dir := t.TempDir()
 	ds := NewDataStore(dir)
-	taskDir := filepath.Join(dir, "someTask")
+	taskDir := filepath.Join(dir, taskName)
 	writeStoreChunks(t, taskDir, [][]string{{`{"n":1}`}})
 
 	bad := filepath.Join(taskDir, "results.2.jsonl")
@@ -161,7 +168,7 @@ func TestRecordsStopsEarly(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(bad, 0o600) })
 
 	count := 0
-	for _, err := range ds.Records("someTask") {
+	for _, err := range ds.Records(taskName) {
 		if err != nil {
 			t.Fatalf("unexpected error before break: %v", err)
 		}
@@ -177,16 +184,16 @@ func TestRecordsStopsEarly(t *testing.T) {
 func TestRecordsIgnoresNonJSONLFiles(t *testing.T) {
 	dir := t.TempDir()
 	ds := NewDataStore(dir)
-	taskDir := filepath.Join(dir, "someTask")
+	taskDir := filepath.Join(dir, taskName)
 	writeStoreChunks(t, taskDir, [][]string{{`{"n":1}`}})
 
 	if err := os.WriteFile(filepath.Join(taskDir, "notes.txt"), []byte("ignore me"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := collectRecords(ds.Records("someTask"))
+	got, err := collectRecords(ds.Records(taskName))
 	if err != nil {
-		t.Fatalf("Records: %v", err)
+		t.Fatalf(errRecordsFmt, err)
 	}
 	if len(got) != 1 {
 		t.Errorf("got %d records, want 1", len(got))

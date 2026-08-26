@@ -9,29 +9,53 @@ import (
 	"testing"
 )
 
+// Fixture field names and values, kept as constants so the literals are
+// not repeated across every record in every table.
+const (
+	fieldKey        = "key"
+	fieldProjectKey = "projectKey"
+	fieldProject    = "project"
+	fieldBranch     = "branch"
+	fieldSource     = "source"
+	fieldHighlights = "highlightedLines"
+
+	extractRun     = "extract-01"
+	taskSourceCode = "getProjectSourceCode"
+	taskHotspots   = "getProjectHotspotsFull"
+
+	projMain   = "proj1"
+	branchMain = "main"
+	branchDev  = "develop"
+	fileA      = "proj1:a.go"
+	srcA       = "package a\n"
+
+	hsNoBranch     = "hs-no-branch"
+	hsOtherProject = "hs-other-project"
+)
+
 // sourceCorpus writes a getProjectSourceCode fixture containing records for
 // two projects across two branches, so scoping can be observed rather than
 // assumed.
 func sourceCorpus(t *testing.T, dir string) {
 	t.Helper()
-	writeJSONL(filepath.Join(dir, "extract-01", "getProjectSourceCode"), []map[string]any{
+	writeJSONL(filepath.Join(dir, extractRun, taskSourceCode), []map[string]any{
 		{
-			"key": "proj1:a.go", "projectKey": "proj1", "branch": "main",
-			"source": "package a\n", "highlightedLines": []string{"<span>package a</span>"},
+			fieldKey: fileA, fieldProjectKey: projMain, fieldBranch: branchMain,
+			fieldSource: srcA, fieldHighlights: []string{"<span>package a</span>"},
 		},
 		{
-			"key": "proj1:b.go", "projectKey": "proj1", "branch": "main",
-			"source": "package b\n", "highlightedLines": []string{"<span>package b</span>"},
+			fieldKey: "proj1:b.go", fieldProjectKey: projMain, fieldBranch: branchMain,
+			fieldSource: "package b\n", fieldHighlights: []string{"<span>package b</span>"},
 		},
 		// Same project, different branch — must not leak into main.
 		{
-			"key": "proj1:c.go", "projectKey": "proj1", "branch": "develop",
-			"source": "package c\n", "highlightedLines": []string{"<span>package c</span>"},
+			fieldKey: "proj1:c.go", fieldProjectKey: projMain, fieldBranch: branchDev,
+			fieldSource: "package c\n", fieldHighlights: []string{"<span>package c</span>"},
 		},
 		// Different project entirely — must not leak either.
 		{
-			"key": "proj2:d.go", "projectKey": "proj2", "branch": "main",
-			"source": "package d\n", "highlightedLines": []string{"<span>package d</span>"},
+			fieldKey: "proj2:d.go", fieldProjectKey: "proj2", fieldBranch: branchMain,
+			fieldSource: "package d\n", fieldHighlights: []string{"<span>package d</span>"},
 		},
 	})
 }
@@ -41,7 +65,7 @@ func TestLoadBranchSourceDataScopesToProjectAndBranch(t *testing.T) {
 	sourceCorpus(t, dir)
 	e := newProjectDataExecutor(t, dir)
 
-	sources, highlights := loadBranchSourceData(e, testServerURL, "proj1", "main")
+	sources, highlights := loadBranchSourceData(e, testServerURL, projMain, branchMain)
 
 	if len(sources) != 2 {
 		t.Fatalf("got %d sources, want 2 (proj1/main only): %+v", len(sources), sources)
@@ -50,7 +74,7 @@ func TestLoadBranchSourceDataScopesToProjectAndBranch(t *testing.T) {
 		t.Fatalf("got %d highlights, want 2", len(highlights))
 	}
 	for _, s := range sources {
-		if s.Component != "proj1:a.go" && s.Component != "proj1:b.go" {
+		if s.Component != fileA && s.Component != "proj1:b.go" {
 			t.Errorf("unexpected component leaked into scope: %q", s.Component)
 		}
 	}
@@ -64,9 +88,9 @@ func TestLoadBranchSourceDataMatchesIndividualLoaders(t *testing.T) {
 	sourceCorpus(t, dir)
 	e := newProjectDataExecutor(t, dir)
 
-	sources, highlights := loadBranchSourceData(e, testServerURL, "proj1", "main")
-	onlySources := loadExtractedSources(e, testServerURL, "proj1", "main")
-	onlyHighlights := loadExtractedSyntaxHighlighting(e, testServerURL, "proj1", "main")
+	sources, highlights := loadBranchSourceData(e, testServerURL, projMain, branchMain)
+	onlySources := loadExtractedSources(e, testServerURL, projMain, branchMain)
+	onlyHighlights := loadExtractedSyntaxHighlighting(e, testServerURL, projMain, branchMain)
 
 	if len(sources) != len(onlySources) {
 		t.Fatalf("sources: merged %d, individual %d", len(sources), len(onlySources))
@@ -95,19 +119,19 @@ func TestLoadBranchSourceDataMatchesIndividualLoaders(t *testing.T) {
 // accidentally align the two.
 func TestLoadBranchSourceDataKeepsEmptyKeySourceButNotHighlight(t *testing.T) {
 	dir := t.TempDir()
-	writeJSONL(filepath.Join(dir, "extract-01", "getProjectSourceCode"), []map[string]any{
+	writeJSONL(filepath.Join(dir, extractRun, taskSourceCode), []map[string]any{
 		{
-			"key": "", "projectKey": "proj1", "branch": "main",
-			"source": "orphan source\n", "highlightedLines": []string{"<span>orphan</span>"},
+			fieldKey: "", fieldProjectKey: projMain, fieldBranch: branchMain,
+			fieldSource: "orphan source\n", fieldHighlights: []string{"<span>orphan</span>"},
 		},
 		{
-			"key": "proj1:a.go", "projectKey": "proj1", "branch": "main",
-			"source": "package a\n", "highlightedLines": []string{"<span>package a</span>"},
+			fieldKey: fileA, fieldProjectKey: projMain, fieldBranch: branchMain,
+			fieldSource: srcA, fieldHighlights: []string{"<span>package a</span>"},
 		},
 	})
 	e := newProjectDataExecutor(t, dir)
 
-	sources, highlights := loadBranchSourceData(e, testServerURL, "proj1", "main")
+	sources, highlights := loadBranchSourceData(e, testServerURL, projMain, branchMain)
 
 	if len(sources) != 2 {
 		t.Errorf("got %d sources, want 2 — the empty-key record still counts toward source length", len(sources))
@@ -115,7 +139,7 @@ func TestLoadBranchSourceDataKeepsEmptyKeySourceButNotHighlight(t *testing.T) {
 	if len(highlights) != 1 {
 		t.Fatalf("got %d highlights, want 1 — the empty-key record cannot be highlighted", len(highlights))
 	}
-	if highlights[0].Component != "proj1:a.go" {
+	if highlights[0].Component != fileA {
 		t.Errorf("highlight component = %q, want proj1:a.go", highlights[0].Component)
 	}
 }
@@ -124,12 +148,12 @@ func TestLoadBranchSourceDataKeepsEmptyKeySourceButNotHighlight(t *testing.T) {
 // highlight, rather than an empty-lines highlight entry.
 func TestLoadBranchSourceDataSkipsEmptyHighlighting(t *testing.T) {
 	dir := t.TempDir()
-	writeJSONL(filepath.Join(dir, "extract-01", "getProjectSourceCode"), []map[string]any{
-		{"key": "proj1:a.go", "projectKey": "proj1", "branch": "main", "source": "package a\n"},
+	writeJSONL(filepath.Join(dir, extractRun, taskSourceCode), []map[string]any{
+		{fieldKey: fileA, fieldProjectKey: projMain, fieldBranch: branchMain, fieldSource: srcA},
 	})
 	e := newProjectDataExecutor(t, dir)
 
-	sources, highlights := loadBranchSourceData(e, testServerURL, "proj1", "main")
+	sources, highlights := loadBranchSourceData(e, testServerURL, projMain, branchMain)
 
 	if len(sources) != 1 {
 		t.Errorf("got %d sources, want 1", len(sources))
@@ -144,27 +168,27 @@ func TestLoadBranchSourceDataSkipsEmptyHighlighting(t *testing.T) {
 // pre-existing behaviour that the scoped reader has to keep.
 func TestScopedHotspotItemsHandlesProjectKeyFallbackAndEmptyBranch(t *testing.T) {
 	dir := t.TempDir()
-	writeJSONL(filepath.Join(dir, "extract-01", "getProjectHotspotsFull"), []map[string]any{
-		{"key": "hs-project-field", "project": "proj1", "branch": "main"},
-		{"key": "hs-projectkey-fallback", "projectKey": "proj1", "branch": "main"},
-		{"key": "hs-no-branch", "project": "proj1"},
-		{"key": "hs-other-branch", "project": "proj1", "branch": "develop"},
-		{"key": "hs-other-project", "project": "proj2", "branch": "main"},
+	writeJSONL(filepath.Join(dir, extractRun, taskHotspots), []map[string]any{
+		{fieldKey: "hs-project-field", fieldProject: projMain, fieldBranch: branchMain},
+		{fieldKey: "hs-projectkey-fallback", fieldProjectKey: projMain, fieldBranch: branchMain},
+		{fieldKey: hsNoBranch, fieldProject: projMain},
+		{fieldKey: "hs-other-branch", fieldProject: projMain, fieldBranch: branchDev},
+		{fieldKey: hsOtherProject, fieldProject: "proj2", fieldBranch: branchMain},
 	})
 	e := newProjectDataExecutor(t, dir)
 
 	seen := map[string]bool{}
-	scope := extractScope{ServerURL: testServerURL, ProjectKey: "proj1", Branch: "main"}
+	scope := extractScope{ServerURL: testServerURL, ProjectKey: projMain, Branch: branchMain}
 	for _, hdr := range scopedHotspotItems(e, scope) {
 		seen[hdr.Key] = true
 	}
 
-	for _, want := range []string{"hs-project-field", "hs-projectkey-fallback", "hs-no-branch"} {
+	for _, want := range []string{"hs-project-field", "hs-projectkey-fallback", hsNoBranch} {
 		if !seen[want] {
 			t.Errorf("expected %q to be in scope", want)
 		}
 	}
-	for _, notWant := range []string{"hs-other-branch", "hs-other-project"} {
+	for _, notWant := range []string{"hs-other-branch", hsOtherProject} {
 		if seen[notWant] {
 			t.Errorf("%q must not be in scope", notWant)
 		}
@@ -176,26 +200,26 @@ func TestScopedHotspotItemsHandlesProjectKeyFallbackAndEmptyBranch(t *testing.T)
 // scoping it to one would silently drop hotspots.
 func TestScopedHotspotItemsEmptyScopeBranchSpansAllBranches(t *testing.T) {
 	dir := t.TempDir()
-	writeJSONL(filepath.Join(dir, "extract-01", "getProjectHotspotsFull"), []map[string]any{
-		{"key": "hs-main", "project": "proj1", "branch": "main"},
-		{"key": "hs-develop", "project": "proj1", "branch": "develop"},
-		{"key": "hs-no-branch", "project": "proj1"},
-		{"key": "hs-other-project", "project": "proj2", "branch": "main"},
+	writeJSONL(filepath.Join(dir, extractRun, taskHotspots), []map[string]any{
+		{fieldKey: "hs-main", fieldProject: projMain, fieldBranch: branchMain},
+		{fieldKey: "hs-develop", fieldProject: projMain, fieldBranch: branchDev},
+		{fieldKey: hsNoBranch, fieldProject: projMain},
+		{fieldKey: hsOtherProject, fieldProject: "proj2", fieldBranch: branchMain},
 	})
 	e := newProjectDataExecutor(t, dir)
 
 	seen := map[string]bool{}
-	scope := extractScope{ServerURL: testServerURL, ProjectKey: "proj1"}
+	scope := extractScope{ServerURL: testServerURL, ProjectKey: projMain}
 	for _, hdr := range scopedHotspotItems(e, scope) {
 		seen[hdr.Key] = true
 	}
 
-	for _, want := range []string{"hs-main", "hs-develop", "hs-no-branch"} {
+	for _, want := range []string{"hs-main", "hs-develop", hsNoBranch} {
 		if !seen[want] {
 			t.Errorf("expected %q in an unscoped-branch read", want)
 		}
 	}
-	if seen["hs-other-project"] {
+	if seen[hsOtherProject] {
 		t.Error("another project must never be in scope")
 	}
 }
@@ -209,13 +233,13 @@ func TestRecordHeaderMatches(t *testing.T) {
 		scope extractScope
 		want  bool
 	}{
-		{"exact", recordHeader{ProjectKey: "p", Branch: "main"},
-			extractScope{ProjectKey: "p", Branch: "main"}, true},
-		{"wrong project", recordHeader{ProjectKey: "other", Branch: "main"},
-			extractScope{ProjectKey: "p", Branch: "main"}, false},
-		{"wrong branch", recordHeader{ProjectKey: "p", Branch: "develop"},
-			extractScope{ProjectKey: "p", Branch: "main"}, false},
-		{"empty scope branch matches any", recordHeader{ProjectKey: "p", Branch: "develop"},
+		{"exact", recordHeader{ProjectKey: "p", Branch: branchMain},
+			extractScope{ProjectKey: "p", Branch: branchMain}, true},
+		{"wrong project", recordHeader{ProjectKey: "other", Branch: branchMain},
+			extractScope{ProjectKey: "p", Branch: branchMain}, false},
+		{"wrong branch", recordHeader{ProjectKey: "p", Branch: branchDev},
+			extractScope{ProjectKey: "p", Branch: branchMain}, false},
+		{"empty scope branch matches any", recordHeader{ProjectKey: "p", Branch: branchDev},
 			extractScope{ProjectKey: "p"}, true},
 	}
 	for _, tc := range tests {
@@ -231,14 +255,14 @@ func TestRecordHeaderMatches(t *testing.T) {
 // the project key and branch happen to coincide.
 func TestScopedExtractItemsFiltersByServerURL(t *testing.T) {
 	dir := t.TempDir()
-	writeJSONL(filepath.Join(dir, "extract-01", "getProjectSourceCode"), []map[string]any{
-		{"key": "proj1:a.go", "projectKey": "proj1", "branch": "main", "source": "a"},
+	writeJSONL(filepath.Join(dir, extractRun, taskSourceCode), []map[string]any{
+		{fieldKey: fileA, fieldProjectKey: projMain, fieldBranch: branchMain, fieldSource: "a"},
 	})
 	e := newProjectDataExecutor(t, dir)
 
-	scope := extractScope{ServerURL: "https://other.test/", ProjectKey: "proj1", Branch: "main"}
+	scope := extractScope{ServerURL: "https://other.test/", ProjectKey: projMain, Branch: branchMain}
 	count := 0
-	for range scopedExtractItems(e, "getProjectSourceCode", scope) {
+	for range scopedExtractItems(e, taskSourceCode, scope) {
 		count++
 	}
 	if count != 0 {

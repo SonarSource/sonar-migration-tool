@@ -12,7 +12,16 @@ import (
 	"testing"
 )
 
-const streamTestURL = "https://sq.test/"
+const (
+	streamTestURL  = "https://sq.test/"
+	streamTestURL2 = "https://other.test/"
+
+	// Extract run directory names used by the fixtures.
+	extract01 = "extract-01"
+	extract02 = "extract-02"
+
+	taskSourceCode = "getProjectSourceCode"
+)
 
 // writeChunks creates a task directory containing one results.N.jsonl file
 // per chunk. Production writes one chunk file per source-code record, so
@@ -41,8 +50,8 @@ func writeChunks(t *testing.T, taskDir string, chunks [][]string) {
 func oneExtract(t *testing.T, task string, chunks [][]string) (string, ExtractMapping) {
 	t.Helper()
 	root := t.TempDir()
-	writeChunks(t, filepath.Join(root, "extract-01", task), chunks)
-	return root, ExtractMapping{streamTestURL: "extract-01"}
+	writeChunks(t, filepath.Join(root, extract01, task), chunks)
+	return root, ExtractMapping{streamTestURL: extract01}
 }
 
 func collect(seq func(func(ExtractItem) bool)) []ExtractItem {
@@ -57,14 +66,14 @@ func collect(seq func(func(ExtractItem) bool)) []ExtractItem {
 // order — that equivalence is what lets ~126 cold call sites keep using
 // ReadExtractData unchanged.
 func TestExtractItemsMatchesReadExtractDataAcrossChunks(t *testing.T) {
-	root, mapping := oneExtract(t, "getProjectSourceCode", [][]string{
+	root, mapping := oneExtract(t, taskSourceCode, [][]string{
 		{`{"k":"a1"}`, `{"k":"a2"}`},
 		{`{"k":"b1"}`},
 		{`{"k":"c1"}`, `{"k":"c2"}`, `{"k":"c3"}`},
 	})
 
-	streamed := collect(ExtractItems(root, mapping, "getProjectSourceCode"))
-	slurped, err := ReadExtractData(root, mapping, "getProjectSourceCode")
+	streamed := collect(ExtractItems(root, mapping, taskSourceCode))
+	slurped, err := ReadExtractData(root, mapping, taskSourceCode)
 	if err != nil {
 		t.Fatalf("ReadExtractData: %v", err)
 	}
@@ -116,7 +125,7 @@ func TestExtractItemsPreservesReadDirOrdering(t *testing.T) {
 // task, and records from the readable files must still be yielded.
 func TestExtractItemsSkipsUnreadableFile(t *testing.T) {
 	root := t.TempDir()
-	taskDir := filepath.Join(root, "extract-01", "task")
+	taskDir := filepath.Join(root, extract01, "task")
 	writeChunks(t, taskDir, [][]string{{`{"k":"v1"}`, `{"k":"v2"}`}})
 
 	bad := filepath.Join(taskDir, "results.2.jsonl")
@@ -125,7 +134,7 @@ func TestExtractItemsSkipsUnreadableFile(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(bad, 0o600) })
 
-	got := collect(ExtractItems(root, ExtractMapping{streamTestURL: "extract-01"}, "task"))
+	got := collect(ExtractItems(root, ExtractMapping{streamTestURL: extract01}, "task"))
 	if len(got) != 2 {
 		t.Errorf("got %d records, want 2 from the readable file", len(got))
 	}
@@ -136,15 +145,15 @@ func TestExtractItemsSkipsUnreadableFile(t *testing.T) {
 // stay an error internally rather than being silently treated as empty.
 func TestExtractItemsSkipsExtractMissingTaskDir(t *testing.T) {
 	root := t.TempDir()
-	writeChunks(t, filepath.Join(root, "extract-01", "task"), [][]string{{`{"k":"present"}`}})
+	writeChunks(t, filepath.Join(root, extract01, "task"), [][]string{{`{"k":"present"}`}})
 	// extract-02 exists but has no "task" directory.
-	if err := os.MkdirAll(filepath.Join(root, "extract-02", "other"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, extract02, "other"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	mapping := ExtractMapping{
-		streamTestURL:         "extract-01",
-		"https://other.test/": "extract-02",
+		streamTestURL:  extract01,
+		streamTestURL2: extract02,
 	}
 	got := collect(ExtractItems(root, mapping, "task"))
 	if len(got) != 1 {
@@ -161,7 +170,7 @@ func TestExtractItemsSkipsExtractMissingTaskDir(t *testing.T) {
 // whole point of streaming.
 func TestExtractItemsStopsEarlyWithoutOpeningNextFile(t *testing.T) {
 	root := t.TempDir()
-	taskDir := filepath.Join(root, "extract-01", "task")
+	taskDir := filepath.Join(root, extract01, "task")
 	writeChunks(t, taskDir, [][]string{{`{"k":"first"}`}})
 
 	bad := filepath.Join(taskDir, "results.2.jsonl")
@@ -171,7 +180,7 @@ func TestExtractItemsStopsEarlyWithoutOpeningNextFile(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(bad, 0o600) })
 
 	var seen []string
-	for it := range ExtractItems(root, ExtractMapping{streamTestURL: "extract-01"}, "task") {
+	for it := range ExtractItems(root, ExtractMapping{streamTestURL: extract01}, "task") {
 		seen = append(seen, string(it.Data))
 		break
 	}
@@ -185,12 +194,12 @@ func TestExtractItemsStopsEarlyWithoutOpeningNextFile(t *testing.T) {
 // files within one extract.
 func TestExtractItemsStopsEarlyAcrossExtracts(t *testing.T) {
 	root := t.TempDir()
-	writeChunks(t, filepath.Join(root, "extract-01", "task"), [][]string{{`{"n":1}`, `{"n":2}`}})
-	writeChunks(t, filepath.Join(root, "extract-02", "task"), [][]string{{`{"n":3}`, `{"n":4}`}})
+	writeChunks(t, filepath.Join(root, extract01, "task"), [][]string{{`{"n":1}`, `{"n":2}`}})
+	writeChunks(t, filepath.Join(root, extract02, "task"), [][]string{{`{"n":3}`, `{"n":4}`}})
 
 	mapping := ExtractMapping{
-		streamTestURL:         "extract-01",
-		"https://other.test/": "extract-02",
+		streamTestURL:  extract01,
+		streamTestURL2: extract02,
 	}
 
 	count := 0

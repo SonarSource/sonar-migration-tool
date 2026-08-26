@@ -47,6 +47,14 @@ func spy(applied *int64) func(int64) int64 {
 
 const gib = int64(1) << 30
 
+// Shared assertion messages and fixture values, kept as constants so the
+// literals are not repeated across every table entry.
+const (
+	msgSource  = "source = %q, want %q"
+	msgLimit   = "limit = %d, want %d"
+	bytes32GiB = "34359738368\n"
+)
+
 // Fixture paths, relative to the fake root.
 const (
 	pathV2Max   = "sys/fs/cgroup/memory.max"
@@ -62,18 +70,18 @@ func want80(n int64) int64 { return int64(float64(n) * memLimitFraction) }
 
 func TestApplyMemoryLimitCgroupV2(t *testing.T) {
 	root := fakeRoot(t, map[string]string{
-		pathV2Max: "34359738368\n", // 32 GiB
+		pathV2Max: bytes32GiB, // 32 GiB
 	})
 
 	var applied int64
 	limit, source := applyMemoryLimit(root, noEnv, spy(&applied), quietLogger())
 
 	if source != sourceCgroupV2 {
-		t.Errorf("source = %q, want %q", source, sourceCgroupV2)
+		t.Errorf(msgSource, source, sourceCgroupV2)
 	}
 	want := want80(32 * gib)
 	if limit != want {
-		t.Errorf("limit = %d, want %d", limit, want)
+		t.Errorf(msgLimit, limit, want)
 	}
 	if applied != want {
 		t.Errorf("SetMemoryLimit called with %d, want %d", applied, want)
@@ -92,7 +100,7 @@ func TestApplyMemoryLimitCgroupV2MaxFallsThrough(t *testing.T) {
 	_, source := applyMemoryLimit(root, noEnv, spy(&applied), quietLogger())
 
 	if source != sourceMemInfo {
-		t.Errorf("source = %q, want %q", source, sourceMemInfo)
+		t.Errorf(msgSource, source, sourceMemInfo)
 	}
 }
 
@@ -100,7 +108,7 @@ func TestApplyMemoryLimitCgroupV2MaxFallsThrough(t *testing.T) {
 // feels, so that is the one we must derive the limit from.
 func TestApplyMemoryLimitCgroupV2PrefersLowerOfMaxAndHigh(t *testing.T) {
 	root := fakeRoot(t, map[string]string{
-		pathV2Max:  "34359738368\n", // 32 GiB
+		pathV2Max:  bytes32GiB,      // 32 GiB
 		pathV2High: "17179869184\n", // 16 GiB
 	})
 
@@ -108,7 +116,7 @@ func TestApplyMemoryLimitCgroupV2PrefersLowerOfMaxAndHigh(t *testing.T) {
 	limit, source := applyMemoryLimit(root, noEnv, spy(&applied), quietLogger())
 
 	if source != sourceCgroupV2 {
-		t.Errorf("source = %q, want %q", source, sourceCgroupV2)
+		t.Errorf(msgSource, source, sourceCgroupV2)
 	}
 	want := want80(16 * gib)
 	if limit != want {
@@ -125,11 +133,11 @@ func TestApplyMemoryLimitCgroupV1(t *testing.T) {
 	limit, source := applyMemoryLimit(root, noEnv, spy(&applied), quietLogger())
 
 	if source != sourceCgroupV1 {
-		t.Errorf("source = %q, want %q", source, sourceCgroupV1)
+		t.Errorf(msgSource, source, sourceCgroupV1)
 	}
 	want := want80(8 * gib)
 	if limit != want {
-		t.Errorf("limit = %d, want %d", limit, want)
+		t.Errorf(msgLimit, limit, want)
 	}
 }
 
@@ -146,7 +154,7 @@ func TestApplyMemoryLimitCgroupV1UnlimitedSentinelFallsThrough(t *testing.T) {
 	_, source := applyMemoryLimit(root, noEnv, spy(&applied), quietLogger())
 
 	if source != sourceMemInfo {
-		t.Errorf("source = %q, want %q", source, sourceMemInfo)
+		t.Errorf(msgSource, source, sourceMemInfo)
 	}
 }
 
@@ -159,11 +167,11 @@ func TestApplyMemoryLimitMemInfoFallback(t *testing.T) {
 	limit, source := applyMemoryLimit(root, noEnv, spy(&applied), quietLogger())
 
 	if source != sourceMemInfo {
-		t.Errorf("source = %q, want %q", source, sourceMemInfo)
+		t.Errorf(msgSource, source, sourceMemInfo)
 	}
 	want := want80(32 * gib)
 	if limit != want {
-		t.Errorf("limit = %d, want %d", limit, want)
+		t.Errorf(msgLimit, limit, want)
 	}
 }
 
@@ -171,7 +179,7 @@ func TestApplyMemoryLimitMemInfoFallback(t *testing.T) {
 // GOMEMLIMIT=off, which is the documented way to disable the limit.
 func TestApplyMemoryLimitRespectsExistingGOMEMLIMIT(t *testing.T) {
 	root := fakeRoot(t, map[string]string{
-		pathV2Max: "34359738368\n",
+		pathV2Max: bytes32GiB,
 	})
 
 	for _, val := range []string{"16GiB", "off"} {
@@ -300,11 +308,11 @@ func TestMemTotalMissingFile(t *testing.T) {
 // A nil logger must not panic — callers outside cmd may not have one.
 func TestApplyMemoryLimitNilLogger(t *testing.T) {
 	root := fakeRoot(t, map[string]string{
-		pathV2Max: "34359738368\n",
+		pathV2Max: bytes32GiB,
 	})
 	var applied int64
 	if _, source := applyMemoryLimit(root, noEnv, spy(&applied), nil); source != sourceCgroupV2 {
-		t.Errorf("source = %q, want %q", source, sourceCgroupV2)
+		t.Errorf(msgSource, source, sourceCgroupV2)
 	}
 }
 
