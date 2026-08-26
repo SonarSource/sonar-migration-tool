@@ -78,90 +78,98 @@ func TestRunIDAfter_NonNumericSuffixFallsBackToStringCompare(t *testing.T) {
 // outputs. The fix returns max(N)+1 where N is the existing suffix on
 // today's dirs.
 func TestGenerateRunID_HandlesNumberingGaps(t *testing.T) {
-	today := time.Now().UTC().Format("2006-01-02")
-
-	t.Run("empty directory yields -0001", func(t *testing.T) {
-		dir := t.TempDir()
-		got := GenerateRunID(dir)
-		want := today + "-0001"
-		if got != want {
-			t.Errorf("want %q, got %q", want, got)
-		}
-	})
-
-	t.Run("dirs -10..-19 with gaps below yields -0020 (not -11 collision)", func(t *testing.T) {
-		dir := t.TempDir()
-		for i := 10; i <= 19; i++ {
-			if err := os.MkdirAll(filepath.Join(dir, fmt.Sprintf("%s-%02d", today, i)), 0o755); err != nil {
-				t.Fatalf("mkdir: %v", err)
-			}
-		}
-		got := GenerateRunID(dir)
-		want := today + "-0020"
-		if got != want {
-			t.Errorf("want %q (max+1), got %q", want, got)
-		}
-	})
-
-	t.Run("non-contiguous numbering still returns max+1", func(t *testing.T) {
-		dir := t.TempDir()
-		for _, n := range []int{1, 3, 7, 42} {
-			if err := os.MkdirAll(filepath.Join(dir, fmt.Sprintf("%s-%02d", today, n)), 0o755); err != nil {
-				t.Fatalf("mkdir: %v", err)
-			}
-		}
-		got := GenerateRunID(dir)
-		want := today + "-0043"
-		if got != want {
-			t.Errorf("want %q, got %q", want, got)
-		}
-	})
-
-	t.Run("dirs from other days are ignored", func(t *testing.T) {
-		dir := t.TempDir()
-		// Other days don't participate in the count.
-		if err := os.MkdirAll(filepath.Join(dir, "2020-01-01-99"), 0o755); err != nil {
-			t.Fatalf("mkdir: %v", err)
-		}
-		got := GenerateRunID(dir)
-		want := today + "-0001"
-		if got != want {
-			t.Errorf("foreign-day dir should not affect count: want %q, got %q", want, got)
-		}
-	})
-
-	t.Run("dirs with non-numeric suffix are ignored", func(t *testing.T) {
-		dir := t.TempDir()
-		if err := os.MkdirAll(filepath.Join(dir, today+"-rc1"), 0o755); err != nil {
-			t.Fatalf("mkdir: %v", err)
-		}
-		got := GenerateRunID(dir)
-		// Only well-formed dirs influence max; rc1 is skipped.
-		if !strings.HasPrefix(got, today+"-") {
-			t.Errorf("expected today-prefixed ID, got %q", got)
-		}
-		if got != today+"-0001" {
-			t.Errorf("non-numeric suffix should be ignored: want %q, got %q", today+"-0001", got)
-		}
-	})
-
-	// #542 — the sequence number is zero-padded to four digits so
-	// that among IDs generated after this fix, lexicographic order
-	// keeps matching numeric order past the 99th run of a day (a
+	t.Run("empty directory yields -0001", testGenerateRunID_EmptyDir)
+	t.Run("dirs -10..-19 with gaps below yields -0020 (not -11 collision)", testGenerateRunID_GapBelow)
+	t.Run("non-contiguous numbering still returns max+1", testGenerateRunID_NonContiguous)
+	t.Run("dirs from other days are ignored", testGenerateRunID_ForeignDayIgnored)
+	t.Run("dirs with non-numeric suffix are ignored", testGenerateRunID_NonNumericSuffixIgnored)
+	// #542 — the sequence number is zero-padded to four digits so that
+	// among IDs generated after this fix, lexicographic order keeps
+	// matching numeric order past the 99th run of a day (a
 	// pre-existing, non-padded "-99" dir from before this fix is a
 	// separate, unavoidable transition case handled by RunIDAfter
 	// instead, not by GenerateRunID's own output).
-	t.Run("crossing the 99->100 boundary still zero-pads to four digits", func(t *testing.T) {
-		dir := t.TempDir()
-		if err := os.MkdirAll(filepath.Join(dir, today+"-99"), 0o755); err != nil {
-			t.Fatalf("mkdir: %v", err)
-		}
-		got := GenerateRunID(dir)
-		want := today + "-0100"
-		if got != want {
-			t.Errorf("want %q, got %q", want, got)
-		}
-	})
+	t.Run("crossing the 99->100 boundary still zero-pads to four digits", testGenerateRunID_CrossesPast99)
+}
+
+func mkRunDir(t *testing.T, dir, name string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, name), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+}
+
+func testGenerateRunID_EmptyDir(t *testing.T) {
+	dir := t.TempDir()
+	today := time.Now().UTC().Format("2006-01-02")
+	got := GenerateRunID(dir)
+	want := today + "-0001"
+	if got != want {
+		t.Errorf("want %q, got %q", want, got)
+	}
+}
+
+func testGenerateRunID_GapBelow(t *testing.T) {
+	dir := t.TempDir()
+	today := time.Now().UTC().Format("2006-01-02")
+	for i := 10; i <= 19; i++ {
+		mkRunDir(t, dir, fmt.Sprintf("%s-%02d", today, i))
+	}
+	got := GenerateRunID(dir)
+	want := today + "-0020"
+	if got != want {
+		t.Errorf("want %q (max+1), got %q", want, got)
+	}
+}
+
+func testGenerateRunID_NonContiguous(t *testing.T) {
+	dir := t.TempDir()
+	today := time.Now().UTC().Format("2006-01-02")
+	for _, n := range []int{1, 3, 7, 42} {
+		mkRunDir(t, dir, fmt.Sprintf("%s-%02d", today, n))
+	}
+	got := GenerateRunID(dir)
+	want := today + "-0043"
+	if got != want {
+		t.Errorf("want %q, got %q", want, got)
+	}
+}
+
+func testGenerateRunID_ForeignDayIgnored(t *testing.T) {
+	dir := t.TempDir()
+	today := time.Now().UTC().Format("2006-01-02")
+	// Other days don't participate in the count.
+	mkRunDir(t, dir, "2020-01-01-99")
+	got := GenerateRunID(dir)
+	want := today + "-0001"
+	if got != want {
+		t.Errorf("foreign-day dir should not affect count: want %q, got %q", want, got)
+	}
+}
+
+func testGenerateRunID_NonNumericSuffixIgnored(t *testing.T) {
+	dir := t.TempDir()
+	today := time.Now().UTC().Format("2006-01-02")
+	mkRunDir(t, dir, today+"-rc1")
+	got := GenerateRunID(dir)
+	// Only well-formed dirs influence max; rc1 is skipped.
+	if !strings.HasPrefix(got, today+"-") {
+		t.Errorf("expected today-prefixed ID, got %q", got)
+	}
+	if got != today+"-0001" {
+		t.Errorf("non-numeric suffix should be ignored: want %q, got %q", today+"-0001", got)
+	}
+}
+
+func testGenerateRunID_CrossesPast99(t *testing.T) {
+	dir := t.TempDir()
+	today := time.Now().UTC().Format("2006-01-02")
+	mkRunDir(t, dir, today+"-99")
+	got := GenerateRunID(dir)
+	want := today + "-0100"
+	if got != want {
+		t.Errorf("want %q, got %q", want, got)
+	}
 }
 
 // TestGenerateRunID_ISOFormatShape pins the overall shape produced for
