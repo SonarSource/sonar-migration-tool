@@ -414,6 +414,76 @@ type branchReportMeta struct {
 	ExcludedFiles        int
 }
 
+// buildProtoSources maps each file component's source text onto its
+// protobuf component ref, skipping files with no source.
+//
+// Source text is sanitized on the way in. Files like RCE-demo PHP scripts
+// may contain null bytes (U+0000) used in null-byte injection exploits.
+// The SonarCloud CE's Java component visitor and the underlying database
+// both reject null bytes in text, producing "Visit of Component failed" /
+// "Fail to process issues of component" CE task failures. Stripping them
+// here lets the file still migrate with its issues and measures intact.
+func buildProtoSources(sources []sourceRecord, cr *scanreport.ComponentRef) map[int32]string {
+	pbSources := make(map[int32]string, len(sources))
+	for _, s := range sources {
+		if ref, ok := cr.Refs()[s.Component]; ok && s.Source != "" {
+			pbSources[ref] = stripNullBytes(s.Source)
+		}
+	}
+	return pbSources
+}
+
+// changesetsByComponentKey re-keys changesets from protobuf component ref to
+// component key, sharing the same pointers. BackdateChangesets works in
+// component-key space, so it needs this alias view.
+func changesetsByComponentKey(changesets map[int32]*pb.Changesets, cr *scanreport.ComponentRef) map[string]*pb.Changesets {
+	byKey := make(map[string]*pb.Changesets, len(changesets))
+	for compKey, ref := range cr.Refs() {
+		if cs, ok := changesets[ref]; ok {
+			byKey[compKey] = cs
+		}
+	}
+	return byKey
+}
+
+// preCreateBranchAnalysis performs the SonarCloud "Create analysis"
+// handshake for a non-main branch, returning the analysis UUID to stamp
+// into the report metadata (analysis_uuid, field 19) so the CE binds the
+// report to the pre-created branch. Without it the CE accepts the report
+// (task SUCCESS) but never creates the branch.
+//
+// The main branch needs no handshake — its first analysis establishes it —
+// so this returns an empty UUID for it.
+func preCreateBranchAnalysis(ctx context.Context, e *Executor, input importBranchInput,
+	targetBranch, projectVersion string,
+) (string, error) {
+	if input.IsMain {
+		return "", nil
+	}
+	res, err := scanreport.PreCreateAnalysis(ctx, e.RawAPI.HTTPClient(), scanreport.AnalysisConfig{
+		APIURL:         e.APIURL,
+		OrgKey:         input.OrgKey,
+		ProjectKey:     input.CloudKey,
+		ProjectVersion: projectVersion,
+		BranchName:     targetBranch,
+		TargetBranch:   input.ReferenceBranch,
+		// Migrate every non-main branch as a long-lived branch so it keeps
+		// its full issue history (matches SonarQube Server, where all
+		// branches are long-lived). Without this, branches whose names don't
+		// match the target's long-lived-branch regex would be created as
+		// short-lived (PR-like, auto-deleted, no overall-code history).
+		BranchType: "long",
+	})
+	if err != nil {
+		return "", fmt.Errorf("create-analysis handshake (branch %s): %w", input.Branch, err)
+	}
+	e.Logger.Info("analysis pre-created (branch anchored on target)",
+		"project", input.CloudKey, "branch", targetBranch,
+		"analysisUuid", res.AnalysisUUID, "branchType", res.BranchType,
+		"referenceBranch", res.ReferenceBranchName)
+	return res.AnalysisUUID, nil
+}
+
 // buildBranchReport loads the extracted data for one branch, applies the
 // CE-compatibility fixes, and returns the packaged report. A non-nil skip
 // result means the branch must not be submitted (no components, or no source
@@ -528,19 +598,7 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	now := time.Now()
 
 	root, fileComps, cr := scanreport.BuildComponents(input.CloudKey, components)
-	pbSources := make(map[int32]string)
-	for _, s := range sources {
-		if ref, ok := cr.Refs()[s.Component]; ok && s.Source != "" {
-			// Sanitize source text before embedding in the scanner report.
-			// Files like RCE-demo PHP scripts may contain null bytes (U+0000)
-			// used in null-byte injection exploits. The SonarCloud CE's Java
-			// component visitor and the underlying database both reject null
-			// bytes in text, producing "Visit of Component failed" / "Fail to
-			// process issues of component" CE task failures. Strip them here so
-			// the file still migrates with its issues and measures intact.
-			pbSources[ref] = stripNullBytes(s.Source)
-		}
-	}
+	pbSources := buildProtoSources(sources, cr)
 	// #425 — the SonarCloud CE rejects any report containing a FILE component
 	// with no source text (it fails with "There was an issue whilst processing
 	// the report"), regardless of whether the file carries issues — every
@@ -565,12 +623,7 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 
 	// Backdate changesets so each issue gets its original SonarQube creation date.
 	// Build a component-key-keyed alias map (same pointers) for BackdateChangesets.
-	changesetsByKey := make(map[string]*pb.Changesets, len(changesets))
-	for compKey, ref := range cr.Refs() {
-		if cs, ok := changesets[ref]; ok {
-			changesetsByKey[compKey] = cs
-		}
-	}
+	changesetsByKey := changesetsByComponentKey(changesets, cr)
 	extracted := toExtractedIssues(issues)
 	extracted = append(extracted, extIssuesToExtracted(extIssues)...)
 	scanreport.BackdateChangesets(extracted, changesetsByKey, now)
@@ -583,29 +636,9 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	// this report to the pre-created branch. Without it, the CE accepts the
 	// report (task SUCCESS) but never creates the branch. The main branch needs
 	// no handshake — its first analysis establishes it.
-	var analysisUUID string
-	if !input.IsMain {
-		res, hErr := scanreport.PreCreateAnalysis(ctx, e.RawAPI.HTTPClient(), scanreport.AnalysisConfig{
-			APIURL:         e.APIURL,
-			OrgKey:         input.OrgKey,
-			ProjectKey:     input.CloudKey,
-			ProjectVersion: projectVersion,
-			BranchName:     targetBranch,
-			TargetBranch:   input.ReferenceBranch,
-			// Migrate every non-main branch as a long-lived branch so it keeps
-			// its full issue history (matches SonarQube Server, where all
-			// branches are long-lived). Without this, branches whose names don't
-			// match the target's long-lived-branch regex would be created as
-			// short-lived (PR-like, auto-deleted, no overall-code history).
-			BranchType: "long",
-		})
-		if hErr != nil {
-			return nil, branchReportMeta{}, nil, fmt.Errorf("create-analysis handshake (branch %s): %w", input.Branch, hErr)
-		}
-		analysisUUID = res.AnalysisUUID
-		e.Logger.Info("analysis pre-created (branch anchored on target)",
-			"project", input.CloudKey, "branch", targetBranch,
-			"analysisUuid", analysisUUID, "branchType", res.BranchType, "referenceBranch", res.ReferenceBranchName)
+	analysisUUID, err := preCreateBranchAnalysis(ctx, e, input, targetBranch, projectVersion)
+	if err != nil {
+		return nil, branchReportMeta{}, nil, err
 	}
 
 	reportData := &scanreport.ReportData{
