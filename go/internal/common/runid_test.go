@@ -4,7 +4,14 @@
 
 package common
 
-import "testing"
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
 
 // TestRunIDAfter_NumericCrossoverPast99 reproduces #542: once a run's
 // trailing counter grows to three digits, lexicographic comparison
@@ -54,5 +61,134 @@ func TestRunIDAfter_NonNumericSuffixFallsBackToStringCompare(t *testing.T) {
 	}
 	if !RunIDAfter("any-id", "") {
 		t.Error(`RunIDAfter("any-id", "") = false, want true (first-seen initialization case)`)
+	}
+}
+
+// TestGenerateRunID_HandlesNumberingGaps is the single, authoritative
+// test for GenerateRunID (#542) — this function used to have three
+// hand-synced copies (migrate, extract, wizard), each with its own
+// near-identical test, which is exactly the drift that let wizard's
+// copy fall behind with a buggy count-based algorithm until it was
+// caught and fixed alongside this consolidation.
+//
+// The gap-handling case is a regression test for #359: an earlier
+// (count-of-dirs + 1) approach broke as soon as the numbering had any
+// gap — e.g. dirs -0010..-0019 with none below would yield count=10,
+// colliding with the existing -0011 and silently reusing its task
+// outputs. The fix returns max(N)+1 where N is the existing suffix on
+// today's dirs.
+func TestGenerateRunID_HandlesNumberingGaps(t *testing.T) {
+	today := time.Now().UTC().Format("2006-01-02")
+
+	t.Run("empty directory yields -0001", func(t *testing.T) {
+		dir := t.TempDir()
+		got := GenerateRunID(dir)
+		want := today + "-0001"
+		if got != want {
+			t.Errorf("want %q, got %q", want, got)
+		}
+	})
+
+	t.Run("dirs -10..-19 with gaps below yields -0020 (not -11 collision)", func(t *testing.T) {
+		dir := t.TempDir()
+		for i := 10; i <= 19; i++ {
+			if err := os.MkdirAll(filepath.Join(dir, fmt.Sprintf("%s-%02d", today, i)), 0o755); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+		}
+		got := GenerateRunID(dir)
+		want := today + "-0020"
+		if got != want {
+			t.Errorf("want %q (max+1), got %q", want, got)
+		}
+	})
+
+	t.Run("non-contiguous numbering still returns max+1", func(t *testing.T) {
+		dir := t.TempDir()
+		for _, n := range []int{1, 3, 7, 42} {
+			if err := os.MkdirAll(filepath.Join(dir, fmt.Sprintf("%s-%02d", today, n)), 0o755); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+		}
+		got := GenerateRunID(dir)
+		want := today + "-0043"
+		if got != want {
+			t.Errorf("want %q, got %q", want, got)
+		}
+	})
+
+	t.Run("dirs from other days are ignored", func(t *testing.T) {
+		dir := t.TempDir()
+		// Other days don't participate in the count.
+		if err := os.MkdirAll(filepath.Join(dir, "2020-01-01-99"), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		got := GenerateRunID(dir)
+		want := today + "-0001"
+		if got != want {
+			t.Errorf("foreign-day dir should not affect count: want %q, got %q", want, got)
+		}
+	})
+
+	t.Run("dirs with non-numeric suffix are ignored", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, today+"-rc1"), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		got := GenerateRunID(dir)
+		// Only well-formed dirs influence max; rc1 is skipped.
+		if !strings.HasPrefix(got, today+"-") {
+			t.Errorf("expected today-prefixed ID, got %q", got)
+		}
+		if got != today+"-0001" {
+			t.Errorf("non-numeric suffix should be ignored: want %q, got %q", today+"-0001", got)
+		}
+	})
+
+	// #542 — the sequence number is zero-padded to four digits so
+	// that among IDs generated after this fix, lexicographic order
+	// keeps matching numeric order past the 99th run of a day (a
+	// pre-existing, non-padded "-99" dir from before this fix is a
+	// separate, unavoidable transition case handled by RunIDAfter
+	// instead, not by GenerateRunID's own output).
+	t.Run("crossing the 99->100 boundary still zero-pads to four digits", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, today+"-99"), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		got := GenerateRunID(dir)
+		want := today + "-0100"
+		if got != want {
+			t.Errorf("want %q, got %q", want, got)
+		}
+	})
+}
+
+// TestGenerateRunID_ISOFormatShape pins the overall shape produced for
+// a fresh directory: an ISO YYYY-MM-DD date prefix (not the historical
+// MM-DD-YYYY format), followed by a four-digit, zero-padded sequence
+// number (#108, #542).
+func TestGenerateRunID_ISOFormatShape(t *testing.T) {
+	dir := t.TempDir()
+	id := GenerateRunID(dir)
+	if id == "" {
+		t.Fatal("GenerateRunID should return non-empty string")
+	}
+	if id[len(id)-5:] != "-0001" {
+		t.Errorf("expected -0001 suffix, got %q", id)
+	}
+	// We don't hard-code today's date (test would drift) but pin the
+	// shape: id must be at least YYYY-MM-DD-NNNN = 15 chars, must
+	// start with today's UTC year, and the 5th character must be a
+	// hyphen.
+	wantYear := time.Now().UTC().Format("2006")
+	if len(id) < 15 {
+		t.Fatalf("id too short for ISO format YYYY-MM-DD-NNNN: %q", id)
+	}
+	if id[:4] != wantYear {
+		t.Errorf("id must start with current UTC year %q, got %q (full id %q)", wantYear, id[:4], id)
+	}
+	if id[4] != '-' {
+		t.Errorf("id[4] must be '-' for ISO format, got %q (full id %q)", string(id[4]), id)
 	}
 }

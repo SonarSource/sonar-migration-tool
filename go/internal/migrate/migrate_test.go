@@ -6,12 +6,7 @@ package migrate
 
 import (
 	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
-	"time"
 )
 
 func TestRegisterAllCountsAndDependencies(t *testing.T) {
@@ -436,95 +431,8 @@ func TestMigrateTargetTasksExplicitListHonorsSkipIssueSync(t *testing.T) {
 	}
 }
 
-// Regression for the runID-collision bug surfaced after #359:
-// generateRunID counted dirs and returned count+1, which collides
-// with an existing dir as soon as the numbering has any gap
-// (e.g. dirs -10..-19 with no -01..-09 would yield count=10 and
-// alias onto -11). The fix returns max(N)+1 where N is the
-// existing suffix on today's dirs.
-func TestGenerateRunID_HandlesNumberingGaps(t *testing.T) {
-	today := time.Now().UTC().Format("2006-01-02")
-
-	t.Run("empty directory yields -0001", func(t *testing.T) {
-		dir := t.TempDir()
-		got := generateRunID(dir)
-		want := today + "-0001"
-		if got != want {
-			t.Errorf("want %q, got %q", want, got)
-		}
-	})
-
-	t.Run("dirs -10..-19 with gaps below yields -0020 (not -11 collision)", func(t *testing.T) {
-		dir := t.TempDir()
-		for i := 10; i <= 19; i++ {
-			if err := os.MkdirAll(filepath.Join(dir, fmt.Sprintf("%s-%02d", today, i)), 0o755); err != nil {
-				t.Fatalf("mkdir: %v", err)
-			}
-		}
-		got := generateRunID(dir)
-		want := today + "-0020"
-		if got != want {
-			t.Errorf("want %q (max+1), got %q", want, got)
-		}
-	})
-
-	t.Run("non-contiguous numbering still returns max+1", func(t *testing.T) {
-		dir := t.TempDir()
-		for _, n := range []int{1, 3, 7, 42} {
-			if err := os.MkdirAll(filepath.Join(dir, fmt.Sprintf("%s-%02d", today, n)), 0o755); err != nil {
-				t.Fatalf("mkdir: %v", err)
-			}
-		}
-		got := generateRunID(dir)
-		want := today + "-0043"
-		if got != want {
-			t.Errorf("want %q, got %q", want, got)
-		}
-	})
-
-	t.Run("dirs from other days are ignored", func(t *testing.T) {
-		dir := t.TempDir()
-		// Other days don't participate in the count.
-		if err := os.MkdirAll(filepath.Join(dir, "2020-01-01-99"), 0o755); err != nil {
-			t.Fatalf("mkdir: %v", err)
-		}
-		got := generateRunID(dir)
-		want := today + "-0001"
-		if got != want {
-			t.Errorf("foreign-day dir should not affect count: want %q, got %q", want, got)
-		}
-	})
-
-	t.Run("dirs with non-numeric suffix are ignored", func(t *testing.T) {
-		dir := t.TempDir()
-		if err := os.MkdirAll(filepath.Join(dir, today+"-rc1"), 0o755); err != nil {
-			t.Fatalf("mkdir: %v", err)
-		}
-		got := generateRunID(dir)
-		// Only well-formed dirs influence max; rc1 is skipped.
-		if !strings.HasPrefix(got, today+"-") {
-			t.Errorf("expected today-prefixed ID, got %q", got)
-		}
-		if got != today+"-0001" {
-			t.Errorf("non-numeric suffix should be ignored: want %q, got %q", today+"-0001", got)
-		}
-	})
-
-	// #542 — the sequence number is zero-padded to four digits so
-	// that among IDs generated after this fix, lexicographic order
-	// keeps matching numeric order past the 99th run of a day (a
-	// pre-existing, non-padded "-99" dir from before this fix is a
-	// separate, unavoidable transition case handled by
-	// common.RunIDAfter instead, not by generateRunID's own output).
-	t.Run("crossing the 99->100 boundary still zero-pads to four digits", func(t *testing.T) {
-		dir := t.TempDir()
-		if err := os.MkdirAll(filepath.Join(dir, today+"-99"), 0o755); err != nil {
-			t.Fatalf("mkdir: %v", err)
-		}
-		got := generateRunID(dir)
-		want := today + "-0100"
-		if got != want {
-			t.Errorf("want %q, got %q", want, got)
-		}
-	})
-}
+// generateRunID moved to common.GenerateRunID (#542) — its own tests,
+// including the numbering-gap regression from #359, now live in
+// go/internal/common/runid_test.go, deduplicated across the three
+// packages (migrate, extract, wizard) that used to each hand-maintain
+// an identical copy of this function and its test.

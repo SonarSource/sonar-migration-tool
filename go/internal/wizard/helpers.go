@@ -12,9 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 )
@@ -91,30 +89,6 @@ func phaseByIndex(idx int) WizardPhase {
 		return phaseSequence[idx]
 	}
 	return PhaseExtract
-}
-
-// generateRunID creates an ISO-date-prefixed run ID like
-// "2026-04-20-0001" (issue #108). YYYY-MM-DD sorts chronologically
-// when run directories are listed alphabetically and is
-// internationally readable. The sequence number is zero-padded to
-// four digits so lexicographic and numeric ordering agree up to
-// 9999 runs/day (#542). Mirrors migrate.generateRunID — keep them in
-// sync.
-func generateRunID(directory string) string {
-	today := time.Now().UTC().Format("2006-01-02")
-	prefix := today + "-"
-	entries, _ := os.ReadDir(directory)
-	maxN := 0
-	for _, e := range entries {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), prefix) {
-			continue
-		}
-		n, err := strconv.Atoi(e.Name()[len(prefix):])
-		if err == nil && n > maxN {
-			maxN = n
-		}
-	}
-	return fmt.Sprintf("%s-%04d", today, maxN+1)
 }
 
 // isSSLError walks the error chain looking for TLS/certificate errors.

@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -339,7 +338,7 @@ func prepareMigratePlan(cfg MigrateConfig, logger *slog.Logger) (*migratePlan, e
 	runID := cfg.RunID
 	createPlan := runID == ""
 	if createPlan {
-		runID = generateRunID(cfg.ExportDirectory)
+		runID = common.GenerateRunID(cfg.ExportDirectory)
 	}
 	runDir := filepath.Join(cfg.ExportDirectory, runID)
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
@@ -491,43 +490,6 @@ func (cfg *MigrateConfig) applyDefaults() {
 	if cfg.URL != "" && cfg.URL[len(cfg.URL)-1] != '/' {
 		cfg.URL += "/"
 	}
-}
-
-// generateRunID returns an ISO-date-prefixed run ID (issue #108).
-// Format: "YYYY-MM-DD-NNNN" where NNNN is the next sequence number for
-// the current day in the given directory, zero-padded to four digits
-// so that lexicographic and numeric ordering agree up to 9999 runs/day
-// (#542 — the previous two-digit padding let a 3-digit run number like
-// "-101" sort lexicographically *before* "-99").
-//
-// The implementation finds the highest existing sequence number for
-// today and returns max+1. The earlier (count+1) approach broke once
-// the numbering had ANY gap — e.g. dirs -10..-19 with no -01..-09
-// would yield count=10, which collides with the existing -11 and
-// silently reuses its task outputs. See the #359 follow-up
-// regression report.
-func generateRunID(directory string) string {
-	today := time.Now().UTC().Format("2006-01-02")
-	prefix := today + "-"
-	entries, _ := os.ReadDir(directory)
-	maxN := 0
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if !strings.HasPrefix(name, prefix) {
-			continue
-		}
-		n, err := strconv.Atoi(name[len(prefix):])
-		if err != nil {
-			continue
-		}
-		if n > maxN {
-			maxN = n
-		}
-	}
-	return fmt.Sprintf("%s-%04d", today, maxN+1)
 }
 
 func writeMigrateMeta(dir string, plan [][]string, runID string, edition common.Edition, url string, targets []string, registry map[string]*TaskDef) error {
