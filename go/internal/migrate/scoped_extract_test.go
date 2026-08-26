@@ -171,6 +171,35 @@ func TestScopedHotspotItemsHandlesProjectKeyFallbackAndEmptyBranch(t *testing.T)
 	}
 }
 
+// An empty scope Branch must span every branch of the project. This is how
+// loadMatchableHotspots reads: the metadata sync covers all branches, so
+// scoping it to one would silently drop hotspots.
+func TestScopedHotspotItemsEmptyScopeBranchSpansAllBranches(t *testing.T) {
+	dir := t.TempDir()
+	writeJSONL(filepath.Join(dir, "extract-01", "getProjectHotspotsFull"), []map[string]any{
+		{"key": "hs-main", "project": "proj1", "branch": "main"},
+		{"key": "hs-develop", "project": "proj1", "branch": "develop"},
+		{"key": "hs-no-branch", "project": "proj1"},
+		{"key": "hs-other-project", "project": "proj2", "branch": "main"},
+	})
+	e := newProjectDataExecutor(t, dir)
+
+	seen := map[string]bool{}
+	scope := extractScope{ServerURL: testServerURL, ProjectKey: "proj1"}
+	for _, hdr := range scopedHotspotItems(e, scope) {
+		seen[hdr.Key] = true
+	}
+
+	for _, want := range []string{"hs-main", "hs-develop", "hs-no-branch"} {
+		if !seen[want] {
+			t.Errorf("expected %q in an unscoped-branch read", want)
+		}
+	}
+	if seen["hs-other-project"] {
+		t.Error("another project must never be in scope")
+	}
+}
+
 // An empty scope Branch matches every branch; this is what run-scoped and
 // project-scoped readers rely on.
 func TestRecordHeaderMatches(t *testing.T) {

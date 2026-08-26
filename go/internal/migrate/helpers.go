@@ -202,13 +202,17 @@ func (h hotspotHeader) projectKey() string {
 	return h.ProjectKey
 }
 
-// matches reports whether a hotspot record belongs to the given scope. A
-// record with no branch belongs to every branch.
+// matches reports whether a hotspot record belongs to the given scope.
+//
+// Two independent wildcards, and both are needed. An empty scope Branch
+// wants every branch of the project — that is how the metadata sync reads
+// hotspots. A record with no branch belongs to every branch, which is how
+// the per-branch report loader has always treated them.
 func (h hotspotHeader) matches(scope extractScope) bool {
 	if h.projectKey() != scope.ProjectKey {
 		return false
 	}
-	return h.Branch == "" || h.Branch == scope.Branch
+	return scope.Branch == "" || h.Branch == "" || h.Branch == scope.Branch
 }
 
 // scopedHotspotItems is scopedExtractItems for getProjectHotspotsFull.
