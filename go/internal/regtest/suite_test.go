@@ -197,3 +197,141 @@ func TestLatestRunDir_PicksMostRecentlyModified(t *testing.T) {
 		t.Errorf("latestRunDir = %q, want %q", got, "2026-08-25-10")
 	}
 }
+
+// TestLatestRunDir_SkipsNonMatchingEntries ensures directories that don't
+// match runIDPattern (stray files, unrelated dirs) are ignored rather than
+// mistaken for a run.
+func TestLatestRunDir_SkipsNonMatchingEntries(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "not-a-run-dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "2026-08-25-01"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := latestRunDir(dir)
+	if err != nil {
+		t.Fatalf("latestRunDir: %v", err)
+	}
+	if got != "2026-08-25-01" {
+		t.Errorf("latestRunDir = %q, want %q (non-matching entries must be skipped)", got, "2026-08-25-01")
+	}
+}
+
+// TestLatestRunDir_UnreadableExportDirIsAnError ensures a missing/unreadable
+// export dir surfaces as an error rather than being treated as "no runs
+// yet".
+func TestLatestRunDir_UnreadableExportDirIsAnError(t *testing.T) {
+	if _, err := latestRunDir(filepath.Join(t.TempDir(), "does-not-exist")); err == nil {
+		t.Fatal("expected an error when the export dir cannot be read")
+	}
+}
+
+// TestLoadCloudProjectKeyMap_NoCreateProjectsData ensures a run directory
+// that exists but has no createProjects output yet (e.g. regtest invoked
+// right after extract, before migrate has run) yields a nil map, not an
+// error.
+func TestLoadCloudProjectKeyMap_NoCreateProjectsData(t *testing.T) {
+	exportDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(exportDir, "2026-08-25-01"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := loadCloudProjectKeyMap(exportDir)
+	if err != nil {
+		t.Fatalf("loadCloudProjectKeyMap: %v", err)
+	}
+	if m != nil {
+		t.Errorf("loadCloudProjectKeyMap = %v, want nil (no createProjects data yet)", m)
+	}
+}
+
+// TestNewSuite_WarnsAndFallsBackWhenExportDirUnreadable ensures NewSuite
+// doesn't fail outright when cloudKeyByProject can't be loaded — it should
+// log a warning and fall back to a nil map (default key convention).
+func TestNewSuite_WarnsAndFallsBackWhenExportDirUnreadable(t *testing.T) {
+	s, err := NewSuite(Config{
+		SQSURL: "http://sqs.local", SQSToken: "t",
+		SCURL: "https://sc.local", SCToken: "t", SCOrg: "my-org",
+		ExportDir: filepath.Join(t.TempDir(), "does-not-exist"),
+	})
+	if err != nil {
+		t.Fatalf("NewSuite: %v", err)
+	}
+	if s.cloudKeyByProject != nil {
+		t.Errorf("cloudKeyByProject = %v, want nil when export dir is unreadable", s.cloudKeyByProject)
+	}
+}
+
+// TestLoadConfigFile_InvalidJSONIsAnError ensures a malformed config file
+// surfaces a parse error rather than a zero-value Config.
+func TestLoadConfigFile_InvalidJSONIsAnError(t *testing.T) {
+	path := writeConfig(t, `{not valid json`)
+	if _, err := LoadConfigFile(path); err == nil {
+		t.Fatal("expected an error when the config file is not valid JSON")
+	}
+}
+
+// TestLoadConfigFile_DefaultsExportDirWhenUnset ensures ExportDir falls
+// back to "./migration-files" when export_directory is absent from the
+// config file entirely.
+func TestLoadConfigFile_DefaultsExportDirWhenUnset(t *testing.T) {
+	path := writeConfig(t, `{
+		"source": {"url": "http://sqs.local", "token": "sqs-token"},
+		"target": {"url": "https://sc.local", "token": "sc-token", "default_organization": "my-org"}
+	}`)
+
+	cfg, err := LoadConfigFile(path)
+	if err != nil {
+		t.Fatalf("LoadConfigFile: %v", err)
+	}
+	if cfg.ExportDir != "./migration-files" {
+		t.Errorf("ExportDir = %q, want %q (default fallback when export_directory is unset)", cfg.ExportDir, "./migration-files")
+	}
+}
+
+// TestLoadConfigFile_OrganizationsCSVReadErrorPropagates ensures a read
+// error from organizations.csv (as opposed to the file simply not
+// existing) is surfaced rather than silently treated as "no org found".
+func TestLoadConfigFile_OrganizationsCSVReadErrorPropagates(t *testing.T) {
+	exportDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(exportDir, "organizations.csv"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := writeConfig(t, `{
+		"export_directory": "`+exportDir+`",
+		"source": {"url": "http://sqs.local", "token": "sqs-token"},
+		"target": {"url": "https://sc.local", "token": "sc-token"}
+	}`)
+
+	if _, err := LoadConfigFile(path); err == nil {
+		t.Fatal("expected an error when organizations.csv cannot be read")
+	}
+}
+
+// TestLoadConfigFile_SkipsBlankAndSkippedOrgRows ensures rows with a blank
+// or "SKIPPED" sonarcloud_org_key are ignored when resolving the single
+// organization to verify against.
+func TestLoadConfigFile_SkipsBlankAndSkippedOrgRows(t *testing.T) {
+	exportDir := t.TempDir()
+	csv := "sonarqube_org_key,sonarcloud_org_key,binding_key,server_url,alm,url,is_cloud,project_count\n" +
+		"http://skipped.local/,SKIPPED,http://skipped.local/,http://skipped.local/,,,false,1\n" +
+		"http://other.local/,resolved-org,http://other.local/,http://other.local/,,,false,2\n"
+	if err := os.WriteFile(filepath.Join(exportDir, "organizations.csv"), []byte(csv), 0o600); err != nil {
+		t.Fatalf("writing organizations.csv: %v", err)
+	}
+	path := writeConfig(t, `{
+		"export_directory": "`+exportDir+`",
+		"source": {"url": "http://sqs.local", "token": "sqs-token"},
+		"target": {"url": "https://sc.local", "token": "sc-token"}
+	}`)
+
+	cfg, err := LoadConfigFile(path)
+	if err != nil {
+		t.Fatalf("LoadConfigFile: %v", err)
+	}
+	if cfg.SCOrg != "resolved-org" {
+		t.Errorf("SCOrg = %q, want %q (SKIPPED/blank rows must be ignored)", cfg.SCOrg, "resolved-org")
+	}
+}
