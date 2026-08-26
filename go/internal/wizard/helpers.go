@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -101,14 +102,19 @@ func phaseByIndex(idx int) WizardPhase {
 // sync.
 func generateRunID(directory string) string {
 	today := time.Now().UTC().Format("2006-01-02")
+	prefix := today + "-"
 	entries, _ := os.ReadDir(directory)
-	count := 0
+	maxN := 0
 	for _, e := range entries {
-		if e.IsDir() && len(e.Name()) > len(today) && e.Name()[:len(today)] == today {
-			count++
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), prefix) {
+			continue
+		}
+		n, err := strconv.Atoi(e.Name()[len(prefix):])
+		if err == nil && n > maxN {
+			maxN = n
 		}
 	}
-	return fmt.Sprintf("%s-%04d", today, count+1)
+	return fmt.Sprintf("%s-%04d", today, maxN+1)
 }
 
 // isSSLError walks the error chain looking for TLS/certificate errors.
