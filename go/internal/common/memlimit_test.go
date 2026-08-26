@@ -126,7 +126,7 @@ func TestApplyMemoryLimitCgroupV2PrefersLowerOfMaxAndHigh(t *testing.T) {
 
 func TestApplyMemoryLimitCgroupV1(t *testing.T) {
 	root := fakeRoot(t, map[string]string{
-		pathV1Limit: "8589934592\n", // 8 GiB
+		pathV1Limit: bytes8GiB, // 8 GiB
 	})
 
 	var applied int64
@@ -326,5 +326,170 @@ func TestApplyMemoryLimitExportedIsSafe(t *testing.T) {
 	}
 	if limit == 0 && source != "" {
 		t.Errorf("no limit applied but source = %q", source)
+	}
+}
+
+// --- cgroup path resolution (systemd slices, nested containers) ---------
+
+const (
+	pathSelfCgroup = "proc/self/cgroup"
+
+	// A systemd unit's own cgroup, as /proc/self/cgroup reports it.
+	selfCgroupUnit = "0::/system.slice/smt.service\n"
+
+	bytes4GiB = "4294967296\n"
+	bytes8GiB = "8589934592\n"
+)
+
+// Outside a cgroup namespace the hierarchy root is unlimited and the real
+// ceiling sits in the process's own cgroup. Reading only the root found
+// nothing and fell through to total system memory.
+func TestApplyMemoryLimitCgroupV2NestedPath(t *testing.T) {
+	root := fakeRoot(t, map[string]string{
+		pathSelfCgroup: selfCgroupUnit,
+		// Root and intermediate are unlimited, as on a real systemd host.
+		pathV2Max:                               "max\n",
+		"sys/fs/cgroup/system.slice/memory.max": "max\n",
+		"sys/fs/cgroup/system.slice/smt.service/memory.max": bytes4GiB, // 4 GiB
+	})
+
+	var applied int64
+	limit, source := applyMemoryLimit(root, noEnv, spy(&applied), quietLogger())
+
+	if source != sourceCgroupV2 {
+		t.Fatalf("source = %q, want %q — the unit's MemoryMax must be found", source, sourceCgroupV2)
+	}
+	if want := want80(4 * gib); limit != want {
+		t.Errorf("limit = %d, want %d", limit, want)
+	}
+}
+
+// The kernel enforces memory.max hierarchically, so the effective ceiling
+// is the minimum across the chain. A looser ancestor must not mask a
+// tighter leaf, and a tighter ancestor must not be ignored in favour of a
+// looser leaf. This is the case that separates "minimum" from "first hit".
+func TestApplyMemoryLimitCgroupV2TakesMinimumAcrossAncestors(t *testing.T) {
+	tests := []struct {
+		name           string
+		ancestor, leaf string
+		wantGiB        int64
+	}{
+		{"tighter ancestor wins", "2147483648\n" /*2G*/, bytes8GiB /*8G*/, 2},
+		{"tighter leaf wins", "34359738368\n" /*32G*/, bytes4GiB /*4G*/, 4},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := fakeRoot(t, map[string]string{
+				pathSelfCgroup:                          selfCgroupUnit,
+				pathV2Max:                               "max\n",
+				"sys/fs/cgroup/system.slice/memory.max": tc.ancestor,
+				"sys/fs/cgroup/system.slice/smt.service/memory.max": tc.leaf,
+			})
+
+			var applied int64
+			limit, _ := applyMemoryLimit(root, noEnv, spy(&applied), quietLogger())
+
+			if want := want80(tc.wantGiB * gib); limit != want {
+				t.Errorf("limit = %d, want %d (%d GiB budget)", limit, want, tc.wantGiB)
+			}
+		})
+	}
+}
+
+// Inside a cgroup namespace /proc/self/cgroup reports "/", so the mount
+// root is the process's own cgroup and behaviour is unchanged.
+func TestApplyMemoryLimitCgroupV2NamespacedRootUnchanged(t *testing.T) {
+	root := fakeRoot(t, map[string]string{
+		pathSelfCgroup: "0::/\n",
+		pathV2Max:      bytes32GiB,
+	})
+
+	var applied int64
+	limit, source := applyMemoryLimit(root, noEnv, spy(&applied), quietLogger())
+
+	if source != sourceCgroupV2 {
+		t.Errorf(msgSource, source, sourceCgroupV2)
+	}
+	if want := want80(32 * gib); limit != want {
+		t.Errorf(msgLimit, limit, want)
+	}
+}
+
+// v1 names its hierarchy by controller and nests under the controller
+// mount, so it needs its own path resolution.
+func TestApplyMemoryLimitCgroupV1NestedPath(t *testing.T) {
+	root := fakeRoot(t, map[string]string{
+		pathSelfCgroup: "12:pids:/system.slice/smt.service\n" +
+			"9:memory:/system.slice/smt.service\n" +
+			selfCgroupUnit,
+		"sys/fs/cgroup/memory/system.slice/smt.service/memory.limit_in_bytes": bytes8GiB, // 8 GiB
+	})
+
+	var applied int64
+	limit, source := applyMemoryLimit(root, noEnv, spy(&applied), quietLogger())
+
+	if source != sourceCgroupV1 {
+		t.Fatalf("source = %q, want %q", source, sourceCgroupV1)
+	}
+	if want := want80(8 * gib); limit != want {
+		t.Errorf(msgLimit, limit, want)
+	}
+}
+
+// A missing or unparseable /proc/self/cgroup must degrade to the old
+// root-only probe rather than losing detection entirely.
+func TestCgroupSelfPathsAlwaysIncludesRoot(t *testing.T) {
+	tests := []struct {
+		name  string
+		files map[string]string
+	}{
+		{"missing file", nil},
+		{"unparseable", map[string]string{pathSelfCgroup: "garbage without colons\n"}},
+		{"empty", map[string]string{pathSelfCgroup: ""}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := cgroupSelfPaths(fakeRoot(t, tc.files), "")
+			if len(got) != 1 || got[0] != "" {
+				t.Errorf("cgroupSelfPaths = %q, want exactly [\"\"]", got)
+			}
+		})
+	}
+}
+
+func TestCgroupSelfPathsWalksAncestors(t *testing.T) {
+	root := fakeRoot(t, map[string]string{
+		pathSelfCgroup: selfCgroupUnit,
+	})
+
+	got := cgroupSelfPaths(root, "")
+	want := []string{"", "/system.slice", "/system.slice/smt.service"}
+
+	if len(got) != len(want) {
+		t.Fatalf("cgroupSelfPaths = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("path %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// The v2 line is the one with hierarchy ID 0 and no controllers; a v1
+// hierarchy is picked by its controller name. Selecting the wrong line
+// would probe a path that does not exist for that hierarchy.
+func TestCgroupSelfPathSelectsCorrectHierarchy(t *testing.T) {
+	root := fakeRoot(t, map[string]string{
+		pathSelfCgroup: "12:pids:/pids-path\n9:memory,cpu:/memory-path\n0::/unified-path\n",
+	})
+
+	if got := cgroupSelfPath(root, ""); got != "/unified-path" {
+		t.Errorf("v2 path = %q, want /unified-path", got)
+	}
+	if got := cgroupSelfPath(root, "memory"); got != "/memory-path" {
+		t.Errorf("v1 memory path = %q, want /memory-path (comma-separated controller list)", got)
+	}
+	if got := cgroupSelfPath(root, "nosuch"); got != "" {
+		t.Errorf("unknown controller = %q, want empty", got)
 	}
 }

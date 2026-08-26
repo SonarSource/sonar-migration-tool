@@ -24,7 +24,14 @@ import (
 // Operators used to have to discover this themselves and set GOMEMLIMIT by
 // hand. These helpers derive the same ceiling automatically from whatever
 // the process is actually allowed to use — the cgroup limit under a
-// container or systemd slice, total system memory otherwise.
+// container or a systemd slice, total system memory otherwise.
+//
+// "Under a systemd slice" requires resolving the process's own cgroup from
+// /proc/self/cgroup rather than reading the hierarchy root: a unit with
+// MemoryMax= runs in /system.slice/<unit>, and the root it sits under is
+// unlimited. Reading only the root found nothing there and silently fell
+// through to total system memory, which is no protection at all when the
+// unit's cap is the thing about to kill the process.
 const (
 	// memLimitFraction leaves headroom for the parts of the process the
 	// Go heap limit does not cover (stacks, the binary, OS page cache
@@ -111,27 +118,104 @@ func detectMemoryBudget(root string) (int64, string) {
 	return 0, ""
 }
 
-// cgroupV2Limit reads the cgroup v2 memory ceiling. memory.max is the hard
-// limit and memory.high the throttling threshold; when both are set the
-// lower one is what the process will actually feel, so we take the min.
-// The literal "max" means unlimited.
-func cgroupV2Limit(root string) int64 {
-	limit := int64(0)
-	for _, name := range []string{"memory.max", "memory.high"} {
-		v := readCgroupValue(filepath.Join(root, "sys/fs/cgroup", name))
-		if v <= 0 {
+// cgroupSelfPaths returns the cgroup-relative paths to probe, from the
+// hierarchy root down to the process's own cgroup.
+//
+// The empty path is always first. Inside a cgroup namespace — the usual
+// container case — /proc/self/cgroup reports "/" and the mount root IS the
+// process's cgroup, so the empty path is the whole answer. Outside one, a
+// process placed in a nested cgroup (a systemd unit with MemoryMax= lands
+// in /system.slice/<unit>) sees an unlimited hierarchy root, and its real
+// ceiling lives further down. Probing only the root missed those entirely.
+//
+// controller selects the v1 hierarchy to read; pass "" for unified v2.
+// A missing or unparseable /proc/self/cgroup degrades to the empty path,
+// i.e. exactly the old root-only behaviour.
+func cgroupSelfPaths(root, controller string) []string {
+	paths := []string{""}
+
+	rel := cgroupSelfPath(root, controller)
+	segments := strings.Split(strings.Trim(rel, "/"), "/")
+	cur := ""
+	for _, seg := range segments {
+		if seg == "" {
 			continue
 		}
-		if limit == 0 || v < limit {
-			limit = v
+		cur += "/" + seg
+		paths = append(paths, cur)
+	}
+	return paths
+}
+
+// cgroupSelfPath parses /proc/self/cgroup and returns the path this process
+// belongs to in the requested hierarchy, or "" when it cannot be determined.
+//
+// Lines are "hierarchy-ID:controller-list:cgroup-path". The unified v2
+// hierarchy is the entry with ID 0 and an empty controller list; a v1
+// hierarchy is identified by its controller appearing in the list.
+func cgroupSelfPath(root, controller string) string {
+	b, err := os.ReadFile(filepath.Join(root, "proc/self/cgroup"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), ":", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		if cgroupLineMatches(parts[0], parts[1], controller) {
+			return parts[2]
+		}
+	}
+	return ""
+}
+
+// cgroupLineMatches reports whether a /proc/self/cgroup line belongs to the
+// requested hierarchy.
+func cgroupLineMatches(id, controllers, want string) bool {
+	if want == "" {
+		return id == "0" && controllers == ""
+	}
+	for _, c := range strings.Split(controllers, ",") {
+		if c == want {
+			return true
+		}
+	}
+	return false
+}
+
+// cgroupV2Limit reads the cgroup v2 memory ceiling for this process.
+//
+// memory.max is the hard limit and memory.high the throttling threshold,
+// and the kernel enforces both hierarchically: a process is bound by the
+// tightest limit anywhere in its ancestor chain. So the effective ceiling
+// is the minimum across every level, not the first one that happens to be
+// set — an ancestor slice capped looser than the unit's own MemoryMax must
+// not mask it. The literal "max" means unlimited and is skipped.
+func cgroupV2Limit(root string) int64 {
+	limit := int64(0)
+	for _, rel := range cgroupSelfPaths(root, "") {
+		for _, name := range []string{"memory.max", "memory.high"} {
+			v := readCgroupValue(filepath.Join(root, "sys/fs/cgroup", rel, name))
+			if v > 0 && (limit == 0 || v < limit) {
+				limit = v
+			}
 		}
 	}
 	return limit
 }
 
-// cgroupV1Limit reads the cgroup v1 memory ceiling.
+// cgroupV1Limit reads the cgroup v1 memory ceiling for this process, taking
+// the minimum across the ancestor chain for the same reason as v2.
 func cgroupV1Limit(root string) int64 {
-	return readCgroupValue(filepath.Join(root, "sys/fs/cgroup/memory/memory.limit_in_bytes"))
+	limit := int64(0)
+	for _, rel := range cgroupSelfPaths(root, "memory") {
+		v := readCgroupValue(filepath.Join(root, "sys/fs/cgroup/memory", rel, "memory.limit_in_bytes"))
+		if v > 0 && (limit == 0 || v < limit) {
+			limit = v
+		}
+	}
+	return limit
 }
 
 // readCgroupValue parses a single-value cgroup file, returning 0 for
