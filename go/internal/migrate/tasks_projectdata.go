@@ -719,19 +719,10 @@ type branchInfo struct {
 // collectBranchInfo reads extracted branch data for a project, returning
 // each LONG branch's name and whether it is the main branch.
 func collectBranchInfo(e *Executor, serverURL, serverKey string) []branchInfo {
-	items, err := readExtractItems(e, "getBranches")
-	if err != nil {
-		return nil
-	}
+	// No Branch in the scope: this collects every branch of the project.
+	scope := extractScope{ServerURL: serverURL, ProjectKey: serverKey}
 	var branches []branchInfo
-	for _, item := range items {
-		if item.ServerURL != serverURL {
-			continue
-		}
-		projKey := extractField(item.Data, "projectKey")
-		if projKey != serverKey {
-			continue
-		}
+	for item := range scopedExtractItems(e, "getBranches", scope) {
 		branchType := strings.ToUpper(extractField(item.Data, "type"))
 		if branchType == "SHORT" {
 			continue
@@ -1344,20 +1335,10 @@ var sonarCloudRuleRepos = map[string]bool{
 // project+branch combination. Returns the version string, or empty if not found
 // (the caller's BuildMetadata defaults to "1.0.0").
 func resolveProjectVersion(e *Executor, serverURL, serverKey, branch string) string {
-	items, err := readExtractItems(e, "getProjectVersions")
-	if err != nil {
-		return ""
-	}
-	for _, item := range items {
-		if item.ServerURL != serverURL {
-			continue
-		}
-		if extractField(item.Data, "projectKey") != serverKey {
-			continue
-		}
-		if extractField(item.Data, "branch") != branch {
-			continue
-		}
+	scope := extractScope{ServerURL: serverURL, ProjectKey: serverKey, Branch: branch}
+	// Streaming lets this stop at the first usable version rather than
+	// scanning the rest of the corpus.
+	for item := range scopedExtractItems(e, "getProjectVersions", scope) {
 		version := extractField(item.Data, "version")
 		if version != "" && version != "not provided" {
 			return version
@@ -1367,15 +1348,8 @@ func resolveProjectVersion(e *Executor, serverURL, serverKey, branch string) str
 }
 
 func loadExtractedActiveRules(e *Executor, serverURL, serverKey string) []scanreport.ActiveRuleInput {
-	items, err := readExtractItems(e, "getActiveProfileRules")
-	if err != nil {
-		return nil
-	}
 	var rules []scanreport.ActiveRuleInput
-	for _, item := range items {
-		if item.ServerURL != serverURL {
-			continue
-		}
+	for item := range serverExtractItems(e, "getActiveProfileRules", serverURL) {
 		rule := extractField(item.Data, "key")
 		repo, key := splitRule(rule)
 		// Only include rules from known SonarCloud repositories.

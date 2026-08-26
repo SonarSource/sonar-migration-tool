@@ -166,6 +166,23 @@ func scopedExtractItems(e *Executor, extractKey string, scope extractScope) func
 	}
 }
 
+// serverExtractItems streams the records of extractKey belonging to one
+// source server, without any project or branch filter. For extract tasks
+// that are genuinely server-scoped (getActiveProfileRules), where the
+// filtering scopedExtractItems does would be wrong.
+func serverExtractItems(e *Executor, extractKey, serverURL string) func(yield func(structure.ExtractItem) bool) {
+	return func(yield func(structure.ExtractItem) bool) {
+		for item := range structure.ExtractItems(e.ExportDir, e.Mapping, extractKey) {
+			if item.ServerURL != serverURL {
+				continue
+			}
+			if !yield(item) {
+				return
+			}
+		}
+	}
+}
+
 // hotspotHeader is the stage-one decode for getProjectHotspotsFull, whose
 // records name their project differently from every other extract task:
 // "project" with a "projectKey" fallback. A record with no branch matches
