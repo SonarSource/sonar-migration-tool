@@ -325,7 +325,7 @@ func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*i
 		targetBranch = input.Branch
 	}
 
-	report, skip, err := buildBranchReport(ctx, e, input, targetBranch)
+	zipBytes, meta, skip, err := buildBranchReport(ctx, e, input, targetBranch)
 	if err != nil {
 		return nil, err
 	}
@@ -338,15 +338,20 @@ func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*i
 		ProjectKey:     input.CloudKey,
 		OrgKey:         input.OrgKey,
 		BranchName:     targetBranch,
-		ProjectVersion: report.ProjectVersion,
+		ProjectVersion: meta.ProjectVersion,
 		IsMain:         input.IsMain,
 	}
 
-	result, err := scanreport.SubmitReport(ctx, e.Raw.HTTPClient(), cfg, report.ZIP)
+	result, err := scanreport.SubmitReport(ctx, e.Raw.HTTPClient(), cfg, zipBytes)
 	if err != nil {
 		return nil, fmt.Errorf("submitting report: %w", err)
 	}
 
+	// zipBytes is dead from here on, so the GC can reclaim it during the
+	// poll below. That is the point of returning meta separately: PollCETask
+	// blocks for minutes, and when these fields lived on a struct alongside
+	// the ZIP, reading one of them after the poll kept the whole allocation
+	// -- ZIP included -- reachable in every concurrent branch import.
 	e.Logger.Info("CE task submitted", "project", input.CloudKey, "targetBranch", targetBranch, "taskId", result.TaskID)
 
 	if err := scanreport.PollCETask(ctx, e.Raw.HTTPClient(), e.CloudURL, result.TaskID, e.Logger); err != nil {
@@ -354,14 +359,21 @@ func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*i
 	}
 
 	return &importResult{
-		Status: "success", TaskID: result.TaskID, SourcePurged: report.SourcePurged,
-		UnsupportedLanguages: report.UnsupportedLanguages, ExcludedFiles: report.ExcludedFiles,
+		Status: "success", TaskID: result.TaskID, SourcePurged: meta.SourcePurged,
+		UnsupportedLanguages: meta.UnsupportedLanguages, ExcludedFiles: meta.ExcludedFiles,
 	}, nil
 }
 
-// branchReport is a packaged scanner report for one branch, ready to submit.
-type branchReport struct {
-	ZIP            []byte
+// branchReportMeta is everything about a packaged report that outlives the
+// ZIP bytes.
+//
+// It is returned separately from the ZIP so importBranch can drop the ZIP
+// the moment SubmitReport returns. The CE poll that follows runs for
+// minutes, and with 25 projects in flight, holding 25 report ZIPs across it
+// was a large share of peak RSS. Keeping these fields on a struct alongside
+// the ZIP is what pinned it: reading any field after the poll keeps the
+// whole allocation, ZIP included, reachable.
+type branchReportMeta struct {
 	ProjectVersion string
 	// SourcePurged is true when this branch's source text was unavailable
 	// (purged by housekeeping) so the report carries measures + issues but no
@@ -378,7 +390,7 @@ type branchReport struct {
 // CE-compatibility fixes, and returns the packaged report. A non-nil skip
 // result means the branch must not be submitted (no components, or no source
 // to anchor its issues).
-func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput, targetBranch string) (*branchReport, *importResult, error) {
+func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput, targetBranch string) ([]byte, branchReportMeta, *importResult, error) {
 	issues := loadExtractedIssues(e, input.ServerURL, input.ServerKey, input.Branch)
 	hotspots := loadExtractedHotspots(e, input.ServerURL, input.ServerKey, input.Branch)
 	hotspotIssues := convertHotspotsForReport(e, input, hotspots)
@@ -398,7 +410,7 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	syntaxHighlighting := loadExtractedSyntaxHighlighting(e, input.ServerURL, input.ServerKey, input.Branch)
 
 	if len(components) == 0 {
-		return nil, &importResult{Status: "skipped"}, nil
+		return nil, branchReportMeta{}, &importResult{Status: "skipped"}, nil
 	}
 
 	// The source server returns no source TEXT for this branch even though line
@@ -443,7 +455,7 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	components, unsupportedLangKeys, unsupportedSkip := applyUnsupportedLanguagePolicy(
 		e, input.CloudKey, input.Branch, components, scProfileByLang)
 	if unsupportedSkip != nil {
-		return nil, unsupportedSkip, nil
+		return nil, branchReportMeta{}, unsupportedSkip, nil
 	}
 	// Zero unless mode "exclude" actually dropped components.
 	excludedFiles := componentsBeforePolicy - len(components)
@@ -560,7 +572,7 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 			BranchType: "long",
 		})
 		if hErr != nil {
-			return nil, nil, fmt.Errorf("create-analysis handshake (branch %s): %w", input.Branch, hErr)
+			return nil, branchReportMeta{}, nil, fmt.Errorf("create-analysis handshake (branch %s): %w", input.Branch, hErr)
 		}
 		analysisUUID = res.AnalysisUUID
 		e.Logger.Info("analysis pre-created (branch anchored on target)",
@@ -595,7 +607,7 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 
 	zipBytes, err := scanreport.PackageReport(reportData)
 	if err != nil {
-		return nil, nil, fmt.Errorf("packaging report: %w", err)
+		return nil, branchReportMeta{}, nil, fmt.Errorf("packaging report: %w", err)
 	}
 
 	if dumpDir := os.Getenv("SMT_DUMP_REPORT_DIR"); dumpDir != "" {
@@ -620,8 +632,8 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 		"activeRules", len(activeRules),
 	)
 
-	return &branchReport{
-		ZIP: zipBytes, ProjectVersion: projectVersion, SourcePurged: sourcePurged,
+	return zipBytes, branchReportMeta{
+		ProjectVersion: projectVersion, SourcePurged: sourcePurged,
 		UnsupportedLanguages: unsupportedLangKeys, ExcludedFiles: excludedFiles,
 	}, nil, nil
 }
