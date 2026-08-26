@@ -183,6 +183,13 @@ func serverExtractItems(e *Executor, extractKey, serverURL string) func(yield fu
 	}
 }
 
+// serverAgnosticExtractItems streams every record of extractKey across all
+// extract runs, with no filtering at all. For config-scale tasks that are
+// keyed by something other than server/project/branch.
+func serverAgnosticExtractItems(e *Executor, extractKey string) func(yield func(structure.ExtractItem) bool) {
+	return structure.ExtractItems(e.ExportDir, e.Mapping, extractKey)
+}
+
 // hotspotHeader is the stage-one decode for getProjectHotspotsFull, whose
 // records name their project differently from every other extract task:
 // "project" with a "projectKey" fallback. A record with no branch matches

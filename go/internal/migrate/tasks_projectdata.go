@@ -325,11 +325,34 @@ func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*i
 		targetBranch = input.Branch
 	}
 
+	// Bound concurrent report construction. Held across build + submit and
+	// released before the CE poll below, so the expensive window is short
+	// even though the branch stays in flight for minutes afterwards.
+	//
+	// The release flag is a local, not a field: e is shared by every
+	// concurrent branch import, so clearing e.BuildSem to mark "released"
+	// would switch the semaphore off for the whole run.
+	buildSem := e.BuildSem
+	if buildSem != nil {
+		if err := common.AcquireSem(ctx, buildSem); err != nil {
+			return nil, err
+		}
+	}
+	buildReleased := false
+	buildDone := func() {
+		if buildSem != nil && !buildReleased {
+			buildReleased = true
+			<-buildSem
+		}
+	}
+
 	zipBytes, meta, skip, err := buildBranchReport(ctx, e, input, targetBranch)
 	if err != nil {
+		buildDone()
 		return nil, err
 	}
 	if skip != nil {
+		buildDone()
 		return skip, nil
 	}
 
@@ -344,8 +367,13 @@ func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*i
 
 	result, err := scanreport.SubmitReport(ctx, e.Raw.HTTPClient(), cfg, zipBytes)
 	if err != nil {
+		buildDone()
 		return nil, fmt.Errorf("submitting report: %w", err)
 	}
+
+	// The report is on the wire; let the next branch start building while
+	// this one waits on the CE.
+	buildDone()
 
 	// zipBytes is dead from here on, so the GC can reclaim it during the
 	// poll below. That is the point of returning meta separately: PollCETask
