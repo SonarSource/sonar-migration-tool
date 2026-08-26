@@ -182,10 +182,10 @@ func totalsByProject(category, api, sqsParam, scParam string) func(context.Conte
 	}
 }
 
-// SQS's api/issues/search has no "projectKeys" param (it silently ignores
-// unknown params and returns the whole-instance total) — the real param is
-// "components". SC's api/issues/search does accept "projects" directly.
-var checkIssueTotals = totalsByProject("Issues", apiIssuesSearch, "components", "projects")
+// componentKeys (not components) is the canonical project filter on
+// /api/issues/search across every SQ version we support — SQ 9.9
+// silently ignores `components` and returns the global issue set (#400).
+var checkIssueTotals = totalsByProject("Issues", apiIssuesSearch, "componentKeys", "projects")
 
 func checkIssueDistribution(filterKey, filterValue string) func(ctx context.Context, s *Suite) []CheckResult {
 	return func(ctx context.Context, s *Suite) []CheckResult {
@@ -196,7 +196,7 @@ func checkIssueDistribution(filterKey, filterValue string) func(ctx context.Cont
 		var results []CheckResult
 		for _, proj := range projects {
 			sqsCount, err := countWithFilter(ctx, s.sqsRaw, apiIssuesSearch,
-				urlParams("components", proj), filterKey, filterValue)
+				urlParams("componentKeys", proj), filterKey, filterValue)
 			if err != nil {
 				results = append(results, makeError("Issues", fmt.Sprintf("%s: %s", filterValue, proj), err))
 				continue
