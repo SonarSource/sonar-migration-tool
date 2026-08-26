@@ -108,6 +108,15 @@ func allChecks() []checkFn {
 // ── Projects ──────────────────────────────────────────────────────────
 
 func checkProjectCount(ctx context.Context, s *Suite) []CheckResult {
+	projects, err := s.getProjects(ctx)
+	if err != nil {
+		return []CheckResult{makeError("Projects", nameProjectCount, err)}
+	}
+	if len(s.cfg.ProjectKeys) > 0 {
+		// Scoped run (#529): the target deliberately holds only this subset,
+		// so comparing instance-wide totals would always fail.
+		return []CheckResult{makeResult("Projects", nameProjectCount, len(projects), len(projects), "Scoped")}
+	}
 	sqsCount, err := queryTotal(ctx, s.sqsRaw, "api/projects/search", nil)
 	if err != nil {
 		return []CheckResult{makeError("Projects", nameProjectCount, err)}
