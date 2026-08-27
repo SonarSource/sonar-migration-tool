@@ -97,6 +97,37 @@
 	gap: 0.5rem;
 	margin-top: 0.75rem;
 }
+/* Label-left, field-right rows with every field's left edge aligned
+   to the same column, regardless of label length. */
+.field-row {
+	display: flex;
+	align-items: center;
+	gap: 0.75rem;
+	margin: 0.5rem 0;
+}
+.prompt .field-row .prompt-label {
+	flex: 0 0 210px;
+	margin: 0;
+	font-size: 0.8rem;
+	text-align: left;
+	cursor: help;
+}
+.field-row .field-control {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+}
+.field-row .field-control .input-row {
+	flex: 1;
+	margin-top: 0;
+}
+.field-row .field-control input[type="url"],
+.field-row .field-control input[type="password"],
+.field-row .field-control input[type="text"] {
+	margin-bottom: 0;
+}
 .review-table {
 	width: 100%;
 	border-collapse: collapse;
@@ -130,11 +161,10 @@
 	border-bottom: 1px solid var(--color-border);
 	margin-bottom: 0.75rem;
 }
-.advanced-settings > label:first-of-type {
+.advanced-settings .field-row:first-of-type {
 	margin-top: 0;
 }
-.advanced-settings > input:last-of-type,
-.advanced-settings > div:last-of-type {
+.advanced-settings .field-row:last-of-type {
 	margin-bottom: 0.75rem;
 }
 .checkbox-row {
@@ -162,10 +192,6 @@
 .prompt input[type="url"],
 .prompt input[type="password"] {
 	margin-bottom: 0.75rem;
-}
-.prompt label.prompt-label {
-	margin-top: 0.5rem;
-	cursor: help;
 }
 .required-marker {
 	color: var(--color-error);
@@ -620,6 +646,19 @@ var Wizard = (function() {
 		return `<label class="prompt-label" for="${forId}" title="${escapeAttr(tooltip)}">${escapeHTML(text)}${marker}</label>`;
 	}
 
+	// promptRow lays a label and its field out on the same line, label on
+	// the left and field on the right, with every row's field starting at
+	// the same x position (the label column has a fixed width, see CSS).
+	function promptRow(labelHtml, fieldHtml) {
+		return `<div class="field-row">${labelHtml}<div class="field-control">${fieldHtml}</div></div>`;
+	}
+
+	// fieldRow combines fieldLabel + promptRow for the common case of a
+	// form field that has required/optional semantics and help text.
+	function fieldRow(forId, text, help, required, fieldHtml) {
+		return promptRow(fieldLabel(forId, text, help, required), fieldHtml);
+	}
+
 	function renderPrompt(msg) {
 		switch (msg.type) {
 		case 'prompt_url': return renderPromptURL(msg);
@@ -642,35 +681,37 @@ var Wizard = (function() {
 		if (isCloudURLPrompt(msg)) {
 			return renderPromptCloudURL(msg);
 		}
+		const label = `<label class="prompt-label" for="${ID_PROMPT_INPUT}">${escapeHTML(msg.message)}</label>`;
+		const field = `<div class="input-row">
+			${backButton(msg)}
+			<input type="url" id="${ID_PROMPT_INPUT}" placeholder="https://"
+				onkeydown="Wizard.onInputKey(event)">
+			<button class="btn-primary"
+				onclick="Wizard.submitInput()">Submit</button>
+		</div>`;
 		return `<div class="prompt">
-			<label class="prompt-label">${escapeHTML(msg.message)}</label>
-			<div class="input-row">
-				${backButton(msg)}
-				<input type="url" id="${ID_PROMPT_INPUT}" placeholder="https://"
-					onkeydown="Wizard.onInputKey(event)">
-				<button class="btn-primary"
-					onclick="Wizard.submitInput()">Submit</button>
-			</div>
+			${promptRow(label, field)}
 			<div id="prompt-error" class="text-error mt-1"></div>
 		</div>`;
 	}
 
 	function renderPromptCloudURL(msg) {
+		const label = `<label class="prompt-label" for="cloud-url-select">${escapeHTML(msg.message)}</label>`;
+		const field = `<div class="input-row">
+			${backButton(msg)}
+			<select id="cloud-url-select"
+				onchange="Wizard.onCloudSelect()">
+				<option value="https://sonarcloud.io">
+					SonarQube Cloud (sonarcloud.io)</option>
+				<option value="https://sonarqube.us">
+					SonarQube Cloud US (sonarqube.us)</option>
+				<option value="other">Other</option>
+			</select>
+			<button id="cloud-url-submit" class="btn-primary"
+				onclick="Wizard.submitCloudURL()">Submit</button>
+		</div>`;
 		return `<div class="prompt">
-			<label class="prompt-label">${escapeHTML(msg.message)}</label>
-			<div class="input-row">
-				${backButton(msg)}
-				<select id="cloud-url-select"
-					onchange="Wizard.onCloudSelect()">
-					<option value="https://sonarcloud.io">
-						SonarQube Cloud (sonarcloud.io)</option>
-					<option value="https://sonarqube.us">
-						SonarQube Cloud US (sonarqube.us)</option>
-					<option value="other">Other</option>
-				</select>
-				<button id="cloud-url-submit" class="btn-primary"
-					onclick="Wizard.submitCloudURL()">Submit</button>
-			</div>
+			${promptRow(label, field)}
 			<div id="cloud-url-custom" class="input-row ${HIDDEN}">
 				<input type="url" id="${ID_PROMPT_INPUT}"
 					placeholder="https://custom-instance.example.com"
@@ -682,41 +723,39 @@ var Wizard = (function() {
 
 	function renderPromptText(msg) {
 		const defaultVal = msg['default'] || '';
-		return `<div class="prompt">
-			<label class="prompt-label">${escapeHTML(msg.message)}</label>
-			<div class="input-row">
-				${backButton(msg)}
-				<input type="text" id="${ID_PROMPT_INPUT}"
-					value="${escapeAttr(defaultVal)}"
-					onkeydown="Wizard.onInputKey(event)">
-				<button class="btn-primary"
-					onclick="Wizard.submitInput()">Submit</button>
-			</div>
+		const label = `<label class="prompt-label" for="${ID_PROMPT_INPUT}">${escapeHTML(msg.message)}</label>`;
+		const field = `<div class="input-row">
+			${backButton(msg)}
+			<input type="text" id="${ID_PROMPT_INPUT}"
+				value="${escapeAttr(defaultVal)}"
+				onkeydown="Wizard.onInputKey(event)">
+			<button class="btn-primary"
+				onclick="Wizard.submitInput()">Submit</button>
 		</div>`;
+		return `<div class="prompt">${promptRow(label, field)}</div>`;
 	}
 
 	function renderPromptPassword(msg) {
-		return `<div class="prompt">
-			<label class="prompt-label">${escapeHTML(msg.message)}</label>
-			<div class="input-row">
-				${backButton(msg)}
-				<div class="password-wrapper">
-					<input type="password" id="${ID_PROMPT_INPUT}"
-						autocomplete="off"
-						onkeydown="Wizard.onInputKey(event)">
-					<button type="button" class="btn-eye"
-						onmousedown="document.getElementById('${ID_PROMPT_INPUT}').type='text'"
-						onmouseup="document.getElementById('${ID_PROMPT_INPUT}').type='password'"
-						onmouseleave="document.getElementById('${ID_PROMPT_INPUT}').type='password'"
-						ontouchstart="document.getElementById('${ID_PROMPT_INPUT}').type='text'"
-						ontouchend="document.getElementById('${ID_PROMPT_INPUT}').type='password'">
-						${EYE_SVG}
-					</button>
-				</div>
-				<button class="btn-primary"
-					onclick="Wizard.submitInput()">Submit</button>
+		const label = `<label class="prompt-label" for="${ID_PROMPT_INPUT}">${escapeHTML(msg.message)}</label>`;
+		const field = `<div class="input-row">
+			${backButton(msg)}
+			<div class="password-wrapper">
+				<input type="password" id="${ID_PROMPT_INPUT}"
+					autocomplete="off"
+					onkeydown="Wizard.onInputKey(event)">
+				<button type="button" class="btn-eye"
+					onmousedown="document.getElementById('${ID_PROMPT_INPUT}').type='text'"
+					onmouseup="document.getElementById('${ID_PROMPT_INPUT}').type='password'"
+					onmouseleave="document.getElementById('${ID_PROMPT_INPUT}').type='password'"
+					ontouchstart="document.getElementById('${ID_PROMPT_INPUT}').type='text'"
+					ontouchend="document.getElementById('${ID_PROMPT_INPUT}').type='password'">
+					${EYE_SVG}
+				</button>
 			</div>
+			<button class="btn-primary"
+				onclick="Wizard.submitInput()">Submit</button>
 		</div>`;
+		return `<div class="prompt">${promptRow(label, field)}</div>`;
 	}
 
 	function renderPromptConfirm(msg) {
@@ -779,38 +818,32 @@ var Wizard = (function() {
 			html += `<h3>${escapeHTML(msg.title)}</h3>`;
 		}
 		html += `
-			${fieldLabel('extract-url', 'SonarQube Server URL', 'The base URL of the SonarQube Server instance to migrate from.', true)}
-			<input type="url" id="extract-url" required placeholder="https://"
-				value="${escapeAttr(msg.default_url)}">
-			${fieldLabel('extract-token', 'Admin token', 'An administrator token for the source SonarQube Server.', !msg.token_optional)}
-			<input type="password" id="extract-token" placeholder="${escapeAttr(tokenPlaceholder)}"
-				${msg.token_optional ? '' : 'required'}>
+			${fieldRow('extract-url', 'SonarQube Server URL', 'The base URL of the SonarQube Server instance to migrate from.', true,
+				`<input type="url" id="extract-url" required placeholder="https://" value="${escapeAttr(msg.default_url)}">`)}
+			${fieldRow('extract-token', 'Admin token', 'An administrator token for the source SonarQube Server.', !msg.token_optional,
+				`<input type="password" id="extract-token" placeholder="${escapeAttr(tokenPlaceholder)}" ${msg.token_optional ? '' : 'required'}>`)}
 			<details class="advanced-settings" ${certSettingsPreFilled ? 'open' : ''}>
 				<summary>Client certificate settings (optional)</summary>
-				${fieldLabel('extract-pem-path', 'Client certificate PEM file', 'Path to a PEM-encoded client certificate, only needed if the source server requires mutual TLS.', false)}
-				<input type="text" id="extract-pem-path" placeholder="/path/to/cert.pem"
-					value="${escapeAttr(msg.default_pem_file_path)}">
-				${fieldLabel('extract-key-path', 'Client certificate key file', "Path to the certificate's private key file, if not already included in the PEM file.", false)}
-				<input type="text" id="extract-key-path" placeholder="leave empty if included in PEM"
-					value="${escapeAttr(msg.default_key_file_path)}">
-				${fieldLabel('extract-cert-password', 'Client certificate password', 'Password protecting the client certificate, if any.', false)}
-				<div class="password-wrapper">
-					<input type="password" id="extract-cert-password" autocomplete="off"
-						placeholder="${msg.cert_password_known ? 'Leave blank to keep the configured password' : ''}">
-					<button type="button" class="btn-eye"
-						onmousedown="document.getElementById('extract-cert-password').type='text'"
-						onmouseup="document.getElementById('extract-cert-password').type='password'"
-						onmouseleave="document.getElementById('extract-cert-password').type='password'"
-						ontouchstart="document.getElementById('extract-cert-password').type='text'"
-						ontouchend="document.getElementById('extract-cert-password').type='password'">
-						${EYE_SVG}
-					</button>
-				</div>
+				${fieldRow('extract-pem-path', 'Client certificate PEM file', 'Path to a PEM-encoded client certificate, only needed if the source server requires mutual TLS.', false,
+					`<input type="text" id="extract-pem-path" placeholder="/path/to/cert.pem" value="${escapeAttr(msg.default_pem_file_path)}">`)}
+				${fieldRow('extract-key-path', 'Client certificate key file', "Path to the certificate's private key file, if not already included in the PEM file.", false,
+					`<input type="text" id="extract-key-path" placeholder="leave empty if included in PEM" value="${escapeAttr(msg.default_key_file_path)}">`)}
+				${fieldRow('extract-cert-password', 'Client certificate password', 'Password protecting the client certificate, if any.', false, `
+					<div class="password-wrapper">
+						<input type="password" id="extract-cert-password" autocomplete="off"
+							placeholder="${msg.cert_password_known ? 'Leave blank to keep the configured password' : ''}">
+						<button type="button" class="btn-eye"
+							onmousedown="document.getElementById('extract-cert-password').type='text'"
+							onmouseup="document.getElementById('extract-cert-password').type='password'"
+							onmouseleave="document.getElementById('extract-cert-password').type='password'"
+							ontouchstart="document.getElementById('extract-cert-password').type='text'"
+							ontouchend="document.getElementById('extract-cert-password').type='password'">
+							${EYE_SVG}
+						</button>
+					</div>`)}
 			</details>
-			${fieldLabel('extract-project-key-pattern', 'Project key(s)/pattern', "Limits extraction to project keys matching this pattern (a literal key or a full-match regex). Leave empty to extract every project.", false)}
-			<input type="text" id="extract-project-key-pattern"
-				placeholder="e.g. BANKING_.+ — full-match regex; leave empty to extract every project"
-				value="${escapeAttr(msg.default_project_key_pattern)}">
+			${fieldRow('extract-project-key-pattern', 'Project key(s)/pattern', "Limits extraction to project keys matching this pattern (a literal key or a full-match regex). Leave empty to extract every project.", false,
+				`<input type="text" id="extract-project-key-pattern" placeholder="e.g. BANKING_.+ — full-match regex; leave empty to extract every project" value="${escapeAttr(msg.default_project_key_pattern)}">`)}
 			<div id="prompt-error" class="text-error mt-1"></div>
 			<div class="checkbox-row">
 				<label>
@@ -852,18 +885,14 @@ var Wizard = (function() {
 			html += `<h3>${escapeHTML(msg.title)}</h3>`;
 		}
 		html += `
-			${fieldLabel('migrate-url', 'SonarQube Cloud URL', 'The SonarQube Cloud (or SonarQube Cloud US) instance to migrate to.', true)}
-			<input type="url" id="migrate-url" required placeholder="https://"
-				value="${escapeAttr(msg.default_url)}">
-			${fieldLabel('migrate-token', 'Cloud admin token', 'An administrator token for the target SonarQube Cloud organization.', !msg.token_optional)}
-			<input type="password" id="migrate-token" placeholder="${escapeAttr(tokenPlaceholder)}"
-				${msg.token_optional ? '' : 'required'}>
-			${fieldLabel('migrate-enterprise-key', 'Enterprise key', 'The SonarQube Cloud Enterprise key that owns the target organizations.', true)}
-			<input type="text" id="migrate-enterprise-key" required
-				value="${escapeAttr(msg.default_enterprise_key)}">
-			${fieldLabel('migrate-default-organization', 'Default SonarCloud organization', "SonarCloud organization key used for any source organization that hasn't been explicitly mapped.", false)}
-			<input type="text" id="migrate-default-organization"
-				value="${escapeAttr(msg.default_organization)}">
+			${fieldRow('migrate-url', 'SonarQube Cloud URL', 'The SonarQube Cloud (or SonarQube Cloud US) instance to migrate to.', true,
+				`<input type="url" id="migrate-url" required placeholder="https://" value="${escapeAttr(msg.default_url)}">`)}
+			${fieldRow('migrate-token', 'Cloud admin token', 'An administrator token for the target SonarQube Cloud organization.', !msg.token_optional,
+				`<input type="password" id="migrate-token" placeholder="${escapeAttr(tokenPlaceholder)}" ${msg.token_optional ? '' : 'required'}>`)}
+			${fieldRow('migrate-enterprise-key', 'Enterprise key', 'The SonarQube Cloud Enterprise key that owns the target organizations.', true,
+				`<input type="text" id="migrate-enterprise-key" required value="${escapeAttr(msg.default_enterprise_key)}">`)}
+			${fieldRow('migrate-default-organization', 'Default SonarCloud organization', "SonarCloud organization key used for any source organization that hasn't been explicitly mapped.", false,
+				`<input type="text" id="migrate-default-organization" value="${escapeAttr(msg.default_organization)}">`)}
 			<div id="prompt-error" class="text-error mt-1"></div>
 			<div class="checkbox-row">
 				<label>
@@ -890,20 +919,19 @@ var Wizard = (function() {
 	}
 
 	function renderPromptChoice(msg) {
-		let html = `<div class="prompt">
-			<label class="prompt-label">${escapeHTML(msg.message)}</label>
-			<div class="input-row">`;
+		const label = `<label class="prompt-label" for="choice-select">${escapeHTML(msg.message)}</label>`;
+		let field = '<div class="input-row">';
 		if (msg.options && msg.options.length) {
-			html += '<select id="choice-select">';
+			field += '<select id="choice-select">';
 			for (let i = 0; i < msg.options.length; i++) {
-				html += `<option value="${i}">${escapeHTML(msg.options[i])}</option>`;
+				field += `<option value="${i}">${escapeHTML(msg.options[i])}</option>`;
 			}
-			html += '</select>';
+			field += '</select>';
 		}
-		html += `<button class="btn-primary"
+		field += `<button class="btn-primary"
 			onclick="Wizard.submitChoice()">Select</button>
-		</div></div>`;
-		return html;
+		</div>`;
+		return `<div class="prompt">${promptRow(label, field)}</div>`;
 	}
 
 	function renderSummaryTable(summary) {
