@@ -347,6 +347,9 @@ func TestRunIDPatternValidation(t *testing.T) {
 	valid := []string{
 		"04-20-2026-01", "12-31-2025-99", "01-01-2000-01", // MM-DD-YYYY (legacy)
 		"2026-04-20-01", "2025-12-31-99", "2000-01-01-01", // YYYY-MM-DD (ISO)
+		// #542 — a 3+ digit daily counter (post-99, or the new
+		// 4-digit zero-padded format) must still match.
+		"2026-08-20-101", "04-20-2026-101", "2026-04-20-0001",
 	}
 	invalid := []string{
 		"not-a-run", "04-20-2026", "2026-04-20", "../escape", "",
@@ -362,5 +365,38 @@ func TestRunIDPatternValidation(t *testing.T) {
 		if runIDPattern.MatchString(id) {
 			t.Errorf("%q should not match", id)
 		}
+	}
+}
+
+// TestRunsListHandler_OrdersNumericallyPast99 reproduces #542 at the GUI
+// layer: once a day has both a two-digit and a three-digit run, the
+// history list must put the three-digit (numerically later) run first,
+// not the two-digit one that would sort first lexicographically.
+func TestRunsListHandler_OrdersNumericallyPast99(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "2026-08-20-99"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "2026-08-20-101"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := RunsListHandler(dir)
+	req := httptest.NewRequest("GET", "/api/runs", nil)
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	var runs []RunInfo
+	if err := json.Unmarshal(w.Body.Bytes(), &runs); err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("expected 2 runs, got %d", len(runs))
+	}
+	if runs[0].RunID != "2026-08-20-101" {
+		t.Errorf("first (newest) run: got %q, want %q", runs[0].RunID, "2026-08-20-101")
+	}
+	if runs[1].RunID != "2026-08-20-99" {
+		t.Errorf("second run: got %q, want %q", runs[1].RunID, "2026-08-20-99")
 	}
 }

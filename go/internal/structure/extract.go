@@ -59,11 +59,14 @@ func buildURLMappings(directory string, entries []os.DirEntry) map[string]map[st
 	return urlMappings
 }
 
-// latestID returns the lexicographically greatest key from a set.
+// latestID returns the most recent run ID from a set, ordering
+// numerically rather than lexicographically (#542) — see
+// common.RunIDAfter for why a plain string compare misorders once a
+// run's trailing counter grows past two digits.
 func latestID(ids map[string]bool) string {
 	var latest string
 	for id := range ids {
-		if id > latest {
+		if common.RunIDAfter(id, latest) {
 			latest = id
 		}
 	}

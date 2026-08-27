@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/analysis"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/extract"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/migrate"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/report/summary"
@@ -93,7 +94,7 @@ func runExtractWithRetry(ctx context.Context, p Prompter, state *WizardState, ex
 
 	var cert certConfig
 	for {
-		extractID := generateRunID(exportDir)
+		extractID := common.GenerateRunID(exportDir)
 		cfg := extract.ExtractConfig{
 			URL:                      sourceURL,
 			Token:                    token,
@@ -404,7 +405,7 @@ func runMigrateWithRetry(ctx context.Context, p Prompter, state *WizardState, ex
 	includeIssueSync := ptrBoolOr(state.IncludeIssueSync, true)
 
 	for {
-		runID := generateRunID(exportDir)
+		runID := common.GenerateRunID(exportDir)
 		cfg := migrate.MigrateConfig{
 			Token:                    token,
 			EnterpriseKey:            ptrStr(state.EnterpriseKey),

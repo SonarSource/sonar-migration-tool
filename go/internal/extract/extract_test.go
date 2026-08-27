@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
-	"time"
 )
 
 const (
@@ -870,50 +869,10 @@ func TestFetchAndWriteSingleWithResultKey(t *testing.T) {
 	}
 }
 
-// Regression for the runID-collision bug — twin of the migrate-side
-// test in migrate/migrate_test.go. Both helpers must use max+1 so
-// extract and migrate never alias onto an existing run dir when the
-// numbering has gaps.
-func TestGenerateRunID_HandlesNumberingGaps(t *testing.T) {
-	today := time.Now().UTC().Format("2006-01-02")
-
-	t.Run("empty directory yields -01", func(t *testing.T) {
-		dir := t.TempDir()
-		got := generateRunID(dir)
-		want := today + "-01"
-		if got != want {
-			t.Errorf("want %q, got %q", want, got)
-		}
-	})
-
-	t.Run("dirs -10..-19 yields -20 (not -11 collision)", func(t *testing.T) {
-		dir := t.TempDir()
-		for i := 10; i <= 19; i++ {
-			if err := os.MkdirAll(filepath.Join(dir, fmt.Sprintf("%s-%02d", today, i)), 0o755); err != nil {
-				t.Fatalf("mkdir: %v", err)
-			}
-		}
-		got := generateRunID(dir)
-		want := today + "-20"
-		if got != want {
-			t.Errorf("want %q (max+1), got %q", want, got)
-		}
-	})
-
-	t.Run("non-contiguous numbering still returns max+1", func(t *testing.T) {
-		dir := t.TempDir()
-		for _, n := range []int{1, 3, 7, 42} {
-			if err := os.MkdirAll(filepath.Join(dir, fmt.Sprintf("%s-%02d", today, n)), 0o755); err != nil {
-				t.Fatalf("mkdir: %v", err)
-			}
-		}
-		got := generateRunID(dir)
-		want := today + "-43"
-		if got != want {
-			t.Errorf("want %q, got %q", want, got)
-		}
-	})
-}
+// generateRunID moved to common.GenerateRunID (#542) — its own tests
+// now live in go/internal/common/runid_test.go, deduplicated across
+// the three packages (migrate, extract, wizard) that used to each
+// hand-maintain an identical copy of this function and its test.
 
 // #529: ListAllProjectKeys is the pre-flight, unfiltered project listing
 // transfer uses to resolve a --project_key regex pattern before the

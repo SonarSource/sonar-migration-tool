@@ -9,6 +9,7 @@ import (
 	"sort"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/analysis"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/report/maturity"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/report/migration"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
@@ -85,7 +86,7 @@ func RunDetailPageHandler(tmpl *Templates, exportDir string) http.HandlerFunc {
 // listRuns returns all run directories sorted by recency.
 func listRuns(exportDir string) []RunInfo {
 	runs := fetchRunList(exportDir)
-	sort.Slice(runs, func(i, j int) bool { return runs[i].RunID > runs[j].RunID })
+	sort.Slice(runs, func(i, j int) bool { return common.RunIDAfter(runs[i].RunID, runs[j].RunID) })
 	return runs
 }
 
