@@ -28,6 +28,7 @@ type configFileShape struct {
 	Edition            string `json:"edition"`
 	ExportDirectory    string `json:"export_directory"`
 	Concurrency        int    `json:"concurrency"`
+	BuildConcurrency   int    `json:"project_data_build_concurrency"`
 	Timeout            int    `json:"timeout"`
 	RunID              string `json:"run_id"`
 	TargetTask         string `json:"target_task"`
@@ -104,6 +105,7 @@ type unifiedTargetBlock struct {
 	Timeout             int      `json:"timeout"`
 	RunID               string   `json:"run_id"`
 	TargetTask          string   `json:"target_task"`
+	BuildConcurrency    int      `json:"project_data_build_concurrency"`
 	OrganizationKey     string   `json:"organization_key"`     // provisional, ignored
 	DefaultOrganization string   `json:"default_organization"` // #281
 	ProjectKeyPattern   string   `json:"project_key_pattern"`  // #138
@@ -139,9 +141,10 @@ type OrgConfigEntry struct {
 }
 
 type settingsBlock struct {
-	ExportDirectory string `json:"export_directory"`
-	Concurrency     int    `json:"concurrency"`
-	Timeout         int    `json:"timeout"`
+	ExportDirectory  string `json:"export_directory"`
+	Concurrency      int    `json:"concurrency"`
+	BuildConcurrency int    `json:"project_data_build_concurrency"`
+	Timeout          int    `json:"timeout"`
 }
 
 func parseConfigFile(path string) (configFileShape, error) {
@@ -175,6 +178,7 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			cfg.RunID = s.Target.RunID
 			cfg.TargetTask = s.Target.TargetTask
 			cfg.Concurrency = s.Target.Concurrency
+			cfg.BuildConcurrency = s.Target.BuildConcurrency
 			cfg.Timeout = s.Target.Timeout
 			cfg.DefaultOrganization = s.Target.DefaultOrganization
 			cfg.ProjectKeyPattern = s.Target.ProjectKeyPattern
@@ -192,6 +196,9 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		cfg.FastSync = resolveFastSync(targetFastSync, s.FastSync)
 		if cfg.Concurrency == 0 {
 			cfg.Concurrency = s.Concurrency
+		}
+		if cfg.BuildConcurrency == 0 {
+			cfg.BuildConcurrency = s.BuildConcurrency
 		}
 		if cfg.Timeout == 0 {
 			cfg.Timeout = s.Timeout
@@ -246,6 +253,7 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			Edition:            s.Edition,
 			ExportDirectory:    s.ExportDirectory,
 			Concurrency:        s.Concurrency,
+			BuildConcurrency:   s.BuildConcurrency,
 			Timeout:            s.Timeout,
 			RunID:              s.RunID,
 			TargetTask:         s.TargetTask,
@@ -293,6 +301,7 @@ func (sc sonarCloudBlock) toMigrateConfig(settings *settingsBlock) MigrateConfig
 	if settings != nil {
 		cfg.ExportDirectory = settings.ExportDirectory
 		cfg.Concurrency = settings.Concurrency
+		cfg.BuildConcurrency = settings.BuildConcurrency
 		cfg.Timeout = settings.Timeout
 	}
 	return cfg

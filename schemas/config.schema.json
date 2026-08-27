@@ -12,6 +12,12 @@
       "default": 10,
       "description": "Default max parallel HTTP calls. Overridden per command by source.concurrency / target.concurrency."
     },
+    "project_data_build_concurrency": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 4,
+      "description": "Default max number of scanner reports built at once during project-data migration. Overridden by target.project_data_build_concurrency. Lower it if the migration runs out of memory on a large instance; raise it toward concurrency if report building is the bottleneck."
+    },
     "timeout": {
       "type": "integer",
       "minimum": 1,
@@ -155,6 +161,11 @@
           "type": ["integer", "null"],
           "minimum": 1,
           "description": "Override the top-level concurrency for migrate/reset calls."
+        },
+        "project_data_build_concurrency": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "Override the top-level project_data_build_concurrency for migrate calls."
         },
         "timeout": {
           "type": ["integer", "null"],

@@ -22,6 +22,17 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// DefaultBuildConcurrency bounds how many scanner reports are built at
+// once. Report construction is where importProjectData's memory goes: the
+// branch's full source text, the protobuf messages built from it, and the
+// packaged ZIP are all live simultaneously.
+//
+// It is much lower than the default request concurrency of 25 on purpose.
+// The phase's wall clock is dominated by PollCETask, which polls every few
+// seconds for minutes, so throttling construction costs little while
+// cutting peak memory by roughly the ratio between the two.
+const DefaultBuildConcurrency = 4
+
 // MigrateConfig holds all parameters for a migrate run.
 type MigrateConfig struct {
 	Token         string
@@ -30,6 +41,9 @@ type MigrateConfig struct {
 	URL           string // Cloud URL (default: https://sonarcloud.io/)
 	RunID         string // Resume a prior run
 	Concurrency   int
+	// BuildConcurrency bounds concurrent scanner-report CONSTRUCTION during
+	// importProjectData, independently of Concurrency. See Executor.BuildSem.
+	BuildConcurrency int
 	// Timeout is the per-HTTP-request timeout in seconds applied to
 	// every SonarQube Cloud call the migrate phase makes (#383). When
 	// <= 0, applyDefaults sets it to 60 — matching the SDK default
@@ -87,19 +101,41 @@ type MigrateConfig struct {
 
 // Executor is the runtime context passed to every migrate task function.
 type Executor struct {
-	Cloud           *cloud.Client     // Standard Cloud API (sonarcloud.io)
-	CloudAPI        *cloud.Client     // Enterprise API (api.sonarcloud.io)
-	Raw             *common.RawClient // For reading from Cloud standard API
-	RawAPI          *common.RawClient // For reading from Cloud enterprise API
-	Extract         *common.DataStore // Reads extract data (across all extract runs)
-	Store           *common.DataStore // Writes migrate output to run directory
-	CloudURL        string            // e.g. "https://sonarcloud.io/"
-	APIURL          string            // e.g. "https://api.sonarcloud.io/"
-	EntKey          string            // Enterprise key
-	Edition         common.Edition
-	ExportDir       string // Root export directory
-	Mapping         structure.ExtractMapping
-	Sem             chan struct{}
+	Cloud     *cloud.Client     // Standard Cloud API (sonarcloud.io)
+	CloudAPI  *cloud.Client     // Enterprise API (api.sonarcloud.io)
+	Raw       *common.RawClient // For reading from Cloud standard API
+	RawAPI    *common.RawClient // For reading from Cloud enterprise API
+	Extract   *common.DataStore // Reads extract data (across all extract runs)
+	Store     *common.DataStore // Writes migrate output to run directory
+	CloudURL  string            // e.g. "https://sonarcloud.io/"
+	APIURL    string            // e.g. "https://api.sonarcloud.io/"
+	EntKey    string            // Enterprise key
+	Edition   common.Edition
+	ExportDir string // Root export directory
+	Mapping   structure.ExtractMapping
+	// Sem is a capacity carrier, NOT a semaphore. Nothing in this package
+	// ever sends to or receives from it; every reference reads cap(e.Sem)
+	// to size a per-task errgroup limit. Each task therefore gets its own
+	// independent limit rather than sharing one pool.
+	//
+	// Do not "fix" this by acquiring it. The fan-outs nest —
+	// runSyncIssueMetadata's forEachMigrateItem holds a slot for each of
+	// its 25 workers, and each of those calls runProjectSyncLoop, which
+	// limits on the same capacity. On one shared counting semaphore the
+	// outer holders would take every slot and no inner work could ever
+	// acquire: a permanent deadlock. Making it real requires restructuring
+	// the nested fan-outs first.
+	Sem chan struct{}
+	// BuildSem bounds concurrent scanner-report CONSTRUCTION, which is the
+	// memory-heavy part of importProjectData: a branch's full source text,
+	// its protobufs and the packaged ZIP are all live at once.
+	//
+	// Deliberately NOT the same bound as project fan-out. importProjectData
+	// spends most of its wall clock in PollCETask, so 25 branches can stay
+	// in flight against the CE while only a few are being built.
+	//
+	// May be nil (test fixtures); callers must nil-check.
+	BuildSem        chan struct{}
 	Logger          *slog.Logger
 	ExcludeBranches []string
 	Progress        *common.Tracker // run-wide progress/ETA estimator (#520)
@@ -193,6 +229,7 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 		ExportDir:            cfg.ExportDirectory,
 		Mapping:              mp.Mapping,
 		Sem:                  make(chan struct{}, cfg.Concurrency),
+		BuildSem:             make(chan struct{}, cfg.BuildConcurrency),
 		ExcludeBranches:      cfg.ExcludeBranches,
 		UnsupportedLanguages: cfg.UnsupportedLanguages,
 		FastSync:             cfg.FastSync,
@@ -462,6 +499,9 @@ func runPhase(ctx context.Context, e *Executor, taskNames []string, registry map
 func (cfg *MigrateConfig) applyDefaults() {
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 25
+	}
+	if cfg.BuildConcurrency <= 0 {
+		cfg.BuildConcurrency = DefaultBuildConcurrency
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 60
