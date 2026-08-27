@@ -61,6 +61,7 @@ func init() {
 	_ = f.MarkDeprecated("token", "use --target_token instead")
 	f.String("run_id", "", "ID of a run to resume in case of failures")
 	f.Int("concurrency", 0, "Maximum number of concurrent requests")
+	f.Int("project_data_build_concurrency", 0, "Maximum number of scanner reports built at once during project-data migration (default 4). Lower this if the migration runs out of memory on a large instance; raise it toward --concurrency if report building is the bottleneck.")
 	f.Int("timeout", 0, "Per-HTTP-request timeout in seconds (default: 60). Maps to the top-level timeout config field.")
 	f.String("export_directory", "", "Root directory containing all SonarQube exports")
 	f.String("target_task", "", "Name of a specific migration task to complete")
@@ -102,6 +103,7 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	overrideString(cmd, "default_organization", &cfg.DefaultOrganization)
 	overrideString(cmd, "project_key_pattern", &cfg.ProjectKeyPattern)
 	overrideInt(cmd, "concurrency", &cfg.Concurrency)
+	overrideInt(cmd, "project_data_build_concurrency", &cfg.BuildConcurrency)
 	overrideInt(cmd, "timeout", &cfg.Timeout)
 	if cmd.Flags().Changed("skip_profiles") {
 		cfg.SkipProfiles, _ = cmd.Flags().GetBool("skip_profiles")

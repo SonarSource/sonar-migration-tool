@@ -1098,21 +1098,14 @@ func (r *ruleTagDefaults) UserTagsOnly(serverURL, ruleKey string, allTags []stri
 // tag list so that matchableIssue.Tags holds only the user-added tags
 // — see the type doc on ruleTagDefaults.
 func loadMatchableIssues(e *Executor, serverURL, serverKey string, ruleDefaults *ruleTagDefaults) []matchableIssue {
-	items, err := readExtractItems(e, "getProjectIssuesFull")
-	if err != nil {
-		return nil
-	}
+	// Project-scoped with no branch filter. Streaming matters here: this
+	// runs once per project at concurrency 25, so materializing the whole
+	// instance's issue corpus meant 25 concurrent copies of it.
+	scope := extractScope{ServerURL: serverURL, ProjectKey: serverKey}
 
 	var issues []matchableIssue
 	var excludedFixed int
-	for _, item := range items {
-		if item.ServerURL != serverURL {
-			continue
-		}
-		if extractField(item.Data, "projectKey") != serverKey {
-			continue
-		}
-
+	for item := range scopedExtractItems(e, "getProjectIssuesFull", scope) {
 		status := strings.ToUpper(extractField(item.Data, "status"))
 		resolution := strings.ToUpper(extractField(item.Data, "resolution"))
 		issueStatus := strings.ToUpper(extractField(item.Data, "issueStatus"))

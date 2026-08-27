@@ -78,18 +78,51 @@ type ExtractItem struct {
 	Data      json.RawMessage
 }
 
+// ExtractItems streams every JSONL record of the named task across all
+// extract runs in the mapping, yielding (serverURL, rawObject) pairs one
+// chunk file at a time. Peak memory is one chunk file rather than the whole
+// task, which matters because getProjectSourceCode embeds full file text
+// and per-line highlighted HTML for every file on the instance.
+//
+// Error policy is identical to ReadExtractData, which is now a thin wrapper
+// over this:
+//   - an extract whose task directory is missing is skipped entirely (the
+//     extract may simply not have run that task);
+//   - a single unreadable JSONL file inside a task directory is logged as a
+//     warning and the records ReadJSONLFile parsed before the failure are
+//     still yielded (#312, #314).
+//
+// No error is yielded because none can escape: every failure mode above is
+// absorbed by design. Consumers stop early with break.
+//
+// Ordering matches ReadExtractData exactly — mapping iteration is Go map
+// order (nondeterministic across servers) and chunk files are visited in
+// os.ReadDir order within an extract.
+func ExtractItems(directory string, mapping ExtractMapping, key string) func(yield func(ExtractItem) bool) {
+	return func(yield func(ExtractItem) bool) {
+		for serverURL, extractID := range mapping {
+			taskDir := filepath.Join(directory, extractID, key)
+			completed, err := eachTaskDirRecord(taskDir, func(r json.RawMessage) bool {
+				return yield(ExtractItem{ServerURL: serverURL, Data: r})
+			})
+			if err != nil {
+				continue // task may not exist for this extract
+			}
+			if !completed {
+				return // consumer stopped early
+			}
+		}
+	}
+}
+
 // ReadExtractData reads all JSONL items for a given task key across all extracts.
+//
+// Prefer ExtractItems for anything whose size scales with the instance —
+// this materializes every record of every project at once.
 func ReadExtractData(directory string, mapping ExtractMapping, key string) ([]ExtractItem, error) {
 	var items []ExtractItem
-	for serverURL, extractID := range mapping {
-		taskDir := filepath.Join(directory, extractID, key)
-		raw, err := readTaskDir(taskDir)
-		if err != nil {
-			continue // task may not exist for this extract
-		}
-		for _, r := range raw {
-			items = append(items, ExtractItem{ServerURL: serverURL, Data: r})
-		}
+	for item := range ExtractItems(directory, mapping, key) {
+		items = append(items, item)
 	}
 	return items, nil
 }
@@ -104,11 +137,29 @@ func ReadExtractData(directory string, mapping ExtractMapping, key string) ([]Ex
 // Returns an error only when the task directory itself can't be
 // listed; per-file failures are visible via slog warnings.
 func readTaskDir(dir string) ([]json.RawMessage, error) {
-	entries, err := os.ReadDir(dir)
+	var all []json.RawMessage
+	_, err := eachTaskDirRecord(dir, func(r json.RawMessage) bool {
+		all = append(all, r)
+		return true
+	})
 	if err != nil {
 		return nil, err
 	}
-	var all []json.RawMessage
+	return all, nil
+}
+
+// eachTaskDirRecord yields every JSONL record under dir, one chunk file at
+// a time. It is the shared body of readTaskDir and ExtractItems, so both
+// observe exactly the same error policy (see readTaskDir's doc).
+//
+// Returns an error only when the directory itself can't be listed.
+// completed reports whether iteration ran to the end; false means the
+// consumer stopped early, so no further files were opened.
+func eachTaskDirRecord(dir string, yield func(json.RawMessage) bool) (completed bool, err error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, err
+	}
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".jsonl" {
 			continue
@@ -122,10 +173,12 @@ func readTaskDir(dir string) ([]json.RawMessage, error) {
 			// error — ReadJSONLFile returns the records it parsed
 			// up to the failure point, which is better than nothing
 			// for callers that downstream process per-record.
-			all = append(all, items...)
-			continue
 		}
-		all = append(all, items...)
+		for _, r := range items {
+			if !yield(r) {
+				return false, nil
+			}
+		}
 	}
-	return all, nil
+	return true, nil
 }

@@ -844,26 +844,13 @@ const hotspotSourceLinkMarker = "Link to [Original hotspot]"
 // loadMatchableHotspots reads the getProjectHotspotsFull extract items and
 // converts them into normalised matchableHotspot structs.
 func loadMatchableHotspots(e *Executor, serverURL, serverKey string) ([]matchableHotspot, error) {
-	items, err := readExtractItems(e, "getProjectHotspotsFull")
-	if err != nil {
-		return nil, fmt.Errorf("loadMatchableHotspots: %w", err)
-	}
+	// Project-scoped across every branch. Streaming matters here: this runs
+	// once per project at concurrency 25, and syncHotspotMetadata shares a
+	// phase with syncIssueMetadata, so both corpora were resident at once.
+	scope := extractScope{ServerURL: serverURL, ProjectKey: serverKey}
 
 	var hotspots []matchableHotspot
-	for _, item := range items {
-		if item.ServerURL != serverURL {
-			continue
-		}
-
-		// Filter by project key.
-		projKey := extractField(item.Data, "project")
-		if projKey == "" {
-			projKey = extractField(item.Data, "projectKey")
-		}
-		if projKey != serverKey {
-			continue
-		}
-
+	for item := range scopedHotspotItems(e, scope) {
 		h := parseMatchableHotspot(item.Data)
 		if h.Key == "" {
 			continue

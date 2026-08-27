@@ -101,8 +101,148 @@ func sortExtractItems(taskName string, items []structure.ExtractItem) {
 }
 
 // readExtractItems reads JSONL items from an extract task across all extract runs.
+//
+// This materializes every record of every project. Use scopedExtractItems
+// for anything read per project or per branch.
 func readExtractItems(e *Executor, taskKey string) ([]structure.ExtractItem, error) {
 	return structure.ReadExtractData(e.ExportDir, e.Mapping, taskKey)
+}
+
+// extractScope is the (server, project, branch) slice of an extract task
+// that one project-data loader cares about. An empty Branch matches every
+// branch.
+type extractScope struct {
+	ServerURL  string
+	ProjectKey string
+	Branch     string
+}
+
+// recordHeader is stage one of the two-stage decode every project-data
+// loader uses. Only the routing fields are declared, so encoding/json skips
+// everything else with d.skip(), which scans without allocating.
+//
+// This is the difference that matters. common.ExtractField unmarshals into
+// a map[string]json.RawMessage, and json.RawMessage.UnmarshalJSON is an
+// append — so it copies every value in the record, including a source
+// file's full text and its per-line highlighted HTML, just to read one key.
+// Loaders decode the payload only once the scope has matched.
+type recordHeader struct {
+	Key        string `json:"key"`
+	ProjectKey string `json:"projectKey"`
+	Branch     string `json:"branch"`
+}
+
+// matches reports whether a record belongs to the given scope. An empty
+// scope Branch matches any branch; otherwise the record's branch must be
+// exactly equal (a record with no branch does NOT match a concrete
+// branch — see hotspotHeader.matches for the task that differs).
+func (h recordHeader) matches(scope extractScope) bool {
+	if h.ProjectKey != scope.ProjectKey {
+		return false
+	}
+	return scope.Branch == "" || h.Branch == scope.Branch
+}
+
+// scopedExtractItems streams the records of extractKey that belong to
+// scope, paying only a recordHeader decode for the ones that don't.
+//
+// Records that fail to parse are skipped, matching the pre-existing
+// per-loader behaviour.
+func scopedExtractItems(e *Executor, extractKey string, scope extractScope) func(yield func(structure.ExtractItem, recordHeader) bool) {
+	return func(yield func(structure.ExtractItem, recordHeader) bool) {
+		for item := range structure.ExtractItems(e.ExportDir, e.Mapping, extractKey) {
+			if item.ServerURL != scope.ServerURL {
+				continue
+			}
+			var hdr recordHeader
+			if err := json.Unmarshal(item.Data, &hdr); err != nil {
+				continue
+			}
+			if !hdr.matches(scope) {
+				continue
+			}
+			if !yield(item, hdr) {
+				return
+			}
+		}
+	}
+}
+
+// serverExtractItems streams the records of extractKey belonging to one
+// source server, without any project or branch filter. For extract tasks
+// that are genuinely server-scoped (getActiveProfileRules), where the
+// filtering scopedExtractItems does would be wrong.
+func serverExtractItems(e *Executor, extractKey, serverURL string) func(yield func(structure.ExtractItem) bool) {
+	return func(yield func(structure.ExtractItem) bool) {
+		for item := range structure.ExtractItems(e.ExportDir, e.Mapping, extractKey) {
+			if item.ServerURL != serverURL {
+				continue
+			}
+			if !yield(item) {
+				return
+			}
+		}
+	}
+}
+
+// serverAgnosticExtractItems streams every record of extractKey across all
+// extract runs, with no filtering at all. For config-scale tasks that are
+// keyed by something other than server/project/branch.
+func serverAgnosticExtractItems(e *Executor, extractKey string) func(yield func(structure.ExtractItem) bool) {
+	return structure.ExtractItems(e.ExportDir, e.Mapping, extractKey)
+}
+
+// hotspotHeader is the stage-one decode for getProjectHotspotsFull, whose
+// records name their project differently from every other extract task:
+// "project" with a "projectKey" fallback. A record with no branch matches
+// any branch, which is why this cannot reuse recordHeader.
+type hotspotHeader struct {
+	Key        string `json:"key"`
+	Project    string `json:"project"`
+	ProjectKey string `json:"projectKey"`
+	Branch     string `json:"branch"`
+}
+
+// projectKey returns whichever of the two spellings the record carries.
+func (h hotspotHeader) projectKey() string {
+	if h.Project != "" {
+		return h.Project
+	}
+	return h.ProjectKey
+}
+
+// matches reports whether a hotspot record belongs to the given scope.
+//
+// Two independent wildcards, and both are needed. An empty scope Branch
+// wants every branch of the project — that is how the metadata sync reads
+// hotspots. A record with no branch belongs to every branch, which is how
+// the per-branch report loader has always treated them.
+func (h hotspotHeader) matches(scope extractScope) bool {
+	if h.projectKey() != scope.ProjectKey {
+		return false
+	}
+	return scope.Branch == "" || h.Branch == "" || h.Branch == scope.Branch
+}
+
+// scopedHotspotItems is scopedExtractItems for getProjectHotspotsFull.
+func scopedHotspotItems(e *Executor, scope extractScope) func(yield func(structure.ExtractItem, hotspotHeader) bool) {
+	return func(yield func(structure.ExtractItem, hotspotHeader) bool) {
+		for item := range structure.ExtractItems(e.ExportDir, e.Mapping, "getProjectHotspotsFull") {
+			if item.ServerURL != scope.ServerURL {
+				continue
+			}
+			var hdr hotspotHeader
+			if err := json.Unmarshal(item.Data, &hdr); err != nil {
+				continue
+			}
+			if !hdr.matches(scope) {
+				continue
+			}
+			if !yield(item, hdr) {
+				return
+			}
+		}
+	}
 }
 
 // forEachMigrateItem reads items from a completed migrate task and calls fn

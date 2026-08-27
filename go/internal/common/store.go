@@ -59,9 +59,47 @@ func (ds *DataStore) Writer(taskName string) (*ChunkWriter, error) {
 	return NewChunkWriter(ds.taskDir(taskName))
 }
 
-// ReadAll returns every JSONL object for a completed task as raw JSON.
-func (ds *DataStore) ReadAll(taskName string) ([]json.RawMessage, error) {
-	dir := ds.taskDir(taskName)
+// Records streams every JSONL object of a completed task, one chunk file at
+// a time. Peak memory is one chunk file rather than the whole task.
+//
+// Error policy is identical to ReadAll, which is now a thin wrapper:
+//   - a missing task directory yields nothing (ReadAll's (nil, nil));
+//   - any other ReadDir failure, or the first per-file read error, yields
+//     (nil, err) and ends iteration without yielding any record from the
+//     failing file, preserving ReadAll's all-or-nothing contract.
+//
+// Note this differs deliberately from structure.ExtractItems, which warns
+// and keeps partial records (#312/#314). The two stores have different
+// contracts and both are relied upon; the error in this signature is what
+// makes the difference visible rather than buried in a comment.
+//
+// taskName is resolved through taskDir, so Windows sanitization (#486)
+// applies here too.
+func (ds *DataStore) Records(taskName string) func(yield func(json.RawMessage, error) bool) {
+	return func(yield func(json.RawMessage, error) bool) {
+		dir := ds.taskDir(taskName)
+		names, err := jsonlFileNames(dir)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		for _, name := range names {
+			items, err := ReadJSONLFile(filepath.Join(dir, name))
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			if !yieldRecords(items, yield) {
+				return
+			}
+		}
+	}
+}
+
+// jsonlFileNames lists the .jsonl file names directly under dir. A missing
+// directory is not an error — the task simply never ran — and returns no
+// names, which is what gives ReadAll its (nil, nil).
+func jsonlFileNames(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -69,16 +107,38 @@ func (ds *DataStore) ReadAll(taskName string) ([]json.RawMessage, error) {
 		}
 		return nil, fmt.Errorf("reading task dir %s: %w", dir, err)
 	}
-	var all []json.RawMessage
+	var names []string
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
 			continue
 		}
-		items, err := ReadJSONLFile(filepath.Join(dir, entry.Name()))
+		names = append(names, entry.Name())
+	}
+	return names, nil
+}
+
+// yieldRecords passes each record to yield, reporting false as soon as the
+// consumer stops so the caller can abandon the remaining files unopened.
+func yieldRecords(items []json.RawMessage, yield func(json.RawMessage, error) bool) bool {
+	for _, item := range items {
+		if !yield(item, nil) {
+			return false
+		}
+	}
+	return true
+}
+
+// ReadAll returns every JSONL object for a completed task as raw JSON.
+//
+// Prefer Records for anything whose size scales with the instance — this
+// materializes every record of the task at once.
+func (ds *DataStore) ReadAll(taskName string) ([]json.RawMessage, error) {
+	var all []json.RawMessage
+	for item, err := range ds.Records(taskName) {
 		if err != nil {
 			return nil, err
 		}
-		all = append(all, items...)
+		all = append(all, item)
 	}
 	return all, nil
 }

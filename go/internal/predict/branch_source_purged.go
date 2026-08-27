@@ -48,29 +48,29 @@ func synthesizeBranchSourcePurged(exportDir, runDir string, extractMapping struc
 	// "purged" from "source never extracted".
 	sourceBytes := make(map[branchKey]int)
 	sourceRecords := make(map[branchKey]int)
-	if items, err := structure.ReadExtractData(exportDir, extractMapping, "getProjectSourceCode"); err == nil {
-		for _, item := range items {
-			bk := branchKey{item.ServerURL, jsonStringField(item.Data, "projectKey"), jsonStringField(item.Data, "branch")}
-			sourceBytes[bk] += len(jsonStringField(item.Data, "source"))
-			sourceRecords[bk]++
-		}
+	// Streamed rather than slurped: this is a pure fold into two counters,
+	// but getProjectSourceCode is the largest thing the extract produces —
+	// full file text plus per-line highlighted HTML for every file on the
+	// instance — and none of it needs to be resident to count bytes.
+	for item := range structure.ExtractItems(exportDir, extractMapping, "getProjectSourceCode") {
+		bk := branchKey{item.ServerURL, jsonStringField(item.Data, "projectKey"), jsonStringField(item.Data, "branch")}
+		sourceBytes[bk] += len(jsonStringField(item.Data, "source"))
+		sourceRecords[bk]++
 	}
 
 	// Branches per project (LONG branches only). Projects with no recorded
 	// branches fall back to a lone "main" branch, matching migrate.
 	branchesByProject := make(map[projectKeyT][]string)
-	if items, err := structure.ReadExtractData(exportDir, extractMapping, "getBranches"); err == nil {
-		for _, item := range items {
-			if strings.ToUpper(jsonStringField(item.Data, "type")) == "SHORT" {
-				continue
-			}
-			name := jsonStringField(item.Data, "name")
-			if name == "" {
-				continue
-			}
-			pk := projectKeyT{item.ServerURL, jsonStringField(item.Data, "projectKey")}
-			branchesByProject[pk] = append(branchesByProject[pk], name)
+	for item := range structure.ExtractItems(exportDir, extractMapping, "getBranches") {
+		if strings.ToUpper(jsonStringField(item.Data, "type")) == "SHORT" {
+			continue
 		}
+		name := jsonStringField(item.Data, "name")
+		if name == "" {
+			continue
+		}
+		pk := projectKeyT{item.ServerURL, jsonStringField(item.Data, "projectKey")}
+		branchesByProject[pk] = append(branchesByProject[pk], name)
 	}
 
 	w, err := store.Writer("importProjectData")

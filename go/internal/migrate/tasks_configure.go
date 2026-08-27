@@ -82,8 +82,33 @@ func runSetProfileParent(ctx context.Context, e *Executor) error {
 	return err
 }
 
+// loadProfileBackups indexes every quality-profile XML backup by profile
+// key. A profile's backup is the complete ruleset, so this is multi-MB for
+// something like Sonar way for Java.
+//
+// Built ONCE up front and shared across all profiles: the index is
+// read-only after construction, so it is safe to fan out concurrently.
+// Reading it inside the per-profile callback instead meant every one of
+// the 25 workers held its own copy of every backup on the instance, and
+// turned profile restore into an O(profiles^2) scan.
+func loadProfileBackups(e *Executor) map[string]string {
+	backups := make(map[string]string)
+	for item := range serverAgnosticExtractItems(e, "getProfileBackups") {
+		key := extractField(item.Data, "profileKey")
+		if key == "" {
+			continue
+		}
+		// The backup data is stored as XML in the "backup" field.
+		if backup := extractField(item.Data, "backup"); backup != "" {
+			backups[key] = backup
+		}
+	}
+	return backups
+}
+
 func runRestoreProfiles(ctx context.Context, e *Executor) error {
 	counter := TaskCounterFromContext(ctx)
+	backups := loadProfileBackups(e)
 	err := forEachMigrateItem(ctx, e, "restoreProfiles", "getProfileBackups",
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
 			orgKey := extractField(item, "sonarcloud_org_key")
@@ -92,26 +117,17 @@ func runRestoreProfiles(ctx context.Context, e *Executor) error {
 				return nil
 			}
 
-			// Read the XML backup from extract data.
-			items, _ := readExtractItems(e, "getProfileBackups")
-			for _, ei := range items {
-				eiKey := extractField(ei.Data, "profileKey")
-				if eiKey != profileKey {
-					continue
-				}
-				// The backup data is stored as XML in the "backup" field.
-				backup := extractField(ei.Data, "backup")
-				if backup == "" {
-					continue
-				}
-				_, err := e.Cloud.QualityProfiles.Restore(ctx, orgKey, []byte(backup))
-				if err != nil {
-					counter.Fail()
-					logAPIWarn(e.Logger, "restoreProfiles failed", err, "profile", profileKey)
-				} else {
-					counter.Success()
-				}
+			backup := backups[profileKey]
+			if backup == "" {
 				return nil
+			}
+
+			_, err := e.Cloud.QualityProfiles.Restore(ctx, orgKey, []byte(backup))
+			if err != nil {
+				counter.Fail()
+				logAPIWarn(e.Logger, "restoreProfiles failed", err, "profile", profileKey)
+			} else {
+				counter.Success()
 			}
 			return nil
 		})
