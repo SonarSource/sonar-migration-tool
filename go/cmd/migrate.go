@@ -61,12 +61,14 @@ func init() {
 	_ = f.MarkDeprecated("token", "use --target_token instead")
 	f.String("run_id", "", "ID of a run to resume in case of failures")
 	f.Int("concurrency", 0, "Maximum number of concurrent requests")
+	f.Int("project_data_build_concurrency", 0, "Maximum number of scanner reports built at once during project-data migration (default 4). Lower this if the migration runs out of memory on a large instance; raise it toward --concurrency if report building is the bottleneck.")
 	f.Int("timeout", 0, "Per-HTTP-request timeout in seconds (default: 60). Maps to the top-level timeout config field.")
 	f.String("export_directory", "", "Root directory containing all SonarQube exports")
 	f.String("target_task", "", "Name of a specific migration task to complete")
 	f.Bool("skip_profiles", false, "Skip quality profile migration/provisioning in SonarQube Cloud")
 	f.Bool(flagSkipIssueSync, false, "Skip the final per-issue and per-hotspot metadata sync (#299). Same semantics as the skip_issue_sync config-file field — defaults to false (sync happens); pass the flag to skip.")
 	f.Bool(flagSkipProjectDataMigration, false, "Skip the entire project-data migration: importProjectData and the trailing per-issue/per-hotspot sync (#303). Defaults to false (data is migrated); pass the flag to skip.")
+	f.Bool(flagFastSync, false, "Skip tagging and back-linking hotspots/issues with zero user changes on the source (original state, no comments, no custom tags). Defaults to false (every hotspot is tagged and back-linked). #527.")
 	f.String("default_organization", "", "SonarQube Cloud organization to migrate every project into when organizations.csv has no mapping defined. Ignored if any mapping is present.")
 	f.String("project_key_pattern", "", "Template for target project keys, built from <ORIGINAL_PROJECT_KEY> and <ORGANIZATION_KEY> (default: <ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>). #138")
 	f.StringSlice("exclude_branches", nil, "Glob patterns for non-main branches to skip during project data import (e.g. feature/*,bugfix/*)")
@@ -101,6 +103,7 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	overrideString(cmd, "default_organization", &cfg.DefaultOrganization)
 	overrideString(cmd, "project_key_pattern", &cfg.ProjectKeyPattern)
 	overrideInt(cmd, "concurrency", &cfg.Concurrency)
+	overrideInt(cmd, "project_data_build_concurrency", &cfg.BuildConcurrency)
 	overrideInt(cmd, "timeout", &cfg.Timeout)
 	if cmd.Flags().Changed("skip_profiles") {
 		cfg.SkipProfiles, _ = cmd.Flags().GetBool("skip_profiles")
@@ -130,6 +133,7 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	if cmd.Flags().Changed("exclude_branches") {
 		cfg.ExcludeBranches, _ = cmd.Flags().GetStringSlice("exclude_branches")
 	}
+	applyFlagBool(cmd, flagFastSync, &cfg.FastSync)
 
 	// Default the export directory when neither config nor flag supplied
 	// one (issue #247).

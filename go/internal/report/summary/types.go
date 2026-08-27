@@ -44,10 +44,17 @@ type MigrationSummary struct {
 	OverallStatus string
 	Phases        []PhaseTiming
 	Tasks         []TaskTiming
-	Failures      []FailureRow
-	Warnings      WarningLedger
-	Branches      []BranchStat
-	Throughput    ThroughputStats
+	// PhaseBreakdown sums Tasks' durations into the four coarse phases
+	// the Run metadata section reports (#530): Global objects
+	// provisioning, Projects configuration provisioning, Project data
+	// migration, and Issue and Hotspot sync. Populated by
+	// buildPhaseBreakdown from the same migrate.CategorizeTask mapping
+	// the live progress bar uses (#520), so the two always agree.
+	PhaseBreakdown []PhaseBreakdownEntry
+	Failures       []FailureRow
+	Warnings       WarningLedger
+	Branches       []BranchStat
+	Throughput     ThroughputStats
 
 	// RateLimit is populated only when API rate limiting materially
 	// impacted the run (one or more tasks failed on 429, total pause
@@ -133,6 +140,15 @@ type TaskTiming struct {
 	Duration time.Duration
 	OK       bool
 	Err      string
+}
+
+// PhaseBreakdownEntry captures the total wall-clock time spent across all
+// tasks belonging to one of the four coarse phases the Run metadata
+// section reports (#530). Coarser than PhaseTiming, which is keyed by the
+// raw execution-plan phase index instead.
+type PhaseBreakdownEntry struct {
+	Name     string
+	Duration time.Duration
 }
 
 // FailureRow describes a single entity-level failure for the failures table.
@@ -241,6 +257,10 @@ type EntityItem struct {
 	ErrorMessage string   // failures only
 	SkipReason   string   // for skipped items: SkipReason* constants below
 	Issues       []string // for partial migrations: human-readable list of issues
+	// SourceKey is the source-side project key, shown beneath the project
+	// name in the report's Name column (issue #448). Populated for the
+	// Projects section only; empty for all other sections.
+	SourceKey string
 }
 
 // Skip reason constants used when classifying skipped entities.
@@ -278,6 +298,10 @@ type sectionDef struct {
 	NameField      string // JSONL field to extract entity name
 	DetailField    string // JSONL field for detail column (e.g., cloud key)
 	ExtractTask    string // extract task for source data (empty if not applicable)
+	// SourceKeyField is the JSONL field holding the source-side key shown
+	// under the project name (issue #448). Only set for Projects; left
+	// empty elsewhere so other sections are unaffected.
+	SourceKeyField string
 }
 
 // sectionDefs defines the sections in report order.
@@ -331,6 +355,7 @@ var sectionDefs = []sectionDef{
 		AnalysisEntity: "Project",
 		NameField:      "name",
 		DetailField:    "cloud_project_key",
+		SourceKeyField: "key",
 	},
 	{
 		// Global settings (issue #186) — one row per non-default SQS

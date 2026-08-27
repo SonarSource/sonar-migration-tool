@@ -29,14 +29,14 @@ func TestSaveAndLoad(t *testing.T) {
 	dir := t.TempDir()
 
 	original := &WizardState{
-		Phase:              PhaseStructure,
-		ExtractID:          strPtr("abc-123"),
-		SourceURL:          strPtr("https://sonar.example.com"),
-		TargetURL:          strPtr("https://sonarcloud.io"),
-		EnterpriseKey:      strPtr("my-enterprise"),
+		Phase:               PhaseStructure,
+		ExtractID:           strPtr("abc-123"),
+		SourceURL:           strPtr("https://sonar.example.com"),
+		TargetURL:           strPtr("https://sonarcloud.io"),
+		EnterpriseKey:       strPtr("my-enterprise"),
 		OrganizationsMapped: true,
-		ValidationPassed:   false,
-		MigrationRunID:     nil,
+		ValidationPassed:    false,
+		MigrationRunID:      nil,
 	}
 
 	if err := original.Save(dir); err != nil {
@@ -76,16 +76,56 @@ func TestLoadMissingFile(t *testing.T) {
 	}
 }
 
+// A zero-byte state file is exactly what a pre-atomic-write Save left
+// behind when killed mid-write (Ctrl-C, crash) — Load must treat it like
+// a missing file rather than surfacing "unexpected end of JSON input".
+func TestLoadEmptyFileTreatedAsFresh(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, stateFileName), []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
+	state, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load empty file: %v", err)
+	}
+	if state.Phase != PhaseInit {
+		t.Errorf("expected phase %q for empty file, got %q", PhaseInit, state.Phase)
+	}
+}
+
+// Save must not leave a stray temp file behind in the directory —
+// the atomic write's temp file is renamed over the final path, not left
+// alongside it.
+func TestSaveLeavesNoTempFile(t *testing.T) {
+	dir := t.TempDir()
+	state := NewWizardState()
+	if err := state.Save(dir); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != stateFileName {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Errorf("expected only %q in directory, got %v", stateFileName, names)
+	}
+}
+
 func TestJSONFormat(t *testing.T) {
 	state := &WizardState{
-		Phase:              PhaseExtract,
-		ExtractID:          strPtr("run-42"),
-		SourceURL:          strPtr("https://sq.local"),
-		TargetURL:          nil,
-		EnterpriseKey:      nil,
+		Phase:               PhaseExtract,
+		ExtractID:           strPtr("run-42"),
+		SourceURL:           strPtr("https://sq.local"),
+		TargetURL:           nil,
+		EnterpriseKey:       nil,
 		OrganizationsMapped: false,
-		ValidationPassed:   false,
-		MigrationRunID:     nil,
+		ValidationPassed:    false,
+		MigrationRunID:      nil,
 	}
 
 	data, err := json.MarshalIndent(state, "", "  ")
@@ -102,7 +142,9 @@ func TestJSONFormat(t *testing.T) {
   "enterprise_key": null,
   "organizations_mapped": false,
   "validation_passed": false,
-  "migration_run_id": null
+  "migration_run_id": null,
+  "include_project_data": null,
+  "include_issue_sync": null
 }`
 
 	if string(data) != expected {
@@ -169,16 +211,17 @@ func TestResetPhaseStateOrgMapping(t *testing.T) {
 	s := fullyPopulatedState()
 	resetPhaseState(s, PhaseOrgMapping)
 
-	if s.TargetURL != nil {
-		t.Error("TargetURL should be nil after reset")
-	}
-	if s.EnterpriseKey != nil {
-		t.Error("EnterpriseKey should be nil after reset")
-	}
 	if s.OrganizationsMapped {
 		t.Error("OrganizationsMapped should be false after reset")
 	}
-	// Unrelated fields should remain.
+	// Unrelated fields should remain — TargetURL/EnterpriseKey are now
+	// collected during the Migrate phase, not Org Mapping.
+	if s.TargetURL == nil {
+		t.Error("TargetURL should be untouched")
+	}
+	if s.EnterpriseKey == nil {
+		t.Error("EnterpriseKey should be untouched")
+	}
 	if s.SourceURL == nil {
 		t.Error("SourceURL should be untouched")
 	}
@@ -202,6 +245,12 @@ func TestResetPhaseStateMigrate(t *testing.T) {
 
 	if s.MigrationRunID != nil {
 		t.Error("MigrationRunID should be nil after reset")
+	}
+	if s.TargetURL != nil {
+		t.Error("TargetURL should be nil after reset")
+	}
+	if s.EnterpriseKey != nil {
+		t.Error("EnterpriseKey should be nil after reset")
 	}
 	if s.SourceURL == nil {
 		t.Error("SourceURL should be untouched")

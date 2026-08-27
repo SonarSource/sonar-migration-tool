@@ -73,19 +73,19 @@ func TestDumpOurReport(t *testing.T) {
 		IsMain:       true,
 	}
 
-	report, skip, err := buildBranchReport(context.Background(), e, input, mainName)
+	zipBytes, _, skip, err := buildBranchReport(context.Background(), e, input, mainName)
 	if err != nil {
 		t.Fatalf("buildBranchReport: %v", err)
 	}
 	if skip != nil {
 		t.Fatalf("branch was skipped: status=%q err=%q", skip.Status, skip.Error)
 	}
-	if report == nil || len(report.ZIP) == 0 {
+	if len(zipBytes) == 0 {
 		t.Fatal("empty report zip")
 	}
 
-	if err := os.WriteFile(out, report.ZIP, 0o644); err != nil {
+	if err := os.WriteFile(out, zipBytes, 0o644); err != nil {
 		t.Fatalf("write zip: %v", err)
 	}
-	t.Logf("wrote %d bytes to %s", len(report.ZIP), out)
+	t.Logf("wrote %d bytes to %s", len(zipBytes), out)
 }

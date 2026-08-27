@@ -12,6 +12,7 @@ This page lists **every** option `sonar-migration-tool` accepts — JSON config 
 - [Project key renaming strategy](#project-key-renaming-strategy)
 - [Per-command CLI flags](#per-command-cli-flags)
 - [SonarQube Cloud API rate limiting handling](#sonarqube-cloud-api-rate-limiting-handling)
+- [HTTP User-Agent](#http-user-agent)
 - [Legacy config shapes](#legacy-config-shapes)
 - [Security tips](#security-tips)
 
@@ -43,6 +44,7 @@ Only `source.url` / `source.token` (for `extract`) and `target.url` / `target.to
 | Parameter | CLI flag | Commands | Default | Required | Role |
 |---|---|---|---|:--:|---|
 | `concurrency` | `--concurrency` | all | `10` | No | Max parallel HTTP calls. Overridable per block via `source`/`target`. |
+| `project_data_build_concurrency` | `--project_data_build_concurrency` | migrate | `4` | No | Max number of scanner reports built at once during project-data migration. Lower it if the migration runs out of memory on a large instance; raise it toward `concurrency` if report building is the bottleneck. Overridable via `target.project_data_build_concurrency`. |
 | `timeout` | `--timeout` | extract, transfer | `60` | No | HTTP request timeout in seconds. Overridable per block. |
 | `export_directory` | `--export_directory` (`--export_dir` on `transfer`) | all | `./migration-files` | No | Root directory for extract / migrate output. |
 | `skip_issue_sync` | `--skip_issue_sync` | extract, migrate, transfer | `false` | No | Skip the final per-issue / per-hotspot metadata sync (#299). Accepts `true`/`on`/`yes`/`1` (case-insensitive). CLI flag is a one-way override. |
@@ -74,6 +76,7 @@ Only `source.url` / `source.token` (for `extract`) and `target.url` / `target.to
 | `target.enterprise_key` | `--enterprise_key` | `null` | No¹ | SonarQube Cloud enterprise key. ¹Required for any enterprise-scoped endpoint (portfolios, org listings, etc.). |
 | `target.edition` | `--edition` | `enterprise` | No | SonarQube Cloud edition: `enterprise`, `team`, or `foss`. |
 | `target.concurrency` | `--concurrency` | top-level | No | Override top-level concurrency for migrate / reset calls. |
+| `target.project_data_build_concurrency` | `--project_data_build_concurrency` | top-level | No | Override top-level `project_data_build_concurrency` for migrate calls. |
 | `target.timeout` | `--timeout` | top-level | No | Override top-level timeout for migrate / reset calls. |
 | `target.run_id` | `--run_id` | `null` | No | Resume an in-progress migrate run by ID. |
 | `target.target_task` | `--target_task` | `null` | No | Stop migrate at a specific task (dependencies still run). |
@@ -104,6 +107,7 @@ All optional.
 | Field | Default | Description |
 |---|---|---|
 | `concurrency` | `10` | Default max parallel HTTP calls. |
+| `project_data_build_concurrency` | `4` | Default max number of scanner reports built at once during project-data migration. |
 | `timeout` | `60` | Default HTTP request timeout in seconds. |
 | `export_directory` | `./migration-files` | Root directory for extract / migrate output. |
 | `skip_issue_sync` | `false` | When `true` (or `"on"` / `"yes"` / `1`), skip the final per-issue and per-hotspot metadata sync that runs after project data is replayed. Defaults to `false` so the sync happens. Accepted aliases are case-insensitive. Issue #299. |
@@ -142,6 +146,7 @@ The CLI flags `--skip_issue_sync` and `--skip_project_data_migration` on `migrat
 | `enterprise_key` | | SonarCloud enterprise key (required for any enterprise-scoped endpoint — portfolios, org listings, etc.). |
 | `edition` | | `"enterprise"` (default), `"team"`, or `"foss"`. |
 | `concurrency` | | Override top-level default. |
+| `project_data_build_concurrency` | | Override top-level `project_data_build_concurrency` default. |
 | `timeout` | | Override top-level default. |
 | `run_id` | | Resume an in-progress migrate run by ID. |
 | `target_task` | | Stop migrate at a specific task. |
@@ -278,6 +283,7 @@ sonar-migration-tool migrate --target_token <token> --enterprise_key <key> [flag
 | `--default_organization <key>` | SonarCloud org applied to every project when `organizations.csv` has no mapping defined. |
 | `--project_key_pattern <pattern>` | Template for target project keys (`<ORIGINAL_PROJECT_KEY>` / `<ORGANIZATION_KEY>`). Default `<ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>`. See [Project key renaming strategy](#project-key-renaming-strategy). |
 | `--concurrency <n>` | Max concurrent requests. |
+| `--project_data_build_concurrency <n>` | Max number of scanner reports built at once during project-data migration (default `4`). Lower it if the migration runs out of memory on a large instance; raise it toward `--concurrency` if report building is the bottleneck. |
 
 ### `reset`
 
@@ -432,6 +438,18 @@ it paused. An amber rate-limit notice is shown only when rate limiting was *not*
 - a task failed with `429` as its terminal status (re-run with `--run-id` to resume), or
 - a non-standard `429` (Cloudflare / WAF / unclassified) was seen, which may need operator
   action even if it resolved on its own.
+
+---
+
+## HTTP User-Agent
+
+Every API call the tool makes to SonarQube Server or SonarQube Cloud is sent with a fixed
+`User-Agent: sonar-migration-tool` header, instead of Go's default (`Go-http-client/1.1` or
+`/2.0`). This makes the tool's traffic easy to pick out from other API clients in
+server-side/audit logs when diagnosing a migration. The header is not configurable.
+
+When `--debug` is enabled, the request headers logged for each call include this `User-Agent`
+value alongside the (redacted) `Authorization` header.
 
 ---
 

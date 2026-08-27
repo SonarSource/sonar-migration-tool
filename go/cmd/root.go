@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/version"
 	"github.com/spf13/cobra"
 )
@@ -34,6 +35,10 @@ it to a Cloud organization. Also updates CI/CD pipelines post-migration.`,
 		debug, _ := cmd.Flags().GetBool("debug")
 		configureDefaultLogger(debug)
 		logStartupVersion()
+		// Derive a soft heap ceiling from the cgroup / system memory so
+		// large migrations collect early instead of being OOM-killed.
+		// No-op when GOMEMLIMIT is already set.
+		common.ApplyMemoryLimit(slog.Default())
 		if debug {
 			slog.Default().Debug("debug mode enabled", "command", cmd.Name())
 		}
@@ -57,6 +62,7 @@ func addCommands() {
 		structureCmd,
 		mappingsCmd,
 		migrateCmd,
+		syncIssuesCmd,
 		predictiveReportCmd,
 		resetCmd,
 		analysisReportCmd,

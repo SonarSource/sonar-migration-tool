@@ -203,6 +203,26 @@ func TestHistoryPageHandlerWithReportParam(t *testing.T) {
 	requireStatus(t, w.Code, http.StatusOK)
 }
 
+// TestListRuns_OrdersNumericallyPast99 reproduces #542 for the page
+// (non-JSON-API) run listing path: a three-digit run must sort as
+// newer than a two-digit one from the same day.
+func TestListRuns_OrdersNumericallyPast99(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "2026-08-20-99"), 0o755)
+	os.MkdirAll(filepath.Join(dir, "2026-08-20-101"), 0o755)
+
+	runs := listRuns(dir)
+	if len(runs) != 2 {
+		t.Fatalf("expected 2 runs, got %d", len(runs))
+	}
+	if runs[0].RunID != "2026-08-20-101" {
+		t.Errorf("first (newest) run: got %q, want %q", runs[0].RunID, "2026-08-20-101")
+	}
+	if runs[1].RunID != "2026-08-20-99" {
+		t.Errorf("second run: got %q, want %q", runs[1].RunID, "2026-08-20-99")
+	}
+}
+
 func TestBuildRunDetailNil(t *testing.T) {
 	dir := t.TempDir()
 	result := buildRunDetail(dir, "nonexistent-01-01-2026-01")

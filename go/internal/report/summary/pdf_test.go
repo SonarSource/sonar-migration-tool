@@ -130,25 +130,104 @@ func TestDrawWrappedCell(t *testing.T) {
 }
 
 type fpdfCellCall struct {
-	x, y, w, h           float64
-	text, border, align  string
-	ln                   int
-	fill                 bool
+	x, y, w, h          float64
+	text, border, align string
+	ln                  int
+	fill                bool
+	// fontStyle/fontSize capture whatever SetFont call was in effect
+	// immediately before this CellFormat — set by fpdfCellRecorder's
+	// SetFont (used by the drawNameCell tests, #448).
+	fontStyle string
+	fontSize  float64
 }
 
 type fpdfCellRecorder struct {
-	x, y  float64
-	calls []fpdfCellCall
+	x, y      float64
+	fontStyle string
+	fontSize  float64
+	calls     []fpdfCellCall
 }
 
 func (r *fpdfCellRecorder) GetXY() (float64, float64) { return r.x, r.y }
 func (r *fpdfCellRecorder) SetXY(x, y float64)        { r.x, r.y = x, y }
+func (r *fpdfCellRecorder) SetFont(familyStr, styleStr string, size float64) {
+	r.fontStyle, r.fontSize = styleStr, size
+}
 func (r *fpdfCellRecorder) CellFormat(w, h float64, text, border string, ln int, align string, fill bool, link int, linkStr string) {
 	r.calls = append(r.calls, fpdfCellCall{
 		x: r.x, y: r.y, w: w, h: h,
 		text: text, border: border, align: align,
 		ln: ln, fill: fill,
+		fontStyle: r.fontStyle, fontSize: r.fontSize,
 	})
+}
+
+// TestDrawNameCell covers issue #448: the trailing keyLines must
+// render in the bold/smaller font while the leading nameLines stay
+// regular/nameFontSize, the border pattern must match drawWrappedCell
+// exactly (so the two are visually indistinguishable when there is no
+// key), and the caller's font must be restored afterward.
+func TestDrawNameCell(t *testing.T) {
+	rec := &fpdfCellRecorder{}
+	nameLines := [][]byte{[]byte("My Project")}
+	keyLines := [][]byte{[]byte("my-project-key")}
+	const nameFontSize, keyFontSize = 8.0, 6.0
+
+	drawNameCell(rec, 55, 4, len(nameLines)+len(keyLines), nameCellContent{
+		nameLines: nameLines, keyLines: keyLines,
+		nameFontSize: nameFontSize, keyFontSize: keyFontSize,
+	})
+
+	if len(rec.calls) != 2 {
+		t.Fatalf("expected 2 CellFormat calls, got %d", len(rec.calls))
+	}
+	nameCall, keyCall := rec.calls[0], rec.calls[1]
+	if nameCall.text != "My Project" || nameCall.fontStyle != "" || nameCall.fontSize != nameFontSize {
+		t.Errorf("name line: got text=%q style=%q size=%.1f, want text=%q style=%q size=%.1f",
+			nameCall.text, nameCall.fontStyle, nameCall.fontSize, "My Project", "", nameFontSize)
+	}
+	if keyCall.text != "my-project-key" || keyCall.fontStyle != "B" || keyCall.fontSize != keyFontSize {
+		t.Errorf("key line: got text=%q style=%q size=%.1f, want text=%q style=%q size=%.1f",
+			keyCall.text, keyCall.fontStyle, keyCall.fontSize, "my-project-key", "B", keyFontSize)
+	}
+	if nameCall.border != "LRT" || keyCall.border != "LRB" {
+		t.Errorf("borders: got %q/%q, want LRT/LRB", nameCall.border, keyCall.border)
+	}
+	// Font must be restored to regular/nameFontSize for the caller's
+	// next column.
+	if rec.fontStyle != "" || rec.fontSize != nameFontSize {
+		t.Errorf("font not restored: style=%q size=%.1f, want style=%q size=%.1f",
+			rec.fontStyle, rec.fontSize, "", nameFontSize)
+	}
+}
+
+// TestDrawNameCell_NoKeyMatchesDrawWrappedCell covers the every-other-
+// section case (#448): with no keyLines, drawNameCell's border/text
+// output for each line must be identical to drawWrappedCell's, and
+// every line renders in the regular font.
+func TestDrawNameCell_NoKeyMatchesDrawWrappedCell(t *testing.T) {
+	nameLines := [][]byte{[]byte("Quality Gate"), []byte("Long Name")}
+
+	wrapped := &fpdfCellRecorder{}
+	drawWrappedCell(wrapped, 55, 4, len(nameLines), nameLines)
+
+	named := &fpdfCellRecorder{}
+	drawNameCell(named, 55, 4, len(nameLines), nameCellContent{
+		nameLines: nameLines, nameFontSize: 8.0, keyFontSize: 8.0,
+	})
+
+	if len(named.calls) != len(wrapped.calls) {
+		t.Fatalf("call count: got %d, want %d", len(named.calls), len(wrapped.calls))
+	}
+	for i, nc := range named.calls {
+		wc := wrapped.calls[i]
+		if nc.text != wc.text || nc.border != wc.border {
+			t.Errorf("line %d: got text=%q border=%q, want text=%q border=%q", i, nc.text, nc.border, wc.text, wc.border)
+		}
+		if nc.fontStyle != "" {
+			t.Errorf("line %d: expected regular font with no key, got style=%q", i, nc.fontStyle)
+		}
+	}
 }
 
 func TestRenderPDFLongDetailsWrap(t *testing.T) {
@@ -412,6 +491,24 @@ func TestUnifiedRowDisplayNameWithLanguage(t *testing.T) {
 	}
 }
 
+// TestUnifiedRowNameCellMarkdown covers issue #448: the Markdown Name
+// cell must append a line break plus the source key wrapped in
+// inline-bold markers (so mdDetail renders "**key**"), and must be a
+// pure passthrough to displayName() when there is no source key —
+// every non-Projects section.
+func TestUnifiedRowNameCellMarkdown(t *testing.T) {
+	withKey := unifiedRow{name: "Proj", sourceKey: "proj-key-1"}
+	want := "Proj\n" + inlineBoldStart + "proj-key-1" + inlineBoldEnd
+	if got := withKey.nameCellMarkdown(); got != want {
+		t.Errorf("nameCellMarkdown() = %q, want %q", got, want)
+	}
+
+	noKey := unifiedRow{name: "Gate"}
+	if got := noKey.nameCellMarkdown(); got != noKey.displayName() {
+		t.Errorf("nameCellMarkdown() without a key = %q, want displayName() %q", got, noKey.displayName())
+	}
+}
+
 // #359: project-data migration outcome rendering. Successful imports
 // are silent (no mention in Details). Skipped / failed projects say
 // "Project data migration skipped" optionally followed by the reason.
@@ -525,12 +622,12 @@ func TestSuccessDetailsDroppedUserPermsLine(t *testing.T) {
 	}
 }
 
-// #356 / #323: per-project sync stats marker renders a one-line "x% of
-// items with manual changes synced" comment plus an "N ACKNOWLEDGED
-// hotspot(s) left as TO_REVIEW" segment when hotspots had to be
-// demoted. The line renders in both actual and predictive reports —
-// the predict pipeline synthesizes hotspot stats from the extract
-// (#323).
+// #356 / #323 / #527: per-project sync stats marker renders a one-line
+// "x% of items with manual changes synced" comment plus an "N
+// ACKNOWLEDGED hotspot(s) inventoried but not state-synced" segment
+// when ACKNOWLEDGED hotspots were counted in the denominator. The line
+// renders in both actual and predictive reports — the predict pipeline
+// synthesizes hotspot stats from the extract (#323).
 func TestSuccessDetailsSyncStatsLine(t *testing.T) {
 	item := EntityItem{Detail: "acme_proj|syncStats:i=42/50,h=10/12"}
 
@@ -565,18 +662,18 @@ func TestSuccessDetailsSyncStatsLine(t *testing.T) {
 			t.Errorf("did not expect sync line for plain detail, got %q", got)
 		}
 	})
-	t.Run("ack= segment renders ACKNOWLEDGED-demoted callout (#323)", func(t *testing.T) {
+	t.Run("ack= segment renders ACKNOWLEDGED callout (#527)", func(t *testing.T) {
 		got := successDetails(EntityItem{Detail: "p|syncStats:h=8/10,ack=2"}, false, false, false)
 		if !strings.Contains(got, "80% of hotspots with manual changes synced (8/10)") {
 			t.Errorf("expected hotspot sync line, got %q", got)
 		}
-		if !strings.Contains(got, "2 ACKNOWLEDGED hotspots left as TO_REVIEW") {
-			t.Errorf("expected ACKNOWLEDGED-demoted callout, got %q", got)
+		if !strings.Contains(got, "2 ACKNOWLEDGED hotspots inventoried but not state-synced") {
+			t.Errorf("expected ACKNOWLEDGED callout, got %q", got)
 		}
 	})
-	t.Run("ack=1 uses singular noun (#323)", func(t *testing.T) {
+	t.Run("ack=1 uses singular noun (#527)", func(t *testing.T) {
 		got := successDetails(EntityItem{Detail: "p|syncStats:ack=1"}, false, false, false)
-		if !strings.Contains(got, "1 ACKNOWLEDGED hotspot left as TO_REVIEW") {
+		if !strings.Contains(got, "1 ACKNOWLEDGED hotspot inventoried but not state-synced") {
 			t.Errorf("expected singular noun for ack=1, got %q", got)
 		}
 		if strings.Contains(got, "hotspots ") {

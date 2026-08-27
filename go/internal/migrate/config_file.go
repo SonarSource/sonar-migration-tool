@@ -28,6 +28,7 @@ type configFileShape struct {
 	Edition            string `json:"edition"`
 	ExportDirectory    string `json:"export_directory"`
 	Concurrency        int    `json:"concurrency"`
+	BuildConcurrency   int    `json:"project_data_build_concurrency"`
 	Timeout            int    `json:"timeout"`
 	RunID              string `json:"run_id"`
 	TargetTask         string `json:"target_task"`
@@ -47,6 +48,16 @@ type configFileShape struct {
 	SkipProjectDataMigration *FlexibleBool `json:"skip_project_data_migration"`
 	Debug                    bool          `json:"debug"`
 	ExcludeBranches          []string      `json:"exclude_branches"`
+	// UnsupportedLanguages selects how projects containing files in a
+	// language with no target quality profile are handled (#474):
+	// "exclude" (default), "skip", or "warn".
+	UnsupportedLanguages string `json:"unsupported_languages"`
+	// FastSync skips tagging and back-linking hotspots (and issues) that
+	// have zero user changes on the source — original state, no comments,
+	// no custom tags (#527). Defaults to false (every hotspot is tagged
+	// and back-linked, current behavior). Same FlexibleBool semantics as
+	// skip_issue_sync.
+	FastSync *FlexibleBool `json:"fast_sync"`
 
 	// Shape 2 (command-sectioned).
 	Migrate *configFileShape `json:"migrate"`
@@ -94,10 +105,15 @@ type unifiedTargetBlock struct {
 	Timeout             int      `json:"timeout"`
 	RunID               string   `json:"run_id"`
 	TargetTask          string   `json:"target_task"`
+	BuildConcurrency    int      `json:"project_data_build_concurrency"`
 	OrganizationKey     string   `json:"organization_key"`     // provisional, ignored
 	DefaultOrganization string   `json:"default_organization"` // #281
 	ProjectKeyPattern   string   `json:"project_key_pattern"`  // #138
 	ExcludeBranches     []string `json:"exclude_branches"`
+	// UnsupportedLanguages — see configFileShape.UnsupportedLanguages (#474).
+	UnsupportedLanguages string `json:"unsupported_languages"`
+	// FastSync — see configFileShape.FastSync (#527).
+	FastSync *FlexibleBool `json:"fast_sync"`
 }
 
 type sonarCloudBlock struct {
@@ -125,9 +141,10 @@ type OrgConfigEntry struct {
 }
 
 type settingsBlock struct {
-	ExportDirectory string `json:"export_directory"`
-	Concurrency     int    `json:"concurrency"`
-	Timeout         int    `json:"timeout"`
+	ExportDirectory  string `json:"export_directory"`
+	Concurrency      int    `json:"concurrency"`
+	BuildConcurrency int    `json:"project_data_build_concurrency"`
+	Timeout          int    `json:"timeout"`
 }
 
 func parseConfigFile(path string) (configFileShape, error) {
@@ -161,13 +178,27 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			cfg.RunID = s.Target.RunID
 			cfg.TargetTask = s.Target.TargetTask
 			cfg.Concurrency = s.Target.Concurrency
+			cfg.BuildConcurrency = s.Target.BuildConcurrency
 			cfg.Timeout = s.Target.Timeout
 			cfg.DefaultOrganization = s.Target.DefaultOrganization
 			cfg.ProjectKeyPattern = s.Target.ProjectKeyPattern
 			cfg.ExcludeBranches = s.Target.ExcludeBranches
+			cfg.UnsupportedLanguages = s.Target.UnsupportedLanguages
 		}
+		// #474 — target.unsupported_languages wins, else the top-level field.
+		cfg.UnsupportedLanguages = resolveUnsupportedLanguages(
+			cfg.UnsupportedLanguages, s.UnsupportedLanguages)
+		// #527 — target.fast_sync wins, else the top-level field, else false.
+		var targetFastSync *FlexibleBool
+		if s.Target != nil {
+			targetFastSync = s.Target.FastSync
+		}
+		cfg.FastSync = resolveFastSync(targetFastSync, s.FastSync)
 		if cfg.Concurrency == 0 {
 			cfg.Concurrency = s.Concurrency
+		}
+		if cfg.BuildConcurrency == 0 {
+			cfg.BuildConcurrency = s.BuildConcurrency
 		}
 		if cfg.Timeout == 0 {
 			cfg.Timeout = s.Timeout
@@ -185,15 +216,22 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		return cfg
 	case s.SonarCloud != nil:
 		cfg := s.SonarCloud.toMigrateConfig(s.Settings)
+		cfg.UnsupportedLanguages = resolveUnsupportedLanguages(
+			cfg.UnsupportedLanguages, s.UnsupportedLanguages)
 		if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
 			cfg.SkipIssueSync = s.SkipIssueSync.Value
 		}
 		if s.SkipProjectDataMigration != nil && s.SkipProjectDataMigration.Set {
 			cfg.SkipProjectDataMigration = s.SkipProjectDataMigration.Value
 		}
+		if s.FastSync != nil && s.FastSync.Set {
+			cfg.FastSync = s.FastSync.Value
+		}
 		return cfg
 	case s.Migrate != nil:
 		cfg := s.Migrate.toMigrateConfig()
+		cfg.UnsupportedLanguages = resolveUnsupportedLanguages(
+			cfg.UnsupportedLanguages, s.UnsupportedLanguages)
 		// Outer-level skip_issue_sync wins when both outer and inner
 		// set it (#299). If only outer is set, propagate it down.
 		if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
@@ -201,6 +239,10 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		}
 		if s.SkipProjectDataMigration != nil && s.SkipProjectDataMigration.Set {
 			cfg.SkipProjectDataMigration = s.SkipProjectDataMigration.Value
+		}
+		// Same outer-wins-else-inner semantics for fast_sync (#527).
+		if s.FastSync != nil && s.FastSync.Set {
+			cfg.FastSync = s.FastSync.Value
 		}
 		return cfg
 	default:
@@ -211,6 +253,7 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			Edition:            s.Edition,
 			ExportDirectory:    s.ExportDirectory,
 			Concurrency:        s.Concurrency,
+			BuildConcurrency:   s.BuildConcurrency,
 			Timeout:            s.Timeout,
 			RunID:              s.RunID,
 			TargetTask:         s.TargetTask,
@@ -218,12 +261,17 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			IncludeProjectData: s.IncludeProjectData,
 			Debug:              s.Debug,
 			ExcludeBranches:    s.ExcludeBranches,
+			// #474 — flat shape reads the field directly.
+			UnsupportedLanguages: s.UnsupportedLanguages,
 		}
 		if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
 			cfg.SkipIssueSync = s.SkipIssueSync.Value
 		}
 		if s.SkipProjectDataMigration != nil && s.SkipProjectDataMigration.Set {
 			cfg.SkipProjectDataMigration = s.SkipProjectDataMigration.Value
+		}
+		if s.FastSync != nil && s.FastSync.Set {
+			cfg.FastSync = s.FastSync.Value
 		}
 		return cfg
 	}
@@ -253,6 +301,7 @@ func (sc sonarCloudBlock) toMigrateConfig(settings *settingsBlock) MigrateConfig
 	if settings != nil {
 		cfg.ExportDirectory = settings.ExportDirectory
 		cfg.Concurrency = settings.Concurrency
+		cfg.BuildConcurrency = settings.BuildConcurrency
 		cfg.Timeout = settings.Timeout
 	}
 	return cfg

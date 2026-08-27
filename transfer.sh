@@ -13,11 +13,14 @@ usage() {
   exit 1
 }
 
-while getopts "c:hp:o:" opt; do
+DEBUG=""
+
+while getopts "c:hp:o:v" opt; do
   case "${opt}" in
     c) CONFIG="${OPTARG}" ;;
     p) PK="${OPTARG}" ;;
     o) ORG="${OPTARG}" ;;
+    v) DEBUG="--debug" ;;
     h) usage ;;
     *) usage ;;
   esac
@@ -37,4 +40,4 @@ fi
 
 CONFIG_FILE="config-${CONFIG}.json"
 
-./sonar-migration-tool transfer --config "${CONFIG_FILE}" --project_key $PK --default_organization $ORG --debug
+sonar-migration-tool transfer --config "${CONFIG_FILE}" --project_key $PK --default_organization $ORG $DEBUG

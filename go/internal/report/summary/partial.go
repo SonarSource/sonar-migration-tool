@@ -292,9 +292,11 @@ func collectPartial(def sectionDef, failures []configFailure, succeeded []Entity
 				Organization: cf.Organization,
 				Issues:       []string{issue},
 			}
-			// Carry over detail (cloud_id) from the matching success entry, if any.
+			// Carry over detail (cloud_id) and source key from the matching
+			// success entry, if any (#448 for SourceKey).
 			if sIdx, ok := succeededByName[cf.EntityName]; ok {
 				item.Detail = succeeded[sIdx].Detail
+				item.SourceKey = succeeded[sIdx].SourceKey
 			}
 			merged[cf.EntityName] = len(partial)
 			partial = append(partial, item)

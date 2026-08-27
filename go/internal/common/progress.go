@@ -119,6 +119,7 @@ var ProgressLogInterval = map[string]int64{
 	"setDefaultGates":                      50,
 	"restoreProfiles":                      50,
 	"setProjectLinks":                      50,
+	"setProjectSourceLink":                 50,
 	"setProjectProfiles":                   50,
 	"addMigrationGroupToTemplates":         50,
 	"createMigrationGroups":                50,
@@ -222,3 +223,19 @@ func (p *ProgressLogger) Increment() {
 
 // Interval returns the resolved per-iteration interval (testing only).
 func (p *ProgressLogger) Interval() int64 { return p.interval }
+
+// Fraction returns how far through the task's item count this logger has
+// progressed, in [0,1]. A task with no known total (total <= 0) reports 1
+// (complete) since there is nothing to wait on. Used by Tracker (#520) to
+// blend in-flight task progress into the run-wide percentage without any
+// task Run function needing to know about the tracker.
+func (p *ProgressLogger) Fraction() float64 {
+	if p.total <= 0 {
+		return 1
+	}
+	n := p.done.Load()
+	if int(n) >= p.total {
+		return 1
+	}
+	return float64(n) / float64(p.total)
+}

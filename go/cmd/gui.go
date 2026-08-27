@@ -178,6 +178,14 @@ func resolveGUIDefaults(cmd *cobra.Command) (string, *wizard.WizardState, error)
 		v := migrateCfg.EnterpriseKey
 		seed.EnterpriseKey = &v
 	}
+	// #516: extractCfg and migrateCfg parse the same unified top-level
+	// skip_project_data_migration / skip_issue_sync config keys, so
+	// extractCfg is used as the single source for the wizard's
+	// migration-scope checkboxes.
+	includeProjectData := !extractCfg.SkipProjectDataMigration
+	seed.IncludeProjectData = &includeProjectData
+	includeIssueSync := !extractCfg.SkipIssueSync
+	seed.IncludeIssueSync = &includeIssueSync
 	return exportDir, seed, nil
 }
 

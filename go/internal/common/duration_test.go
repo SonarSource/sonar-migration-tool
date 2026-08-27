@@ -39,3 +39,29 @@ func TestFormatHMSMillis(t *testing.T) {
 		})
 	}
 }
+
+func TestFormatHMS(t *testing.T) {
+	cases := []struct {
+		name string
+		in   time.Duration
+		want string
+	}{
+		{"zero", 0, "00:00:00"},
+		{"negative clamps to zero", -5 * time.Second, "00:00:00"},
+		{"sub-second rounds down", 999 * time.Millisecond, "00:00:00"},
+		{"one second", time.Second, "00:00:01"},
+		{"one minute", time.Minute, "00:01:00"},
+		{"5m30s", 5*time.Minute + 30*time.Second, "00:05:30"},
+		{"one hour", time.Hour, "01:00:00"},
+		{"02:30:05", 2*time.Hour + 30*time.Minute + 5*time.Second, "02:30:05"},
+		{"big day-plus", 25*time.Hour + 13*time.Minute + 7*time.Second, "25:13:07"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := FormatHMS(c.in)
+			if got != c.want {
+				t.Errorf("FormatHMS(%v) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}

@@ -29,7 +29,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: '1.25'
       - name: Run Go library tests with coverage
@@ -49,9 +49,19 @@ jobs:
         with:
           secrets: |
             development/kv/data/sonarcloud token | SONAR_TOKEN;
+      - name: Compute project version
+        if: env.SONAR_ANALYSIS_ENABLED == 'true'
+        id: project_version
+        run: |
+          RAW_VERSION="$(grep -oE 'const Version = "[^"]+"' go/internal/version/version.go | cut -d'"' -f2)"
+          VERSION="${RAW_VERSION#v}"
+          VERSION="${VERSION%%-*}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
       - name: SonarQube Scan
         if: env.SONAR_ANALYSIS_ENABLED == 'true'
         uses: SonarSource/sonarqube-scan-action@v8
+        with:
+          args: -Dsonar.projectVersion=${{ steps.project_version.outputs.version }}
         env:
           # `|| '{}'` is load-bearing: GitHub evaluates a step's `env` expressions
           # even when its `if` is false, so when "Fetch Vault secrets" is skipped
@@ -118,7 +128,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: '1.25'
       - name: Build binary
@@ -276,7 +286,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Set up Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'

@@ -30,6 +30,20 @@ func TestIsCloudBinding(t *testing.T) {
 		{"https://bitbucket.org/myteam", true},
 		{"https://my-server.example.com", false},
 		{"", false},
+		// Azure DevOps Services accounts predating the dev.azure.com
+		// rename still bind as <account>.visualstudio.com, and those are
+		// cloud. Treating them as on-premise silently dropped the
+		// binding (#505).
+		{"https://myaccount.visualstudio.com", true},
+		{"https://myaccount.visualstudio.com/DefaultCollection", true},
+		// On-premise platforms SonarQube Cloud cannot integrate with.
+		// The observed shape of a GitHub Enterprise Server binding is
+		// the /api/v3 endpoint on the customer's own host.
+		{"https://github.acme.com/api/v3", false},
+		{"https://gitlab.acme.com/api/v4", false},
+		{"https://bitbucket-server.your-company.com", false},
+		// Hosts are case-insensitive; nothing normalises what the server reports.
+		{"HTTPS://API.GITHUB.COM", true},
 	}
 	for _, tt := range tests {
 		got := IsCloudBinding(tt.url)

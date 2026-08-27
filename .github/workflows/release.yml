@@ -15,7 +15,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: '1.25'
       - name: Run Go library tests with coverage
@@ -34,8 +34,17 @@ jobs:
         with:
           secrets: |
             development/kv/data/sonarcloud token | SONAR_TOKEN;
+      - name: Compute project version
+        id: project_version
+        run: |
+          RAW_VERSION="$(grep -oE 'const Version = "[^"]+"' go/internal/version/version.go | cut -d'"' -f2)"
+          VERSION="${RAW_VERSION#v}"
+          VERSION="${VERSION%%-*}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
       - name: SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@v8
+        with:
+          args: -Dsonar.projectVersion=${{ steps.project_version.outputs.version }}
         env:
           SONAR_TOKEN: ${{ fromJSON(steps.secrets.outputs.vault).SONAR_TOKEN }}
 
@@ -72,7 +81,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: '1.25'
       - name: Build binary
@@ -227,7 +236,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Set up Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
@@ -284,12 +293,26 @@ jobs:
     runs-on: sonar-xs
     permissions:
       contents: write
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
     steps:
-      - name: Set release tag
+      - uses: actions/checkout@v6
+
+      - name: Set release version and tag
         id: release
         run: |
-          TAG="v$(date -u +%Y.%m.%d)-${GITHUB_RUN_NUMBER}"
+          RAW_VERSION="$(grep -oE 'const Version = "[^"]+"' go/internal/version/version.go | cut -d'"' -f2)"
+          VERSION="${RAW_VERSION#v}"
+          VERSION="${VERSION%%-*}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version '${RAW_VERSION}' in go/internal/version/version.go is not major.minor.patch"
+            exit 1
+          fi
+          TAG="v${VERSION}.${GITHUB_RUN_NUMBER}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Release version: ${VERSION}"
           echo "Release tag: ${TAG}"
 
       - name: Download all binaries
@@ -312,10 +335,58 @@ jobs:
           path: dist/
 
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.release.outputs.tag }}
           name: ${{ steps.release.outputs.tag }}
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
           files: dist/sonar-migration-tool-*
+
+  # Open a PR bumping go/internal/version/version.go to a tentative next
+  # version (incrementing the minor number, resetting patch to 0) so the
+  # released version is never left stale. The PR is a starting point only:
+  # a human picks the real next major/minor/patch before merging.
+  bump-version:
+    name: Open Next-Version Bump PR
+    needs: publish
+    if: success()
+    runs-on: sonar-xs
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Bump version.go and open PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASED_VERSION: ${{ needs.publish.outputs.version }}
+          RELEASED_TAG: ${{ needs.publish.outputs.tag }}
+        run: |
+          set -euo pipefail
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$RELEASED_VERSION"
+          NEXT_VERSION="${MAJOR}.$((MINOR + 1)).0-SNAPSHOT"
+          BRANCH="chore/bump-version-${MAJOR}.$((MINOR + 1)).0"
+
+          sed -i.bak -E "s/const Version = \"[^\"]+\"/const Version = \"v${NEXT_VERSION}\"/" go/internal/version/version.go
+          rm -f go/internal/version/version.go.bak
+
+          if git diff --quiet -- go/internal/version/version.go; then
+            echo "::error::Expected go/internal/version/version.go to change but it did not"
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git commit -am "chore: bump version to v${NEXT_VERSION}"
+          git push origin "$BRANCH"
+
+          PR_BODY="$(printf 'Automated follow-up to release `%s`.\n\nThis bumps `go/internal/version/version.go` to a tentative next version (`v%s`) by incrementing the minor version number.\n\n**Please review and adjust the major/minor/patch as appropriate for what'"'"'s actually planned next before merging.**' "$RELEASED_TAG" "$NEXT_VERSION")"
+
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "chore: bump version to v${NEXT_VERSION}" \
+            --body "$PR_BODY"

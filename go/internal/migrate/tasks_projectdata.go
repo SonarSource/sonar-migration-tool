@@ -48,9 +48,11 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 	}
 
 	completed := loadCompletedBranches(e.Store)
+	counter := TaskCounterFromContext(ctx)
 
 	e.Logger.Info("starting task", "task", "importProjectData", "items", len(projects))
 	prog := common.NewProgressLogger(e.Logger, "importProjectData", len(projects))
+	e.Progress.Registry().Register("importProjectData", prog)
 
 	g, gCtx := errgroup.WithContext(ctx)
 	g.SetLimit(cap(e.Sem))
@@ -81,9 +83,11 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 
 			scMainBranch := fetchSCMainBranch(gCtx, e, cloudKey)
 
-			if err := importProjectBranches(gCtx, e, proj, sqBranches, scMainBranch, completed, w); err != nil {
-				e.Logger.Warn("project project data failed", "project", cloudKey, "err", err)
-			}
+			// #474 — a rejected report used to be a Warn that left the task
+			// summary reporting nothing at all, so a transfer that migrated
+			// zero issues and zero branches still looked clean.
+			recordImportOutcome(e, counter, cloudKey,
+				importProjectBranches(gCtx, e, proj, sqBranches, scMainBranch, completed, w))
 			prog.Increment()
 			return nil
 		})
@@ -275,6 +279,10 @@ func recordBranchResult(w *common.ChunkWriter, cloudKey, branchName string, resu
 		"task_id":           result.TaskID,
 		"error":             result.Error,
 		"source_purged":     result.SourcePurged,
+		// #474 — languages with no target quality profile, and how many files
+		// were dropped from the report because of them.
+		"unsupported_languages": result.UnsupportedLanguages,
+		"excluded_files":        result.ExcludedFiles,
 	})
 	w.WriteOne(record) //nolint:errcheck
 }
@@ -300,6 +308,15 @@ type importResult struct {
 	// flag drives the per-project "source code of branch X is missing" note
 	// in the migration report.
 	SourcePurged bool
+	// UnsupportedLanguages lists the languages found in this branch that have
+	// no quality profile on the target organization (#474). Set whether the
+	// branch was skipped, excluded-and-migrated, or submitted as-is, so the
+	// migration report can always explain what happened.
+	UnsupportedLanguages []string
+	// ExcludedFiles is the number of file components dropped from the scanner
+	// report because their language has no target quality profile (#474,
+	// --unsupported_languages=exclude).
+	ExcludedFiles int
 }
 
 func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*importResult, error) {
@@ -308,11 +325,34 @@ func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*i
 		targetBranch = input.Branch
 	}
 
-	report, skip, err := buildBranchReport(ctx, e, input, targetBranch)
+	// Bound concurrent report construction. Held across build + submit and
+	// released before the CE poll below, so the expensive window is short
+	// even though the branch stays in flight for minutes afterwards.
+	//
+	// The release flag is a local, not a field: e is shared by every
+	// concurrent branch import, so clearing e.BuildSem to mark "released"
+	// would switch the semaphore off for the whole run.
+	buildSem := e.BuildSem
+	if buildSem != nil {
+		if err := common.AcquireSem(ctx, buildSem); err != nil {
+			return nil, err
+		}
+	}
+	buildReleased := false
+	buildDone := func() {
+		if buildSem != nil && !buildReleased {
+			buildReleased = true
+			<-buildSem
+		}
+	}
+
+	zipBytes, meta, skip, err := buildBranchReport(ctx, e, input, targetBranch)
 	if err != nil {
+		buildDone()
 		return nil, err
 	}
 	if skip != nil {
+		buildDone()
 		return skip, nil
 	}
 
@@ -321,58 +361,154 @@ func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*i
 		ProjectKey:     input.CloudKey,
 		OrgKey:         input.OrgKey,
 		BranchName:     targetBranch,
-		ProjectVersion: report.ProjectVersion,
+		ProjectVersion: meta.ProjectVersion,
 		IsMain:         input.IsMain,
 	}
 
-	result, err := scanreport.SubmitReport(ctx, e.Raw.HTTPClient(), cfg, report.ZIP)
+	result, err := scanreport.SubmitReport(ctx, e.Raw.HTTPClient(), cfg, zipBytes)
 	if err != nil {
+		buildDone()
 		return nil, fmt.Errorf("submitting report: %w", err)
 	}
 
+	// The report is on the wire; let the next branch start building while
+	// this one waits on the CE.
+	buildDone()
+
+	// zipBytes is dead from here on, so the GC can reclaim it during the
+	// poll below. That is the point of returning meta separately: PollCETask
+	// blocks for minutes, and when these fields lived on a struct alongside
+	// the ZIP, reading one of them after the poll kept the whole allocation
+	// -- ZIP included -- reachable in every concurrent branch import.
 	e.Logger.Info("CE task submitted", "project", input.CloudKey, "targetBranch", targetBranch, "taskId", result.TaskID)
 
 	if err := scanreport.PollCETask(ctx, e.Raw.HTTPClient(), e.CloudURL, result.TaskID, e.Logger); err != nil {
 		return nil, fmt.Errorf("CE task failed: %w", err)
 	}
 
-	return &importResult{Status: "success", TaskID: result.TaskID, SourcePurged: report.SourcePurged}, nil
+	return &importResult{
+		Status: "success", TaskID: result.TaskID, SourcePurged: meta.SourcePurged,
+		UnsupportedLanguages: meta.UnsupportedLanguages, ExcludedFiles: meta.ExcludedFiles,
+	}, nil
 }
 
-// branchReport is a packaged scanner report for one branch, ready to submit.
-type branchReport struct {
-	ZIP            []byte
+// branchReportMeta is everything about a packaged report that outlives the
+// ZIP bytes.
+//
+// It is returned separately from the ZIP so importBranch can drop the ZIP
+// the moment SubmitReport returns. The CE poll that follows runs for
+// minutes, and with 25 projects in flight, holding 25 report ZIPs across it
+// was a large share of peak RSS. Keeping these fields on a struct alongside
+// the ZIP is what pinned it: reading any field after the poll keeps the
+// whole allocation, ZIP included, reachable.
+type branchReportMeta struct {
 	ProjectVersion string
 	// SourcePurged is true when this branch's source text was unavailable
 	// (purged by housekeeping) so the report carries measures + issues but no
 	// source. Propagated to the importResult for #425 reporting.
 	SourcePurged bool
+	// UnsupportedLanguages / ExcludedFiles carry the #474 finding through to
+	// the importResult so the migration report can explain the outcome even
+	// when the branch itself migrated successfully.
+	UnsupportedLanguages []string
+	ExcludedFiles        int
+}
+
+// buildProtoSources maps each file component's source text onto its
+// protobuf component ref, skipping files with no source.
+//
+// Source text is sanitized on the way in. Files like RCE-demo PHP scripts
+// may contain null bytes (U+0000) used in null-byte injection exploits.
+// The SonarCloud CE's Java component visitor and the underlying database
+// both reject null bytes in text, producing "Visit of Component failed" /
+// "Fail to process issues of component" CE task failures. Stripping them
+// here lets the file still migrate with its issues and measures intact.
+func buildProtoSources(sources []sourceRecord, cr *scanreport.ComponentRef) map[int32]string {
+	pbSources := make(map[int32]string, len(sources))
+	for _, s := range sources {
+		if ref, ok := cr.Refs()[s.Component]; ok && s.Source != "" {
+			pbSources[ref] = stripNullBytes(s.Source)
+		}
+	}
+	return pbSources
+}
+
+// changesetsByComponentKey re-keys changesets from protobuf component ref to
+// component key, sharing the same pointers. BackdateChangesets works in
+// component-key space, so it needs this alias view.
+func changesetsByComponentKey(changesets map[int32]*pb.Changesets, cr *scanreport.ComponentRef) map[string]*pb.Changesets {
+	byKey := make(map[string]*pb.Changesets, len(changesets))
+	for compKey, ref := range cr.Refs() {
+		if cs, ok := changesets[ref]; ok {
+			byKey[compKey] = cs
+		}
+	}
+	return byKey
+}
+
+// preCreateBranchAnalysis performs the SonarCloud "Create analysis"
+// handshake for a non-main branch, returning the analysis UUID to stamp
+// into the report metadata (analysis_uuid, field 19) so the CE binds the
+// report to the pre-created branch. Without it the CE accepts the report
+// (task SUCCESS) but never creates the branch.
+//
+// The main branch needs no handshake — its first analysis establishes it —
+// so this returns an empty UUID for it.
+func preCreateBranchAnalysis(ctx context.Context, e *Executor, input importBranchInput,
+	targetBranch, projectVersion string,
+) (string, error) {
+	if input.IsMain {
+		return "", nil
+	}
+	res, err := scanreport.PreCreateAnalysis(ctx, e.RawAPI.HTTPClient(), scanreport.AnalysisConfig{
+		APIURL:         e.APIURL,
+		OrgKey:         input.OrgKey,
+		ProjectKey:     input.CloudKey,
+		ProjectVersion: projectVersion,
+		BranchName:     targetBranch,
+		TargetBranch:   input.ReferenceBranch,
+		// Migrate every non-main branch as a long-lived branch so it keeps
+		// its full issue history (matches SonarQube Server, where all
+		// branches are long-lived). Without this, branches whose names don't
+		// match the target's long-lived-branch regex would be created as
+		// short-lived (PR-like, auto-deleted, no overall-code history).
+		BranchType: "long",
+	})
+	if err != nil {
+		return "", fmt.Errorf("create-analysis handshake (branch %s): %w", input.Branch, err)
+	}
+	e.Logger.Info("analysis pre-created (branch anchored on target)",
+		"project", input.CloudKey, "branch", targetBranch,
+		"analysisUuid", res.AnalysisUUID, "branchType", res.BranchType,
+		"referenceBranch", res.ReferenceBranchName)
+	return res.AnalysisUUID, nil
 }
 
 // buildBranchReport loads the extracted data for one branch, applies the
 // CE-compatibility fixes, and returns the packaged report. A non-nil skip
 // result means the branch must not be submitted (no components, or no source
 // to anchor its issues).
-func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput, targetBranch string) (*branchReport, *importResult, error) {
+func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput, targetBranch string) ([]byte, branchReportMeta, *importResult, error) {
 	issues := loadExtractedIssues(e, input.ServerURL, input.ServerKey, input.Branch)
-	hotspotIssues := loadExtractedHotspots(e, input.ServerURL, input.ServerKey, input.Branch)
+	hotspots := loadExtractedHotspots(e, input.ServerURL, input.ServerKey, input.Branch)
+	hotspotIssues := convertHotspotsForReport(e, input, hotspots)
 	extIssues, adHocRules := loadExtractedExternalIssues(e, input.ServerURL, input.ServerKey, input.Branch)
 	// Include ALL FIL components, not just those with source code; external
 	// issues can reference files without source. CloudVoyager does the same.
 	components := loadExtractedComponents(e, input.ServerURL, input.ServerKey, input.Branch)
-	sources := loadExtractedSources(e, input.ServerURL, input.ServerKey, input.Branch)
+	// Source text and per-line syntax highlighting come from the same
+	// extract task, so one pass yields both. Without the highlighting the
+	// migrated source renders as raw, uncolored text (issue #420).
+	sources, syntaxHighlighting := loadBranchSourceData(e, input.ServerURL, input.ServerKey, input.Branch)
 	activeRules := loadExtractedActiveRules(e, input.ServerURL, input.ServerKey)
 	// Per-file measures (ncloc et al.) — without these the branch renders as
 	// "main branch is empty". Real per-line SCM blame — without it the Code
 	// view shows no author/date per line.
 	componentMeasures := loadComponentMeasures(e, input.ServerURL, input.ServerKey, input.Branch)
 	scmByComponent := loadExtractedSCM(e, input.ServerURL, input.ServerKey, input.Branch)
-	// Per-line syntax highlighting (colors in the Code view); without it the
-	// migrated source renders as raw, uncolored text (issue #420).
-	syntaxHighlighting := loadExtractedSyntaxHighlighting(e, input.ServerURL, input.ServerKey, input.Branch)
 
 	if len(components) == 0 {
-		return nil, &importResult{Status: "skipped"}, nil
+		return nil, branchReportMeta{}, &importResult{Status: "skipped"}, nil
 	}
 
 	// The source server returns no source TEXT for this branch even though line
@@ -408,6 +544,20 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	// The CE validates that qprofile keys in the metadata exist in the SC instance.
 	scProfileByLang := buildSCProfileMap(ctx, e, input.OrgKey)
 
+	// #474 — a file whose language has no target quality profile makes the
+	// SonarQube Cloud CE reject the WHOLE report ("Report contains a file with
+	// language 'X' but no matching quality profile"), which silently costs the
+	// project every issue and every branch. Detect that before submitting,
+	// explain it, and apply the configured handling mode.
+	componentsBeforePolicy := len(components)
+	components, unsupportedLangKeys, unsupportedSkip := applyUnsupportedLanguagePolicy(
+		e, input.CloudKey, input.Branch, components, scProfileByLang)
+	if unsupportedSkip != nil {
+		return nil, branchReportMeta{}, unsupportedSkip, nil
+	}
+	// Zero unless mode "exclude" actually dropped components.
+	excludedFiles := componentsBeforePolicy - len(components)
+
 	// Filter profiles and rules to languages present in the project (matches cloudvoyager).
 	projectLangs := collectProjectLanguages(components)
 	// Cross-language analyzers raise findings on files whose own language
@@ -436,31 +586,19 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	// requires every native issue's rule to be activated in the analysis; an
 	// orphan rule (e.g. a "secrets" finding when secrets rules were never
 	// extracted as active rules) aborts the entire report. Such issues cannot
-	// be recreated on the target regardless. Hotspots are appended afterward —
-	// they are validated against hotspot rules, not the active-rule set.
+	// be recreated on the target regardless.
 	issues, droppedOrphanIssues := dropIssuesWithInactiveRules(issues, activeRules)
 	if droppedOrphanIssues > 0 {
 		e.Logger.Warn("dropped native issues referencing inactive rules",
 			"project", input.CloudKey, "branch", input.Branch, "dropped", droppedOrphanIssues)
 	}
+	hotspotIssues = dropHotspotsWithInactiveRules(e, input, len(hotspots), hotspotIssues, activeRules)
 	issues = append(issues, hotspotIssues...)
 
 	now := time.Now()
 
 	root, fileComps, cr := scanreport.BuildComponents(input.CloudKey, components)
-	pbSources := make(map[int32]string)
-	for _, s := range sources {
-		if ref, ok := cr.Refs()[s.Component]; ok && s.Source != "" {
-			// Sanitize source text before embedding in the scanner report.
-			// Files like RCE-demo PHP scripts may contain null bytes (U+0000)
-			// used in null-byte injection exploits. The SonarCloud CE's Java
-			// component visitor and the underlying database both reject null
-			// bytes in text, producing "Visit of Component failed" / "Fail to
-			// process issues of component" CE task failures. Strip them here so
-			// the file still migrates with its issues and measures intact.
-			pbSources[ref] = stripNullBytes(s.Source)
-		}
-	}
+	pbSources := buildProtoSources(sources, cr)
 	// #425 — the SonarCloud CE rejects any report containing a FILE component
 	// with no source text (it fails with "There was an issue whilst processing
 	// the report"), regardless of whether the file carries issues — every
@@ -477,19 +615,15 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	// offset would be rejected by the CE with "offset out of range". We zero
 	// out the offsets for those issues below while preserving their line numbers.
 	purgedRefs := ensureFileSourcesPresent(fileComps, pbSources)
+	// Covers the hotspot-derived issues too — they were merged into `issues`
+	// above, so a second pass over `hotspotIssues` would be a no-op.
 	issues = zeroOffsetsForPurgedComponents(issues, purgedRefs, cr)
-	hotspotIssues = zeroOffsetsForPurgedComponents(hotspotIssues, purgedRefs, cr)
 
 	changesets := buildChangesetMap(cr, components, pbSources, scmByComponent, now)
 
 	// Backdate changesets so each issue gets its original SonarQube creation date.
 	// Build a component-key-keyed alias map (same pointers) for BackdateChangesets.
-	changesetsByKey := make(map[string]*pb.Changesets, len(changesets))
-	for compKey, ref := range cr.Refs() {
-		if cs, ok := changesets[ref]; ok {
-			changesetsByKey[compKey] = cs
-		}
-	}
+	changesetsByKey := changesetsByComponentKey(changesets, cr)
 	extracted := toExtractedIssues(issues)
 	extracted = append(extracted, extIssuesToExtracted(extIssues)...)
 	scanreport.BackdateChangesets(extracted, changesetsByKey, now)
@@ -502,29 +636,9 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	// this report to the pre-created branch. Without it, the CE accepts the
 	// report (task SUCCESS) but never creates the branch. The main branch needs
 	// no handshake — its first analysis establishes it.
-	var analysisUUID string
-	if !input.IsMain {
-		res, hErr := scanreport.PreCreateAnalysis(ctx, e.RawAPI.HTTPClient(), scanreport.AnalysisConfig{
-			APIURL:         e.APIURL,
-			OrgKey:         input.OrgKey,
-			ProjectKey:     input.CloudKey,
-			ProjectVersion: projectVersion,
-			BranchName:     targetBranch,
-			TargetBranch:   input.ReferenceBranch,
-			// Migrate every non-main branch as a long-lived branch so it keeps
-			// its full issue history (matches SonarQube Server, where all
-			// branches are long-lived). Without this, branches whose names don't
-			// match the target's long-lived-branch regex would be created as
-			// short-lived (PR-like, auto-deleted, no overall-code history).
-			BranchType: "long",
-		})
-		if hErr != nil {
-			return nil, nil, fmt.Errorf("create-analysis handshake (branch %s): %w", input.Branch, hErr)
-		}
-		analysisUUID = res.AnalysisUUID
-		e.Logger.Info("analysis pre-created (branch anchored on target)",
-			"project", input.CloudKey, "branch", targetBranch,
-			"analysisUuid", analysisUUID, "branchType", res.BranchType, "referenceBranch", res.ReferenceBranchName)
+	analysisUUID, err := preCreateBranchAnalysis(ctx, e, input, targetBranch, projectVersion)
+	if err != nil {
+		return nil, branchReportMeta{}, nil, err
 	}
 
 	reportData := &scanreport.ReportData{
@@ -554,7 +668,7 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 
 	zipBytes, err := scanreport.PackageReport(reportData)
 	if err != nil {
-		return nil, nil, fmt.Errorf("packaging report: %w", err)
+		return nil, branchReportMeta{}, nil, fmt.Errorf("packaging report: %w", err)
 	}
 
 	if dumpDir := os.Getenv("SMT_DUMP_REPORT_DIR"); dumpDir != "" {
@@ -579,7 +693,10 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 		"activeRules", len(activeRules),
 	)
 
-	return &branchReport{ZIP: zipBytes, ProjectVersion: projectVersion, SourcePurged: sourcePurged}, nil, nil
+	return zipBytes, branchReportMeta{
+		ProjectVersion: projectVersion, SourcePurged: sourcePurged,
+		UnsupportedLanguages: unsupportedLangKeys, ExcludedFiles: excludedFiles,
+	}, nil, nil
 }
 
 // ensureFileSourcesPresent guarantees every FILE component has a source
@@ -663,19 +780,10 @@ type branchInfo struct {
 // collectBranchInfo reads extracted branch data for a project, returning
 // each LONG branch's name and whether it is the main branch.
 func collectBranchInfo(e *Executor, serverURL, serverKey string) []branchInfo {
-	items, err := readExtractItems(e, "getBranches")
-	if err != nil {
-		return nil
-	}
+	// No Branch in the scope: this collects every branch of the project.
+	scope := extractScope{ServerURL: serverURL, ProjectKey: serverKey}
 	var branches []branchInfo
-	for _, item := range items {
-		if item.ServerURL != serverURL {
-			continue
-		}
-		projKey := extractField(item.Data, "projectKey")
-		if projKey != serverKey {
-			continue
-		}
+	for item := range scopedExtractItems(e, "getBranches", scope) {
 		branchType := strings.ToUpper(extractField(item.Data, "type"))
 		if branchType == "SHORT" {
 			continue
@@ -755,84 +863,66 @@ type sourceRecord struct {
 	Source    string
 }
 
-func loadExtractedSources(e *Executor, serverURL, serverKey, branch string) []sourceRecord {
-	items, err := readExtractItems(e, "getProjectSourceCode")
-	if err != nil {
-		return nil
-	}
-	var sources []sourceRecord
-	for _, item := range items {
-		if item.ServerURL != serverURL {
-			continue
-		}
-		if extractField(item.Data, "projectKey") != serverKey {
-			continue
-		}
-		if extractField(item.Data, "branch") != branch {
-			continue
-		}
-		sources = append(sources, sourceRecord{
-			Component: extractField(item.Data, "key"),
-			Source:    extractField(item.Data, "source"),
-		})
-	}
-	return sources
-}
+// loadBranchSourceData reads getProjectSourceCode once for a branch and
+// returns both the source text and the per-line highlighted HTML. The
+// highlighting is parsed into protobuf rules later by
+// scanreport.BuildSyntaxHighlighting so the migrated Code view renders with
+// colors (issue #420).
+//
+// This was two functions each doing a full pass over the whole instance's
+// source corpus. Reading once halves the I/O, and streaming with a
+// two-stage decode means a record belonging to another project costs a
+// three-field header rather than a copy of its full text and highlighting.
+func loadBranchSourceData(e *Executor, serverURL, serverKey, branch string) ([]sourceRecord, []scanreport.HighlightInput) {
+	scope := extractScope{ServerURL: serverURL, ProjectKey: serverKey, Branch: branch}
 
-// loadExtractedSyntaxHighlighting reads the per-line highlighted HTML captured
-// alongside source code (getProjectSourceCode → "highlightedLines") for the
-// given branch, returning one HighlightInput per file. The highlighting is
-// parsed into protobuf rules later by scanreport.BuildSyntaxHighlighting so the
-// migrated Code view renders with colors (issue #420).
-func loadExtractedSyntaxHighlighting(e *Executor, serverURL, serverKey, branch string) []scanreport.HighlightInput {
-	items, err := readExtractItems(e, "getProjectSourceCode")
-	if err != nil {
-		return nil
-	}
+	var sources []sourceRecord
 	var inputs []scanreport.HighlightInput
-	for _, item := range items {
-		if item.ServerURL != serverURL {
-			continue
-		}
+
+	for item, hdr := range scopedExtractItems(e, "getProjectSourceCode", scope) {
 		var rec struct {
-			Key              string   `json:"key"`
-			ProjectKey       string   `json:"projectKey"`
-			Branch           string   `json:"branch"`
+			Source           string   `json:"source"`
 			HighlightedLines []string `json:"highlightedLines"`
 		}
 		if err := json.Unmarshal(item.Data, &rec); err != nil {
 			continue
 		}
-		if rec.ProjectKey != serverKey || rec.Branch != branch || rec.Key == "" {
-			continue
+
+		// Note the asymmetry, which is load-bearing: a record with an
+		// empty key still contributes a sourceRecord because its length
+		// feeds the #425 purged-source decision, but it cannot produce a
+		// HighlightInput because highlighting is keyed by component.
+		sources = append(sources, sourceRecord{Component: hdr.Key, Source: rec.Source})
+
+		if hdr.Key != "" && len(rec.HighlightedLines) > 0 {
+			inputs = append(inputs, scanreport.HighlightInput{
+				Component: hdr.Key,
+				Lines:     rec.HighlightedLines,
+			})
 		}
-		if len(rec.HighlightedLines) == 0 {
-			continue
-		}
-		inputs = append(inputs, scanreport.HighlightInput{
-			Component: rec.Key,
-			Lines:     rec.HighlightedLines,
-		})
 	}
+	return sources, inputs
+}
+
+// loadExtractedSources returns just the source text for a branch.
+// Retained so the existing per-loader tests keep exercising the same
+// contract; production goes through loadBranchSourceData.
+func loadExtractedSources(e *Executor, serverURL, serverKey, branch string) []sourceRecord {
+	sources, _ := loadBranchSourceData(e, serverURL, serverKey, branch)
+	return sources
+}
+
+// loadExtractedSyntaxHighlighting returns just the per-line highlighted
+// HTML for a branch. See loadExtractedSources on why this remains.
+func loadExtractedSyntaxHighlighting(e *Executor, serverURL, serverKey, branch string) []scanreport.HighlightInput {
+	_, inputs := loadBranchSourceData(e, serverURL, serverKey, branch)
 	return inputs
 }
 
 func loadExtractedIssues(e *Executor, serverURL, serverKey, branch string) []scanreport.IssueInput {
-	items, err := readExtractItems(e, "getProjectIssuesFull")
-	if err != nil {
-		return nil
-	}
+	scope := extractScope{ServerURL: serverURL, ProjectKey: serverKey, Branch: branch}
 	var issues []scanreport.IssueInput
-	for _, item := range items {
-		if item.ServerURL != serverURL {
-			continue
-		}
-		if extractField(item.Data, "projectKey") != serverKey {
-			continue
-		}
-		if extractField(item.Data, "branch") != branch {
-			continue
-		}
+	for item := range scopedExtractItems(e, "getProjectIssuesFull", scope) {
 		// Exclude CLOSED issues and issues resolved by code fix (FIXED).
 		// These have no Cloud counterpart — the scanner report only creates
 		// them as OPEN, so recreating CLOSED/FIXED would create phantom issues.
@@ -872,24 +962,12 @@ func loadExtractedIssues(e *Executor, serverURL, serverKey, branch string) []sca
 // CloudVoyager's is-external-issue.js: issues from repos NOT in
 // sonarCloudRuleRepos or prefixed with "external_" are external.
 func loadExtractedExternalIssues(e *Executor, serverURL, serverKey, branch string) ([]scanreport.ExternalIssueInput, []scanreport.AdHocRuleInput) {
-	items, err := readExtractItems(e, "getProjectIssuesFull")
-	if err != nil {
-		return nil, nil
-	}
+	scope := extractScope{ServerURL: serverURL, ProjectKey: serverKey, Branch: branch}
 	seenRules := make(map[string]bool)
 	var extIssues []scanreport.ExternalIssueInput
 	var adHocRules []scanreport.AdHocRuleInput
 
-	for _, item := range items {
-		if item.ServerURL != serverURL {
-			continue
-		}
-		if extractField(item.Data, "projectKey") != serverKey {
-			continue
-		}
-		if extractField(item.Data, "branch") != branch {
-			continue
-		}
+	for item := range scopedExtractItems(e, "getProjectIssuesFull", scope) {
 		issue, rule, ok := classifyExternalIssue(item.Data)
 		if !ok {
 			continue
@@ -981,38 +1059,25 @@ func extractImpactInputs(data json.RawMessage, field string) []scanreport.Impact
 	return out
 }
 
-// loadExtractedHotspots loads hotspots from the extract and converts them
-// to IssueInput for inclusion in the scanner report protobuf. Hotspots
-// are mapped to regular issues with severity derived from vulnerability
-// probability (matching CloudVoyager behavior).
-func loadExtractedHotspots(e *Executor, serverURL, serverKey, branch string) []scanreport.IssueInput {
-	items, err := readExtractItems(e, "getProjectHotspotsFull")
-	if err != nil {
-		return nil
-	}
-	var hotspots []scanreport.IssueInput
-	for _, item := range items {
-		if item.ServerURL != serverURL {
-			continue
-		}
-		projKey := extractField(item.Data, "project")
-		if projKey == "" {
-			projKey = extractField(item.Data, "projectKey")
-		}
-		if projKey != serverKey {
-			continue
-		}
-		br := extractField(item.Data, "branch")
-		if br != "" && br != branch {
-			continue
-		}
+// loadExtractedHotspots loads the Security Hotspots extracted from the source
+// SonarQube Server for one branch.
+//
+// The returned HotspotInputs are converted into native issues by
+// scanreport.ConvertHotspotsToIssues before they enter the report: SonarQube
+// Cloud dropped hotspots on 2026-07-01 and turned the former hotspot rules
+// into ordinary issue rules, so a hotspot has to migrate as an issue (#423).
+// The review state is carried through here so the metadata-sync phase can
+// reproduce it as issue triage.
+func loadExtractedHotspots(e *Executor, serverURL, serverKey, branch string) []scanreport.HotspotInput {
+	scope := extractScope{ServerURL: serverURL, ProjectKey: serverKey, Branch: branch}
+	var hotspots []scanreport.HotspotInput
+	for item := range scopedHotspotItems(e, scope) {
 		ruleKey := extractField(item.Data, "ruleKey")
 		if ruleKey == "" {
 			// Try nested rule.key
 			ruleKey = extractNestedRuleKey(item.Data)
 		}
 		repo, key := splitRule(ruleKey)
-		severity := mapVulnProbToSeverity(extractField(item.Data, "vulnerabilityProbability"))
 		// Prefer the full textRange (with column offsets) so the report
 		// matches CloudVoyager / the real scanner; fall back to the bare
 		// line when no textRange is present.
@@ -1025,21 +1090,62 @@ func loadExtractedHotspots(e *Executor, serverURL, serverKey, branch string) []s
 			startLine = line
 			endLine = line
 		}
-		hotspots = append(hotspots, scanreport.IssueInput{
-			Key:          extractField(item.Data, "key"),
-			CreationDate: parseISODate(extractField(item.Data, "creationDate")),
-			RuleRepo:     repo,
-			RuleKey:      key,
-			Message:      extractField(item.Data, "message"),
-			Severity:     severity,
-			StartLine:    startLine,
-			EndLine:      endLine,
-			StartOff:     startOff,
-			EndOff:       endOff,
-			Component:    extractField(item.Data, "component"),
+		hotspots = append(hotspots, scanreport.HotspotInput{
+			Key:                      extractField(item.Data, "key"),
+			CreationDate:             parseISODate(extractField(item.Data, "creationDate")),
+			RuleRepo:                 repo,
+			RuleKey:                  key,
+			Message:                  extractField(item.Data, "message"),
+			VulnerabilityProbability: extractField(item.Data, "vulnerabilityProbability"),
+			Status:                   extractField(item.Data, "status"),
+			Resolution:               extractField(item.Data, "resolution"),
+			StartLine:                startLine,
+			EndLine:                  endLine,
+			StartOff:                 startOff,
+			EndOff:                   endOff,
+			Component:                extractField(item.Data, "component"),
 		})
 	}
 	return hotspots
+}
+
+// convertHotspotsForReport turns extracted Security Hotspots into the native
+// issues the scanner would have reported for the same rules.
+//
+// SonarQube Cloud has had no Security Hotspots since 2026-07-01 — the former
+// hotspot rules are ordinary issue rules there — so every hotspot migrates as a
+// native issue (#423). See scanreport.ConvertHotspotsToIssues for why no type
+// and no impacts are stamped.
+func convertHotspotsForReport(e *Executor, input importBranchInput, hotspots []scanreport.HotspotInput) []scanreport.IssueInput {
+	hotspotIssues, ruleless := scanreport.ConvertHotspotsToIssues(hotspots)
+	if ruleless > 0 {
+		e.Logger.Warn("skipped hotspots with no resolvable rule key",
+			"project", input.CloudKey, "branch", input.Branch, "skipped", ruleless)
+	}
+	return hotspotIssues
+}
+
+// dropHotspotsWithInactiveRules holds hotspot-derived issues to the same
+// active-rule contract as native issues.
+//
+// They used to bypass it, on the reasoning that hotspots were "validated
+// against hotspot rules, not the active-rule set" — true while the target had
+// hotspots, false since 2026-07-01. Now that they are ordinary issues, an
+// orphan hotspot rule aborts the whole report in the CE and takes every other
+// finding on the branch down with it. Rules that Cloud retired outright rather
+// than converting (e.g. python:S4823 and python:S4784, status REMOVED) land
+// here: they are unmigratable, and dropping them is the only way the rest of
+// the branch survives.
+func dropHotspotsWithInactiveRules(e *Executor, input importBranchInput, sourceCount int, hotspotIssues []scanreport.IssueInput, activeRules []scanreport.ActiveRuleInput) []scanreport.IssueInput {
+	kept, dropped := dropIssuesWithInactiveRules(hotspotIssues, activeRules)
+	if dropped > 0 {
+		e.Logger.Warn("dropped hotspots referencing inactive rules — these rules are not activatable on the target",
+			"project", input.CloudKey, "branch", input.Branch, "dropped", dropped)
+	}
+	e.Logger.Info("converted security hotspots to issues",
+		"project", input.CloudKey, "branch", input.Branch,
+		"hotspots", sourceCount, "converted", len(kept), "droppedInactiveRule", dropped)
+	return kept
 }
 
 func extractNestedRuleKey(data json.RawMessage) string {
@@ -1064,35 +1170,10 @@ func extractNestedRuleKey(data json.RawMessage) string {
 	return key
 }
 
-func mapVulnProbToSeverity(prob string) string {
-	switch strings.ToUpper(prob) {
-	case "HIGH":
-		return "CRITICAL"
-	case "MEDIUM":
-		return "MAJOR"
-	case "LOW":
-		return "MINOR"
-	default:
-		return "MAJOR"
-	}
-}
-
 func loadExtractedComponents(e *Executor, serverURL, serverKey, branch string) []scanreport.ComponentInput {
-	items, err := readExtractItems(e, "getProjectComponentTree")
-	if err != nil {
-		return nil
-	}
+	scope := extractScope{ServerURL: serverURL, ProjectKey: serverKey, Branch: branch}
 	var components []scanreport.ComponentInput
-	for _, item := range items {
-		if item.ServerURL != serverURL {
-			continue
-		}
-		if extractField(item.Data, "projectKey") != serverKey {
-			continue
-		}
-		if extractField(item.Data, "branch") != branch {
-			continue
-		}
+	for item := range scopedExtractItems(e, "getProjectComponentTree", scope) {
 		lines := extractInt32Field(item.Data, "lines")
 		if lines == 0 {
 			lines = extractMeasureInt32(item.Data, "ncloc")
@@ -1114,22 +1195,10 @@ func loadExtractedComponents(e *Executor, serverURL, serverKey, branch string) [
 // packaged report carries no measures-*.pb, SonarCloud's CE computes a null
 // project ncloc, and the migrated branch renders as "main branch is empty".
 func loadComponentMeasures(e *Executor, serverURL, serverKey, branch string) []scanreport.MeasureInput {
-	items, err := readExtractItems(e, "getProjectComponentTree")
-	if err != nil {
-		return nil
-	}
+	scope := extractScope{ServerURL: serverURL, ProjectKey: serverKey, Branch: branch}
 	var measures []scanreport.MeasureInput
-	for _, item := range items {
-		if item.ServerURL != serverURL {
-			continue
-		}
-		if extractField(item.Data, "projectKey") != serverKey {
-			continue
-		}
-		if extractField(item.Data, "branch") != branch {
-			continue
-		}
-		key := extractField(item.Data, "key")
+	for item, hdr := range scopedExtractItems(e, "getProjectComponentTree", scope) {
+		key := hdr.Key
 		if key == "" {
 			continue
 		}
@@ -1193,22 +1262,10 @@ type blameLine struct {
 // this data and shipped synthetic changesets; loading it lets the report carry
 // real per-line author/date/revision for the SonarCloud Code view.
 func loadExtractedSCM(e *Executor, serverURL, serverKey, branch string) map[string][]blameLine {
-	items, err := readExtractItems(e, "getProjectSCMData")
-	if err != nil {
-		return nil
-	}
+	scope := extractScope{ServerURL: serverURL, ProjectKey: serverKey, Branch: branch}
 	result := make(map[string][]blameLine)
-	for _, item := range items {
-		if item.ServerURL != serverURL {
-			continue
-		}
-		if extractField(item.Data, "projectKey") != serverKey {
-			continue
-		}
-		if extractField(item.Data, "branch") != branch {
-			continue
-		}
-		key := extractField(item.Data, "key")
+	for item, hdr := range scopedExtractItems(e, "getProjectSCMData", scope) {
+		key := hdr.Key
 		if key == "" {
 			continue
 		}
@@ -1339,20 +1396,10 @@ var sonarCloudRuleRepos = map[string]bool{
 // project+branch combination. Returns the version string, or empty if not found
 // (the caller's BuildMetadata defaults to "1.0.0").
 func resolveProjectVersion(e *Executor, serverURL, serverKey, branch string) string {
-	items, err := readExtractItems(e, "getProjectVersions")
-	if err != nil {
-		return ""
-	}
-	for _, item := range items {
-		if item.ServerURL != serverURL {
-			continue
-		}
-		if extractField(item.Data, "projectKey") != serverKey {
-			continue
-		}
-		if extractField(item.Data, "branch") != branch {
-			continue
-		}
+	scope := extractScope{ServerURL: serverURL, ProjectKey: serverKey, Branch: branch}
+	// Streaming lets this stop at the first usable version rather than
+	// scanning the rest of the corpus.
+	for item := range scopedExtractItems(e, "getProjectVersions", scope) {
 		version := extractField(item.Data, "version")
 		if version != "" && version != "not provided" {
 			return version
@@ -1362,15 +1409,8 @@ func resolveProjectVersion(e *Executor, serverURL, serverKey, branch string) str
 }
 
 func loadExtractedActiveRules(e *Executor, serverURL, serverKey string) []scanreport.ActiveRuleInput {
-	items, err := readExtractItems(e, "getActiveProfileRules")
-	if err != nil {
-		return nil
-	}
 	var rules []scanreport.ActiveRuleInput
-	for _, item := range items {
-		if item.ServerURL != serverURL {
-			continue
-		}
+	for item := range serverExtractItems(e, "getActiveProfileRules", serverURL) {
 		rule := extractField(item.Data, "key")
 		repo, key := splitRule(rule)
 		// Only include rules from known SonarCloud repositories.

@@ -4,7 +4,10 @@
 
 package wizard
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 // ErrBack is returned by prompt methods when the user clicks the Back button.
 var ErrBack = errors.New("back")
@@ -35,6 +38,23 @@ type Prompter interface {
 	// Returns true if the user confirms, false to re-enter.
 	ConfirmReview(title string, details []KV) (bool, error)
 
+	// PromptExtractForm asks for the source URL, admin token, and the
+	// two dependent migration-scope choices (include project data,
+	// include issue sync) together in a single screen. tokenOptional
+	// means a token is already known (e.g. seeded via --config, #388),
+	// so the token field may be submitted blank — the caller falls back
+	// to the known token when the returned token is empty. When
+	// includeProjectData is false, includeIssueSync is forced false
+	// too, mirroring the migrate.MigrateConfig cascade. There is no
+	// separate review step: submitting the form finalizes the values.
+	PromptExtractForm(defaultURL string, tokenOptional bool, defaultIncludeProjectData, defaultIncludeIssueSync bool) (url, token string, includeProjectData, includeIssueSync bool, err error)
+
+	// PromptMigrateForm asks for the target Cloud URL, admin token,
+	// enterprise key, and the two migration-scope checkboxes together
+	// in a single screen, right before migration executes. Same
+	// tokenOptional/no-review-step semantics as PromptExtractForm.
+	PromptMigrateForm(defaultURL string, tokenOptional bool, defaultEnterpriseKey string, defaultIncludeProjectData, defaultIncludeIssueSync bool) (url, token, enterpriseKey string, includeProjectData, includeIssueSync bool, err error)
+
 	// PromptChoice presents a list of options and returns the 0-based index.
 	PromptChoice(message string, options []string) (int, error)
 
@@ -44,6 +64,13 @@ type Prompter interface {
 	// Display methods (output only, no return).
 	DisplayWelcome()
 	DisplayPhaseProgress(phase WizardPhase)
+
+	// DisplayOverallProgress reports the run-wide percent/ETA snapshot
+	// computed by common.Tracker (#520) for the extract/migrate step
+	// currently in flight. known is false until enough progress has
+	// been made to extrapolate an ETA. Fired roughly every 10s plus
+	// once more at completion (#519).
+	DisplayOverallProgress(percent float64, eta time.Duration, known bool)
 	DisplayMessage(msg string)
 	DisplayError(msg string)
 	DisplayWarning(msg string)

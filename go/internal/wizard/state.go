@@ -23,8 +23,8 @@ const (
 	PhaseOrgMapping WizardPhase = "org_mapping"
 	PhaseMappings   WizardPhase = "mappings"
 	PhaseValidate   WizardPhase = "validate"
-	PhaseMigrate  WizardPhase = "migrate"
-	PhaseComplete WizardPhase = "complete"
+	PhaseMigrate    WizardPhase = "migrate"
+	PhaseComplete   WizardPhase = "complete"
 )
 
 // WizardState holds the persistent state of a migration wizard session.
@@ -47,6 +47,12 @@ type WizardState struct {
 	MigrationRunID      *string     `json:"migration_run_id"`
 	SkippedProjects     []string    `json:"skipped_projects,omitempty"`
 
+	// IncludeProjectData / IncludeIssueSync record the #516 migration-scope
+	// checkboxes gathered on the Extract phase's credentials screen. nil
+	// means "not yet chosen" and defaults to true (migrate everything).
+	IncludeProjectData *bool `json:"include_project_data"`
+	IncludeIssueSync   *bool `json:"include_issue_sync"`
+
 	// Tokens — in-memory only. See type-level comment for rationale.
 	SourceToken *string `json:"-"`
 	TargetToken *string `json:"-"`
@@ -57,13 +63,36 @@ func NewWizardState() *WizardState {
 	return &WizardState{Phase: PhaseInit}
 }
 
-// Save persists the wizard state to .wizard_state.json in the given directory.
+// Save persists the wizard state to .wizard_state.json in the given
+// directory. Written atomically (temp file + rename) so a process killed
+// mid-save (Ctrl-C, crash, OOM) can never leave a truncated/empty state
+// file behind — os.WriteFile alone truncates-then-writes as separate
+// syscalls, and a kill between them corrupts the file for every future
+// Load until it's manually deleted.
 func (s *WizardState) Save(directory string) error {
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(directory, stateFileName), data, 0644)
+
+	tmp, err := os.CreateTemp(directory, stateFileName+".*.tmp")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name()) // no-op once Rename below succeeds
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), filepath.Join(directory, stateFileName))
 }
 
 // resetPhaseState clears state fields written by the given phase so the
@@ -74,19 +103,26 @@ func resetPhaseState(state *WizardState, phase WizardPhase) {
 		state.SourceURL = nil
 		state.ExtractID = nil
 		state.SkippedProjects = nil
+		state.IncludeProjectData = nil
+		state.IncludeIssueSync = nil
 	case PhaseOrgMapping:
-		state.TargetURL = nil
-		state.EnterpriseKey = nil
 		state.OrganizationsMapped = false
 	case PhaseValidate:
 		state.ValidationPassed = false
 	case PhaseMigrate:
 		state.MigrationRunID = nil
+		state.TargetURL = nil
+		state.EnterpriseKey = nil
 	}
 }
 
 // Load reads a WizardState from .wizard_state.json in the given directory.
 // If the file does not exist, it returns a new state at the INIT phase.
+// A zero-byte file — the signature left by a pre-atomic-write Save that
+// was killed mid-write (Ctrl-C, crash) before this fix — is treated the
+// same as a missing file: WizardState always serializes to non-empty
+// JSON, so an empty file can never have been a legitimately saved state,
+// and there's nothing to resume from it anyway.
 func Load(directory string) (*WizardState, error) {
 	data, err := os.ReadFile(filepath.Join(directory, stateFileName))
 	if err != nil {
@@ -94,6 +130,9 @@ func Load(directory string) (*WizardState, error) {
 			return NewWizardState(), nil
 		}
 		return nil, err
+	}
+	if len(data) == 0 {
+		return NewWizardState(), nil
 	}
 	var state WizardState
 	if err := json.Unmarshal(data, &state); err != nil {

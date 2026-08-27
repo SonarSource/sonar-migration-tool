@@ -18,7 +18,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: '1.25'
 
@@ -37,8 +37,18 @@ jobs:
           secrets: |
             development/kv/data/sonarcloud token | SONAR_TOKEN;
 
+      - name: Compute project version
+        id: project_version
+        run: |
+          RAW_VERSION="$(grep -oE 'const Version = "[^"]+"' go/internal/version/version.go | cut -d'"' -f2)"
+          VERSION="${RAW_VERSION#v}"
+          VERSION="${VERSION%%-*}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
       - name: SonarQube Cloud Scan
         uses: SonarSource/sonarqube-scan-action@v8
+        with:
+          args: -Dsonar.projectVersion=${{ steps.project_version.outputs.version }}
         env:
           # Reference the token from Vault
           SONAR_TOKEN: ${{ fromJSON(steps.secrets.outputs.vault).SONAR_TOKEN }}

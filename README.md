@@ -5,6 +5,8 @@ Migrate your SonarQube Server to SonarQube Cloud — projects, configuration, so
 
 The tool ships as a single static binary. No installer, no runtime dependencies. Download it, run one command, and your projects land in SonarQube Cloud with their full issue history intact.
 
+See [what's new](WHATSNEW.md) in the latest release.
+
 ---
 
 ## Contents
@@ -30,6 +32,7 @@ The tool ships as a single static binary. No installer, no runtime dependencies.
 ---
 
 ## What gets migrated
+<!-- updated: 2026-07-27_23:05:00 -->
 
 ### ✅ Migrated
 * Projects, Quality Gates, Quality Profiles<br>
@@ -39,6 +42,7 @@ The tool ships as a single static binary. No installer, no runtime dependencies.
 * Project data (Branches with Measures, Issues, Source files, Syntax highlighting, ...) (Optional)<br>
 * Issues & Hotspots status, comments, and tags (optional)
 * SCM blame authorship
+* Project DevOps platform binding (GitHub / GitLab / Azure DevOps / Bitbucket Cloud) — requires the target organization to be bound to the same platform
 
 ### ❌ NOT migrated
 * User accounts & auth
@@ -49,6 +53,7 @@ The tool ships as a single static binary. No installer, no runtime dependencies.
 * Portfolio hierarchies
 * Issue assignments
 * CI/CD pipelines
+* Organization-level DevOps platform binding (needs platform secrets — bind the target organization by hand first)
 
 ---
 
@@ -246,6 +251,7 @@ You may want to rerun the command with the extra `--debug` flag to get more trou
 | `structure` | Group extracted projects into organizations |
 | `mappings` | Generate entity mapping CSVs |
 | `migrate` | Push configuration and data to SonarQube Cloud |
+| `sync-issues` | Sync issue/hotspot triage state from SonarQube Server to an already-migrated SonarQube Cloud project |
 | `wizard` | Interactive guided migration (terminal) |
 | `gui` | Browser-based guided migration |
 | `report` | Generate a migration or maturity report |

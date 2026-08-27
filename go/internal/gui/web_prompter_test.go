@@ -6,6 +6,8 @@ package gui
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -196,6 +198,171 @@ func TestConfirmReviewSendsDetails(t *testing.T) {
 	}
 }
 
+func TestPromptExtractFormRoundTrips(t *testing.T) {
+	sendFn, snapshot := collectMessages()
+	ctx := context.Background()
+	wp := NewWebPrompter(ctx, sendFn)
+
+	done := make(chan struct{})
+	var url, token string
+	var includeProjectData, includeIssueSync bool
+
+	go func() {
+		url, token, includeProjectData, includeIssueSync, _ = wp.PromptExtractForm(
+			"https://sq.example.com", true, true, true)
+		close(done)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	sent := snapshot()[0]
+	if sent.Type != TypePromptExtractForm {
+		t.Fatalf("type: got %q", sent.Type)
+	}
+	if sent.DefaultURL != "https://sq.example.com" {
+		t.Errorf("default_url: got %q", sent.DefaultURL)
+	}
+	if !sent.TokenOptional {
+		t.Error("token_optional: got false, want true")
+	}
+	if !sent.DefaultIncludeProjectData || !sent.DefaultIncludeIssueSync {
+		t.Errorf("defaults: got %v/%v, want true/true", sent.DefaultIncludeProjectData, sent.DefaultIncludeIssueSync)
+	}
+
+	wp.HandleResponse(ClientMessage{ID: sent.ID, Value: map[string]any{
+		"url":                "https://sq.other.com",
+		"token":              "secret",
+		"includeProjectData": false,
+		"includeIssueSync":   false,
+	}})
+	<-done
+
+	if url != "https://sq.other.com" {
+		t.Errorf("url: got %q", url)
+	}
+	if token != "secret" {
+		t.Errorf("token: got %q", token)
+	}
+	if includeProjectData {
+		t.Error("includeProjectData: want false")
+	}
+	if includeIssueSync {
+		t.Error("includeIssueSync: want false")
+	}
+}
+
+func TestPromptExtractFormCancelledByContext(t *testing.T) {
+	sendFn, _ := collectMessages()
+	ctx, cancel := context.WithCancel(context.Background())
+	wp := NewWebPrompter(ctx, sendFn)
+
+	done := make(chan struct{})
+	var err error
+
+	go func() {
+		_, _, _, _, err = wp.PromptExtractForm("https://sq.example.com", false, true, true)
+		close(done)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("PromptExtractForm did not return after cancel")
+	}
+
+	if err != context.Canceled {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestPromptMigrateFormRoundTrips(t *testing.T) {
+	sendFn, snapshot := collectMessages()
+	ctx := context.Background()
+	wp := NewWebPrompter(ctx, sendFn)
+
+	done := make(chan struct{})
+	var url, token, enterpriseKey string
+	var includeProjectData, includeIssueSync bool
+
+	go func() {
+		url, token, enterpriseKey, includeProjectData, includeIssueSync, _ = wp.PromptMigrateForm(
+			"https://sonarcloud.io", true, "my-enterprise", true, true)
+		close(done)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	sent := snapshot()[0]
+	if sent.Type != TypePromptMigrateForm {
+		t.Fatalf("type: got %q", sent.Type)
+	}
+	if sent.DefaultURL != "https://sonarcloud.io" {
+		t.Errorf("default_url: got %q", sent.DefaultURL)
+	}
+	if !sent.TokenOptional {
+		t.Error("token_optional: got false, want true")
+	}
+	if sent.DefaultEnterpriseKey != "my-enterprise" {
+		t.Errorf("default_enterprise_key: got %q", sent.DefaultEnterpriseKey)
+	}
+	if !sent.DefaultIncludeProjectData || !sent.DefaultIncludeIssueSync {
+		t.Errorf("defaults: got %v/%v, want true/true", sent.DefaultIncludeProjectData, sent.DefaultIncludeIssueSync)
+	}
+
+	wp.HandleResponse(ClientMessage{ID: sent.ID, Value: map[string]any{
+		"url":                "https://other.sonarcloud.io",
+		"token":              "secret",
+		"enterpriseKey":      "other-enterprise",
+		"includeProjectData": false,
+		"includeIssueSync":   false,
+	}})
+	<-done
+
+	if url != "https://other.sonarcloud.io" {
+		t.Errorf("url: got %q", url)
+	}
+	if token != "secret" {
+		t.Errorf("token: got %q", token)
+	}
+	if enterpriseKey != "other-enterprise" {
+		t.Errorf("enterpriseKey: got %q", enterpriseKey)
+	}
+	if includeProjectData {
+		t.Error("includeProjectData: want false")
+	}
+	if includeIssueSync {
+		t.Error("includeIssueSync: want false")
+	}
+}
+
+func TestPromptMigrateFormCancelledByContext(t *testing.T) {
+	sendFn, _ := collectMessages()
+	ctx, cancel := context.WithCancel(context.Background())
+	wp := NewWebPrompter(ctx, sendFn)
+
+	done := make(chan struct{})
+	var err error
+
+	go func() {
+		_, _, _, _, _, err = wp.PromptMigrateForm("https://sonarcloud.io", false, "my-enterprise", true, true)
+		close(done)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("PromptMigrateForm did not return after cancel")
+	}
+
+	if err != context.Canceled {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+}
+
 func TestContextCancellation(t *testing.T) {
 	sendFn, _ := collectMessages()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -299,6 +466,64 @@ func TestDisplayPhaseProgressFields(t *testing.T) {
 	}
 	if msg.Name != "Structure" {
 		t.Errorf("name: got %q", msg.Name)
+	}
+}
+
+func TestDisplayOverallProgressFields(t *testing.T) {
+	sendFn, snapshot := collectMessages()
+	ctx := context.Background()
+	wp := NewWebPrompter(ctx, sendFn)
+
+	wp.DisplayOverallProgress(42, 12*time.Minute, true)
+	msg := snapshot()[0]
+
+	if msg.Type != TypeDisplayOverallProgress {
+		t.Errorf("type: got %q", msg.Type)
+	}
+	if msg.Percent != 42 {
+		t.Errorf("percent: got %v, want 42", msg.Percent)
+	}
+	if msg.EtaSeconds != 720 {
+		t.Errorf("eta_seconds: got %d, want 720", msg.EtaSeconds)
+	}
+	if !msg.Known {
+		t.Error("known: got false, want true")
+	}
+}
+
+func TestDisplayOverallProgressUnknownETA(t *testing.T) {
+	sendFn, snapshot := collectMessages()
+	ctx := context.Background()
+	wp := NewWebPrompter(ctx, sendFn)
+
+	wp.DisplayOverallProgress(0, 0, false)
+	msg := snapshot()[0]
+
+	if msg.Percent != 0 {
+		t.Errorf("percent: got %v, want 0", msg.Percent)
+	}
+	if msg.Known {
+		t.Error("known: got true, want false")
+	}
+}
+
+// A 0-second ETA (LogFinal's 100%/0s closing snapshot, or any tick that
+// rounds down to 0s while known) must still serialize eta_seconds — an
+// omitted field arrives as `undefined` in JS and renders "ETA: ~NaN min".
+func TestDisplayOverallProgressZeroETASerializes(t *testing.T) {
+	sendFn, snapshot := collectMessages()
+	ctx := context.Background()
+	wp := NewWebPrompter(ctx, sendFn)
+
+	wp.DisplayOverallProgress(100, 0, true)
+	msg := snapshot()[0]
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"eta_seconds":0`) {
+		t.Errorf("expected eta_seconds:0 in serialized message, got: %s", data)
 	}
 }
 

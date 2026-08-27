@@ -73,7 +73,7 @@ func RunReset(ctx context.Context, cfg ResetConfig) error {
 
 	edition := common.Edition(cfg.Edition)
 
-	runID := generateRunID(cfg.ExportDirectory)
+	runID := common.GenerateRunID(cfg.ExportDirectory)
 	runDir := filepath.Join(cfg.ExportDirectory, runID)
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		return fmt.Errorf("creating run dir: %w", err)

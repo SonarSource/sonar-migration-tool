@@ -12,8 +12,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
-	"time"
 )
 
 const (
@@ -869,47 +869,99 @@ func TestFetchAndWriteSingleWithResultKey(t *testing.T) {
 	}
 }
 
-// Regression for the runID-collision bug — twin of the migrate-side
-// test in migrate/migrate_test.go. Both helpers must use max+1 so
-// extract and migrate never alias onto an existing run dir when the
-// numbering has gaps.
-func TestGenerateRunID_HandlesNumberingGaps(t *testing.T) {
-	today := time.Now().UTC().Format("2006-01-02")
+// generateRunID moved to common.GenerateRunID (#542) — its own tests
+// now live in go/internal/common/runid_test.go, deduplicated across
+// the three packages (migrate, extract, wizard) that used to each
+// hand-maintain an identical copy of this function and its test.
 
-	t.Run("empty directory yields -01", func(t *testing.T) {
-		dir := t.TempDir()
-		got := generateRunID(dir)
-		want := today + "-01"
-		if got != want {
-			t.Errorf("want %q, got %q", want, got)
-		}
-	})
+// #529: ListAllProjectKeys is the pre-flight, unfiltered project listing
+// transfer uses to resolve a --project_key regex pattern before the
+// real, key-scoped extract run.
+func TestListAllProjectKeys(t *testing.T) {
+	srv := newMockServer()
+	defer srv.Close()
 
-	t.Run("dirs -10..-19 yields -20 (not -11 collision)", func(t *testing.T) {
-		dir := t.TempDir()
-		for i := 10; i <= 19; i++ {
-			if err := os.MkdirAll(filepath.Join(dir, fmt.Sprintf("%s-%02d", today, i)), 0o755); err != nil {
-				t.Fatalf("mkdir: %v", err)
-			}
-		}
-		got := generateRunID(dir)
-		want := today + "-20"
-		if got != want {
-			t.Errorf("want %q (max+1), got %q", want, got)
-		}
-	})
+	keys, err := ListAllProjectKeys(context.Background(), ExtractConfig{URL: srv.URL, Token: testToken})
+	if err != nil {
+		t.Fatalf("ListAllProjectKeys: %v", err)
+	}
+	want := []string{"proj1", "proj2"}
+	if !reflect.DeepEqual(keys, want) {
+		t.Errorf("keys = %v, want %v", keys, want)
+	}
+}
 
-	t.Run("non-contiguous numbering still returns max+1", func(t *testing.T) {
-		dir := t.TempDir()
-		for _, n := range []int{1, 3, 7, 42} {
-			if err := os.MkdirAll(filepath.Join(dir, fmt.Sprintf("%s-%02d", today, n)), 0o755); err != nil {
-				t.Fatalf("mkdir: %v", err)
-			}
-		}
-		got := generateRunID(dir)
-		want := today + "-43"
-		if got != want {
-			t.Errorf("want %q, got %q", want, got)
-		}
+// A component with no "key" field (unexpected, but defensive) must be
+// skipped rather than producing an empty-string entry.
+func TestListAllProjectKeys_SkipsItemsWithoutKey(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/server/version", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, testServerVersion)
 	})
+	mux.HandleFunc("GET /api/system/info", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"edition": "developer"})
+	})
+	mux.HandleFunc("GET /api/projects/search", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"paging":     map[string]any{"total": 2},
+			"components": []map[string]any{{"key": "proj-a"}, {"name": "no key here"}},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	keys, err := ListAllProjectKeys(context.Background(), ExtractConfig{URL: srv.URL, Token: testToken})
+	if err != nil {
+		t.Fatalf("ListAllProjectKeys: %v", err)
+	}
+	want := []string{"proj-a"}
+	if !reflect.DeepEqual(keys, want) {
+		t.Errorf("keys = %v, want %v", keys, want)
+	}
+}
+
+// #529: ListAllProjectKeys is the pre-flight, unfiltered project listing
+// transfer uses to resolve a --project_key regex pattern before the
+// real, key-scoped extract run.
+func TestListAllProjectKeys(t *testing.T) {
+	srv := newMockServer()
+	defer srv.Close()
+
+	keys, err := ListAllProjectKeys(context.Background(), ExtractConfig{URL: srv.URL, Token: testToken})
+	if err != nil {
+		t.Fatalf("ListAllProjectKeys: %v", err)
+	}
+	want := []string{"proj1", "proj2"}
+	if !reflect.DeepEqual(keys, want) {
+		t.Errorf("keys = %v, want %v", keys, want)
+	}
+}
+
+// A component with no "key" field (unexpected, but defensive) must be
+// skipped rather than producing an empty-string entry.
+func TestListAllProjectKeys_SkipsItemsWithoutKey(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/server/version", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, testServerVersion)
+	})
+	mux.HandleFunc("GET /api/system/info", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"edition": "developer"})
+	})
+	mux.HandleFunc("GET /api/projects/search", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"paging":     map[string]any{"total": 2},
+			"components": []map[string]any{{"key": "proj-a"}, {"name": "no key here"}},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	keys, err := ListAllProjectKeys(context.Background(), ExtractConfig{URL: srv.URL, Token: testToken})
+	if err != nil {
+		t.Fatalf("ListAllProjectKeys: %v", err)
+	}
+	want := []string{"proj-a"}
+	if !reflect.DeepEqual(keys, want) {
+		t.Errorf("keys = %v, want %v", keys, want)
+	}
 }

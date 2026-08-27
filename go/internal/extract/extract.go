@@ -12,8 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -25,16 +23,16 @@ import (
 
 // ExtractConfig holds all parameters for an extract run.
 type ExtractConfig struct {
-	URL             string
-	Token           string
-	ExportDirectory string
-	ExtractType     string // "all" or report type
-	PEMFilePath     string
-	KeyFilePath     string
-	CertPassword    string
-	Concurrency     int
-	Timeout         int
-	ExtractID       string
+	URL                      string
+	Token                    string
+	ExportDirectory          string
+	ExtractType              string // "all" or report type
+	PEMFilePath              string
+	KeyFilePath              string
+	CertPassword             string
+	Concurrency              int
+	Timeout                  int
+	ExtractID                string
 	TargetTask               string
 	IncludeProjectData       bool
 	SkipProjectDataMigration bool // #303. Set true to skip project-data tasks (issues, source, SCM blame).
@@ -51,6 +49,11 @@ type ExtractConfig struct {
 	// requested projects are fetched and all downstream per-project tasks
 	// naturally scope to the same set.
 	ProjectKeys []string
+	// ProgressCallback, when set, is invoked with the same run-wide
+	// percent/ETA snapshot as the #520 log line, on every tick and once
+	// more at completion. Nil for CLI callers (go/cmd/extract.go); the
+	// GUI wizard sets it to drive a progress bar (#519).
+	ProgressCallback func(percent float64, eta time.Duration, known bool)
 }
 
 // Executor is the runtime context passed to every task function.
@@ -62,8 +65,9 @@ type Executor struct {
 	Version       common.Version
 	Sem           chan struct{}
 	Logger        *slog.Logger
-	ProjectKeys   []string // non-empty → limit extraction to these project keys
-	SkipIssueSync bool     // drop additionalFields=_all + hotspot detail enrichment. #398.
+	ProjectKeys   []string        // non-empty → limit extraction to these project keys
+	SkipIssueSync bool            // drop additionalFields=_all + hotspot detail enrichment. #398.
+	Progress      *common.Tracker // run-wide progress/ETA estimator (#520)
 
 	mu              sync.Mutex
 	skippedProjects map[string]bool
@@ -138,9 +142,19 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 	executor := newExecutor(raw, store, client.BaseURL(), edition, version, cfg.Concurrency)
 	executor.ProjectKeys = cfg.ProjectKeys
 	executor.SkipIssueSync = cfg.SkipIssueSync
+
+	// Overall progress/ETA logging (#520) — every 10s for the duration of
+	// the run, stopped once phases finish (success or error).
+	executor.Progress = common.NewTracker(executor.Logger, plan, CategorizeTask, common.DefaultCategoryWeights)
+	executor.Progress.OnUpdate(cfg.ProgressCallback)
+	executor.Progress.Start(ctx, 10*time.Second)
+	defer executor.Progress.Stop()
+
 	if err := executePhases(ctx, executor, plan, registry, store); err != nil {
 		return nil, err
 	}
+	executor.Progress.Stop() // silence the ticker before the closing line
+	executor.Progress.LogFinal()
 
 	fmt.Printf("%s v%s - Extract Complete: %s\n", smtver.ToolName, smtver.Version, extractID)
 	return executor.SkippedProjectKeys(), nil
@@ -170,10 +184,36 @@ func initClient(ctx context.Context, cfg ExtractConfig) (*sqapi.Client, *RawClie
 	return client, raw, version, edition, nil
 }
 
+// ListAllProjectKeys connects to the source SonarQube Server and returns
+// every project key visible to the token, unfiltered, across all pages.
+// Used to resolve a --project_key regex pattern (#529) before the real,
+// key-scoped extract run — the only call that should fan out across
+// every matched project's per-project tasks. Reuses initClient, so this
+// pre-flight call gets the same version detection, auth and mTLS
+// handling as the real extract run.
+func ListAllProjectKeys(ctx context.Context, cfg ExtractConfig) ([]string, error) {
+	cfg.applyDefaults()
+	_, raw, _, _, err := initClient(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	items, err := raw.GetPaginated(ctx, PaginatedOpts{Path: "api/projects/search", ResultKey: "components"})
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(items))
+	for _, item := range items {
+		if k := common.ExtractField(item, "key"); k != "" {
+			keys = append(keys, k)
+		}
+	}
+	return keys, nil
+}
+
 func prepareExtractDir(cfg ExtractConfig) (string, string, error) {
 	extractID := cfg.ExtractID
 	if extractID == "" {
-		extractID = generateRunID(cfg.ExportDirectory)
+		extractID = common.GenerateRunID(cfg.ExportDirectory)
 	}
 	extractDir := filepath.Join(cfg.ExportDirectory, extractID)
 	if err := os.MkdirAll(extractDir, 0o755); err != nil {
@@ -249,6 +289,7 @@ func runPhase(ctx context.Context, e *Executor, taskNames []string, registry map
 			if err != nil {
 				return fmt.Errorf("task %s: %w", name, err)
 			}
+			e.Progress.MarkTaskComplete(name)
 			return nil
 		})
 	}
@@ -321,33 +362,6 @@ func detectEdition(ctx context.Context, raw *RawClient) (Edition, error) {
 		return EditionCommunity, err
 	}
 	return ParseEdition(body), nil
-}
-
-// generateRunID returns an ISO-date-prefixed extract ID (issue
-// #108). Format: "YYYY-MM-DD-NN". See migrate.generateRunID for the
-// rationale — the two helpers are deliberately kept in sync.
-func generateRunID(directory string) string {
-	today := time.Now().UTC().Format("2006-01-02")
-	prefix := today + "-"
-	entries, _ := os.ReadDir(directory)
-	maxN := 0
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if !strings.HasPrefix(name, prefix) {
-			continue
-		}
-		n, err := strconv.Atoi(name[len(prefix):])
-		if err != nil {
-			continue
-		}
-		if n > maxN {
-			maxN = n
-		}
-	}
-	return fmt.Sprintf("%s-%02d", today, maxN+1)
 }
 
 // extractMeta groups the parameters for writeMetadata. Version stays as

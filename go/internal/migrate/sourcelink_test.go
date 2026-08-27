@@ -78,6 +78,37 @@ func TestHotspotSourceLinkURL(t *testing.T) {
 	}
 }
 
+func TestProjectSourceLinkURL(t *testing.T) {
+	cases := []struct {
+		name       string
+		serverURL  string
+		projectKey string
+		want       string
+	}{
+		{
+			name: "basic", serverURL: "https://sq.example.com", projectKey: "my-proj",
+			want: "https://sq.example.com/dashboard?id=my-proj",
+		},
+		{
+			name: "trailing slash trimmed", serverURL: "https://sq.example.com/", projectKey: "p",
+			want: "https://sq.example.com/dashboard?id=p",
+		},
+		{
+			name: "special chars escaped", serverURL: "https://sq.example.com", projectKey: "org:proj",
+			want: "https://sq.example.com/dashboard?id=org%3Aproj",
+		},
+		{name: "missing serverURL", serverURL: "", projectKey: "p", want: ""},
+		{name: "missing projectKey", serverURL: "https://sq", projectKey: "", want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := projectSourceLinkURL(tc.serverURL, tc.projectKey); got != tc.want {
+				t.Fatalf("projectSourceLinkURL = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSourceLinkIdempotencyHelpers(t *testing.T) {
 	link := issueSourceLinkURL("https://sq.example.com", "p", "k", "")
 
@@ -100,15 +131,17 @@ func TestSourceLinkIdempotencyHelpers(t *testing.T) {
 	})
 	_ = link
 
+	// The hotspot back-link is now a comment on the migrated ISSUE, since the
+	// target has no hotspots — so its marker is matched over issue comments.
 	t.Run("hotspot: marker detected", func(t *testing.T) {
-		cloud := []hotspotComment{{Markdown: hotspotSourceLinkMarker + "(https://sq.example.com/security_hotspots?id=p&hotspots=k)"}}
-		if !hotspotCommentsContain(cloud, hotspotSourceLinkMarker) {
+		cloud := []issueComment{{Markdown: hotspotSourceLinkMarker + "(https://sq.example.com/security_hotspots?id=p&hotspots=k)"}}
+		if !issueCommentsContain(cloud, hotspotSourceLinkMarker) {
 			t.Fatal("expected the existing hotspot source link to be detected via marker")
 		}
 	})
 	t.Run("hotspot: absent when no link", func(t *testing.T) {
-		cloud := []hotspotComment{{HTMLText: "unrelated"}}
-		if hotspotCommentsContain(cloud, hotspotSourceLinkMarker) {
+		cloud := []issueComment{{HTMLText: "unrelated"}}
+		if issueCommentsContain(cloud, hotspotSourceLinkMarker) {
 			t.Fatal("did not expect a hotspot source link to be detected")
 		}
 	})

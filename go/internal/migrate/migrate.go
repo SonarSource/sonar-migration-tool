@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +22,17 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// DefaultBuildConcurrency bounds how many scanner reports are built at
+// once. Report construction is where importProjectData's memory goes: the
+// branch's full source text, the protobuf messages built from it, and the
+// packaged ZIP are all live simultaneously.
+//
+// It is much lower than the default request concurrency of 25 on purpose.
+// The phase's wall clock is dominated by PollCETask, which polls every few
+// seconds for minutes, so throttling construction costs little while
+// cutting peak memory by roughly the ratio between the two.
+const DefaultBuildConcurrency = 4
+
 // MigrateConfig holds all parameters for a migrate run.
 type MigrateConfig struct {
 	Token         string
@@ -31,6 +41,9 @@ type MigrateConfig struct {
 	URL           string // Cloud URL (default: https://sonarcloud.io/)
 	RunID         string // Resume a prior run
 	Concurrency   int
+	// BuildConcurrency bounds concurrent scanner-report CONSTRUCTION during
+	// importProjectData, independently of Concurrency. See Executor.BuildSem.
+	BuildConcurrency int
 	// Timeout is the per-HTTP-request timeout in seconds applied to
 	// every SonarQube Cloud call the migrate phase makes (#383). When
 	// <= 0, applyDefaults sets it to 60 — matching the SDK default
@@ -60,29 +73,80 @@ type MigrateConfig struct {
 	// during project data import. Main branch is never excluded.
 	ExcludeBranches []string
 
+	// UnsupportedLanguages selects how a project whose files use a language
+	// with no quality profile on the target organization is handled (#474):
+	// "exclude" (default) drops those files from the scanner report so the
+	// rest of the project migrates, "skip" declines to migrate the project's
+	// data at all, "warn" submits the report unchanged. Empty resolves to
+	// DefaultUnsupportedLanguages.
+	UnsupportedLanguages string
+
+	// FastSync skips tagging and back-linking hotspots (and issues) that
+	// have zero user changes on the source — original state (TO_REVIEW /
+	// OPEN), no user comment, no custom tags (#527). Defaults to false:
+	// every hotspot is tagged and back-linked, the pre-#527 behavior.
+	FastSync bool
+
 	// ProjectKeyPattern is the template used to derive each target
 	// SonarQube Cloud project key from the source key, the org key, and
 	// the enterprise key. Defaults to DefaultProjectKeyPattern. Issue #138.
 	ProjectKeyPattern string
+
+	// ProgressCallback, when set, is invoked with the same run-wide
+	// percent/ETA snapshot as the #520 log line, on every tick and once
+	// more at completion. Nil for CLI callers (go/cmd/migrate.go); the
+	// GUI wizard sets it to drive a progress bar (#519).
+	ProgressCallback func(percent float64, eta time.Duration, known bool)
 }
 
 // Executor is the runtime context passed to every migrate task function.
 type Executor struct {
-	Cloud           *cloud.Client     // Standard Cloud API (sonarcloud.io)
-	CloudAPI        *cloud.Client     // Enterprise API (api.sonarcloud.io)
-	Raw             *common.RawClient // For reading from Cloud standard API
-	RawAPI          *common.RawClient // For reading from Cloud enterprise API
-	Extract         *common.DataStore // Reads extract data (across all extract runs)
-	Store           *common.DataStore // Writes migrate output to run directory
-	CloudURL        string            // e.g. "https://sonarcloud.io/"
-	APIURL          string            // e.g. "https://api.sonarcloud.io/"
-	EntKey          string            // Enterprise key
-	Edition         common.Edition
-	ExportDir       string // Root export directory
-	Mapping         structure.ExtractMapping
-	Sem             chan struct{}
+	Cloud     *cloud.Client     // Standard Cloud API (sonarcloud.io)
+	CloudAPI  *cloud.Client     // Enterprise API (api.sonarcloud.io)
+	Raw       *common.RawClient // For reading from Cloud standard API
+	RawAPI    *common.RawClient // For reading from Cloud enterprise API
+	Extract   *common.DataStore // Reads extract data (across all extract runs)
+	Store     *common.DataStore // Writes migrate output to run directory
+	CloudURL  string            // e.g. "https://sonarcloud.io/"
+	APIURL    string            // e.g. "https://api.sonarcloud.io/"
+	EntKey    string            // Enterprise key
+	Edition   common.Edition
+	ExportDir string // Root export directory
+	Mapping   structure.ExtractMapping
+	// Sem is a capacity carrier, NOT a semaphore. Nothing in this package
+	// ever sends to or receives from it; every reference reads cap(e.Sem)
+	// to size a per-task errgroup limit. Each task therefore gets its own
+	// independent limit rather than sharing one pool.
+	//
+	// Do not "fix" this by acquiring it. The fan-outs nest —
+	// runSyncIssueMetadata's forEachMigrateItem holds a slot for each of
+	// its 25 workers, and each of those calls runProjectSyncLoop, which
+	// limits on the same capacity. On one shared counting semaphore the
+	// outer holders would take every slot and no inner work could ever
+	// acquire: a permanent deadlock. Making it real requires restructuring
+	// the nested fan-outs first.
+	Sem chan struct{}
+	// BuildSem bounds concurrent scanner-report CONSTRUCTION, which is the
+	// memory-heavy part of importProjectData: a branch's full source text,
+	// its protobufs and the packaged ZIP are all live at once.
+	//
+	// Deliberately NOT the same bound as project fan-out. importProjectData
+	// spends most of its wall clock in PollCETask, so 25 branches can stay
+	// in flight against the CE while only a few are being built.
+	//
+	// May be nil (test fixtures); callers must nil-check.
+	BuildSem        chan struct{}
 	Logger          *slog.Logger
 	ExcludeBranches []string
+	Progress        *common.Tracker // run-wide progress/ETA estimator (#520)
+
+	// UnsupportedLanguages is the resolved handling mode for files whose
+	// language has no quality profile on the target organization (#474):
+	// UnsupportedLanguagesExclude / Skip / Warn.
+	UnsupportedLanguages string
+
+	// FastSync — see MigrateConfig.FastSync (#527).
+	FastSync bool
 
 	// ProjectKeyPattern is the resolved target-key template (issue #138),
 	// consumed by every task that derives a SonarQube Cloud project key
@@ -114,27 +178,129 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 	base := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})
 	logger := slog.New(newEventHandler(base, collector))
 
-	// Validate the project-key renaming pattern syntax before anything
-	// else — a malformed pattern is a config error the operator must fix
-	// (issue #138). The org-prefix collision guard runs later once the
-	// Cloud client exists.
-	if err := ValidateProjectKeyPattern(cfg.ProjectKeyPattern); err != nil {
-		return "", common.NewExitError(2, fmt.Errorf("invalid project_key_pattern: %w", err))
-	}
-
-	// Validate the SQC org mapping and apply --default_organization
-	// fallback if requested (issues #279 + #281). Done before any API
-	// client setup so the failure or warning surfaces immediately.
-	appliedDefault, err := applyOrgMapping(cfg.ExportDirectory, cfg.DefaultOrganization, logger)
+	appliedDefault, err := validateMigrateConfig(cfg, logger)
 	if err != nil {
 		return "", err
 	}
 
+	clients := newMigrateClients(cfg, logger)
+
+	// Verify every SQC organization the migration will touch exists and
+	// is visible to the token, and that the project-key pattern doesn't
+	// collide with one (issues #283, #138). Done early so a config error
+	// aborts the run before any extract data is touched.
+	if err := validateMigrateOrgs(ctx, clients.Cloud, cfg, appliedDefault); err != nil {
+		return "", err
+	}
+
+	mp, err := prepareMigratePlan(cfg, logger)
+	if err != nil {
+		return "", err
+	}
+	runIDOut = mp.RunID
+
+	// Best-effort run artifacts: written on every exit path (success or
+	// error) without altering retErr or panicking.
+	defer func() {
+		tm.CompletedAt = time.Now()
+		writeMigrateRunArtifacts(mp.RunDir, tm, retErr, cfg.ProjectKeyPattern, collector, logger)
+		// End-of-command timing line (#311) — paired with the per-task
+		// lines from runPhase so operators get a complete duration view.
+		common.LogCommandDuration(logger, "migrate", tm.StartedAt)
+	}()
+
+	defer writeRateLimitArtifact(mp.RunDir, clients.RateLimitTracker, logger)
+
+	// Filter completed tasks for resumability.
+	store := common.NewDataStore(mp.RunDir)
+	phases := filterCompleted(mp.Plan, store)
+
+	executor := &Executor{
+		Cloud:                clients.Cloud,
+		CloudAPI:             clients.CloudAPI,
+		Raw:                  clients.Raw,
+		RawAPI:               clients.RawAPI,
+		Extract:              nil, // Will be set per-task based on extract mapping
+		Store:                store,
+		CloudURL:             clients.CloudURL,
+		APIURL:               clients.APIURL,
+		EntKey:               cfg.EnterpriseKey,
+		Edition:              mp.Edition,
+		ExportDir:            cfg.ExportDirectory,
+		Mapping:              mp.Mapping,
+		Sem:                  make(chan struct{}, cfg.Concurrency),
+		BuildSem:             make(chan struct{}, cfg.BuildConcurrency),
+		ExcludeBranches:      cfg.ExcludeBranches,
+		UnsupportedLanguages: cfg.UnsupportedLanguages,
+		FastSync:             cfg.FastSync,
+		ProjectKeyPattern:    cfg.ProjectKeyPattern,
+		Logger:               logger,
+	}
+
+	// Overall progress/ETA logging (#520) — every 10s for the duration of
+	// the run, stopped once phases finish (success or error).
+	executor.Progress = common.NewTracker(logger, phases, CategorizeTask, common.DefaultCategoryWeights)
+	executor.Progress.OnUpdate(cfg.ProgressCallback)
+	executor.Progress.Start(ctx, 10*time.Second)
+	defer executor.Progress.Stop()
+
+	// Execute phases.
+	for i, phase := range phases {
+		logger.Info("starting phase", "phase", i+1, "tasks", len(phase))
+		if err := runPhase(ctx, executor, phase, mp.Registry, i+1, tm); err != nil {
+			return runIDOut, fmt.Errorf("phase %d: %w", i+1, err)
+		}
+		for _, taskName := range phase {
+			store.MarkComplete(taskName)
+		}
+	}
+	executor.Progress.LogFinal()
+
+	fmt.Printf("%s v%s - Migration Complete: %s\n", version.ToolName, version.Version, runIDOut)
+	return runIDOut, nil
+}
+
+// validateMigrateConfig validates the project-key renaming pattern syntax
+// and the SQC org mapping, applying the --default_organization fallback if
+// requested (issues #138, #279, #281). Both checks run before any API
+// client setup so a config error surfaces immediately.
+func validateMigrateConfig(cfg MigrateConfig, logger *slog.Logger) (appliedDefault bool, err error) {
+	if err := ValidateProjectKeyPattern(cfg.ProjectKeyPattern); err != nil {
+		return false, common.NewExitError(2, fmt.Errorf("invalid project_key_pattern: %w", err))
+	}
+	return applyOrgMapping(cfg.ExportDirectory, cfg.DefaultOrganization, logger)
+}
+
+// validateMigrateOrgs verifies every SQC organization the migration will
+// touch exists and is visible to the token (issue #283), and that the
+// project-key pattern's static prefix — used in place of
+// <ORGANIZATION_KEY> — doesn't collide with a real org (issue #138).
+func validateMigrateOrgs(ctx context.Context, cc *cloud.Client, cfg MigrateConfig, appliedDefault bool) error {
+	if err := validateOrgsExist(ctx, cc.Organizations, cfg.ExportDirectory, cfg.EnterpriseKey, cfg.DefaultOrganization, appliedDefault); err != nil {
+		return err
+	}
+	return validatePatternOrgCollision(ctx, cc.Organizations, cfg.ProjectKeyPattern)
+}
+
+// migrateClients bundles the Cloud API clients, raw readers, and
+// rate-limit tracker a migrate run wires together before executing tasks.
+type migrateClients struct {
+	Cloud            *cloud.Client
+	CloudAPI         *cloud.Client
+	Raw              *common.RawClient
+	RawAPI           *common.RawClient
+	CloudURL         string
+	APIURL           string
+	RateLimitTracker *RateLimitTracker
+}
+
+// newMigrateClients builds the standard and enterprise Cloud API clients
+// for a migrate run, wiring retry, rate-limit, and (when cfg.Debug is set)
+// full HTTP request/response logging into each one.
+func newMigrateClients(cfg MigrateConfig, logger *slog.Logger) *migrateClients {
 	cloudURL := cfg.URL
 	apiURL := strings.Replace(cloudURL, "https://", "https://api.", 1)
 
-	// Create Cloud clients with retry logging — and, when --debug is set,
-	// full HTTP request/response logging.
 	retryLog := func(method, url string, status, attempt, total int) {
 		logger.Warn("retrying request",
 			"method", method, "endpoint", url,
@@ -171,82 +337,52 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 	}
 	cloudClient := sqapi.NewCloudClient(cloudURL, cfg.Token, clientOpts...)
 	apiClient := sqapi.NewCloudClient(apiURL, cfg.Token, clientOpts...)
-	cc := cloud.New(cloudClient)
-	apiCC := cloud.New(apiClient)
 
-	// Verify every SQC organization the migration will touch exists and
-	// is visible to the token (issue #283). Done early so a typo aborts
-	// the run before any extract data is touched.
-	if err := validateOrgsExist(ctx, cc.Organizations, cfg.ExportDirectory, cfg.EnterpriseKey, cfg.DefaultOrganization, appliedDefault); err != nil {
-		return "", err
+	return &migrateClients{
+		Cloud:            cloud.New(cloudClient),
+		CloudAPI:         cloud.New(apiClient),
+		Raw:              common.NewRawClient(cloudClient.HTTPClient(), cloudClient.BaseURL()),
+		RawAPI:           common.NewRawClient(apiClient.HTTPClient(), apiClient.BaseURL()),
+		CloudURL:         cloudClient.BaseURL(),
+		APIURL:           apiClient.BaseURL(),
+		RateLimitTracker: rateLimitTracker,
 	}
+}
 
-	// When the key pattern carries a static prefix instead of <ORGANIZATION_KEY>,
-	// that prefix is shared by every project and could be mistaken for an
-	// organization-scoped key. Abort if it collides with a real SQC org
-	// (issue #138).
-	if err := validatePatternOrgCollision(ctx, cc.Organizations, cfg.ProjectKeyPattern); err != nil {
-		return "", err
-	}
+// migratePlan bundles the resolved extract mapping, task registry, and
+// dependency-resolved phase plan a migrate run executes.
+type migratePlan struct {
+	Mapping  structure.ExtractMapping
+	Edition  common.Edition
+	RunID    string
+	RunDir   string
+	Registry map[string]*TaskDef
+	Plan     [][]string
+}
 
-	// Create RawClients for read operations.
-	raw := common.NewRawClient(cloudClient.HTTPClient(), cloudClient.BaseURL())
-	rawAPI := common.NewRawClient(apiClient.HTTPClient(), apiClient.BaseURL())
-
-	// Resolve extract mapping.
+// prepareMigratePlan resolves the extract mapping, creates the run
+// directory, and builds the dependency-resolved phase plan for the
+// requested target tasks — persisting the plan metadata for a fresh run.
+func prepareMigratePlan(cfg MigrateConfig, logger *slog.Logger) (*migratePlan, error) {
 	mapping, err := structure.GetUniqueExtracts(cfg.ExportDirectory)
 	if err != nil {
-		return "", fmt.Errorf("scanning extracts: %w", err)
+		return nil, fmt.Errorf("scanning extracts: %w", err)
 	}
 
-	// Determine edition.
 	edition := common.Edition(cfg.Edition)
 
 	// Generate or resume run ID.
 	runID := cfg.RunID
 	createPlan := runID == ""
 	if createPlan {
-		runID = generateRunID(cfg.ExportDirectory)
+		runID = common.GenerateRunID(cfg.ExportDirectory)
 	}
 	runDir := filepath.Join(cfg.ExportDirectory, runID)
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		return "", fmt.Errorf("creating run dir: %w", err)
+		return nil, fmt.Errorf("creating run dir: %w", err)
 	}
-	runIDOut = runID
 
-	// Best-effort run artifacts: written on every exit path (success or
-	// error) without altering retErr or panicking.
-	defer func() {
-		tm.CompletedAt = time.Now()
-		meta := RunMeta{
-			StartedAt:         tm.StartedAt,
-			CompletedAt:       tm.CompletedAt,
-			OverallStatus:     computeStatus(retErr, tm),
-			Phases:            tm.phasesSnapshot(),
-			Tasks:             tm.tasksSnapshot(),
-			ProjectKeyPattern: cfg.ProjectKeyPattern,
-		}
-		if b, err := json.MarshalIndent(meta, "", "  "); err == nil {
-			_ = os.WriteFile(filepath.Join(runDir, "run_meta.json"), b, 0o644)
-		}
-		if err := writeRunEvents(runDir, collector); err != nil {
-			logger.Warn("writing run events", "err", err)
-		}
-		// End-of-command timing line (#311) — paired with the per-task
-		// lines from runPhase so operators get a complete duration view.
-		common.LogCommandDuration(logger, "migrate", tm.StartedAt)
-	}()
-
-	defer func() {
-		if writeErr := rateLimitTracker.WriteJSON(filepath.Join(runDir, RateLimitEventsFile)); writeErr != nil {
-			logger.Warn("failed to write rate-limit events artefact", "err", writeErr)
-		}
-	}()
-
-	// Build task registry and plan.
-	allDefs := RegisterAll()
-	registry := BuildMigrateRegistry(allDefs)
-	registry = FilterByEdition(registry, edition)
+	registry := FilterByEdition(BuildMigrateRegistry(RegisterAll()), edition)
 
 	// Project-data migration covers importProjectData + the trailing
 	// issue/hotspot sync pair. Skipping it necessarily skips the
@@ -270,57 +406,57 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 	targets := MigrateTargetTasks(registry, cfg.TargetTask, cfg.SkipProfiles, cfg.IncludeProjectData, cfg.SkipIssueSync, cfg.SkipProjectDataMigration, cfg.TargetTasks)
 	taskSet := ResolveDependencies(targets, registry)
 	if taskSet == nil {
-		return "", fmt.Errorf("cannot resolve dependencies for target tasks")
+		return nil, fmt.Errorf("cannot resolve dependencies for target tasks")
 	}
 
 	plan, err := PlanPhases(taskSet, registry)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	// Write or load plan metadata.
+	// Write plan metadata for a fresh run.
 	if createPlan {
-		if err := writeMigrateMeta(runDir, plan, runID, edition, cloudURL, targets, registry); err != nil {
-			return "", err
+		if err := writeMigrateMeta(runDir, plan, runID, edition, cfg.URL, targets, registry); err != nil {
+			return nil, err
 		}
 	}
 
-	// Filter completed tasks for resumability.
-	store := common.NewDataStore(runDir)
-	plan = filterCompleted(plan, store)
+	return &migratePlan{
+		Mapping:  mapping,
+		Edition:  edition,
+		RunID:    runID,
+		RunDir:   runDir,
+		Registry: registry,
+		Plan:     plan,
+	}, nil
+}
 
-	executor := &Executor{
-		Cloud:             cc,
-		CloudAPI:          apiCC,
-		Raw:               raw,
-		RawAPI:            rawAPI,
-		Extract:           nil, // Will be set per-task based on extract mapping
-		Store:             store,
-		CloudURL:          cloudClient.BaseURL(),
-		APIURL:            apiClient.BaseURL(),
-		EntKey:            cfg.EnterpriseKey,
-		Edition:           edition,
-		ExportDir:         cfg.ExportDirectory,
-		Mapping:           mapping,
-		Sem:               make(chan struct{}, cfg.Concurrency),
-		ExcludeBranches:   cfg.ExcludeBranches,
-		ProjectKeyPattern: cfg.ProjectKeyPattern,
-		Logger:            logger,
+// writeMigrateRunArtifacts best-effort persists run_meta.json and the
+// collected run-events log on every exit path (success or error) without
+// altering retErr or panicking.
+func writeMigrateRunArtifacts(runDir string, tm *RunTimings, retErr error, keyPattern string, collector *eventCollector, logger *slog.Logger) {
+	meta := RunMeta{
+		StartedAt:         tm.StartedAt,
+		CompletedAt:       tm.CompletedAt,
+		OverallStatus:     computeStatus(retErr, tm),
+		Phases:            tm.phasesSnapshot(),
+		Tasks:             tm.tasksSnapshot(),
+		ProjectKeyPattern: keyPattern,
 	}
-
-	// Execute phases.
-	for i, phase := range plan {
-		logger.Info("starting phase", "phase", i+1, "tasks", len(phase))
-		if err := runPhase(ctx, executor, phase, registry, i+1, tm); err != nil {
-			return runIDOut, fmt.Errorf("phase %d: %w", i+1, err)
-		}
-		for _, taskName := range phase {
-			store.MarkComplete(taskName)
-		}
+	if b, err := json.MarshalIndent(meta, "", "  "); err == nil {
+		_ = os.WriteFile(filepath.Join(runDir, "run_meta.json"), b, 0o644)
 	}
+	if err := writeRunEvents(runDir, collector); err != nil {
+		logger.Warn("writing run events", "err", err)
+	}
+}
 
-	fmt.Printf("%s v%s - Migration Complete: %s\n", version.ToolName, version.Version, runID)
-	return runID, nil
+// writeRateLimitArtifact best-effort persists the rate-limit events
+// collected during the run, for later PDF reporting.
+func writeRateLimitArtifact(runDir string, tracker *RateLimitTracker, logger *slog.Logger) {
+	if writeErr := tracker.WriteJSON(filepath.Join(runDir, RateLimitEventsFile)); writeErr != nil {
+		logger.Warn("failed to write rate-limit events artefact", "err", writeErr)
+	}
 }
 
 func runPhase(ctx context.Context, e *Executor, taskNames []string, registry map[string]*TaskDef, phaseIdx int, tm *RunTimings) error {
@@ -351,6 +487,7 @@ func runPhase(ctx context.Context, e *Executor, taskNames []string, registry map
 				e.Logger.Error("task failed", "task", name, "err", runErr)
 				return fmt.Errorf("task %s: %w", name, runErr)
 			}
+			e.Progress.MarkTaskComplete(name)
 			return nil
 		})
 	}
@@ -362,6 +499,9 @@ func runPhase(ctx context.Context, e *Executor, taskNames []string, registry map
 func (cfg *MigrateConfig) applyDefaults() {
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 25
+	}
+	if cfg.BuildConcurrency <= 0 {
+		cfg.BuildConcurrency = DefaultBuildConcurrency
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 60
@@ -378,44 +518,18 @@ func (cfg *MigrateConfig) applyDefaults() {
 	if strings.TrimSpace(cfg.ProjectKeyPattern) == "" {
 		cfg.ProjectKeyPattern = DefaultProjectKeyPattern
 	}
+	// #474 — normalise the unsupported-language handling mode. An invalid
+	// value is rejected at the CLI layer (ValidateUnsupportedLanguages), so
+	// here we only need to fill in the default for an absent value.
+	if mode, err := ParseUnsupportedLanguageMode(cfg.UnsupportedLanguages); err == nil {
+		cfg.UnsupportedLanguages = mode
+	} else {
+		cfg.UnsupportedLanguages = DefaultUnsupportedLanguages
+	}
 	// Ensure trailing slash.
 	if cfg.URL != "" && cfg.URL[len(cfg.URL)-1] != '/' {
 		cfg.URL += "/"
 	}
-}
-
-// generateRunID returns an ISO-date-prefixed run ID (issue #108).
-// Format: "YYYY-MM-DD-NN" where NN is the next sequence number for
-// the current day in the given directory.
-//
-// The implementation finds the highest existing sequence number for
-// today and returns max+1. The earlier (count+1) approach broke once
-// the numbering had ANY gap — e.g. dirs -10..-19 with no -01..-09
-// would yield count=10, which collides with the existing -11 and
-// silently reuses its task outputs. See the #359 follow-up
-// regression report.
-func generateRunID(directory string) string {
-	today := time.Now().UTC().Format("2006-01-02")
-	prefix := today + "-"
-	entries, _ := os.ReadDir(directory)
-	maxN := 0
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if !strings.HasPrefix(name, prefix) {
-			continue
-		}
-		n, err := strconv.Atoi(name[len(prefix):])
-		if err != nil {
-			continue
-		}
-		if n > maxN {
-			maxN = n
-		}
-	}
-	return fmt.Sprintf("%s-%02d", today, maxN+1)
 }
 
 func writeMigrateMeta(dir string, plan [][]string, runID string, edition common.Edition, url string, targets []string, registry map[string]*TaskDef) error {

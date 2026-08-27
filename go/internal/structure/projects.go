@@ -11,8 +11,28 @@ import (
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
-// Cloud endpoint patterns for ALM binding detection.
-var cloudEndpoints = []string{"dev.azure.com", "gitlab.com", "api.github.com", "bitbucket.org"}
+// cloudEndpoints are the DevOps platform hosts SonarQube Cloud is able to
+// bind a project to. Everything else is an on-premise platform (GitHub
+// Enterprise Server, self-managed GitLab, Bitbucket Server/Data Center)
+// that has no SonarQube Cloud equivalent.
+//
+// The hosts are the ones SonarQube Server reports as the ALM setting's
+// `url`, which is the platform's API endpoint rather than its web host —
+// hence api.github.com (a GitHub Enterprise Server binding reads
+// https://github.acme.com/api/v3) and the bare gitlab.com of
+// https://gitlab.com/api/v4.
+//
+// visualstudio.com is Azure DevOps *Services*: accounts created before
+// the dev.azure.com rename still bind as https://<account>.visualstudio.com,
+// and those are cloud. Leaving it out classified them as on-premise and
+// silently dropped their binding.
+var cloudEndpoints = []string{
+	"api.github.com",
+	"gitlab.com",
+	"dev.azure.com",
+	"visualstudio.com",
+	"bitbucket.org",
+}
 
 // newCodeMappings maps SonarQube Server NCD types to the equivalent
 // SonarQube Cloud "type" values accepted by /api/projects/create and
@@ -28,9 +48,13 @@ var newCodeMappings = map[string]string{
 }
 
 // IsCloudBinding checks whether a binding URL matches a known cloud endpoint.
+// Matched case-insensitively, as almFromURL in internal/migrate already does
+// for the SonarQube Cloud side — hosts are not case-sensitive and nothing
+// normalises the value SonarQube Server reports.
 func IsCloudBinding(bindingURL string) bool {
+	lower := strings.ToLower(bindingURL)
 	for _, ep := range cloudEndpoints {
-		if strings.Contains(bindingURL, ep) {
+		if strings.Contains(lower, ep) {
 			return true
 		}
 	}

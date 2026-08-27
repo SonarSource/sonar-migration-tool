@@ -32,6 +32,10 @@
 				<span class="spinner"></span>
 				<span id="processing-text">Processing...</span>
 			</div>
+			<div id="overall-progress" class="overall-progress hidden">
+				<div class="progress-track"><div id="overall-progress-fill" class="progress-fill"></div></div>
+				<span id="overall-progress-eta" class="progress-eta"></span>
+			</div>
 		</div>
 
 		<div id="event-log-card" class="card mt-2">
@@ -53,6 +57,31 @@
 	animation: spin 0.8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+.overall-progress {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	margin-top: 0.5rem;
+}
+.progress-track {
+	flex: 1;
+	height: 8px;
+	border-radius: 4px;
+	background: var(--color-border);
+	overflow: hidden;
+}
+.progress-fill {
+	height: 100%;
+	width: 0%;
+	background: var(--color-primary);
+	transition: width 0.3s ease-out;
+}
+.progress-eta {
+	font-size: 0.8rem;
+	color: var(--color-text-muted, #888);
+	white-space: nowrap;
+}
 
 .prompt .input-row {
 	display: flex;
@@ -83,6 +112,35 @@
 	white-space: nowrap;
 	width: 1%;
 }
+.checkbox-row {
+	margin: 0.5rem 0;
+}
+.checkbox-row label {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	font-size: 0.9rem;
+	cursor: pointer;
+}
+.checkbox-row input[type="checkbox"] {
+	width: 1rem;
+	height: 1rem;
+	flex-shrink: 0;
+}
+.checkbox-row input[type="checkbox"]:disabled {
+	cursor: not-allowed;
+}
+.checkbox-row label:has(input:disabled) {
+	color: var(--color-text-muted, #888);
+	cursor: not-allowed;
+}
+.prompt input[type="url"],
+.prompt input[type="password"] {
+	margin-bottom: 0.75rem;
+}
+.prompt label.prompt-label {
+	margin-top: 0.5rem;
+}
 </style>
 
 <script>
@@ -93,6 +151,8 @@ var Wizard = (function() {
 	const HIDDEN = 'hidden';
 	const ID_PROMPT_AREA = 'prompt-area';
 	const ID_PROMPT_INPUT = 'prompt-input';
+	// Below this, an ETA reads clearer as exact seconds than as "~0 min" (#519).
+	const ETA_SECONDS_AS_TEXT_THRESHOLD = 120;
 
 	const EYE_SVG = `<svg xmlns="http://www.w3.org/2000/svg"
 		viewBox="0 0 24 24" fill="currentColor"><path
@@ -213,6 +273,9 @@ var Wizard = (function() {
 		case 'display_phase_progress':
 			onPhaseProgress(msg);
 			break;
+		case 'display_overall_progress':
+			onOverallProgress(msg);
+			break;
 		case 'display_message':
 			showProcessing(msg.message);
 			addLogEntry(msg.message, msg.type);
@@ -244,6 +307,8 @@ var Wizard = (function() {
 		case 'prompt_password':
 		case 'prompt_confirm':
 		case 'prompt_confirm_review':
+		case 'prompt_extract_form':
+		case 'prompt_migrate_form':
 		case 'prompt_choice':
 			onPrompt(msg);
 			break;
@@ -291,7 +356,42 @@ var Wizard = (function() {
 		addLogEntry(text, 'display_phase_progress');
 	}
 
+	function onOverallProgress(msg) {
+		const box = document.getElementById('overall-progress');
+		const fill = document.getElementById('overall-progress-fill');
+		const eta = document.getElementById('overall-progress-eta');
+		box.classList.remove(HIDDEN);
+		fill.style.width = `${msg.percent}%`;
+		eta.textContent = msg.known ? `ETA: ${formatETA(msg.eta_seconds)}` : 'ETA: calculating...';
+	}
+
+	// Below 2 minutes, "~1 min"/"~0 min" reads as imprecise or done-ish
+	// when it isn't — show exact seconds instead. At/above 2 minutes,
+	// round to the nearest minute per issue #519.
+	function formatETA(seconds) {
+		const s = seconds || 0; // defend against a missing/undefined eta_seconds
+		if (s < ETA_SECONDS_AS_TEXT_THRESHOLD) {
+			return `${Math.round(s)}s`;
+		}
+		return `~${Math.round(s / 60)} min`;
+	}
+
 	// --- Phase input capture ---
+
+	function formatPhaseInputValue(prompt, value) {
+		if (prompt.type === 'prompt_password') {
+			return '********';
+		}
+		if (prompt.type === 'prompt_extract_form' || prompt.type === 'prompt_migrate_form') {
+			return `URL: ${value.url}, `
+				+ `Project data: ${value.includeProjectData ? 'Yes' : 'No'}, `
+				+ `Issue sync: ${value.includeIssueSync ? 'Yes' : 'No'}`;
+		}
+		if (typeof value === 'boolean') {
+			return value ? 'Yes' : 'No';
+		}
+		return String(value);
+	}
 
 	function capturePhaseInput(prompt, value) {
 		if (!currentPhase) {
@@ -302,14 +402,7 @@ var Wizard = (function() {
 			return;
 		}
 
-		let displayValue;
-		if (prompt.type === 'prompt_password') {
-			displayValue = '********';
-		} else if (typeof value === 'boolean') {
-			displayValue = value ? 'Yes' : 'No';
-		} else {
-			displayValue = String(value);
-		}
+		let displayValue = formatPhaseInputValue(prompt, value);
 
 		if (prompt.type === 'prompt_confirm' && latestSummary && latestSummary.stats) {
 			const orgLabel = findStat(latestSummary.stats, 'Integration Key') ||
@@ -493,6 +586,8 @@ var Wizard = (function() {
 		case 'prompt_password': return renderPromptPassword(msg);
 		case 'prompt_confirm': return renderPromptConfirm(msg);
 		case 'prompt_confirm_review': return renderPromptConfirmReview(msg);
+		case 'prompt_extract_form': return renderPromptExtractForm(msg);
+		case 'prompt_migrate_form': return renderPromptMigrateForm(msg);
 		case 'prompt_choice': return renderPromptChoice(msg);
 		default: return `<p>Unknown prompt type: ${escapeHTML(msg.type)}</p>`;
 		}
@@ -623,6 +718,103 @@ var Wizard = (function() {
 		return html;
 	}
 
+	function renderPromptExtractForm(msg) {
+		const includeData = !!msg.default_include_project_data;
+		// Never render checked-but-disabled: if project data is off, the
+		// sync checkbox must start unchecked too, or a submit without
+		// touching either box would send includeProjectData=false with
+		// includeIssueSync=true — the invalid combination the CLI
+		// prompter's cascade prevents.
+		const includeSync = includeData && !!msg.default_include_issue_sync;
+		const tokenPlaceholder = msg.token_optional
+			? 'Leave blank to keep the configured token'
+			: '';
+		let html = '<form class="prompt" onsubmit="return Wizard.submitExtractForm(event)">';
+		if (msg.title) {
+			html += `<h3>${escapeHTML(msg.title)}</h3>`;
+		}
+		html += `
+			<label class="prompt-label" for="extract-url">SonarQube Server URL</label>
+			<input type="url" id="extract-url" required placeholder="https://"
+				value="${escapeAttr(msg.default_url)}">
+			<label class="prompt-label" for="extract-token">Admin token</label>
+			<input type="password" id="extract-token" placeholder="${escapeAttr(tokenPlaceholder)}"
+				${msg.token_optional ? '' : 'required'}>
+			<div id="prompt-error" class="text-error mt-1"></div>
+			<div class="checkbox-row">
+				<label>
+					<input type="checkbox" id="extract-include-project-data"
+						${includeData ? 'checked' : ''}
+						onchange="Wizard.updateIssueSyncCheckbox('extract-include-project-data', 'extract-include-issue-sync')">
+					Migrate project data (files, measures, issues, SCM data, ...)
+				</label>
+			</div>
+			<div class="checkbox-row">
+				<label>
+					<input type="checkbox" id="extract-include-issue-sync"
+						${includeSync ? 'checked' : ''}
+						${includeData ? '' : 'disabled'}>
+					Sync issue/hotspot metadata after migration
+				</label>
+			</div>
+			<div class="button-row">
+				<button type="button" class="btn-secondary" onclick="Wizard.cancel()">Cancel</button>
+				<button type="submit" class="btn-primary">Start Extract</button>
+			</div>`;
+		html += '</form>';
+		return html;
+	}
+
+	function renderPromptMigrateForm(msg) {
+		const includeData = !!msg.default_include_project_data;
+		// Never render checked-but-disabled: if project data is off, the
+		// sync checkbox must start unchecked too, or a submit without
+		// touching either box would send includeProjectData=false with
+		// includeIssueSync=true — the invalid combination the CLI
+		// prompter's cascade prevents.
+		const includeSync = includeData && !!msg.default_include_issue_sync;
+		const tokenPlaceholder = msg.token_optional
+			? 'Leave blank to keep the configured token'
+			: '';
+		let html = '<form class="prompt" onsubmit="return Wizard.submitMigrateForm(event)">';
+		if (msg.title) {
+			html += `<h3>${escapeHTML(msg.title)}</h3>`;
+		}
+		html += `
+			<label class="prompt-label" for="migrate-url">SonarQube Cloud URL</label>
+			<input type="url" id="migrate-url" required placeholder="https://"
+				value="${escapeAttr(msg.default_url)}">
+			<label class="prompt-label" for="migrate-token">Cloud admin token</label>
+			<input type="password" id="migrate-token" placeholder="${escapeAttr(tokenPlaceholder)}"
+				${msg.token_optional ? '' : 'required'}>
+			<label class="prompt-label" for="migrate-enterprise-key">Enterprise key</label>
+			<input type="text" id="migrate-enterprise-key" required
+				value="${escapeAttr(msg.default_enterprise_key)}">
+			<div id="prompt-error" class="text-error mt-1"></div>
+			<div class="checkbox-row">
+				<label>
+					<input type="checkbox" id="migrate-include-project-data"
+						${includeData ? 'checked' : ''}
+						onchange="Wizard.updateIssueSyncCheckbox('migrate-include-project-data', 'migrate-include-issue-sync')">
+					Migrate project data (files, measures, issues, SCM data, ...)
+				</label>
+			</div>
+			<div class="checkbox-row">
+				<label>
+					<input type="checkbox" id="migrate-include-issue-sync"
+						${includeSync ? 'checked' : ''}
+						${includeData ? '' : 'disabled'}>
+					Sync issue/hotspot metadata after migration
+				</label>
+			</div>
+			<div class="button-row">
+				<button type="button" class="btn-secondary" onclick="Wizard.cancel()">Cancel</button>
+				<button type="submit" class="btn-primary">Start Migrate</button>
+			</div>`;
+		html += '</form>';
+		return html;
+	}
+
 	function renderPromptChoice(msg) {
 		let html = `<div class="prompt">
 			<label class="prompt-label">${escapeHTML(msg.message)}</label>
@@ -695,6 +887,82 @@ var Wizard = (function() {
 			val = sel.value;
 		}
 		respond(val);
+	}
+
+	// --- Extract-scope checkbox helpers (#516) ---
+
+	function updateIssueSyncCheckbox(dataId, syncId) {
+		const dataBox = document.getElementById(dataId);
+		const syncBox = document.getElementById(syncId);
+		if (!dataBox || !syncBox) {
+			return;
+		}
+		if (dataBox.checked) {
+			syncBox.disabled = false;
+		} else {
+			syncBox.checked = false;
+			syncBox.disabled = true;
+		}
+	}
+
+	function submitExtractForm(event) {
+		event.preventDefault();
+
+		const urlInput = document.getElementById('extract-url');
+		const tokenInput = document.getElementById('extract-token');
+		const dataBox = document.getElementById('extract-include-project-data');
+		const syncBox = document.getElementById('extract-include-issue-sync');
+		const errEl = document.getElementById('prompt-error');
+
+		const url = urlInput.value.trim();
+		if (!isValidURL(url)) {
+			if (errEl) {
+				errEl.textContent = 'Please enter a valid HTTP or HTTPS URL';
+			}
+			return false;
+		}
+		if (errEl) {
+			errEl.textContent = '';
+		}
+
+		respond({
+			url,
+			token: tokenInput.value.trim(),
+			includeProjectData: dataBox ? dataBox.checked : true,
+			includeIssueSync: syncBox ? syncBox.checked : true,
+		});
+		return false;
+	}
+
+	function submitMigrateForm(event) {
+		event.preventDefault();
+
+		const urlInput = document.getElementById('migrate-url');
+		const tokenInput = document.getElementById('migrate-token');
+		const enterpriseKeyInput = document.getElementById('migrate-enterprise-key');
+		const dataBox = document.getElementById('migrate-include-project-data');
+		const syncBox = document.getElementById('migrate-include-issue-sync');
+		const errEl = document.getElementById('prompt-error');
+
+		const url = urlInput.value.trim();
+		if (!isValidURL(url)) {
+			if (errEl) {
+				errEl.textContent = 'Please enter a valid HTTP or HTTPS URL';
+			}
+			return false;
+		}
+		if (errEl) {
+			errEl.textContent = '';
+		}
+
+		respond({
+			url,
+			token: tokenInput.value.trim(),
+			enterpriseKey: enterpriseKeyInput.value.trim(),
+			includeProjectData: dataBox ? dataBox.checked : true,
+			includeIssueSync: syncBox ? syncBox.checked : true,
+		});
+		return false;
 	}
 
 	// --- Response handling ---
@@ -795,6 +1063,10 @@ var Wizard = (function() {
 		const proc = document.getElementById('processing');
 		proc.classList.add(HIDDEN);
 		proc.style.display = 'none';
+
+		const progress = document.getElementById('overall-progress');
+		progress.classList.add(HIDDEN);
+		document.getElementById('overall-progress-fill').style.width = '0%';
 	}
 
 	function hidePrompt() {
@@ -867,6 +1139,9 @@ var Wizard = (function() {
 			}
 		},
 		onCloudSelect,
+		updateIssueSyncCheckbox,
+		submitExtractForm,
+		submitMigrateForm,
 		respond,
 		goBack() {
 			if (!pendingPromptId) {

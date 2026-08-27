@@ -10,11 +10,17 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/extract"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/migrate"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 	sqapi "github.com/sonar-solutions/sq-api-go"
 )
 
@@ -70,6 +76,13 @@ type Suite struct {
 	mu      sync.Mutex
 	results []CheckResult
 	nextID  int
+	// cloudKeyByProject maps a source project key to the SonarCloud key it
+	// was actually migrated to, read from the latest run's createProjects
+	// output (#138 — target.project_key_pattern can differ from the
+	// default "<ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>" convention, so
+	// scProjectKey must consult the real mapping rather than assume it).
+	// Nil (or missing a given key) falls back to that default convention.
+	cloudKeyByProject map[string]string
 }
 
 // checkFn is the signature for a single check function.
@@ -92,12 +105,77 @@ func NewSuite(cfg Config) (*Suite, error) {
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
+	cloudKeyByProject, err := loadCloudProjectKeyMap(cfg.ExportDir)
+	if err != nil {
+		logger.Warn("could not read the createProjects mapping from the latest run — "+
+			"falling back to the default <org>_<key> convention, which is wrong if "+
+			"target.project_key_pattern is customized (#138)",
+			"export_dir", cfg.ExportDir, "err", err)
+	}
+
 	return &Suite{
-		cfg:    cfg,
-		sqsRaw: common.NewRawClient(sqsClient.HTTPClient(), sqsClient.BaseURL()),
-		scRaw:  common.NewRawClient(scClient.HTTPClient(), scClient.BaseURL()),
-		logger: logger,
+		cfg:               cfg,
+		sqsRaw:            common.NewRawClient(sqsClient.HTTPClient(), sqsClient.BaseURL()),
+		scRaw:             common.NewRawClient(scClient.HTTPClient(), scClient.BaseURL()),
+		logger:            logger,
+		cloudKeyByProject: cloudKeyByProject,
 	}, nil
+}
+
+// runIDPattern matches both the historical MM-DD-YYYY-NN and the current
+// ISO YYYY-MM-DD-NN (#108) run directory naming conventions.
+var runIDPattern = regexp.MustCompile(`^(\d{2}-\d{2}-\d{4}|\d{4}-\d{2}-\d{2})-\d+$`)
+
+// latestRunDir returns the most recently modified run directory directly
+// under exportDir, or "" if none exist.
+func latestRunDir(exportDir string) (string, error) {
+	entries, err := os.ReadDir(exportDir)
+	if err != nil {
+		return "", fmt.Errorf("reading export dir %s: %w", exportDir, err)
+	}
+	var latest string
+	var latestMod time.Time
+	for _, e := range entries {
+		if !e.IsDir() || !runIDPattern.MatchString(e.Name()) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if latest == "" || info.ModTime().After(latestMod) {
+			latest = e.Name()
+			latestMod = info.ModTime()
+		}
+	}
+	return latest, nil
+}
+
+// loadCloudProjectKeyMap reads the createProjects task output from the
+// latest run under exportDir and returns a source-key -> cloud-project-key
+// map. Returns a nil map (not an error) when no run data exists yet, so
+// callers can fall back gracefully — e.g. hand-built Suites in tests, or a
+// config file pointed at an export directory that hasn't been migrated
+// yet.
+func loadCloudProjectKeyMap(exportDir string) (map[string]string, error) {
+	runID, err := latestRunDir(exportDir)
+	if err != nil || runID == "" {
+		return nil, err
+	}
+	store := common.NewDataStore(filepath.Join(exportDir, runID))
+	items, err := store.ReadAll("createProjects")
+	if err != nil || len(items) == 0 {
+		return nil, err
+	}
+	m := make(map[string]string, len(items))
+	for _, raw := range items {
+		key := common.ExtractField(raw, "key")
+		cloudKey := common.ExtractField(raw, "cloud_project_key")
+		if key != "" && cloudKey != "" {
+			m[key] = cloudKey
+		}
+	}
+	return m, nil
 }
 
 // Run executes all regression checks and returns a report.
@@ -229,6 +307,9 @@ func (s *Suite) getProjects(ctx context.Context) ([]string, error) {
 
 // scProjectKey returns the SonarCloud project key for a given SQS project key.
 func (s *Suite) scProjectKey(sqsKey string) string {
+	if k, ok := s.cloudKeyByProject[sqsKey]; ok && k != "" {
+		return k
+	}
 	return s.cfg.SCOrg + "_" + sqsKey
 }
 
@@ -244,46 +325,79 @@ func (cfg *Config) applyDefaults() {
 	}
 }
 
-// LoadConfigFile reads a migration config.json and extracts the fields
-// needed for regression testing.
+// LoadConfigFile reads a migration config.json — in any of the shapes
+// extract/migrate/transfer accept (#266) — and extracts the fields needed
+// for regression testing. It delegates to those packages' own config
+// loaders rather than maintaining a third, independently-drifting parser.
 func LoadConfigFile(path string) (Config, error) {
-	data, err := os.ReadFile(path)
+	sourceCfg, err := extract.LoadExtractConfigFile(path)
 	if err != nil {
-		return Config{}, fmt.Errorf("reading config: %w", err)
+		return Config{}, fmt.Errorf("parsing source config: %w", err)
+	}
+	targetCfg, err := migrate.LoadMigrateConfigFile(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("parsing target config: %w", err)
 	}
 
-	var raw struct {
-		SonarQube struct {
-			URL   string `json:"url"`
-			Token string `json:"token"`
-		} `json:"sonarqube"`
-		SonarCloud struct {
-			Organizations []struct {
-				URL   string `json:"url"`
-				Token string `json:"token"`
-				Key   string `json:"key"`
-			} `json:"organizations"`
-		} `json:"sonarcloud"`
-		Settings struct {
-			ExportDirectory string   `json:"export_directory"`
-			ProjectKeys     []string `json:"project_keys"`
-		} `json:"settings"`
+	exportDir := targetCfg.ExportDirectory
+	if exportDir == "" {
+		exportDir = sourceCfg.ExportDirectory
 	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return Config{}, fmt.Errorf("parsing config: %w", err)
+	if exportDir == "" {
+		exportDir = "./migration-files"
 	}
 
-	cfg := Config{
-		SQSURL:      raw.SonarQube.URL,
-		SQSToken:    raw.SonarQube.Token,
-		ExportDir:   raw.Settings.ExportDirectory,
-		ProjectKeys: raw.Settings.ProjectKeys,
+	scOrg, err := resolveSCOrg(targetCfg.DefaultOrganization, exportDir)
+	if err != nil {
+		return Config{}, err
 	}
-	if len(raw.SonarCloud.Organizations) > 0 {
-		org := raw.SonarCloud.Organizations[0]
-		cfg.SCURL = org.URL
-		cfg.SCToken = org.Token
-		cfg.SCOrg = org.Key
+
+	return Config{
+		SQSURL:      sourceCfg.URL,
+		SQSToken:    sourceCfg.Token,
+		SCURL:       targetCfg.URL,
+		SCToken:     targetCfg.Token,
+		SCOrg:       scOrg,
+		ExportDir:   exportDir,
+		ProjectKeys: sourceCfg.ProjectKeys,
+	}, nil
+}
+
+// resolveSCOrg picks the single SonarCloud organization to verify against.
+// regtest, like the tool's default-org path (#281), verifies one org per
+// run: target.default_organization when set, otherwise the sole mapping
+// found in exportDir/organizations.csv (mirrors loadResetTargetOrgs in
+// go/cmd/reset.go). Multiple distinct mappings can't be resolved
+// automatically since scProjectKey assumes one org prefix for the whole
+// run.
+func resolveSCOrg(defaultOrg, exportDir string) (string, error) {
+	if defaultOrg != "" {
+		return defaultOrg, nil
 	}
-	return cfg, nil
+	rows, err := structure.LoadCSV(exportDir, "organizations.csv")
+	if err != nil {
+		return "", fmt.Errorf("loading organizations.csv from %s: %w", exportDir, err)
+	}
+	seen := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		k, _ := r["sonarcloud_org_key"].(string)
+		k = strings.TrimSpace(k)
+		if k == "" || k == "SKIPPED" {
+			continue
+		}
+		seen[k] = true
+	}
+	orgs := make([]string, 0, len(seen))
+	for k := range seen {
+		orgs = append(orgs, k)
+	}
+	sort.Strings(orgs)
+	switch len(orgs) {
+	case 0:
+		return "", fmt.Errorf("no SonarCloud organization found: set target.default_organization in the config, or run extract/structure/migrate first so %s/organizations.csv is populated", exportDir)
+	case 1:
+		return orgs[0], nil
+	default:
+		return "", fmt.Errorf("multiple SonarCloud organizations found in %s/organizations.csv (%s) — regtest verifies one org per run; set target.default_organization to pick one", exportDir, strings.Join(orgs, ", "))
+	}
 }

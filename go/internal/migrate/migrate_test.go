@@ -6,12 +6,7 @@ package migrate
 
 import (
 	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
-	"time"
 )
 
 func TestRegisterAllCountsAndDependencies(t *testing.T) {
@@ -191,10 +186,20 @@ func TestMatchDevOpsPlatform(t *testing.T) {
 		slug       string
 		expected   string
 	}{
-		{"github match", "github", "org/myrepo", "", "12345"},
+		// GitHub / Azure / Bitbucket Cloud bind by fully qualified slug —
+		// SonarQube Cloud resolves the repository by calling the platform
+		// with this value (verified live against GitHub: posting the
+		// numeric id 404s).
+		{"github match", "github", "org/myrepo", "", "org/myrepo"},
 		{"github no match", "github", "org/nomatch", "", ""},
+		// GitLab bindings store the numeric project id, so that is both
+		// what is matched on and what is sent back.
 		{"gitlab match", "gitlab", "12345", "", "12345"},
 		{"gitlab no match", "gitlab", "99999", "", ""},
+		// A GitLab binding must never fall back to a name match — the
+		// source only carries an opaque id, so a name guess could bind
+		// the wrong repository.
+		{"gitlab never falls back to name", "gitlab", "myrepo", "", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -203,6 +208,136 @@ func TestMatchDevOpsPlatform(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tt.expected)
 			}
 		})
+	}
+}
+
+// TestMatchDevOpsPlatformLiveShapes exercises the matcher against the
+// exact payload SonarQube Cloud's /api/alm_integration/list_repositories
+// returns — {label, installationKey, slug, linkedProjects, private},
+// with NO `id` field. The pre-#122 implementation read `id` and therefore
+// never matched anything against a live instance.
+func TestMatchDevOpsPlatformLiveShapes(t *testing.T) {
+	// Captured verbatim from sc-staging.io, org open-digital-society-1.
+	githubRepos := []json.RawMessage{
+		json.RawMessage(`{"label":"nodejs-sonar-github","installationKey":"Open-Digital-Society/nodejs-sonar-github|579847459","linkedProjects":[],"private":true,"slug":"Open-Digital-Society/nodejs-sonar-github"}`),
+		json.RawMessage(`{"label":"sonarqube-example","installationKey":"Open-Digital-Society/sonarqube-example|625940442","linkedProjects":[],"private":false,"slug":"Open-Digital-Society/sonarqube-example"}`),
+	}
+
+	tests := []struct {
+		name       string
+		alm        string
+		repository string
+		slug       string
+		repos      []json.RawMessage
+		expected   string
+	}{
+		{
+			name: "github exact slug match returns the slug",
+			alm:  "github", repository: "Open-Digital-Society/sonarqube-example",
+			repos: githubRepos, expected: "Open-Digital-Society/sonarqube-example",
+		},
+		{
+			name: "github is case insensitive",
+			alm:  "github", repository: "open-digital-society/SonarQube-Example",
+			repos: githubRepos, expected: "Open-Digital-Society/sonarqube-example",
+		},
+		{
+			// Migrating out of DevOps org "okorach" into a Cloud org bound
+			// to "Open-Digital-Society": the bare repository name still
+			// identifies the repo unambiguously, because
+			// list_repositories only returns the bound org's repos.
+			name: "github falls back to bare repository name across orgs",
+			alm:  "github", repository: "okorach/sonarqube-example",
+			repos: githubRepos, expected: "Open-Digital-Society/sonarqube-example",
+		},
+		{
+			name: "github unknown repository does not match",
+			alm:  "github", repository: "okorach/demo-actions-maven",
+			repos: githubRepos, expected: "",
+		},
+		{
+			// installationKey is "<slug>|<numeric id>"; the numeric part
+			// is the GitLab project id a SQS GitLab binding stores.
+			name: "gitlab matches the installationKey id suffix",
+			alm:  "gitlab", repository: "30452699",
+			repos: []json.RawMessage{
+				json.RawMessage(`{"label":"demo-gitlabci-maven","installationKey":"okorach/demo-gitlabci-maven|30452699","slug":"okorach/demo-gitlabci-maven"}`),
+			},
+			expected: "30452699",
+		},
+		{
+			// SonarQube Cloud labels Azure repositories
+			// "<project name> / <repository name>"; a SQS Azure binding
+			// carries the project name in `slug` and the repository name
+			// in `repository`.
+			name: "azure matches project name and repository name",
+			alm:  "azure", repository: "ddd", slug: "fooo",
+			repos: []json.RawMessage{
+				json.RawMessage(`{"label":"fooo / ddd","installationKey":"fooo/ddd|9","slug":"fooo/ddd"}`),
+			},
+			expected: "fooo/ddd",
+		},
+		{
+			name: "bitbucket cloud matches the repository slug",
+			alm:  "bitbucketcloud", repository: "my-slug",
+			repos: []json.RawMessage{
+				json.RawMessage(`{"label":"My Slug","installationKey":"okorach/my-slug|7","slug":"okorach/my-slug"}`),
+			},
+			expected: "okorach/my-slug",
+		},
+		{
+			name: "unbound project with no identifiers never matches",
+			alm:  "github", repository: "", slug: "",
+			repos: githubRepos, expected: "",
+		},
+		{
+			name: "unknown platform never matches",
+			alm:  "bitbucket", repository: "project3-BBS", slug: "project3-SLUG",
+			repos: githubRepos, expected: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MatchDevOpsPlatform(tt.alm, tt.repository, tt.slug, tt.repos)
+			if got != tt.expected {
+				t.Errorf("got %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestAlmFromURL(t *testing.T) {
+	tests := []struct{ url, want string }{
+		{"https://github.com/Open-Digital-Society", "github"},
+		{"https://gitlab.com/mygroup", "gitlab"},
+		{"https://dev.azure.com/olivierkorach", "azure"},
+		{"https://myorg.visualstudio.com", "azure"},
+		{"https://bitbucket.org/okorach/", "bitbucketcloud"},
+		{"https://bitbucket-server.your-company.com", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		if got := almFromURL(tt.url); got != tt.want {
+			t.Errorf("almFromURL(%q) = %q, want %q", tt.url, got, tt.want)
+		}
+	}
+}
+
+func TestParseBoundOrganization(t *testing.T) {
+	// Captured verbatim from sc-staging.io for a bound organization.
+	bound := json.RawMessage(`{"almOrganization":{"key":"Open-Digital-Society","url":"","almUrl":"https://github.com/Open-Digital-Society","avatar":"https://avatars.githubusercontent.com/u/101562377?v=4","personal":false}}`)
+	almURL, dopOrg := parseBoundOrganization(bound)
+	if almURL != "https://github.com/Open-Digital-Society" || dopOrg != "Open-Digital-Society" {
+		t.Fatalf("bound: got (%q, %q)", almURL, dopOrg)
+	}
+
+	// An unbound organization carries no almOrganization object.
+	almURL, dopOrg = parseBoundOrganization(json.RawMessage(`{}`))
+	if almURL != "" || dopOrg != "" {
+		t.Fatalf("unbound: got (%q, %q), want empty", almURL, dopOrg)
+	}
+	if almFromURL(almURL) != "" {
+		t.Error("unbound org must not resolve to a platform")
 	}
 }
 
@@ -296,77 +431,8 @@ func TestMigrateTargetTasksExplicitListHonorsSkipIssueSync(t *testing.T) {
 	}
 }
 
-// Regression for the runID-collision bug surfaced after #359:
-// generateRunID counted dirs and returned count+1, which collides
-// with an existing dir as soon as the numbering has any gap
-// (e.g. dirs -10..-19 with no -01..-09 would yield count=10 and
-// alias onto -11). The fix returns max(N)+1 where N is the
-// existing suffix on today's dirs.
-func TestGenerateRunID_HandlesNumberingGaps(t *testing.T) {
-	today := time.Now().UTC().Format("2006-01-02")
-
-	t.Run("empty directory yields -01", func(t *testing.T) {
-		dir := t.TempDir()
-		got := generateRunID(dir)
-		want := today + "-01"
-		if got != want {
-			t.Errorf("want %q, got %q", want, got)
-		}
-	})
-
-	t.Run("dirs -10..-19 with gaps below yields -20 (not -11 collision)", func(t *testing.T) {
-		dir := t.TempDir()
-		for i := 10; i <= 19; i++ {
-			if err := os.MkdirAll(filepath.Join(dir, fmt.Sprintf("%s-%02d", today, i)), 0o755); err != nil {
-				t.Fatalf("mkdir: %v", err)
-			}
-		}
-		got := generateRunID(dir)
-		want := today + "-20"
-		if got != want {
-			t.Errorf("want %q (max+1), got %q", want, got)
-		}
-	})
-
-	t.Run("non-contiguous numbering still returns max+1", func(t *testing.T) {
-		dir := t.TempDir()
-		for _, n := range []int{1, 3, 7, 42} {
-			if err := os.MkdirAll(filepath.Join(dir, fmt.Sprintf("%s-%02d", today, n)), 0o755); err != nil {
-				t.Fatalf("mkdir: %v", err)
-			}
-		}
-		got := generateRunID(dir)
-		want := today + "-43"
-		if got != want {
-			t.Errorf("want %q, got %q", want, got)
-		}
-	})
-
-	t.Run("dirs from other days are ignored", func(t *testing.T) {
-		dir := t.TempDir()
-		// Other days don't participate in the count.
-		if err := os.MkdirAll(filepath.Join(dir, "2020-01-01-99"), 0o755); err != nil {
-			t.Fatalf("mkdir: %v", err)
-		}
-		got := generateRunID(dir)
-		want := today + "-01"
-		if got != want {
-			t.Errorf("foreign-day dir should not affect count: want %q, got %q", want, got)
-		}
-	})
-
-	t.Run("dirs with non-numeric suffix are ignored", func(t *testing.T) {
-		dir := t.TempDir()
-		if err := os.MkdirAll(filepath.Join(dir, today+"-rc1"), 0o755); err != nil {
-			t.Fatalf("mkdir: %v", err)
-		}
-		got := generateRunID(dir)
-		// Only well-formed dirs influence max; rc1 is skipped.
-		if !strings.HasPrefix(got, today+"-") {
-			t.Errorf("expected today-prefixed ID, got %q", got)
-		}
-		if got != today+"-01" {
-			t.Errorf("non-numeric suffix should be ignored: want %q, got %q", today+"-01", got)
-		}
-	})
-}
+// generateRunID moved to common.GenerateRunID (#542) — its own tests,
+// including the numbering-gap regression from #359, now live in
+// go/internal/common/runid_test.go, deduplicated across the three
+// packages (migrate, extract, wizard) that used to each hand-maintain
+// an identical copy of this function and its test.

@@ -6,6 +6,7 @@ package summary
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -290,6 +291,106 @@ func applyProjectFailures(succeeded, nearPerfect, partial []EntityItem,
 	return keep, nearPerfect, partial
 }
 
+// collectUnsupportedLanguageExclusions returns one Partial failure per project
+// whose scanner report had file components dropped because their language has
+// no quality profile on the target organization (#474,
+// --unsupported_languages=exclude).
+//
+// Those branches import successfully, so without this the project would be
+// reported as a full migration even though some of its files — and every issue
+// on them — never left the source. The project is routed to Partial with an
+// Issues line naming the languages and the file count.
+func collectUnsupportedLanguageExclusions(store *common.DataStore) []projectFailure {
+	items, err := store.ReadAll("importProjectData")
+	if err != nil || len(items) == 0 {
+		return nil
+	}
+	by, order := aggregateLanguageExclusions(items)
+
+	out := make([]projectFailure, 0, len(order))
+	for _, key := range order {
+		bucket := by[key]
+		out = append(out, projectFailure{
+			CloudProjectKey: key,
+			Bucket:          projectBucketPartial,
+			Operation:       "Files in unsupported languages not migrated",
+			Detail:          languageExclusionDetail(bucket),
+			Error: "the target organization has no quality profile for these languages — typically " +
+				"languages provided by 3rd-party SonarQube Server plugins. The files were excluded from the " +
+				"analysis report so the rest of the project could migrate; issues on them were not migrated",
+		})
+	}
+	return out
+}
+
+// languageExclusionAcc accumulates one project's excluded-file data across all
+// of its branch records.
+type languageExclusionAcc struct {
+	langs map[string]bool
+	files int
+}
+
+// aggregateLanguageExclusions folds the per-branch importProjectData records
+// into one accumulator per project, preserving first-seen project order.
+func aggregateLanguageExclusions(items []json.RawMessage) (map[string]*languageExclusionAcc, []string) {
+	by := make(map[string]*languageExclusionAcc)
+	var order []string
+	for _, raw := range items {
+		key := jsonStr(raw, "cloud_project_key")
+		excluded := jsonInt(raw, "excluded_files")
+		if key == "" || excluded <= 0 {
+			continue
+		}
+		bucket := by[key]
+		if bucket == nil {
+			bucket = &languageExclusionAcc{langs: map[string]bool{}}
+			by[key] = bucket
+			order = append(order, key)
+		}
+		// Every branch of a project drops the same files, so the per-project
+		// count is the worst branch's count — not the sum across branches.
+		if excluded > bucket.files {
+			bucket.files = excluded
+		}
+		for _, lang := range jsonStrSlice(raw, "unsupported_languages") {
+			bucket.langs[lang] = true
+		}
+	}
+	return by, order
+}
+
+// languageExclusionDetail renders "lua, delphi (13 files)".
+func languageExclusionDetail(bucket *languageExclusionAcc) string {
+	langs := make([]string, 0, len(bucket.langs))
+	for l := range bucket.langs {
+		langs = append(langs, l)
+	}
+	sort.Strings(langs)
+	unit := "files"
+	if bucket.files == 1 {
+		unit = "file"
+	}
+	return fmt.Sprintf("%s (%d %s)", strings.Join(langs, ", "), bucket.files, unit)
+}
+
+// jsonStrSlice reads a JSON array of strings from raw, returning nil when the
+// key is absent or is not an array of strings.
+func jsonStrSlice(raw json.RawMessage, key string) []string {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil
+	}
+	nested, ok := obj[key]
+	if !ok {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal(nested, &out); err != nil {
+		return nil
+	}
+	return out
+}
+
 // collectProjectSyncSkips reads the per-project status JSONL produced
 // by the data-migration tasks and returns a synthetic []projectFailure
 // covering #228's orange criteria plus #356's yellow criteria:
@@ -420,3 +521,105 @@ func collectSyncOutcome(store *common.DataStore, taskName, errorOp string) []pro
 	return out
 }
 
+// bindingSkipOperations maps the skip reasons recorded by the migrate
+// package's matchProjectRepos task to the operator-facing sentence shown
+// in the report's Details column (issue #122).
+//
+// The map is keyed by the same string constants the migrate package
+// writes (migrate.BindingSkip*); they are duplicated here rather than
+// imported to keep internal/report free of a dependency on
+// internal/migrate, matching how the global-settings outcome contract is
+// already handled.
+//
+// org_binding_unknown / repos_unknown (issue #505) exist because the
+// lookups feeding a project binding are best-effort: when one of them
+// fails the tool never learns whether the org is bound or which
+// repositories it has, and saying "the org is not bound" would state
+// something it never observed. Those two records carry the API error in
+// skip_error, which is rendered after the sentence (issue #122 asked for
+// the API error to be surfaced in the report).
+var bindingSkipOperations = map[string]string{
+	"org_not_bound":       "project binding was not possible because the org itself is not bound",
+	"repo_not_found":      "project binding was not possible because the repository was not found in the bound DevOps organization",
+	"no_project_id":       "project binding was not possible because the target project id could not be resolved",
+	"org_binding_unknown": "project binding was not possible because the target organization's DevOps platform binding could not be read",
+	"repos_unknown":       "project binding was not possible because the repositories of the bound DevOps organization could not be listed",
+	"on_prem_platform":    "project binding was not possible because the source project is bound to an on-premise DevOps platform, which SonarQube Cloud cannot integrate with",
+}
+
+// collectProjectBindingOutcomes reads the per-project DevOps platform
+// binding records written by matchProjectRepos / setProjectBinding and
+// converts the non-successful ones into projectFailure entries so the
+// affected projects are reported as Partial Migration (issue #122).
+//
+// Two shapes are handled:
+//
+//   - skip records ({"binding_skipped":true,"skip_reason":...}) — the
+//     binding was never attempted. The dominant case is a source project
+//     that WAS bound while the target organization is not bound to the
+//     same DevOps platform, which issue #122 requires to be reported as
+//     partially migrated with an explicit explanation.
+//   - failed writes ({"status":"failed","error":...}) — the binding call
+//     itself was rejected by SonarQube Cloud.
+//
+// Records are read from setProjectBinding when present (it forwards the
+// skip records verbatim and adds the write outcomes) and fall back to
+// matchProjectRepos so the skips are still reported when the binding
+// write task did not run.
+func collectProjectBindingOutcomes(store *common.DataStore) []projectFailure {
+	items, err := store.ReadAll("setProjectBinding")
+	if err != nil || len(items) == 0 {
+		items, err = store.ReadAll("matchProjectRepos")
+		if err != nil {
+			return nil
+		}
+	}
+
+	var out []projectFailure
+	seen := make(map[string]bool)
+	for _, raw := range items {
+		key := jsonStr(raw, "cloud_project_key")
+		op, errMsg, ok := classifyBindingRecord(raw)
+		if key == "" || !ok {
+			continue
+		}
+		// One line per project per distinct message.
+		dedup := key + "\x00" + op
+		if seen[dedup] {
+			continue
+		}
+		seen[dedup] = true
+		out = append(out, projectFailure{
+			CloudProjectKey: key,
+			Bucket:          projectBucketPartial,
+			Operation:       op,
+			Error:           errMsg,
+		})
+	}
+	return out
+}
+
+// classifyBindingRecord turns one DevOps-binding record into the operator
+// sentence and error to report. ok is false for records that need no
+// report entry (a successful binding, or an unrecognised shape).
+func classifyBindingRecord(raw json.RawMessage) (op, errMsg string, ok bool) {
+	if jsonBool(raw, "binding_skipped") {
+		reason := jsonStr(raw, "skip_reason")
+		op = bindingSkipOperations[reason]
+		if op == "" {
+			// Prefer the sentence the migrate side recorded so a newly
+			// added reason still renders something useful.
+			op = jsonStr(raw, "skip_detail")
+		}
+		if op == "" {
+			op = "DevOps platform binding was not migrated"
+		}
+		// skip_error is set only when a failed lookup — not an observed
+		// fact — caused the skip (#505); it is the API error to quote.
+		return op, jsonStr(raw, "skip_error"), true
+	}
+	if jsonStr(raw, "status") == "failed" {
+		return "DevOps platform binding not migrated", jsonStr(raw, "error"), true
+	}
+	return "", "", false
+}

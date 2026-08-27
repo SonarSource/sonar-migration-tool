@@ -6,7 +6,7 @@ This document describes everything the **sonar-migration-tool** migrates (and wi
 ---
 
 ## Current Capabilities (Implemented)
-<!-- updated: 2026-06-04_12:00:00 -->
+<!-- updated: 2026-07-27_23:05:00 -->
 
 The following entities are fully migrated today:
 
@@ -20,6 +20,25 @@ The following entities are fully migrated today:
 | **Permission Templates** | Reusable permission template definitions |
 | **Portfolios** | Portfolio structure and project assignments |
 | **Project Data** | Optional protobuf report injection for historical analysis data |
+
+### Languages SonarQube Cloud does not support
+<!-- updated: 2026-07-27_23:16:00 -->
+
+SonarQube Server can analyze languages SonarQube Cloud cannot — anything
+contributed by a 3rd-party (non-SonarSource) plugin has no Cloud analyzer and
+therefore no quality profile there. Such files **cannot** be migrated: the
+Compute Engine rejects any analysis report containing a file whose language has
+no matching quality profile, and it rejects the report as a whole.
+
+`transfer` detects this before submitting and, by default, excludes only those
+files so that every other file, issue, measure and branch still migrates; the
+project is then reported as a **Partial Migration** naming the languages and the
+file count. `--unsupported_languages=skip` declines to migrate the project's
+data at all. See
+[TRANSFER.md](TRANSFER.md#unsupported-programming-languages---unsupported_languages)
+and the troubleshooting entry
+[Project migrated but has no issues and no branches](TROUBLESHOOTING.md#project-migrated-but-has-no-issues-and-no-branches).
+Issue #474.
 
 ---
 
@@ -56,15 +75,40 @@ Full migration of all code analysis issues from SonarQube Server to SonarQube Cl
 - Issue messages and descriptions
 
 #### Security Hotspots (SPEC-003)
+<!-- updated: 2026-07-27_23:55:00 -->
 
-Migration of security-sensitive code locations that require manual review.
+Migration of the security-sensitive code locations that required manual review on SonarQube Server.
+
+**SonarQube Cloud dropped Security Hotspots as a distinct finding kind on 2026-07-01.** The former
+hotspot rules were converted in place into ordinary issue rules — mostly `VULNERABILITY`, sometimes
+`CODE_SMELL` — each with a clean-code attribute, SECURITY impacts and SonarSource's own system tag
+`former-hotspot`. SonarQube Server (the source) still has hotspots, so the tool extracts them as
+hotspots and lands them on the target as ordinary issues, tagged `sqs-hotspot` — see
+[GitHub issue #423](https://github.com/SonarSource/sonar-migration-tool/issues/423) and
+[HOTSPOTS-AS-ISSUES.md](HOTSPOTS-AS-ISSUES.md).
 
 **What it migrates:**
-- All security hotspot records
-- Hotspot rule associations and categories
+- All security hotspot records, emitted as native protobuf `Issue` messages naming the rule
+- Hotspot rule associations
 - Hotspot locations (file, line, text range)
-- Hotspot vulnerability probability ratings
-- Hotspot creation dates
+- Hotspot creation dates (preserved via changeset backdating)
+- The `sqs-hotspot` issue tag on every migrated hotspot, applied during metadata sync — the
+  migration tool's own marker for "this was a Security Hotspot on SonarQube Server", distinct from
+  SonarSource's `former-hotspot` tag, which marks the converted *rule* rather than the finding
+
+**What it deliberately does not set:**
+- No finding **type**, clean-code attribute or impact. The native `Issue` protobuf has no type field
+  at all; the Compute Engine derives the finding kind from the rule, exactly as a real scanner
+  analysis does. Cloud therefore classifies each migrated hotspot per its own converted rule.
+- No **severity override**. `vulnerabilityProbability` is extracted for reporting only; it is no
+  longer squashed into `overriddenSeverity` (a value the rule would never itself raise), so Cloud
+  applies the converted rule's own impact severity.
+
+**Not migratable:** hotspots on rules SonarQube Cloud retired outright rather than converting
+(`status: REMOVED` — verified on `python:S4823` and `python:S4784`). Those rules do not exist on the
+target. Hotspot-derived issues now pass through the same inactive-rule filter as native issues, so
+these findings are dropped and counted instead of naming an unactivated rule and aborting the whole
+report in the CE.
 
 #### Source Code & SCM Data (SPEC-004)
 
@@ -130,13 +174,38 @@ WARN syncIssueMetadata: triaged source issues without a unique Cloud counterpart
 ```
 
 #### Hotspot Metadata Synchronization (SPEC-009)
+<!-- updated: 2026-07-27_23:55:00 -->
 
-Equivalent to issue metadata sync but for security hotspots.
+Equivalent to issue metadata sync but for security hotspots. Because SonarQube Cloud has had no
+hotspots since 2026-07-01, this phase matches each source hotspot to the **issue** it became on the
+target — via `/api/issues/search`, scoped server-side by rule, file and branch, then resolved by
+line — and triages that issue. It visits **every** source hotspot, not only the triaged ones,
+because the tag matters even for an untriaged `TO_REVIEW` hotspot.
+
+**Review-status mapping** (source hotspot → target issue):
+
+| Source status | Source resolution | Target issue status | Transition |
+|---------------|-------------------|---------------------|------------|
+| `TO_REVIEW` | — | OPEN | *(none — Cloud default)* |
+| `REVIEWED` | `SAFE` | FALSE_POSITIVE | `falsepositive` |
+| `REVIEWED` | `FIXED` | ACCEPTED | `accept` |
+| `REVIEWED` | `ACKNOWLEDGED` | ACCEPTED | `accept` |
+
+No official SonarSource mapping for this conversion was published; the table above is the migration
+tool's own documented choice. `ACKNOWLEDGED` is no longer downgraded to `SAFE` — that downgrade was
+forced by Cloud's hotspot API having no ACKNOWLEDGED resolution, and the issue API can represent it,
+so this is a fidelity gain over the previous hotspot-to-hotspot sync.
 
 **What it migrates:**
-- **Hotspot review statuses**: TO_REVIEW, REVIEWED/SAFE, REVIEWED/FIXED, REVIEWED/ACKNOWLEDGED
-- **Hotspot review comments**: Comments from the review workflow
-- **Hotspot assignments**: Reviewer assignments
+- **Hotspot review statuses**, per the mapping above, applied with `/api/issues/do_transition`
+- **Hotspot review comments**: comments from the review workflow, posted on the migrated issue with
+  original author attribution
+- **A back-link comment** to the original hotspot on the source server (its `security_hotspots` view)
+- **The `sqs-hotspot` tag**, plus the `metadata-synchronized` idempotency marker — appended to the
+  Cloud issue's existing tags rather than replacing them, via `/api/issues/set_tags`
+
+**Not migrated:** hotspot assignments. SonarQube Cloud exposes no hotspot-assign API and the
+migrated issue is not assigned either, so reviewers must be reassigned manually.
 
 #### User Mapping & Assignment (SPEC-010)
 
@@ -327,7 +396,7 @@ Electron-based desktop application wrapping the CLI and browser GUI.
 ---
 
 ## Migration Summary Table
-<!-- updated: 2026-06-26_18:52:18 -->
+<!-- updated: 2026-07-27_23:55:00 -->
 
 | Data Type | Current Status | Target Status |
 |-----------|---------------|---------------|
@@ -339,7 +408,7 @@ Electron-based desktop application wrapping the CLI and browser GUI.
 | Portfolios | Migrated | Migrated |
 | Project Data | Optional | Full protobuf report injection |
 | **Issues** | **Not migrated** | **Full migration with metadata sync** |
-| **Security Hotspots** | **Not migrated** | **Full migration with metadata sync** |
+| **Security Hotspots** | **Not migrated** | **Migrated as ordinary issues, tagged `sqs-hotspot` (Cloud dropped hotspots 2026-07-01, #423)** |
 | **Source Code** | **Not migrated** | **Migrated via scanner protocol** |
 | **Syntax Highlighting** | **Not migrated** | **Migrated (token colors in Code view, #420)** |
 | **SCM/Blame Data** | **Not migrated** | **Full changeset migration** |
@@ -350,8 +419,8 @@ Electron-based desktop application wrapping the CLI and browser GUI.
 | Issue Comments | N/A | Synced with author attribution |
 | Issue Tags | N/A | Synced (full source tag list ∪ existing Cloud tags) |
 | Issue Assignments | N/A | Mapped via users.csv |
-| Hotspot Review Status | N/A | Synced (TO_REVIEW, REVIEWED/SAFE, etc.) |
-| Hotspot Comments | N/A | Synced |
+| Hotspot Review Status | N/A | Synced onto the migrated issue (OPEN, FALSE_POSITIVE, ACCEPTED) |
+| Hotspot Comments | N/A | Synced onto the migrated issue, plus a source back-link |
 | Issue Creation Dates | N/A | Preserved via changeset backdating |
 | Branch Data | N/A | Configurable branch migration |
 | User Mappings | N/A | CSV-based identity mapping |
@@ -359,7 +428,7 @@ Electron-based desktop application wrapping the CLI and browser GUI.
 ---
 
 ## How Migration Works (High-Level)
-<!-- updated: 2026-06-04_12:00:00 -->
+<!-- updated: 2026-07-27_23:55:00 -->
 
 The migration pipeline follows this sequence:
 
@@ -373,7 +442,8 @@ The migration pipeline follows this sequence:
 3. Per-Project Migration (parallelized across projects)
    ├── a. Data Extraction (from SonarQube Server)
    │   ├── Issues (with date-window bisection for >10K)
-   │   ├── Security Hotspots
+   │   ├── Security Hotspots (TO_REVIEW + REVIEWED, with review comments;
+   │   │     a failed query for one review status no longer discards the other)
    │   ├── Source Code & SCM Blame Data
    │   └── Measures & Metrics
    │
@@ -390,7 +460,8 @@ The migration pipeline follows this sequence:
        ├── Wait for SC Elasticsearch indexing
        ├── Match issues by composite key (rule + component + line)
        ├── Sync statuses, comments, tags, assignments
-       └── Sync hotspot review statuses and comments
+       └── Match each source hotspot to the issue it became on Cloud, then sync
+           its review status + comments and tag it `sqs-hotspot`
 
 4. Portfolio Migration
    └── Recreate portfolio structure and project assignments
@@ -422,15 +493,17 @@ Each version has a dedicated extraction/encoding pipeline to handle API differen
 ---
 
 ## API Endpoints Used
-<!-- updated: 2026-06-26_18:52:18 -->
+<!-- updated: 2026-07-27_23:55:00 -->
 
 ### SonarQube Server (Source -- Read Only)
+<!-- updated: 2026-07-27_23:55:00 -->
 
 | Endpoint | Purpose |
 |----------|---------|
 | `/api/issues/search` | Extract issues with pagination |
 | `/api/issues/changelog` | Fetch issue changelogs for pre-filtering |
-| `/api/hotspots/search` | Extract security hotspots |
+| `/api/hotspots/search` | Extract security hotspots (queried once per review status: `TO_REVIEW`, `REVIEWED`) |
+| `/api/hotspots/show` | Extract hotspot review comments and rule |
 | `/api/sources/raw` | Extract source code |
 | `/api/sources/lines` | Extract syntax highlighting (and source-text fallback) |
 | `/api/sources/scm` | Extract SCM blame data |
@@ -443,25 +516,35 @@ Each version has a dedicated extraction/encoding pipeline to handle API differen
 | `/api/permissions/*` | Extract permissions |
 | `/api/project_branches/list` | List branches |
 | `/api/system/info` | Server version detection |
+| `GET /api/alm_settings/get_binding` | Project DevOps platform binding (issue #122) |
+| `GET /api/alm_settings/list` | Configured DevOps platform definitions |
 
 ### SonarQube Cloud (Target -- Read/Write)
+<!-- updated: 2026-07-27_23:55:00 -->
 
 | Endpoint | Purpose |
 |----------|---------|
 | `/api/ce/submit` | Submit scanner report ZIP |
 | `/api/ce/task` | Poll CE task status |
-| `/api/issues/search` | Fetch SC issues for matching |
-| `/api/issues/do_transition` | Apply issue status transitions |
-| `/api/issues/add_comment` | Add migrated comments |
-| `/api/issues/set_tags` | Set issue tags |
+| `/api/issues/search` | Fetch SC issues for matching — including the issues that former hotspots became |
+| `/api/issues/do_transition` | Apply issue status transitions, including migrated hotspot review status |
+| `/api/issues/add_comment` | Add migrated comments, including hotspot review comments and the source back-link |
+| `/api/issues/set_tags` | Set issue tags, including `sqs-hotspot` and `metadata-synchronized` |
 | `/api/issues/assign` | Assign issues to users |
-| `/api/hotspots/search` | Fetch SC hotspots for matching |
-| `/api/hotspots/change_status` | Change hotspot review status |
 | `/api/projects/create` | Create projects |
 | `/api/qualitygates/*` | Create/configure quality gates |
 | `/api/qualityprofiles/*` | Create/configure quality profiles |
 | `/api/user_groups/*` | Create/manage groups |
 | `/api/permissions/*` | Set permissions |
+| `GET /api/alm_integration/show_bound_organization` | The DevOps organization a Cloud org is bound to (issue #122) |
+| `GET /api/alm_integration/list_repositories` | Repositories bindable in that DevOps organization |
+| `GET /api/navigation/component` | Resolve a Cloud project's internal id (not returned by `/api/projects/search`) |
+| `POST {api-host}/dop-translation/project-bindings` | Create the project → repository binding |
+
+**No longer called on the target:** `/api/hotspots/search`, `/api/hotspots/change_status` and
+`/api/hotspots/add_comment`. SonarQube Cloud has had no Security Hotspots since 2026-07-01, so
+`/api/hotspots/search` can never return a migrated finding and hotspot triage is applied through the
+`/api/issues/*` endpoints above (#423).
 
 ---
 

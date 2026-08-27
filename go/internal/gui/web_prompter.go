@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/wizard"
 )
@@ -115,6 +116,39 @@ func (wp *WebPrompter) ConfirmReview(title string, details []wizard.KV) (bool, e
 	return toBool(resp.Value), nil
 }
 
+func (wp *WebPrompter) PromptExtractForm(defaultURL string, tokenOptional bool, defaultIncludeProjectData, defaultIncludeIssueSync bool) (string, string, bool, bool, error) {
+	resp, err := wp.prompt(ServerMessage{
+		Type:                      TypePromptExtractForm,
+		Title:                     "Source Server Credentials",
+		DefaultURL:                defaultURL,
+		TokenOptional:             tokenOptional,
+		DefaultIncludeProjectData: defaultIncludeProjectData,
+		DefaultIncludeIssueSync:   defaultIncludeIssueSync,
+	})
+	if err != nil {
+		return "", "", false, false, err
+	}
+	values, _ := resp.Value.(map[string]any)
+	return toString(values["url"]), toString(values["token"]), toBool(values["includeProjectData"]), toBool(values["includeIssueSync"]), nil
+}
+
+func (wp *WebPrompter) PromptMigrateForm(defaultURL string, tokenOptional bool, defaultEnterpriseKey string, defaultIncludeProjectData, defaultIncludeIssueSync bool) (string, string, string, bool, bool, error) {
+	resp, err := wp.prompt(ServerMessage{
+		Type:                      TypePromptMigrateForm,
+		Title:                     "Target Cloud Credentials",
+		DefaultURL:                defaultURL,
+		TokenOptional:             tokenOptional,
+		DefaultEnterpriseKey:      defaultEnterpriseKey,
+		DefaultIncludeProjectData: defaultIncludeProjectData,
+		DefaultIncludeIssueSync:   defaultIncludeIssueSync,
+	})
+	if err != nil {
+		return "", "", "", false, false, err
+	}
+	values, _ := resp.Value.(map[string]any)
+	return toString(values["url"]), toString(values["token"]), toString(values["enterpriseKey"]), toBool(values["includeProjectData"]), toBool(values["includeIssueSync"]), nil
+}
+
 func (wp *WebPrompter) PromptChoice(message string, options []string) (int, error) {
 	resp, err := wp.prompt(ServerMessage{
 		Type:    TypePromptChoice,
@@ -157,6 +191,15 @@ func (wp *WebPrompter) DisplayPhaseProgress(phase wizard.WizardPhase) {
 		Index: wizard.PhaseIndex(phase),
 		Total: wizard.PhaseCount(),
 		Name:  wizard.PhaseDisplayName(phase),
+	})
+}
+
+func (wp *WebPrompter) DisplayOverallProgress(percent float64, eta time.Duration, known bool) {
+	wp.sendFn(ServerMessage{
+		Type:       TypeDisplayOverallProgress,
+		Percent:    percent,
+		EtaSeconds: int(eta.Seconds()),
+		Known:      known,
 	})
 }
 

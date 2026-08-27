@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 )
@@ -35,8 +34,8 @@ var phaseDisplayNames = map[WizardPhase]string{
 	PhaseOrgMapping: "Organization Mapping",
 	PhaseMappings:   "Mappings",
 	PhaseValidate:   "Validate",
-	PhaseMigrate:  "Migrate",
-	PhaseComplete: "Complete",
+	PhaseMigrate:    "Migrate",
+	PhaseComplete:   "Complete",
 }
 
 // PhaseDisplayName returns the human-readable name for a phase.
@@ -90,23 +89,6 @@ func phaseByIndex(idx int) WizardPhase {
 		return phaseSequence[idx]
 	}
 	return PhaseExtract
-}
-
-// generateRunID creates an ISO-date-prefixed run ID like
-// "2026-04-20-01" (issue #108). YYYY-MM-DD sorts chronologically
-// when run directories are listed alphabetically and is
-// internationally readable. Mirrors migrate.generateRunID — keep
-// them in sync.
-func generateRunID(directory string) string {
-	today := time.Now().UTC().Format("2006-01-02")
-	entries, _ := os.ReadDir(directory)
-	count := 0
-	for _, e := range entries {
-		if e.IsDir() && len(e.Name()) > len(today) && e.Name()[:len(today)] == today {
-			count++
-		}
-	}
-	return fmt.Sprintf("%s-%02d", today, count+1)
 }
 
 // isSSLError walks the error chain looking for TLS/certificate errors.
@@ -228,6 +210,14 @@ func strPtr(s string) *string { return &s }
 func ptrStr(p *string) string {
 	if p == nil {
 		return ""
+	}
+	return *p
+}
+
+// ptrBoolOr safely dereferences a bool pointer, returning def for nil.
+func ptrBoolOr(p *bool, def bool) bool {
+	if p == nil {
+		return def
 	}
 	return *p
 }

@@ -344,10 +344,10 @@ func TestGeneratePredictiveReport_ConsolidatesSonarAuth(t *testing.T) {
 	}
 }
 
-// #323: predictive report must surface per-project hotspot sync stats
-// and route projects with ACKNOWLEDGED hotspots to NearPerfect with
-// the "N ACKNOWLEDGED hotspot(s) left as TO_REVIEW" callout in the
-// Details column.
+// #323 / #527: predictive report must surface per-project hotspot sync
+// stats and route projects with ACKNOWLEDGED hotspots to NearPerfect
+// with the "N ACKNOWLEDGED hotspot(s) inventoried but not state-synced"
+// callout in the Details column.
 func TestGeneratePredictiveReport_HotspotAcknowledgedDemotion(t *testing.T) {
 	exportDir := t.TempDir()
 
@@ -365,8 +365,8 @@ func TestGeneratePredictiveReport_HotspotAcknowledgedDemotion(t *testing.T) {
 	writeFile(t, extractDir, "extract.json", `{"url":"`+testServerURL+`"}`)
 
 	// Three actionable hotspots: 2 SAFE (cleanly synced), 1 ACKNOWLEDGED
-	// (demoted to TO_REVIEW). Plus one TO_REVIEW with no comments — not
-	// actionable, must NOT inflate the actionable count.
+	// (inventoried, never state-synced). Plus one TO_REVIEW with no
+	// comments — excluded, must NOT inflate the actionable count.
 	writeJSONL(t, filepath.Join(extractDir, "getProjectHotspotsFull", "hotspots.jsonl"),
 		[]map[string]any{
 			{"key": "h1", "project": "com.example:app", "status": "REVIEWED", "resolution": "SAFE"},

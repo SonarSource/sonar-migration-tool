@@ -94,6 +94,9 @@ func renderMarkdownTitle(sb *strings.Builder, summary *MigrationSummary) {
 		fmt.Fprintf(sb, "- Started: %s\n", summary.StartedAt.Format(dateTimeLayout))
 		fmt.Fprintf(sb, "- Completed: %s\n", summary.CompletedAt.Format(dateTimeLayout))
 		fmt.Fprintf(sb, "- Total elapsed: %s\n", fmtDuration(summary.TotalElapsed))
+		for _, ph := range summary.PhaseBreakdown {
+			fmt.Fprintf(sb, "- %s: %s\n", ph.Name, fmtDuration(ph.Duration))
+		}
 		fmt.Fprintf(sb, "- Overall status: %s\n", summary.OverallStatus)
 	}
 	sb.WriteString("\n")
@@ -192,7 +195,7 @@ func renderMarkdownSections(sb *strings.Builder, summary *MigrationSummary) {
 		mdRows := make([]map[string]any, 0, len(rows))
 		for _, r := range rows {
 			row := map[string]any{
-				"name":    mdCell(r.displayName()),
+				"name":    mdDetail(r.nameCellMarkdown()),
 				"outcome": r.outcome,
 				"details": mdDetail(r.details),
 			}

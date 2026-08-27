@@ -303,6 +303,189 @@ func writeProjectSettingsResponse(w http.ResponseWriter, r *http.Request, settin
 	}
 }
 
+// TestCheckIssueDistributionQueriesFilteredCounts exercises the SQS/SC
+// issue-count comparison path in the closure returned by
+// checkIssueDistribution, verifying both the filter parameter and the
+// project-key parameter names documented above checkIssueTotals: SQS takes
+// "componentKeys", SC takes "projects".
+func TestCheckIssueDistributionQueriesFilteredCounts(t *testing.T) {
+	sqs := httptest.NewServer(http.HandlerFunc(issueDistributionSQSHandler(t)))
+	defer sqs.Close()
+	sc := httptest.NewServer(http.HandlerFunc(issueDistributionSCHandler(t)))
+	defer sc.Close()
+
+	s := newTestSuite(t, sqs, sc)
+	s.cfg.ProjectKeys = []string{"proj-a"}
+
+	check := checkIssueDistribution("severities", "MAJOR")
+	results := check(context.Background(), s)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if r.SQSValue != "5" || r.SCValue != "3" {
+		t.Errorf("got SQS=%s SC=%s, want 5/3", r.SQSValue, r.SCValue)
+	}
+	if r.Match {
+		t.Errorf("expected Match=false for differing counts")
+	}
+}
+
+// issueDistributionSQSHandler is SQS's server handler for
+// TestCheckIssueDistributionQueriesFilteredCounts: it asserts the
+// severities and componentKeys filters and reports a total of 5.
+func issueDistributionSQSHandler(t *testing.T) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/api/issues/search" {
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		if got := r.URL.Query().Get("severities"); got != "MAJOR" {
+			t.Errorf("SQS request missing severities=MAJOR filter, got %q", got)
+		}
+		if got := r.URL.Query().Get("componentKeys"); got != "proj-a" {
+			t.Errorf("SQS request missing componentKeys=proj-a, got %q", got)
+		}
+		_, _ = w.Write([]byte(`{"paging":{"pageIndex":1,"pageSize":1,"total":5}}`))
+	}
+}
+
+// issueDistributionSCHandler is SC's server handler for
+// TestCheckIssueDistributionQueriesFilteredCounts: it asserts the projects
+// filter and reports a total of 3.
+func issueDistributionSCHandler(t *testing.T) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/api/issues/search" {
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		if r.URL.Query().Get("projects") == "" {
+			t.Errorf("SC request missing projects param")
+		}
+		_, _ = w.Write([]byte(`{"paging":{"pageIndex":1,"pageSize":1,"total":3}}`))
+	}
+}
+
+// TestCheckHotspotByStatusQueriesFilteredCounts exercises the SQS/SC
+// hotspot-count comparison path in the closure returned by
+// checkHotspotByStatus, verifying the project-key parameter names
+// documented above checkHotspotTotals: SQS takes "project" (singular), SC
+// takes "projectKey".
+func TestCheckHotspotByStatusQueriesFilteredCounts(t *testing.T) {
+	sqs := httptest.NewServer(http.HandlerFunc(hotspotByStatusSQSHandler(t)))
+	defer sqs.Close()
+	sc := httptest.NewServer(http.HandlerFunc(hotspotByStatusSCHandler(t)))
+	defer sc.Close()
+
+	s := newTestSuite(t, sqs, sc)
+	s.cfg.ProjectKeys = []string{"proj-a"}
+
+	check := checkHotspotByStatus("TO_REVIEW")
+	results := check(context.Background(), s)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if r.SQSValue != "4" || r.SCValue != "4" {
+		t.Errorf("got SQS=%s SC=%s, want 4/4", r.SQSValue, r.SCValue)
+	}
+	if !r.Match {
+		t.Errorf("expected Match=true for equal counts")
+	}
+}
+
+// hotspotByStatusSQSHandler is SQS's server handler for
+// TestCheckHotspotByStatusQueriesFilteredCounts: it asserts the status and
+// project filters and reports a total of 4.
+func hotspotByStatusSQSHandler(t *testing.T) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/api/hotspots/search" {
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		if got := r.URL.Query().Get("status"); got != "TO_REVIEW" {
+			t.Errorf("SQS request missing status=TO_REVIEW filter, got %q", got)
+		}
+		if got := r.URL.Query().Get("project"); got != "proj-a" {
+			t.Errorf("SQS request missing project=proj-a, got %q", got)
+		}
+		_, _ = w.Write([]byte(`{"paging":{"pageIndex":1,"pageSize":1,"total":4}}`))
+	}
+}
+
+// hotspotByStatusSCHandler is SC's server handler for
+// TestCheckHotspotByStatusQueriesFilteredCounts: it asserts the
+// projectKey filter and reports a total of 4.
+func hotspotByStatusSCHandler(t *testing.T) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/api/hotspots/search" {
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		if r.URL.Query().Get("projectKey") == "" {
+			t.Errorf("SC request missing projectKey param")
+		}
+		_, _ = w.Write([]byte(`{"paging":{"pageIndex":1,"pageSize":1,"total":4}}`))
+	}
+}
+
+// TestCheckProjectCountScoped ensures a scoped run (--project_key subset,
+// #529) reports the subset size on both sides without querying either
+// server — comparing instance-wide totals would always fail when the
+// target deliberately holds only this subset.
+func TestCheckProjectCountScoped(t *testing.T) {
+	sqs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected SQS call in scoped run: %s", r.URL.Path)
+	}))
+	defer sqs.Close()
+	sc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected SC call in scoped run: %s", r.URL.Path)
+	}))
+	defer sc.Close()
+
+	s := newTestSuite(t, sqs, sc)
+	s.cfg.ProjectKeys = []string{"proj-a", "proj-b"}
+
+	results := checkProjectCount(context.Background(), s)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if r.SQSValue != "2" || r.SCValue != "2" || !r.Match {
+		t.Errorf("got SQS=%s SC=%s Match=%v, want 2/2/true", r.SQSValue, r.SCValue, r.Match)
+	}
+	if r.Tolerance != "Scoped" {
+		t.Errorf("got Tolerance=%q, want %q", r.Tolerance, "Scoped")
+	}
+}
+
+// TestCheckProjectCountGetProjectsError ensures checkProjectCount reports
+// an error result rather than panicking when the underlying project
+// listing fails.
+func TestCheckProjectCountGetProjectsError(t *testing.T) {
+	sqs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer sqs.Close()
+	sc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer sc.Close()
+
+	s := newTestSuite(t, sqs, sc)
+	results := checkProjectCount(context.Background(), s)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Error == "" {
+		t.Errorf("expected an error result when getProjects fails, got %+v", results[0])
+	}
+}
+
 func itoa(n int) string {
 	if n == 0 {
 		return "0"

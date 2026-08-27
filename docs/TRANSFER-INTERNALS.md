@@ -1,5 +1,5 @@
 # `transfer` Command — Internal Flow (ASCII Chart)
-<!-- updated: 2026-07-27_22:37:13 -->
+<!-- updated: 2026-07-27_23:55:00 -->
 
 How `sonar-migration-tool transfer` works end-to-end, traced from
 [cmd/transfer.go](../go/cmd/transfer.go) down through `extract` → `structure` →
@@ -61,7 +61,7 @@ statement of `runTransfer`.
         |       ->  GET api/system/info  --|403|-->  api/navigation/global
         |                                            (detectEdition)
         |
-        +-- prepareExtractDir  ->  mkdir exportDir/<runID>/   (runID = date-NN, max+1)
+        +-- prepareExtractDir  ->  mkdir exportDir/<runID>/   (runID = date-NNNN, max+1)
         |
         +-- buildPlan:  RegisterAll -> Registry -> FilterByEdition(edition)
         |       targets = ALL "get*" tasks   (minus 6 projectData tasks if skip)
@@ -98,7 +98,9 @@ statement of `runTransfer`.
   |       getProjects x getBranches  (drop type==SHORT, branches sequential)   |
   |       getProjectIssuesFull / HotspotsFull / ComponentTree / Versions       |
   |       ComponentTree => getProjectSourceCode + getProjectSCMData (per file) |
-  |       hotspots enriched via api/hotspots/show  (rule.key -> ruleKey)       |
+  |       hotspots: 1 query per status (TO_REVIEW, REVIEWED), enriched via     |
+  |         api/hotspots/show (rule.key -> ruleKey); non-fatal 403/404 on one  |
+  |         status skips THAT status only (was: discarded the whole branch)    |
   |       version-gate: statuses vs issueStatuses @ SQ 10.4                    |
   |                                          => <task>/*.jsonl                 |
   |                                                                            |
@@ -213,14 +215,21 @@ statement of `runTransfer`.
   | P1   generate{Project,Profile,Gate,Group,Organization}Mappings   (no deps) |
   |         |                                                                  |
   | P2   createProjects, createProfiles, createGates, createGroups,            |
-  |       getMigrationUser                                                     |
+  |       getMigrationUser, getOrgBinding, getOrgRepos                         |
   |         |                                                                  |
   | P3   analyzeProfileRules, getGateConditions, getProfileBackups,            |
-  |       grantMigrationUserProjectPermissions, setProfileParent               |
+  |       grantMigrationUserProjectPermissions, setProfileParent,              |
+  |       getProjectIds, matchProjectRepos                                     |
+  |         |                                                                  |
+  |       matchProjectRepos (issue #122): source binding x org binding x       |
+  |         org repos -> {project_id, repository_id} or a skip record          |
+  |         (org_not_bound / repo_not_found / no_project_id)                   |
   |         |                                                                  |
   | P4   restoreProfiles, addGateConditions     <== profiles + gate configured |
   |       setProjectProfiles / Gates / GroupPermissions / Settings /           |
   |         Tags / Links / Webhooks, setNewCodePeriods  BEFORE scan replay (P5)|
+  |       setProjectBinding -> POST {api}/dop-translation/project-bindings     |
+  |         (enterprise host only; skips forwarded for the report)             |
   |         |                                                                  |
   | P5   importProjectData                                                     |
   |         |                                                                  |
@@ -234,11 +243,21 @@ statement of `runTransfer`.
   |         non-main branches SEQUENTIAL:                                      |
   |           buildBranchReport: load issues / hotspots / components /         |
   |             sources / activeRules ;  skip empty/purged ;                   |
+  |             buildSCProfileMap(org) -> profile per LANGUAGE ;               |
+  |             #474 applyUnsupportedLanguagePolicy(components, profiles):     |
+  |               langs(components) \ langs(profiles) = UNSUPPORTED            |
+  |                 exclude (default) -> drop those file components            |
+  |                 skip              -> return "skipped" + reason, NO submit  |
+  |                 warn              -> submit unchanged (CE will reject)     |
+  |               (empty profile map = API failure -> detection disabled)      |
   |             langs = file languages + langs of rules the findings use       |
   |               (widenLangsForFindingRules; needs a target profile) #456     |
   |             filter active rules by lang ;                                  |
   |             remap SQ->SC profile keys ;  dedup active rules ;              |
-  |             drop issues on inactive rules ;                                |
+  |             ConvertHotspotsToIssues: rule + msg + text range only          |
+  |               (no type, no impacts, NO severity override) ;                |
+  |             drop issues AND converted hotspots on inactive rules           |
+  |               (same filter: an orphan rule aborts the whole report) ;      |
   |             BackdateChangesets -> original creation dates                  |
   |         |                                                                  |
   |           non-main: PreCreateAnalysis POST {api}/analysis/analyses         |
@@ -251,19 +270,21 @@ statement of `runTransfer`.
   | P6   syncIssueMetadata || syncHotspotMetadata  (concurrent; dep importPD)  |
   |         |                                                                  |
   |       forEachMigrateItem(createProjects):                                  |
-  |         loadMatchable* (issues: exclude CLOSED/FIXED; hotspots: REVIEWED)  |
-  |         actionable filter (manual changes / comments)                      |
+  |         loadMatchable* (issues: exclude CLOSED/FIXED; hotspots: ALL)       |
+  |         actionable filter (issues only; hotspots skip it: the sqs-hotspot  |
+  |           tag matters even for untriaged TO_REVIEW hotspots)               |
   |         waitForCloudIndexing (exp backoff, non-fatal)                      |
   |         runProjectSyncLoop (cap Sem):                                      |
   |           ISSUES:   search componentKeys=key:file & rules=rule &           |
   |             issueStatuses=...  -> classify by line                         |
   |             (1=sync, 0=miss, >1=ambig)                                     |
-  |             -> transition -> comments                                      |
-  |             -> tags = source full tags U cloud tags U metadataSyncTag       |
-  |                (set_tags REPLACES, so union; #456)                         |
-  |             miss/ambig totals reported at WARN (were DEBUG-only)           |
-  |           HOTSPOTS: search projectKey & files  (NO rules param)            |
-  |             -> classify by (ruleKey, line) -> ChangeStatus -> comments     |
+  |             -> transition -> comments -> tags (+metadataSyncTag idem)      |
+  |           HOTSPOTS: now synced AS ISSUES (api/hotspots/search returns      |
+  |             nothing on Cloud since 2026-07-01) : findCloudIssueCandidates  |
+  |             (server-side rules=) -> classifyIssueCandidatesByLine ->       |
+  |             transition (TO_REVIEW=none, SAFE=falsepositive,                |
+  |             FIXED/ACKNOWLEDGED=accept) -> comments -> source back-link ->  |
+  |             set_tags sqs-hotspot (+metadataSyncTag idem)                   |
   |                                              => sync*Metadata/*.jsonl      |
   |                                                                            |
   +----------------------------------------------------------------------------+
@@ -307,7 +328,7 @@ statement of `runTransfer`.
 ```
 
 ## Same flow as a Mermaid chart
-<!-- updated: 2026-06-09_21:45:00 -->
+<!-- updated: 2026-07-27_23:55:00 -->
 
 Top-to-bottom render of the identical flow, with plain-English descriptions on
 every step so anyone can follow along. Orange cylinders are files saved to disk.
@@ -343,7 +364,7 @@ flowchart TB
 
         EX_PP["📦 Download per-project metadata (runs for every project in parallel)<br/><i>For each project, download all the configuration details:<br/>settings, links, quality metrics, webhooks, DevOps bindings, tags,<br/>group permissions, and scanner user permissions.<br/>If the server says 'access denied' or 'not found' for a project,<br/>that project is recorded as skipped and quietly dropped from all later steps.</i>"]
 
-        EX_PD["🐛 Download per-project issue data (the big download)<br/><i>For each branch of each project (skipping short-lived feature branches),<br/>download every bug, vulnerability, code smell, security hotspot,<br/>file tree, source code, and git blame history.<br/>Also grabs the full history of analysis versions.<br/>On newer SonarQube versions (10.4+) the field names for issue status are different —<br/>the tool handles both automatically.</i>"]
+        EX_PD["🐛 Download per-project issue data (the big download)<br/><i>For each branch of each project (skipping short-lived feature branches),<br/>download every bug, vulnerability, code smell, security hotspot,<br/>file tree, source code, and git blame history.<br/>Security Hotspots are fetched one review status at a time — first the<br/>still-to-review ones, then the reviewed ones — and the reviewed ones are<br/>enriched with their comments and rule key. If the server denies one of those<br/>two queries, only that query is skipped: the hotspots already collected for<br/>the other status are still written to disk (they used to be thrown away).<br/>Also grabs the full history of analysis versions.<br/>On newer SonarQube versions (10.4+) the field names for issue status are different —<br/>the tool handles both automatically.</i>"]
 
         EX_INIT --> EX_PLAN --> EX_EXEC --> EX_P1 --> EX_PP --> EX_PD
     end
@@ -418,7 +439,7 @@ flowchart TB
     subgraph MG["☁️ STEP 4 of 4 — MIGRATE   (creates everything on SonarCloud using the CSV tables as instructions)"]
         direction TB
 
-        MG_INIT["🔧 Set up and connect<br/><i>Applies default settings (concurrency=25, target=sonarcloud.io, enterprise edition).<br/>Checks that every target organisation in the CSV files actually exists on SonarCloud.<br/>Opens two API connections: one to the main SonarCloud website,<br/>one to its separate API subdomain (needed for scan report uploads).<br/>Assigns a unique run ID like '2026-06-09-01' so results are easy to find later.<br/>If you said to skip project data, issue sync is also automatically skipped.</i>"]
+        MG_INIT["🔧 Set up and connect<br/><i>Applies default settings (concurrency=25, target=sonarcloud.io, enterprise edition).<br/>Checks that every target organisation in the CSV files actually exists on SonarCloud.<br/>Opens two API connections: one to the main SonarCloud website,<br/>one to its separate API subdomain (needed for scan report uploads).<br/>Assigns a unique run ID like '2026-06-09-0001' so results are easy to find later.<br/>If you said to skip project data, issue sync is also automatically skipped.</i>"]
 
         MG_RES["📐 Plan the migration tasks<br/><i>Figures out all the tasks needed to migrate the 14 project-level items.<br/>Traces every dependency (e.g. 'set project profile' needs 'create profile' first)<br/>to build a complete set of ~25 tasks.<br/>Sorts them into 6 ordered phases using a topological sort algorithm.<br/>Saves the plan to plan.json so a crashed run can be resumed later.</i>"]
 
@@ -433,11 +454,11 @@ flowchart TB
 
             P4["Phase 4 — Configure all project settings<br/><i>Everything that needs to be configured BEFORE code analysis runs:<br/>restore full rule sets into quality profiles,<br/>add all conditions to quality gates,<br/>assign each project its quality profile and gate,<br/>set group permissions, project settings, tags, links, webhooks,<br/>and the 'new code' period definition.<br/>Must finish completely before Phase 5, because the scan replay reads these settings.</i>"]
 
-            P5["Phase 5 — Replay all code analysis history<br/><i>The most complex step. For each project, re-uploads every historical analysis.<br/>Only LONG-lived branches are replicated (main + release branches — not feature branches).<br/>Main branch is always processed first and must succeed before non-main branches start.<br/>For each branch: assembles a package of all issues, hotspots, file contents,<br/>and git blame data; preserves the original creation timestamps of every finding;<br/>translates profile keys from server format to SonarCloud format;<br/>removes duplicate rules and any issues that reference deleted rules.<br/>For non-main branches: first registers the branch with SonarCloud<br/>so it knows this is a long-lived branch tied to main<br/>(without this registration step, SonarCloud would silently discard the data).<br/>Then uploads the compressed report package and waits for SonarCloud to process it.</i>"]
+            P5["Phase 5 — Replay all code analysis history<br/><i>The most complex step. For each project, re-uploads every historical analysis.<br/>Only LONG-lived branches are replicated (main + release branches — not feature branches).<br/>Main branch is always processed first and must succeed before non-main branches start.<br/>For each branch: assembles a package of all issues, hotspots, file contents,<br/>and git blame data; preserves the original creation timestamps of every finding;<br/>translates profile keys from server format to SonarCloud format;<br/>removes duplicate rules and any issues that reference deleted rules.<br/>Security Hotspots are converted into ordinary issues at this point: the package<br/>names the rule, the message and the code range and nothing else — no type, no<br/>impacts, no severity override — because the scanner protocol has no way to say<br/>'this finding is a hotspot', so SonarQube Cloud works the kind out from the rule<br/>on its own. The converted hotspots then go through the very same deleted-rule<br/>filter as native issues, so a hotspot on a rule that no longer exists on<br/>SonarQube Cloud is dropped and counted rather than aborting the whole branch.<br/>For non-main branches: first registers the branch with SonarCloud<br/>so it knows this is a long-lived branch tied to main<br/>(without this registration step, SonarCloud would silently discard the data).<br/>Then uploads the compressed report package and waits for SonarCloud to process it.</i>"]
 
             MAINGATE{{"🚧 Main-branch checkpoint<br/><i>The main branch MUST import successfully.<br/>If it fails, all other branches for that project<br/>are marked as skipped. This prevents orphaned<br/>non-main branches with no parent.</i>"}}:::gate
 
-            P6["Phase 6 — Sync issue metadata (runs in parallel for issues and hotspots)<br/><i>The scan replay in Phase 5 recreated the findings, but lost some human-added metadata:<br/>status changes, comments, tags, and assignments that were manually added on the server.<br/>This phase re-applies all of that.<br/>For each project: loads the original manual changes from disk, waits for SonarCloud<br/>to finish indexing the new findings (with automatic retries), then matches each<br/>old finding to its new equivalent by file path + line number.<br/>Issues: matched 1-to-1 → apply status transition, comments, tags.<br/>Hotspots: matched by rule + line → apply review status, comments.<br/>Ambiguous matches (multiple findings on same line) are flagged but not force-applied.</i>"]
+            P6["Phase 6 — Sync issue metadata (runs in parallel for issues and hotspots)<br/><i>The scan replay in Phase 5 recreated the findings, but lost some human-added metadata:<br/>status changes, comments, tags, and assignments that were manually added on the server.<br/>This phase re-applies all of that.<br/>For each project: loads the original manual changes from disk, waits for SonarCloud<br/>to finish indexing the new findings (with automatic retries), then matches each<br/>old finding to its new equivalent by file path + line number.<br/>Issues: matched 1-to-1 → apply status transition, comments, tags.<br/>Hotspots: SonarQube Cloud has no hotspots any more — they became ordinary issue<br/>rules on 1 July 2026 — so each source hotspot is matched against a target<br/>*issue* on the same rule, file and line instead. It then gets its review state<br/>applied as an issue transition (still-to-review stays open, safe becomes false<br/>positive, fixed and acknowledged both become accepted), its comments copied, a<br/>link back to the original hotspot on the server, and the tag sqs-hotspot so you<br/>can always find which issues used to be Security Hotspots. Every hotspot is<br/>visited, even untriaged ones, because that tag matters for all of them.<br/>Ambiguous matches (multiple findings on same line) are flagged but not force-applied.</i>"]
 
             P1 --> P2 --> P3 --> P4 --> P5
             P5 --> MAINGATE --> P6
@@ -458,7 +479,7 @@ flowchart TB
     P5 -. "saves upload results" .-> IMPORTED
     P6 -. "saves sync results" .-> SYNCED
 
-    P6 --> RUNID["📬 Finish migrate, hand off to reports<br/><i>Returns the run ID (e.g. '2026-06-09-01') so reports can find the right folder.<br/>Even if a phase errored, the run ID is still returned so you get a partial report.<br/>Saves three housekeeping files: run summary metadata, a log of every API event,<br/>and a log of any rate-limit events from SonarCloud.</i>"]
+    P6 --> RUNID["📬 Finish migrate, hand off to reports<br/><i>Returns the run ID (e.g. '2026-06-09-0001') so reports can find the right folder.<br/>Even if a phase errored, the run ID is still returned so you get a partial report.<br/>Saves three housekeeping files: run summary metadata, a log of every API event,<br/>and a log of any rate-limit events from SonarCloud.</i>"]
 
     %% ===================== REPORTS =====================
     subgraph RP["📊 REPORTS   (generates your summary files — a failure here does NOT fail the migration)"]
@@ -525,7 +546,47 @@ flowchart TB
   protobuf metadata field 19 with `BranchType="long"` and a reference to the
   **main** branch — without it the CE accepts the report but never persists the
   branch (the BUG-17 fix).
+- **Hotspots are issues on the target, in both P5 and P6.** SonarQube Cloud
+  dropped Security Hotspots on 2026-07-01 and converted the former hotspot rules
+  in place into ordinary issue rules — mostly `VULNERABILITY`, sometimes
+  `CODE_SMELL`, carrying SonarSource's `former-hotspot` system tag; a few old
+  hotspot rules are `status: REMOVED` instead and are simply unmigratable.
+  Hotspots always *arrived* as plain issues — the native `Issue` protobuf message
+  has no type field, so the scanner only ever names a rule and the server
+  classifies the finding — so nothing was previously "lost". What changed is that
+  P5 now converts them explicitly (`ConvertHotspotsToIssues`: rule coordinates,
+  message and text range only; no type, no impacts and **no severity override**,
+  replacing a `vulnerabilityProbability` → CRITICAL/MAJOR/MINOR squash that
+  stamped a severity the rule would never raise), and P6 resolves the target
+  counterpart through `/api/issues/search` instead of `/api/hotspots/search`,
+  which now returns nothing by definition — previously every hotspot silently
+  resolved to `not_found` and no triage was ever applied. The migration marker is
+  the `sqs-hotspot` tag, set via `/api/issues/set_tags` alongside
+  `metadata-synchronized`. See [HOTSPOTS-AS-ISSUES.md](HOTSPOTS-AS-ISSUES.md).
+- **Converted hotspots now share the native orphan-rule filter.** They used to
+  bypass `dropIssuesWithInactiveRules`, on the reasoning that they were validated
+  against hotspot rules rather than the active-rule set — true while Cloud had
+  hotspots, false since 2026-07-01. An issue naming a rule the analysis does not
+  activate aborts the **entire** report in the CE, so a hotspot on a retired rule
+  could take a whole branch's findings down with it. Dropped ones are counted and
+  warned instead.
 - **Reports are fire-and-forget.** `emitReports` has no error return; if
   `GenerateReports` fails the transfer still prints "Transfer complete." and
   exits 0. Both report files are written to the **top-level** export dir, not
   inside `runDir`.
+- **The report's file languages and its quality-profile metadata come from two
+  different places, and the CE cross-checks them.** Component languages come
+  from the source server (`api/measures/component_tree`); `qprofiles_per_language`
+  can only name profiles that exist on the **target** org
+  (`buildSCProfileMap`). A language present in the former but absent from the
+  latter makes the CE reject the *whole* report with `Report contains a file
+  with language 'X' but no matching quality profile` — costing every issue and
+  every branch while the project, permissions and gate survive, because they
+  are created earlier. `applyUnsupportedLanguagePolicy` closes that gap by
+  comparing the two sets before submitting (#474). A failed profile fetch
+  yields an empty map, so detection is disabled in that case rather than
+  treating every language as unsupported.
+- **A rejected report no longer passes as success.** `importProjectData` logs
+  the failure at **ERROR** and counts it (`task summary … failed=1`); the
+  migration report names the offending language and the remedy instead of
+  framing it as "API error when migrating project data" (#474).

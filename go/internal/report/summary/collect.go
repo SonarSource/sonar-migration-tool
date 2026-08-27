@@ -71,6 +71,15 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 			// from the data-migration tasks' JSONL output.
 			projectFailures := collectProjectFailures(runDir)
 			projectFailures = append(projectFailures, collectProjectSyncSkips(store, projectDataMap)...)
+			// #122 — a project whose source DevOps platform binding
+			// could not be replicated on SonarQube Cloud (most often
+			// because the target organization is not itself bound to
+			// that platform) is reported as Partial Migration with the
+			// reason spelled out in the Details column.
+			projectFailures = append(projectFailures, collectProjectBindingOutcomes(store)...)
+			// #474 — projects whose report had unsupported-language files
+			// excluded imported successfully but are not full migrations.
+			projectFailures = append(projectFailures, collectUnsupportedLanguageExclusions(store)...)
 			section.Succeeded, section.NearPerfect, section.Partial = applyProjectFailures(
 				section.Succeeded, section.NearPerfect, section.Partial, projectFailures)
 			// #356 — append a per-project "x/y issues synced (z%)"
@@ -123,6 +132,7 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 		sum.OverallStatus = rt.OverallStatus
 		sum.Phases = rt.Phases
 		sum.Tasks = rt.Tasks
+		sum.PhaseBreakdown = buildPhaseBreakdown(rt.Tasks)
 		sum.Failures = rt.Failures
 		sum.Warnings = rt.Warnings
 		sum.Branches = rt.Branches
@@ -230,6 +240,26 @@ func collectLimitations(runDir, exportDir string, mapping structure.ExtractMappi
 	return out
 }
 
+// maxListedLimitationUsers caps how many logins are spelled out in a
+// user-permission limitation note (#475) — instances with thousands
+// of users but only a handful holding the affected permissions were
+// producing an unreadably long PDF report.
+const maxListedLimitationUsers = 10
+
+// formatLimitationUserList renders logins for a user-permission
+// limitation note (#475): all of them when there are at most
+// maxListedLimitationUsers, otherwise only the first
+// maxListedLimitationUsers plus a count of the rest.
+func formatLimitationUserList(logins []string) string {
+	if len(logins) <= maxListedLimitationUsers {
+		return strings.Join(logins, ", ")
+	}
+	return fmt.Sprintf("first %d: %s (and %d more)",
+		maxListedLimitationUsers,
+		strings.Join(logins[:maxListedLimitationUsers], ", "),
+		len(logins)-maxListedLimitationUsers)
+}
+
 // collectUserPermissionLimitations covers #230 Y3 and Y4. SonarQube
 // Cloud does not expose a way to grant permissions to individual
 // users via API — only to groups — so any SQS user permission on a
@@ -277,12 +307,12 @@ func collectUserPermissionLimitations(exportDir string, mapping structure.Extrac
 		sort.Strings(combined)
 		notes = append(notes, fmt.Sprintf(
 			"SonarQube Cloud does not support user permissions via API. The following %d user(s) had permissions on SonarQube Server permission templates and were not migrated: %s.",
-			len(combined), strings.Join(combined, ", ")))
+			len(combined), formatLimitationUserList(combined)))
 	}
 	if globalLogins := collect("getUserPermissions"); len(globalLogins) > 0 {
 		notes = append(notes, fmt.Sprintf(
 			"SonarQube Cloud does not support user permissions via API. The following %d user(s) had global SonarQube Server permissions and were not migrated: %s.",
-			len(globalLogins), strings.Join(globalLogins, ", ")))
+			len(globalLogins), formatLimitationUserList(globalLogins)))
 	}
 	return notes
 }
@@ -560,6 +590,17 @@ func collectSection(store *common.DataStore, def sectionDef,
 	succeeded := collectSucceeded(store, def)
 	skipped := collectSkipped(store, def)
 	failed := collectFailed(failuresByType, def)
+	attachFailedSourceKeys(failed, store, def)
+
+	// #525: createProjects can diagnose some failures precisely (a target
+	// key already owned by a different SonarQube Cloud organization) and
+	// records them explicitly instead of relying solely on the generic
+	// requests.log HTTP-status scan above, which can only surface the raw
+	// SonarQube API error text. Merge those in, replacing any
+	// requests.log-derived row for the same project.
+	if def.Name == "Projects" {
+		failed = mergeExplicitProjectFailures(failed, collectExplicitFailures(store, def))
+	}
 	partial := collectPartial(def, configFailures, succeeded)
 	var nearPerfect []EntityItem
 
@@ -664,11 +705,18 @@ func collectSucceeded(store *common.DataStore, def sectionDef) []EntityItem {
 	var result []EntityItem
 	seen := make(map[string]bool, len(items))
 	for _, item := range items {
+		// #525: a task (currently only createProjects) may record an
+		// explicit failure instead of omitting the row entirely — such
+		// rows belong in collectExplicitFailures/Failed, not here.
+		if jsonStr(item, "status") == "failed" {
+			continue
+		}
 		entry := EntityItem{
 			Name:         jsonStr(item, def.NameField),
 			Language:     jsonStr(item, "language"),
 			Organization: jsonStr(item, "sonarcloud_org_key"),
 			Detail:       jsonStr(item, def.DetailField),
+			SourceKey:    jsonStr(item, def.SourceKeyField),
 		}
 		key := entry.Organization + "\x00" + entry.Detail + "\x00" + entry.Name + "\x00" + entry.Language
 		if seen[key] {
@@ -704,6 +752,7 @@ func collectSkipped(store *common.DataStore, def sectionDef) []EntityItem {
 				Organization: jsonStr(item, "sonarqube_org_key"),
 				Detail:       "Organization skipped",
 				SkipReason:   SkipReasonOrgSkipped,
+				SourceKey:    jsonStr(item, def.SourceKeyField),
 			})
 		}
 	}
@@ -807,6 +856,86 @@ func collectFailed(failuresByType map[string][]analysis.ReportRow, def sectionDe
 		})
 	}
 	return result
+}
+
+// collectExplicitFailures reads def.OutputTask for records the task itself
+// marked "status":"failed" with an explicit "error" message (#525) — used
+// when a task can diagnose a failure more precisely than the generic
+// requests.log HTTP-status scan (collectFailed) can, e.g. createProjects
+// detecting that a target key is already owned by a different SonarQube
+// Cloud organization. The record already carries name/source-key fields
+// from the input item it was built from (common.EnrichRaw), so — unlike
+// collectFailed's rows — no separate source-key lookup is needed.
+func collectExplicitFailures(store *common.DataStore, def sectionDef) []EntityItem {
+	items, err := store.ReadAll(def.OutputTask)
+	if err != nil {
+		return nil
+	}
+	var result []EntityItem
+	for _, item := range items {
+		if jsonStr(item, "status") != "failed" {
+			continue
+		}
+		result = append(result, EntityItem{
+			Name:         jsonStr(item, def.NameField),
+			Organization: jsonStr(item, "sonarcloud_org_key"),
+			ErrorMessage: jsonStr(item, "error"),
+			SourceKey:    jsonStr(item, def.SourceKeyField),
+		})
+	}
+	return result
+}
+
+// mergeExplicitProjectFailures appends explicit's rows to failed, dropping
+// any requests.log-derived row from failed whose Name also appears in
+// explicit — the task's own diagnosis supersedes the generic one for the
+// same project rather than duplicating it (#525).
+func mergeExplicitProjectFailures(failed, explicit []EntityItem) []EntityItem {
+	if len(explicit) == 0 {
+		return failed
+	}
+	explicitNames := make(map[string]bool, len(explicit))
+	for _, e := range explicit {
+		explicitNames[e.Name] = true
+	}
+	out := make([]EntityItem, 0, len(failed)+len(explicit))
+	for _, f := range failed {
+		if explicitNames[f.Name] {
+			continue
+		}
+		out = append(out, f)
+	}
+	return append(out, explicit...)
+}
+
+// attachFailedSourceKeys fills in EntityItem.SourceKey for Failed-bucket
+// rows (issue #448) by matching on Name against the generate*Mappings task
+// output. Failed rows come from the analysis report ledger
+// (analysis.ReportRow), which carries the entity name but not the source
+// key, so — unlike Succeeded/Skipped — it has to be looked up separately.
+// No-op when the section has no SourceKeyField (all sections except
+// Projects).
+func attachFailedSourceKeys(items []EntityItem, store *common.DataStore, def sectionDef) {
+	if def.SourceKeyField == "" || len(items) == 0 {
+		return
+	}
+	mapped, err := store.ReadAll(def.InputTask)
+	if err != nil {
+		return
+	}
+	keyByName := make(map[string]string, len(mapped))
+	for _, item := range mapped {
+		name := jsonStr(item, def.NameField)
+		if name == "" {
+			continue
+		}
+		keyByName[name] = jsonStr(item, def.SourceKeyField)
+	}
+	for i := range items {
+		if key, ok := keyByName[items[i].Name]; ok {
+			items[i].SourceKey = key
+		}
+	}
 }
 
 // projectDataOutcome holds the per-project state of the
@@ -919,9 +1048,20 @@ func projectDataSkipReason(errMsg string) string {
 // with the operator-friendly framing the issue spec uses ("API error
 // when migrating project data"). Empty errors fall back to the bare
 // framing so we never lose the signal entirely.
+//
+// #474 — a Compute Engine rejection caused by a file whose language has no
+// quality profile on the target is not an API error, and framing it as one hid
+// the real cause from the operator. Name the language and the remedy instead.
 func projectDataFailureReason(errMsg string) string {
 	if errMsg == "" {
 		return "API error when migrating project data"
+	}
+	if lang := migrate.UnsupportedLanguageFromCEError(errMsg); lang != "" {
+		return "No issues or branches were migrated: the analysis report was rejected because the project " +
+			"contains files in language '" + lang + "', which has no quality profile in the target " +
+			"organization — typically a language provided by a 3rd-party SonarQube Server plugin. " +
+			"Re-run with --unsupported_languages=exclude to migrate everything except those files, " +
+			"or --unsupported_languages=skip to skip this project's data."
 	}
 	return "API error when migrating project data: " + errMsg
 }

@@ -96,6 +96,14 @@ type matchableIssue struct {
 	ManualSeverity bool
 	Branch         string
 	Transitions    []string
+
+	// Message, Type, Severity and Author feed the approximate-match scorer
+	// (matchscore.go, issue #412) — they play no role in the transition /
+	// comment / tag sync logic below.
+	Message  string
+	Type     string
+	Severity string
+	Author   string
 }
 
 // issueComment is a normalised comment attached to a matchableIssue.
@@ -277,6 +285,16 @@ const metadataSyncTag = "metadata-synchronized"
 // Assignee was previously a trigger but was dropped per the issue spec:
 // auto-assigned issues (e.g. via "default assignee") are common and
 // inflate the actionable set without carrying real triage signal.
+//
+// #527 / --fast_sync note: syncProjectIssues only ever visits, tags, and
+// back-links issues that pass this filter — an untouched issue (OPEN, no
+// custom tags, no comments) never reaches the per-item Cloud lookup at
+// all, unconditionally, regardless of the --fast_sync flag. So --fast_sync
+// has no additional effect on the issue path today; its effect is visible
+// only on the hotspot path (tasks_hotspotsync.go's syncOneHotspotAsIssue),
+// which — unlike this one — still resolves and tags every hotspot by
+// default so #423's identifiability guarantee holds even for hotspots
+// with zero user changes.
 func hasManualChanges(iss matchableIssue) bool {
 	status := strings.ToUpper(iss.Status)
 	resolution := strings.ToUpper(iss.Resolution)
@@ -624,20 +642,18 @@ func resolveAndSyncIssue(ctx context.Context, e *Executor, cloudKey, orgKey, bas
 			"project", cloudKey, "source_key", src.Key, "rule", src.Rule, "file", filePath, "branch", src.Branch)
 		return syncOutcomeLookupError
 	}
-	target, outcome := classifyIssueCandidatesByLine(candidates, src.Line)
+	target, outcome := classifyIssueCandidatesByScore(candidates, src)
 	switch outcome {
 	case syncOutcomeSynced:
 		syncOnePair(ctx, e, issuePair{source: src, cloud: target}, baseURL, projectKey, counter)
 	case syncOutcomeNotFound:
-		e.Logger.Debug("syncIssueMetadata: no cloud counterpart on source line", "source_key", src.Key, "rule", src.Rule, "file", filePath, "line", src.Line)
+		e.Logger.Debug("syncIssueMetadata: no cloud counterpart matched", "source_key", src.Key, "rule", src.Rule, "file", filePath, "line", src.Line)
 	case syncOutcomeLineMismatch:
 		keys := make([]string, 0)
 		for _, c := range candidates {
-			if c.Line == src.Line {
-				keys = append(keys, c.Key)
-			}
+			keys = append(keys, c.Key)
 		}
-		e.Logger.Debug("syncIssueMetadata: multiple cloud counterparts on source line, skipping", "source_key", src.Key, "rule", src.Rule, "file", filePath, "line", src.Line, "candidates", keys)
+		e.Logger.Debug("syncIssueMetadata: multiple cloud counterparts matched, skipping", "source_key", src.Key, "rule", src.Rule, "file", filePath, "line", src.Line, "candidates", keys)
 	}
 	return outcome
 }
@@ -647,6 +663,11 @@ func resolveAndSyncIssue(ctx context.Context, e *Executor, cloudKey, orgKey, bas
 // the one on the source's line. 1 → synced, 0 → not_found, n>1 →
 // line_mismatch. Factored out so the per-pair logic is unit testable
 // without HTTP mocking.
+//
+// Used by hotspot-sync (tasks_hotspotsync.go), which reuses the issue
+// matcher against hotspots re-imported as ordinary Cloud issues (#423)
+// but has no message/type/severity/author fields to feed the
+// approximate scorer that resolveAndSyncIssue uses instead (#412).
 func classifyIssueCandidatesByLine(candidates []matchableIssue, sourceLine int) (matchableIssue, syncOutcome) {
 	var pick matchableIssue
 	matches := 0
@@ -1077,21 +1098,14 @@ func (r *ruleTagDefaults) UserTagsOnly(serverURL, ruleKey string, allTags []stri
 // tag list so that matchableIssue.Tags holds only the user-added tags
 // — see the type doc on ruleTagDefaults.
 func loadMatchableIssues(e *Executor, serverURL, serverKey string, ruleDefaults *ruleTagDefaults) []matchableIssue {
-	items, err := readExtractItems(e, "getProjectIssuesFull")
-	if err != nil {
-		return nil
-	}
+	// Project-scoped with no branch filter. Streaming matters here: this
+	// runs once per project at concurrency 25, so materializing the whole
+	// instance's issue corpus meant 25 concurrent copies of it.
+	scope := extractScope{ServerURL: serverURL, ProjectKey: serverKey}
 
 	var issues []matchableIssue
 	var excludedFixed int
-	for _, item := range items {
-		if item.ServerURL != serverURL {
-			continue
-		}
-		if extractField(item.Data, "projectKey") != serverKey {
-			continue
-		}
-
+	for item := range scopedExtractItems(e, "getProjectIssuesFull", scope) {
 		status := strings.ToUpper(extractField(item.Data, "status"))
 		resolution := strings.ToUpper(extractField(item.Data, "resolution"))
 		issueStatus := strings.ToUpper(extractField(item.Data, "issueStatus"))
@@ -1126,6 +1140,10 @@ func loadMatchableIssues(e *Executor, serverURL, serverKey string, ruleDefaults 
 			Assignee:       extractField(item.Data, "assignee"),
 			ManualSeverity: extractBool(item.Data, "manualSeverity"),
 			Branch:         extractField(item.Data, "branch"),
+			Message:        extractField(item.Data, "message"),
+			Type:           extractField(item.Data, "type"),
+			Severity:       extractField(item.Data, "severity"),
+			Author:         extractField(item.Data, "author"),
 		})
 	}
 
@@ -1163,6 +1181,10 @@ func apiIssueToMatchable(ai sqtypes.Issue) matchableIssue {
 		Comments:    comments,
 		Assignee:    ai.Assignee,
 		Transitions: ai.Transitions,
+		Message:     ai.Message,
+		Type:        ai.Type,
+		Severity:    ai.Severity,
+		Author:      ai.Author,
 	}
 }
 
