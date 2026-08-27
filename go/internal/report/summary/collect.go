@@ -591,6 +591,16 @@ func collectSection(store *common.DataStore, def sectionDef,
 	skipped := collectSkipped(store, def)
 	failed := collectFailed(failuresByType, def)
 	attachFailedSourceKeys(failed, store, def)
+
+	// #525: createProjects can diagnose some failures precisely (a target
+	// key already owned by a different SonarQube Cloud organization) and
+	// records them explicitly instead of relying solely on the generic
+	// requests.log HTTP-status scan above, which can only surface the raw
+	// SonarQube API error text. Merge those in, replacing any
+	// requests.log-derived row for the same project.
+	if def.Name == "Projects" {
+		failed = mergeExplicitProjectFailures(failed, collectExplicitFailures(store, def))
+	}
 	partial := collectPartial(def, configFailures, succeeded)
 	var nearPerfect []EntityItem
 
@@ -695,6 +705,12 @@ func collectSucceeded(store *common.DataStore, def sectionDef) []EntityItem {
 	var result []EntityItem
 	seen := make(map[string]bool, len(items))
 	for _, item := range items {
+		// #525: a task (currently only createProjects) may record an
+		// explicit failure instead of omitting the row entirely — such
+		// rows belong in collectExplicitFailures/Failed, not here.
+		if jsonStr(item, "status") == "failed" {
+			continue
+		}
 		entry := EntityItem{
 			Name:         jsonStr(item, def.NameField),
 			Language:     jsonStr(item, "language"),
@@ -840,6 +856,56 @@ func collectFailed(failuresByType map[string][]analysis.ReportRow, def sectionDe
 		})
 	}
 	return result
+}
+
+// collectExplicitFailures reads def.OutputTask for records the task itself
+// marked "status":"failed" with an explicit "error" message (#525) — used
+// when a task can diagnose a failure more precisely than the generic
+// requests.log HTTP-status scan (collectFailed) can, e.g. createProjects
+// detecting that a target key is already owned by a different SonarQube
+// Cloud organization. The record already carries name/source-key fields
+// from the input item it was built from (common.EnrichRaw), so — unlike
+// collectFailed's rows — no separate source-key lookup is needed.
+func collectExplicitFailures(store *common.DataStore, def sectionDef) []EntityItem {
+	items, err := store.ReadAll(def.OutputTask)
+	if err != nil {
+		return nil
+	}
+	var result []EntityItem
+	for _, item := range items {
+		if jsonStr(item, "status") != "failed" {
+			continue
+		}
+		result = append(result, EntityItem{
+			Name:         jsonStr(item, def.NameField),
+			Organization: jsonStr(item, "sonarcloud_org_key"),
+			ErrorMessage: jsonStr(item, "error"),
+			SourceKey:    jsonStr(item, def.SourceKeyField),
+		})
+	}
+	return result
+}
+
+// mergeExplicitProjectFailures appends explicit's rows to failed, dropping
+// any requests.log-derived row from failed whose Name also appears in
+// explicit — the task's own diagnosis supersedes the generic one for the
+// same project rather than duplicating it (#525).
+func mergeExplicitProjectFailures(failed, explicit []EntityItem) []EntityItem {
+	if len(explicit) == 0 {
+		return failed
+	}
+	explicitNames := make(map[string]bool, len(explicit))
+	for _, e := range explicit {
+		explicitNames[e.Name] = true
+	}
+	out := make([]EntityItem, 0, len(failed)+len(explicit))
+	for _, f := range failed {
+		if explicitNames[f.Name] {
+			continue
+		}
+		out = append(out, f)
+	}
+	return append(out, explicit...)
 }
 
 // attachFailedSourceKeys fills in EntityItem.SourceKey for Failed-bucket
