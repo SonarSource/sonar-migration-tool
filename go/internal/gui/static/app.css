@@ -270,7 +270,7 @@ select:focus {
 
 .wizard-layout {
 	display: grid;
-	grid-template-columns: 1fr 1fr;
+	grid-template-columns: 1fr 2fr;
 	gap: 1.5rem;
 	align-items: start;
 	max-width: none;

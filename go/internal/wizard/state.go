@@ -30,12 +30,12 @@ const (
 // WizardState holds the persistent state of a migration wizard session.
 // JSON serialization persists to .wizard_state.json for resume support.
 //
-// SourceToken / TargetToken are deliberately tagged json:"-" so they
-// never reach disk. They exist only so `gui --config <file>` (#388)
-// can pre-fill the corresponding password prompts in memory via
-// RunWithSeed — the wizard reads them when present and prompts
-// otherwise. Resume reloads the state from disk, where these fields
-// will be empty, and the user is asked to retype the tokens.
+// SourceToken / TargetToken / CertPassword are deliberately tagged
+// json:"-" so they never reach disk. They exist only so `gui --config
+// <file>` (#388, #515) can pre-fill the corresponding password prompts
+// in memory via RunWithSeed — the wizard reads them when present and
+// prompts otherwise. Resume reloads the state from disk, where these
+// fields will be empty, and the user is asked to retype them.
 type WizardState struct {
 	Phase               WizardPhase `json:"phase"`
 	ExtractID           *string     `json:"extract_id"`
@@ -53,9 +53,26 @@ type WizardState struct {
 	IncludeProjectData *bool `json:"include_project_data"`
 	IncludeIssueSync   *bool `json:"include_issue_sync"`
 
-	// Tokens — in-memory only. See type-level comment for rationale.
-	SourceToken *string `json:"-"`
-	TargetToken *string `json:"-"`
+	// PEMFilePath / KeyFilePath are the source client-certificate paths
+	// gathered on the Extract phase's credentials screen (#515). Not
+	// secret, so they persist to disk like SourceURL.
+	PEMFilePath *string `json:"pem_file_path"`
+	KeyFilePath *string `json:"key_file_path"`
+
+	// ProjectKeyPattern scopes extraction to matching project keys
+	// (full-match regex, #515/#529 convention). Not secret, persists
+	// to disk like SourceURL.
+	ProjectKeyPattern *string `json:"project_key_pattern"`
+
+	// DefaultOrganization mirrors migrate.MigrateConfig.DefaultOrganization
+	// (#281), gathered on the Migrate phase's credentials screen (#515).
+	// Not secret, persists to disk like TargetURL.
+	DefaultOrganization *string `json:"default_organization"`
+
+	// Tokens / CertPassword — in-memory only. See type-level comment for rationale.
+	SourceToken  *string `json:"-"`
+	TargetToken  *string `json:"-"`
+	CertPassword *string `json:"-"`
 }
 
 // NewWizardState returns a WizardState initialized to the INIT phase.
@@ -105,6 +122,10 @@ func resetPhaseState(state *WizardState, phase WizardPhase) {
 		state.SkippedProjects = nil
 		state.IncludeProjectData = nil
 		state.IncludeIssueSync = nil
+		state.PEMFilePath = nil
+		state.KeyFilePath = nil
+		state.CertPassword = nil
+		state.ProjectKeyPattern = nil
 	case PhaseOrgMapping:
 		state.OrganizationsMapped = false
 	case PhaseValidate:
@@ -113,6 +134,7 @@ func resetPhaseState(state *WizardState, phase WizardPhase) {
 		state.MigrationRunID = nil
 		state.TargetURL = nil
 		state.EnterpriseKey = nil
+		state.DefaultOrganization = nil
 	}
 }
 

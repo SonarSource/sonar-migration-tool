@@ -13,27 +13,36 @@ import (
 // Run is the main entry point for the wizard. It loads state, handles
 // resume, and runs phases sequentially until complete or interrupted.
 func Run(ctx context.Context, p Prompter, exportDir string) error {
-	return RunWithSeed(ctx, p, exportDir, nil)
+	_, err := RunWithSeed(ctx, p, exportDir, nil)
+	return err
 }
 
 // RunWithSeed is the same as Run but pre-fills the in-memory state
 // with values from `seed` before prompting. Disk state wins over the
 // seed — re-running `gui --config <file>` against a partially
 // completed wizard never silently rewrites progress. Tokens carried
-// in the seed (SourceToken / TargetToken) are merged into the
-// in-memory state only; they are NEVER persisted to
+// in the seed (SourceToken / TargetToken / CertPassword) are merged
+// into the in-memory state only; they are NEVER persisted to
 // .wizard_state.json. The cmd/gui.go config-load path uses this to
 // honour `--config` per issue #388.
-func RunWithSeed(ctx context.Context, p Prompter, exportDir string, seed *WizardState) error {
+//
+// The final in-memory *WizardState is returned alongside the error —
+// on success, early exit, or cancellation — so a caller that
+// re-invokes RunWithSeed within the same process (cmd/gui.go's
+// OnStartWizard, #515) can pass it back in as the next call's seed.
+// That carries every override forward — including in-memory-only
+// tokens/CertPassword that never touch disk — for the lifetime of the
+// running process, fixing overrides otherwise being lost after Cancel.
+func RunWithSeed(ctx context.Context, p Prompter, exportDir string, seed *WizardState) (*WizardState, error) {
 	if err := os.MkdirAll(exportDir, 0o755); err != nil {
-		return fmt.Errorf("creating export directory: %w", err)
+		return seed, fmt.Errorf("creating export directory: %w", err)
 	}
 
 	p.DisplayWelcome()
 
 	state, err := Load(exportDir)
 	if err != nil {
-		return fmt.Errorf("loading wizard state: %w", err)
+		return seed, fmt.Errorf("loading wizard state: %w", err)
 	}
 	if seed != nil {
 		mergeSeed(state, seed)
@@ -41,15 +50,16 @@ func RunWithSeed(ctx context.Context, p Prompter, exportDir string, seed *Wizard
 
 	state, shouldContinue := handleResume(p, state, exportDir)
 	if !shouldContinue {
-		return nil
+		return state, nil
 	}
 
 	startPhase, ok := determineStartingPhase(p, state, exportDir)
 	if !ok {
-		return nil
+		return state, nil
 	}
 
-	return runPhaseLoop(ctx, p, state, exportDir, startPhase)
+	err = runPhaseLoop(ctx, p, state, exportDir, startPhase)
+	return state, err
 }
 
 // mergeSeed copies any field from seed into state when state's
@@ -72,14 +82,29 @@ func mergeSeed(state, seed *WizardState) {
 	if state.IncludeIssueSync == nil && seed.IncludeIssueSync != nil {
 		state.IncludeIssueSync = seed.IncludeIssueSync
 	}
-	// Tokens are always seeded when supplied — disk never has them
-	// (json:"-"), so the "disk wins" rule degenerates to "seed wins
-	// when present" for these two fields.
+	if state.PEMFilePath == nil && seed.PEMFilePath != nil && *seed.PEMFilePath != "" {
+		state.PEMFilePath = seed.PEMFilePath
+	}
+	if state.KeyFilePath == nil && seed.KeyFilePath != nil && *seed.KeyFilePath != "" {
+		state.KeyFilePath = seed.KeyFilePath
+	}
+	if state.ProjectKeyPattern == nil && seed.ProjectKeyPattern != nil && *seed.ProjectKeyPattern != "" {
+		state.ProjectKeyPattern = seed.ProjectKeyPattern
+	}
+	if state.DefaultOrganization == nil && seed.DefaultOrganization != nil && *seed.DefaultOrganization != "" {
+		state.DefaultOrganization = seed.DefaultOrganization
+	}
+	// Tokens / CertPassword are always seeded when supplied — disk
+	// never has them (json:"-"), so the "disk wins" rule degenerates
+	// to "seed wins when present" for these fields.
 	if seed.SourceToken != nil && *seed.SourceToken != "" {
 		state.SourceToken = seed.SourceToken
 	}
 	if seed.TargetToken != nil && *seed.TargetToken != "" {
 		state.TargetToken = seed.TargetToken
+	}
+	if seed.CertPassword != nil && *seed.CertPassword != "" {
+		state.CertPassword = seed.CertPassword
 	}
 }
 
