@@ -344,9 +344,9 @@ jobs:
           files: dist/sonar-migration-tool-*
 
   # Open a PR bumping go/internal/version/version.go to a tentative next
-  # version so the released version is never left stale. The PR is a
-  # starting point only: a human picks the real next major/minor/patch
-  # before merging.
+  # version (incrementing the minor number, resetting patch to 0) so the
+  # released version is never left stale. The PR is a starting point only:
+  # a human picks the real next major/minor/patch before merging.
   bump-version:
     name: Open Next-Version Bump PR
     needs: publish
@@ -366,8 +366,8 @@ jobs:
         run: |
           set -euo pipefail
           IFS='.' read -r MAJOR MINOR PATCH <<< "$RELEASED_VERSION"
-          NEXT_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))-SNAPSHOT"
-          BRANCH="chore/bump-version-${MAJOR}.${MINOR}.$((PATCH + 1))"
+          NEXT_VERSION="${MAJOR}.$((MINOR + 1)).0-SNAPSHOT"
+          BRANCH="chore/bump-version-${MAJOR}.$((MINOR + 1)).0"
 
           sed -i.bak -E "s/const Version = \"[^\"]+\"/const Version = \"v${NEXT_VERSION}\"/" go/internal/version/version.go
           rm -f go/internal/version/version.go.bak
@@ -383,7 +383,7 @@ jobs:
           git commit -am "chore: bump version to v${NEXT_VERSION}"
           git push origin "$BRANCH"
 
-          PR_BODY="$(printf 'Automated follow-up to release `%s`.\n\nThis bumps `go/internal/version/version.go` to a tentative next version (`v%s`) by incrementing the patch number.\n\n**Please review and adjust the major/minor/patch as appropriate for what'"'"'s actually planned next before merging.**' "$RELEASED_TAG" "$NEXT_VERSION")"
+          PR_BODY="$(printf 'Automated follow-up to release `%s`.\n\nThis bumps `go/internal/version/version.go` to a tentative next version (`v%s`) by incrementing the minor version number.\n\n**Please review and adjust the major/minor/patch as appropriate for what'"'"'s actually planned next before merging.**' "$RELEASED_TAG" "$NEXT_VERSION")"
 
           gh pr create \
             --base main \
