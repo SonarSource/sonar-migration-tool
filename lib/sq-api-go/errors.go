@@ -92,6 +92,31 @@ func IsAlreadyExists(err error) bool {
 	return strings.Contains(lower, "already exists")
 }
 
+// IsMangledAlreadyExists reports whether err is SonarQube's "condition on
+// metric X already exists" 400 whose message was destroyed server-side
+// before it reached us.
+//
+// QualityGateConditionsUpdater builds that message with the metric's
+// short name, and five metrics have a literal "%" in theirs (e.g.
+// "Duplicated Lines (%) on New Code"). BadRequestException.checkRequest
+// then runs the already-interpolated string through String.format a
+// second time, so the "%)" raises UnknownFormatConversionException —
+// an IllegalArgumentException, which WebServiceEngine catches ahead of
+// BadRequestException and returns as the whole response body. The client
+// therefore sees the literal text "Conversion = ')'" instead of the real
+// message. Reproduced on SonarQube 9.9 through 26.5b; unreported
+// upstream as of 2026-08.
+//
+// Treat it exactly like IsAlreadyExists: the condition is already on the
+// target gate, so the desired end state holds.
+func IsMangledAlreadyExists(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	return strings.Contains(apiErr.Message(), "Conversion = ")
+}
+
 // IsOrgLevelRejection reports whether err is an APIError with status 400
 // whose body indicates the setting key cannot be set at organization
 // level. Some SonarQube Cloud settings — notably analyzer report paths
@@ -114,4 +139,32 @@ func IsOrgLevelRejection(err error) bool {
 	}
 	lower := strings.ToLower(apiErr.Message())
 	return strings.Contains(lower, "at organization level")
+}
+
+// IsProjectLevelRejection reports whether err is an APIError with status
+// 400 whose body indicates the setting key cannot be set at project
+// scope. It is the mirror of IsOrgLevelRejection: SonarQube Cloud's
+// SetAction validates the key's PropertyDefinition qualifiers against
+// the component's, and rejects a mismatch with
+// "Setting 'X' cannot be set on a Project".
+//
+// Instance-scope-only SonarQube Server settings (sonar.dbcleaner.*,
+// sonar.forceAuthentication, sonar.technicalDebt.*, the bundled .NET
+// analyzer manifest keys, ...) hit this whenever they reach a
+// project-scoped /api/settings/set. Detecting it lets the caller
+// abandon the key after one failure instead of retrying it against
+// every project in the run.
+//
+// The trailing word is an i18n label, not a code — SonarQube renders it
+// from "qualifier.TRK=Project", and the sibling message for a portfolio
+// or application reads differently. Match only the invariant stem
+// "cannot be set on a", which also contains no apostrophe and so is
+// immune to SonarCloud escaping ' as &#39; in the raw body.
+func IsProjectLevelRejection(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	lower := strings.ToLower(apiErr.Message())
+	return strings.Contains(lower, "cannot be set on a")
 }
