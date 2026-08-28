@@ -650,8 +650,7 @@ func resolveAndSyncHotspot(ctx context.Context, e *Executor, p hotspotResolvePar
 	switch outcome {
 	case syncOutcomeSynced:
 		if err := syncOneHotspotAsIssue(ctx, e, src, target, p.BaseURL, p.SourceKey, cat); err != nil {
-			counter.Fail()
-			logAPIWarn(e.Logger, "syncHotspotMetadata: hotspot sync failed", err,
+			failAPI(counter, e.Logger, "syncHotspotMetadata: hotspot sync failed", err,
 				"source_key", src.Key, "cloud_key", target.Key)
 		} else {
 			counter.Success()

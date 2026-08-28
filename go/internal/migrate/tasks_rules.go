@@ -8,9 +8,9 @@ import (
 	"context"
 	"strings"
 
-	"github.com/sonar-solutions/sq-api-go/cloud"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
+	"github.com/sonar-solutions/sq-api-go/cloud"
 )
 
 // ruleTasks returns tasks for updating rules in Cloud.
@@ -48,8 +48,7 @@ func runUpdateRuleTags(ctx context.Context, e *Executor) error {
 				Tags:         strings.Join(tags, ","),
 			})
 			if err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "updateRuleTags failed", err, "rule", ruleKey)
+				failAPI(counter, e.Logger, "updateRuleTags failed", err, "rule", ruleKey)
 				return nil
 			}
 			counter.Success()
@@ -78,8 +77,7 @@ func runUpdateRuleDescriptions(ctx context.Context, e *Executor) error {
 				MarkdownNote: note,
 			})
 			if err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "updateRuleDescriptions failed", err, "rule", ruleKey)
+				failAPI(counter, e.Logger, "updateRuleDescriptions failed", err, "rule", ruleKey)
 				return nil
 			}
 			counter.Success()

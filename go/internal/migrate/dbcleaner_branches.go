@@ -104,8 +104,7 @@ func applyDbCleanerBranchesGlobal(ctx context.Context, e *Executor, raw json.Raw
 	for _, org := range orgList {
 		err := e.Cloud.Settings.Set(ctx, "", sqcBranchRegexSetting, regex, org)
 		if err != nil {
-			counter.Fail()
-			logAPIWarn(e.Logger, "setGlobalSettings dbcleaner branches → regex failed", err,
+			failAPI(counter, e.Logger, "setGlobalSettings dbcleaner branches → regex failed", err,
 				"org", org, "target_key", sqcBranchRegexSetting, "value", regex)
 			rec.Outcomes = append(rec.Outcomes, orgOutcome{
 				Org: org, Status: outcomeFailed, Reason: err.Error(),

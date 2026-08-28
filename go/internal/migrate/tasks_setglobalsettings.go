@@ -77,19 +77,19 @@ var sqsOnlySettings = map[string]func(raw json.RawMessage) sqsOnlyDecision{
 	// these before any API call; predict consults
 	// IsSilentlySkippedGlobalSetting to mirror that and keep the two
 	// reports identical.
-	"sonar.core.id":                                           silentSkip, // internal server identity
-	"sonar.core.serverBaseURL":                                silentSkip,
-	"sonar.core.startTime":                                    silentSkip, // read-only server timestamp
+	"sonar.core.id":            silentSkip, // internal server identity
+	"sonar.core.serverBaseURL": silentSkip,
+	"sonar.core.startTime":     silentSkip, // read-only server timestamp
 	"sonar.builtInQualityProfiles.disableNotificationOnUpdate": silentSkip,
-	"sonar.announcement.htmlMessage":                          silentSkip,
-	"sonar.announcement.message":                              silentSkip,
-	"sonar.cfamily.generateComputedConfig":                    silentSkip,
-	"sonar.documentation.baseUrl":                             silentSkip,
-	"sonar.login.displayMessage":                              silentSkip,
-	"sonar.login.message":                                     silentSkip,
-	"sonar.license.notifications.remainingLocThreshold":       silentSkip,
-	"sonar.mcp.healthCheckInterval":                           silentSkip,
-	"sonar.plugins.risk.consent":                              silentSkip,
+	"sonar.announcement.htmlMessage":                           silentSkip,
+	"sonar.announcement.message":                               silentSkip,
+	"sonar.cfamily.generateComputedConfig":                     silentSkip,
+	"sonar.documentation.baseUrl":                              silentSkip,
+	"sonar.login.displayMessage":                               silentSkip,
+	"sonar.login.message":                                      silentSkip,
+	"sonar.license.notifications.remainingLocThreshold":        silentSkip,
+	"sonar.mcp.healthCheckInterval":                            silentSkip,
+	"sonar.plugins.risk.consent":                               silentSkip,
 	// Bundled analyzer plugin manifest fields — server-emitted, not
 	// user-set, never portable. The sonar.cs.analyzer.* family is
 	// covered by the prefix list below; remaining vbnet keys stay
@@ -746,7 +746,7 @@ func applyOneGlobalSetting(ctx context.Context, e *Executor, raw json.RawMessage
 		// extra org.
 		if orgRejected {
 			rec.Outcomes = append(rec.Outcomes,
-				fanOutOutcome(ctx, e, raw, key, org, valueSummary, mergeSuffix, projectDefsByOrg, projectKeyMap, overrideCovered, counter, /*alreadyKnown=*/ true))
+				fanOutOutcome(ctx, e, raw, key, org, valueSummary, mergeSuffix, projectDefsByOrg, projectKeyMap, overrideCovered, counter /*alreadyKnown=*/, true))
 			continue
 		}
 
@@ -766,10 +766,9 @@ func applyOneGlobalSetting(ctx context.Context, e *Executor, raw json.RawMessage
 			// scope POST altogether.
 			orgRejected = true
 			rec.Outcomes = append(rec.Outcomes,
-				fanOutOutcome(ctx, e, raw, key, org, valueSummary, mergeSuffix, projectDefsByOrg, projectKeyMap, overrideCovered, counter, /*alreadyKnown=*/ false))
+				fanOutOutcome(ctx, e, raw, key, org, valueSummary, mergeSuffix, projectDefsByOrg, projectKeyMap, overrideCovered, counter /*alreadyKnown=*/, false))
 		case err != nil:
-			counter.Fail()
-			logAPIWarn(e.Logger, "setGlobalSettings failed", err, "key", key, "org", org)
+			failAPI(counter, e.Logger, "setGlobalSettings failed", err, "key", key, "org", org)
 			rec.Outcomes = append(rec.Outcomes, orgOutcome{
 				Org: org, Status: outcomeFailed, Reason: err.Error(),
 				Detail: "Failed: " + apiErrMessage(err) + mergeSuffix,
@@ -836,8 +835,10 @@ func fanOutOutcome(ctx context.Context, e *Executor, raw json.RawMessage,
 
 	projectDef, hasProjDef := projectDefsByOrg[org][key]
 	if !hasProjDef {
-		// Pathological — org said yes, project says no.
-		counter.Fail()
+		// Pathological — org said yes, project says no. SonarQube
+		// Cloud's own definition lists disagree, so neither scope can
+		// take the value; worth reporting rather than absorbing.
+		counter.FailWith(FailureBug)
 		return orgOutcome{
 			Org: org, Status: outcomeFailed,
 			Reason: "rejected at org scope, key absent from project scope",

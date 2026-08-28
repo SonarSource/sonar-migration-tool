@@ -187,8 +187,7 @@ func runSetProjectProfiles(ctx context.Context, e *Executor) error {
 			e.Logger.Debug("project api call: POST /api/qualityprofiles/add_project",
 				"project", target.cloudKey, "language", lang, "profile", name, "org", target.orgKey)
 			if err := e.Cloud.QualityProfiles.AddProject(ctx, lang, name, target.cloudKey, target.orgKey); err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "setProjectProfiles failed", err,
+				failAPI(counter, e.Logger, "setProjectProfiles failed", err,
 					"project", target.cloudKey, "language", lang, "profile", name)
 			} else {
 				counter.Success()
@@ -225,8 +224,7 @@ func runSetProjectGates(ctx context.Context, e *Executor) error {
 			e.Logger.Debug("project api call: POST /api/qualitygates/select",
 				"project", projectKey, "gate_id", gateID, "gate_name", gateName, "org", orgKey)
 			if err := e.Cloud.QualityGates.Select(ctx, gateID, projectKey, orgKey); err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "setProjectGates failed", err, "project", projectKey)
+				failAPI(counter, e.Logger, "setProjectGates failed", err, "project", projectKey)
 			} else {
 				counter.Success()
 			}
@@ -282,8 +280,7 @@ func applyGroupPermissions(ctx context.Context, e *Executor, data json.RawMessag
 			continue
 		}
 		if err := e.Cloud.Permissions.AddGroup(ctx, cloudName, perm, pm.OrgKey, pm.CloudKey); err != nil {
-			counter.Fail()
-			logAPIWarn(e.Logger, "setProjectGroupPermissions failed", err,
+			failAPI(counter, e.Logger, "setProjectGroupPermissions failed", err,
 				"project", pm.CloudKey, "group", cloudName, "perm", perm)
 		} else {
 			counter.Success()
@@ -444,14 +441,14 @@ func runSetProjectSettings(ctx context.Context, e *Executor) error {
 			case sqapi.IsProjectLevelRejection(err):
 				// Not settable at project scope on SonarQube Cloud. Log
 				// the key once and abandon it for the remaining projects.
-				counter.Fail()
+				counter.FailAPI(err)
 				if rejectedKeys.mark(settingKey) {
 					logAPIWarn(e.Logger, "setProjectSettings: setting cannot be set at project scope on SonarQube Cloud, abandoning it for the remaining projects", err,
 						"project", pm.CloudKey, "setting", settingKey)
 				}
 				return nil
 			case err != nil:
-				counter.Fail()
+				counter.FailAPI(err)
 				logAPIWarn(e.Logger, "setProjectSettings failed", err,
 					"project", pm.CloudKey, "setting", settingKey)
 			default:
@@ -558,7 +555,7 @@ func propagateGlobalsToProjects(ctx context.Context, e *Executor,
 				case errors.Is(err, errSettingEmpty):
 					return nil
 				case err != nil:
-					counter.Fail()
+					counter.FailAPI(err)
 					logAPIWarn(e.Logger, "setProjectSettings: global propagation failed", err,
 						"project", pm.CloudKey, "setting", entry.key)
 				default:
@@ -683,14 +680,12 @@ func runSetNewCodePeriods(ctx context.Context, e *Executor) error {
 					"project", pm.CloudKey, "source_type", sqsType,
 					"org_default_type", orgDefaultType, "org_default_value", orgDefaultValue)
 				if err := e.Cloud.Settings.Set(ctx, pm.CloudKey, "sonar.leak.period", orgDefaultValue, ""); err != nil {
-					counter.Fail()
-					logAPIWarn(e.Logger, "setNewCodePeriods org-default value failed", err,
+					failAPI(counter, e.Logger, "setNewCodePeriods org-default value failed", err,
 						"project", pm.CloudKey, "source_type", sqsType)
 					return nil
 				}
 				if err := e.Cloud.Settings.Set(ctx, pm.CloudKey, "sonar.leak.period.type", orgDefaultType, ""); err != nil {
-					counter.Fail()
-					logAPIWarn(e.Logger, "setNewCodePeriods org-default type failed", err,
+					failAPI(counter, e.Logger, "setNewCodePeriods org-default type failed", err,
 						"project", pm.CloudKey, "source_type", sqsType)
 					return nil
 				}
@@ -733,8 +728,7 @@ func runSetNewCodePeriods(ctx context.Context, e *Executor) error {
 				err = e.Cloud.Settings.Set(ctx, pm.CloudKey, "sonar.leak.period.type", sqcType, "")
 			}
 			if err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "setNewCodePeriods failed", err,
+				failAPI(counter, e.Logger, "setNewCodePeriods failed", err,
 					"project", pm.CloudKey, "branch", branch, "type", sqcType)
 			} else {
 				counter.Success()
@@ -927,8 +921,7 @@ func runSetGlobalNewCodePeriod(ctx context.Context, e *Executor) error {
 			DefaultLeakPeriod:     &value,
 		}
 		if err := e.CloudAPI.Organizations.UpdateOrganization(ctx, orgKey, params); err != nil {
-			counter.Fail()
-			logAPIWarn(e.Logger, "setGlobalNewCodePeriod failed", err,
+			failAPI(counter, e.Logger, "setGlobalNewCodePeriod failed", err,
 				"org", orgKey, "type", sqcType)
 			outcomes = append(outcomes, orgOutcome{
 				Org: orgKey, Status: outcomeFailed, Reason: apiErrMessage(err),
@@ -990,8 +983,7 @@ func runSetProjectTags(ctx context.Context, e *Executor) error {
 			e.Logger.Debug("project api call: POST /api/project_tags/set",
 				"project", pm.CloudKey, "tags", tagStr, "tag_count", len(tags))
 			if err := e.Cloud.Projects.SetTags(ctx, pm.CloudKey, tagStr); err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "setProjectTags failed", err, "project", pm.CloudKey)
+				failAPI(counter, e.Logger, "setProjectTags failed", err, "project", pm.CloudKey)
 			} else {
 				counter.Success()
 			}
@@ -1108,8 +1100,7 @@ func runSetProjectLinks(ctx context.Context, e *Executor) error {
 				URL:        linkURL,
 			}
 			if err := e.Cloud.Projects.CreateLink(ctx, params); err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "setProjectLinks failed", err,
+				failAPI(counter, e.Logger, "setProjectLinks failed", err,
 					"project", pm.CloudKey, "name", name, "url", linkURL)
 			} else {
 				counter.Success()
@@ -1181,8 +1172,7 @@ func runSetProjectSourceLink(ctx context.Context, e *Executor) error {
 				URL:        linkURL,
 			}
 			if err := e.Cloud.Projects.CreateLink(ctx, params); err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "setProjectSourceLink failed", err, "project", cloudKey, "url", linkURL)
+				failAPI(counter, e.Logger, "setProjectSourceLink failed", err, "project", cloudKey, "url", linkURL)
 			} else {
 				counter.Success()
 			}
@@ -1279,8 +1269,7 @@ func runSetProjectWebhooks(ctx context.Context, e *Executor) error {
 				URL:          urlStr,
 			}
 			if err := e.Cloud.Webhooks.Create(ctx, params); err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "setProjectWebhooks failed", err,
+				failAPI(counter, e.Logger, "setProjectWebhooks failed", err,
 					"project", pm.CloudKey, "name", name, "url", urlStr)
 			} else {
 				counter.Success()
@@ -1437,8 +1426,7 @@ func runSetGlobalWebhooks(ctx context.Context, e *Executor) error {
 				URL:          urlStr,
 			})
 			if err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "setGlobalWebhooks failed", err,
+				failAPI(counter, e.Logger, "setGlobalWebhooks failed", err,
 					"org", org, "name", name, "url", urlStr)
 			} else {
 				counter.Success()

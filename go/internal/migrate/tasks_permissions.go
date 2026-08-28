@@ -9,10 +9,10 @@ import (
 	"encoding/json"
 	"sync"
 
-	sqapi "github.com/sonar-solutions/sq-api-go"
-	"github.com/sonar-solutions/sq-api-go/cloud"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
+	sqapi "github.com/sonar-solutions/sq-api-go"
+	"github.com/sonar-solutions/sq-api-go/cloud"
 )
 
 const (
@@ -119,8 +119,7 @@ func runGrantMigrationUserProjectPermissions(ctx context.Context, e *Executor) e
 					"login", login, "perm", perm, "project", cloudKey, "org", orgKey)
 				err := e.Cloud.Permissions.AddUser(ctx, login, perm, orgKey, cloudKey)
 				if err != nil {
-					counter.Fail()
-					logAPIWarn(e.Logger, "grantMigrationUserProjectPermissions failed", err,
+					failAPI(counter, e.Logger, "grantMigrationUserProjectPermissions failed", err,
 						"login", login, "project", cloudKey, "perm", perm)
 					continue
 				}
@@ -155,8 +154,7 @@ func runCreateMigrationGroups(ctx context.Context, e *Executor) error {
 						e.Logger.Info("createMigrationGroups: already exists", "group", groupName, "org", orgKey)
 						counter.Success()
 					} else {
-						counter.Fail()
-						logAPIWarn(e.Logger, "createMigrationGroups failed", err, "group", groupName)
+						failAPI(counter, e.Logger, "createMigrationGroups failed", err, "group", groupName)
 					}
 				} else {
 					counter.Success()
@@ -189,8 +187,7 @@ func runAddMigrationUserToMigrationGroups(ctx context.Context, e *Executor) erro
 			for _, groupName := range migrationGroups {
 				err := e.Cloud.Groups.AddUser(ctx, groupName, login, orgKey)
 				if err != nil {
-					counter.Fail()
-					logAPIWarn(e.Logger, "addMigrationUser failed", err, "group", groupName)
+					failAPI(counter, e.Logger, "addMigrationUser failed", err, "group", groupName)
 				} else {
 					counter.Success()
 				}
@@ -212,8 +209,7 @@ func runAddMigrationGroupToTemplates(ctx context.Context, e *Executor) error {
 			for _, perm := range []string{"scan", "user"} {
 				err := e.Cloud.Permissions.AddGroupToTemplate(ctx, templateID, migrationScanners, perm, orgKey)
 				if err != nil {
-					counter.Fail()
-					logAPIWarn(e.Logger, "addMigrationGroupToTemplates failed", err, "template", templateID, "perm", perm)
+					failAPI(counter, e.Logger, "addMigrationGroupToTemplates failed", err, "template", templateID, "perm", perm)
 				} else {
 					counter.Success()
 				}
@@ -221,8 +217,7 @@ func runAddMigrationGroupToTemplates(ctx context.Context, e *Executor) error {
 			for _, perm := range []string{"user", "codeviewer"} {
 				err := e.Cloud.Permissions.AddGroupToTemplate(ctx, templateID, migrationViewers, perm, orgKey)
 				if err != nil {
-					counter.Fail()
-					logAPIWarn(e.Logger, "addMigrationGroupToTemplates failed", err, "template", templateID, "perm", perm)
+					failAPI(counter, e.Logger, "addMigrationGroupToTemplates failed", err, "template", templateID, "perm", perm)
 				} else {
 					counter.Success()
 				}
@@ -269,8 +264,7 @@ func applyOrgPermissions(ctx context.Context, e *Executor, data json.RawMessage,
 		}
 		err := e.Cloud.Permissions.AddGroup(ctx, cloudName, perm, orgKey, "")
 		if err != nil {
-			counter.Fail()
-			logAPIWarn(e.Logger, "setOrgGroupPermissions failed", err, "group", cloudName, "perm", perm)
+			failAPI(counter, e.Logger, "setOrgGroupPermissions failed", err, "group", cloudName, "perm", perm)
 		} else {
 			counter.Success()
 		}
@@ -304,8 +298,7 @@ func runSetProfileGroupPermissions(ctx context.Context, e *Executor) error {
 			for _, ref := range refs {
 				err := e.Cloud.QualityProfiles.AddGroup(ctx, ref.Language, ref.Name, cloudGroup, ref.OrgKey)
 				if err != nil {
-					counter.Fail()
-					logAPIWarn(e.Logger, "setProfileGroupPermissions failed", err,
+					failAPI(counter, e.Logger, "setProfileGroupPermissions failed", err,
 						"profile", ref.Name, "group", cloudGroup)
 				} else {
 					counter.Success()
@@ -427,8 +420,7 @@ func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 			applied[k] = true
 			appliedMu.Unlock()
 			if err := e.Cloud.Permissions.AddGroupToTemplate(ctx, tmpl.cloudID, cloudGroup, perm, tmpl.org); err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "setTemplateGroupPermissions failed", err,
+				failAPI(counter, e.Logger, "setTemplateGroupPermissions failed", err,
 					"template", tmpl.cloudID, "group", cloudGroup, "perm", perm)
 			} else {
 				counter.Success()

@@ -73,8 +73,7 @@ func runSetProfileParent(ctx context.Context, e *Executor) error {
 
 			err := e.Cloud.QualityProfiles.ChangeParent(ctx, lang, name, parent, orgKey)
 			if err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "setProfileParent failed", err, "name", name)
+				failAPI(counter, e.Logger, "setProfileParent failed", err, "name", name)
 			} else {
 				counter.Success()
 			}
@@ -125,8 +124,7 @@ func runRestoreProfiles(ctx context.Context, e *Executor) error {
 
 			_, err := e.Cloud.QualityProfiles.Restore(ctx, orgKey, []byte(backup))
 			if err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "restoreProfiles failed", err, "profile", profileKey)
+				failAPI(counter, e.Logger, "restoreProfiles failed", err, "profile", profileKey)
 			} else {
 				counter.Success()
 			}
@@ -198,7 +196,9 @@ func runAddGateConditions(ctx context.Context, e *Executor) error {
 						SourceOp:     op,
 						SourceError:  errorVal,
 					})
-					counter.Fail()
+					// A source metric with no Cloud counterpart is an
+					// expected mapping limitation, not a fault.
+					counter.FailWith(FailureByDesign)
 					continue
 				}
 				if !mapped {
@@ -275,7 +275,7 @@ func runAddGateConditions(ctx context.Context, e *Executor) error {
 						"gate", gateName, "metric", tc.Metric, "org", orgKey)
 					counter.Success()
 				default:
-					counter.Fail()
+					counter.FailAPI(err)
 					// gate/op/error are on the line because the source
 					// threshold is otherwise unrecoverable from the log.
 					logAPIWarn(e.Logger, "addGateConditions failed", err,
@@ -365,7 +365,7 @@ func clearTargetGateConditions(ctx context.Context, e *Executor, counter *TaskCo
 					"gate", gateName, "condition_id", cond.ID, "metric", cond.Metric)
 				continue
 			}
-			counter.Fail()
+			counter.FailAPI(err)
 			logAPIWarn(e.Logger, "addGateConditions: delete existing condition failed", err,
 				"gate", gateName, "condition_id", cond.ID, "metric", cond.Metric)
 		}
@@ -387,8 +387,7 @@ func runSetDefaultProfiles(ctx context.Context, e *Executor) error {
 
 			err := e.Cloud.QualityProfiles.SetDefault(ctx, lang, name, orgKey)
 			if err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "setDefaultProfiles failed", err, "name", name)
+				failAPI(counter, e.Logger, "setDefaultProfiles failed", err, "name", name)
 			} else {
 				counter.Success()
 			}
@@ -413,8 +412,7 @@ func runSetDefaultGates(ctx context.Context, e *Executor) error {
 				"name", gateName, "gate_id", gateIDStr, "org", orgKey)
 			err := e.Cloud.QualityGates.SetDefault(ctx, gateID, orgKey)
 			if err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "setDefaultGates failed", err, "gate", gateIDStr)
+				failAPI(counter, e.Logger, "setDefaultGates failed", err, "gate", gateIDStr)
 			} else {
 				counter.Success()
 			}
@@ -435,8 +433,7 @@ func runSetDefaultTemplates(ctx context.Context, e *Executor) error {
 			orgKey := extractField(item, "sonarcloud_org_key")
 			err := e.Cloud.Permissions.SetDefaultTemplate(ctx, templateID, "TRK", orgKey)
 			if err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "setDefaultTemplates failed", err, "template", templateID)
+				failAPI(counter, e.Logger, "setDefaultTemplates failed", err, "template", templateID)
 			} else {
 				counter.Success()
 			}
