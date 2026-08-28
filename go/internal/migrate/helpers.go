@@ -491,14 +491,54 @@ func logAPIWarn(logger *slog.Logger, msg string, err error, attrs ...any) {
 	} else {
 		attrs = append(attrs, "err", err)
 	}
+
+	// Every failure says why it happened and whether it is the platform
+	// refusing something it does not support, the environment blocking
+	// the run, or a defect in this tool. Attached here because this is the
+	// single funnel all ~157 per-item failure sites already use, so no
+	// call site has to opt in.
+	v := ClassifyFailure(err)
+	if v.Class != "" {
+		attrs = append(attrs, "failure_class", string(v.Class), "why", v.Why, "remediation", v.Remediation)
+		if v.Reportable {
+			attrs = append(attrs, "please_report", true)
+		}
+	}
+
+	// A suspected defect is not a warning. Everything else stays at Warn:
+	// by-design and environment failures are expected states an operator
+	// can read, and promoting them would recreate the noise this is meant
+	// to cut through.
+	if v.Class == FailureBug {
+		logger.Error(msg, attrs...)
+		return
+	}
 	logger.Warn(msg, attrs...)
+}
+
+// failAPI records one failed operation in both places at once: the
+// verbose per-item log line and the task's per-cause tally.
+//
+// Keeping them together matters — when a call site logged the error but
+// counted with the unclassified Fail(), the summary reported a cause the
+// log had already contradicted.
+func failAPI(counter *TaskCounter, logger *slog.Logger, msg string, err error, attrs ...any) {
+	counter.FailAPI(err)
+	logAPIWarn(logger, msg, err, attrs...)
 }
 
 // TaskCounter tracks success/failure counts for a task. Safe for concurrent use.
 type TaskCounter struct {
 	succeeded atomic.Int64
 	failed    atomic.Int64
-	task      string
+	// Breakdown of `failed` by cause, so the summary can say whether a
+	// non-zero failure count needs anyone's attention.
+	byDesign     atomic.Int64
+	alreadyDone  atomic.Int64
+	environment  atomic.Int64
+	bugs         atomic.Int64
+	unclassified atomic.Int64
+	task         string
 }
 
 // NewTaskCounter creates a counter for tracking task operation results.
@@ -530,8 +570,56 @@ func TaskCounterFromContext(ctx context.Context) *TaskCounter {
 // Success increments the success count.
 func (c *TaskCounter) Success() { c.succeeded.Add(1) }
 
-// Fail increments the failure count.
-func (c *TaskCounter) Fail() { c.failed.Add(1) }
+// Fail increments the failure count without a classification. Used where
+// the "failure" is a deliberate decision by the tool rather than a
+// rejected request — a metric with no Cloud equivalent, an unsupported
+// new-code type, a record the migration chose to drop.
+//
+// These are counted separately rather than folded into by-design: the
+// breakdown must not claim to know a cause it was never told.
+func (c *TaskCounter) Fail() {
+	c.failed.Add(1)
+	c.unclassified.Add(1)
+}
+
+// FailWith increments the failure count under a cause the caller already
+// knows, for decisions the tool makes itself rather than rejections it
+// received (a metric with no Cloud equivalent is by-design; an internal
+// inconsistency is a bug).
+func (c *TaskCounter) FailWith(class FailureClass) {
+	c.failed.Add(1)
+	switch class {
+	case FailureAlreadyDone:
+		c.alreadyDone.Add(1)
+	case FailureByDesign:
+		c.byDesign.Add(1)
+	case FailureEnvironment:
+		c.environment.Add(1)
+	case FailureBug:
+		c.bugs.Add(1)
+	default:
+		c.unclassified.Add(1)
+	}
+}
+
+// FailAPI increments the failure count and records what kind of failure
+// it was, so the task summary can distinguish an expected platform
+// limitation from a defect worth reporting.
+func (c *TaskCounter) FailAPI(err error) FailureClass {
+	c.failed.Add(1)
+	class := ClassifyFailure(err).Class
+	switch class {
+	case FailureAlreadyDone:
+		c.alreadyDone.Add(1)
+	case FailureByDesign:
+		c.byDesign.Add(1)
+	case FailureEnvironment:
+		c.environment.Add(1)
+	default:
+		c.bugs.Add(1)
+	}
+	return class
+}
 
 // LogSummary emits the end-of-task INFO log. When the counter saw at
 // least one Success/Fail it logs a "task summary" line that carries
@@ -558,10 +646,29 @@ func (c *TaskCounter) LogSummary(logger *slog.Logger, duration time.Duration) {
 		"total", total,
 		"duration", common.FormatHMSMillis(duration),
 	}
+
+	// Break the failure count down by cause. "failed=42048, all by
+	// design" and "failed=3, all bugs" demand completely different
+	// reactions, and the bare count cannot tell them apart.
+	bugs := c.bugs.Load()
+	if f > 0 {
+		attrs = append(attrs,
+			"failed_by_design", c.byDesign.Load(),
+			"failed_already_done", c.alreadyDone.Load(),
+			"failed_environment", c.environment.Load(),
+			"failed_bugs", bugs,
+			"failed_unclassified", c.unclassified.Load(),
+		)
+	}
+
 	// The message text stays "task summary" so log consumers and the
 	// #333 merged-summary contract keep matching; only the level varies.
+	//
+	// Severity follows the cause, not the count: a suspected defect or a
+	// task that achieved nothing is an error; expected platform
+	// limitations are a warning however many there are.
 	switch {
-	case f > 0 && s == 0:
+	case bugs > 0, f > 0 && s == 0:
 		logger.Error("task summary", attrs...)
 	case f > 0:
 		logger.Warn("task summary", attrs...)
