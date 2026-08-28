@@ -385,6 +385,18 @@ func runSetProjectSettings(ctx context.Context, e *Executor) error {
 	// count instead of once per (project, key) pair.
 	skippedKeys := newSettingKeyTally()
 	rejectedKeys := newSettingKeyTally()
+	// Records whose SonarQube Server value only repeats what the project
+	// already inherits. Also a property of the key far more often than of
+	// the project, so tallied and logged the same way.
+	defaultKeys := newSettingKeyTally()
+
+	// The source server's declared defaults, needed to tell an operator
+	// override apart from a value that equals the default. Read once and
+	// shared with the global-propagation post-pass below.
+	sqsDefaults, err := readSQSSettingDefaults(e)
+	if err != nil {
+		return fmt.Errorf("setProjectSettings: %w", err)
+	}
 
 	counter := TaskCounterFromContext(ctx)
 	applier := &projectSettingsApplier{
@@ -392,15 +404,16 @@ func runSetProjectSettings(ctx context.Context, e *Executor) error {
 		projectKeyMap:    projectKeyMap,
 		defsByOrg:        defsByOrg,
 		projectDefsByOrg: projectDefsByOrg,
+		sqsDefaults:      sqsDefaults,
 		covered:          covered,
 		coveredMu:        &coveredMu,
 		skippedKeys:      skippedKeys,
 		rejectedKeys:     rejectedKeys,
+		defaultKeys:      defaultKeys,
 		counter:          counter,
 		perProject:       make(map[string]int),
 	}
-	err := forEachExtractItem(ctx, e, "setProjectSettings", "getProjectSettings", applier.apply)
-	if err != nil {
+	if err := forEachExtractItem(ctx, e, "setProjectSettings", "getProjectSettings", applier.apply); err != nil {
 		return err
 	}
 
@@ -417,6 +430,7 @@ func runSetProjectSettings(ctx context.Context, e *Executor) error {
 	// After the post-pass, so the counts cover both paths.
 	skippedKeys.logSummary(e.Logger, "setProjectSettings: setting skipped for every project (no SonarQube Cloud project scope)")
 	rejectedKeys.logSummary(e.Logger, "setProjectSettings: setting rejected at project scope by SonarQube Cloud")
+	defaultKeys.logSummary(e.Logger, "setProjectSettings: setting left at its SonarQube Server default, not written to SonarQube Cloud")
 
 	return nil
 }
@@ -429,10 +443,12 @@ type projectSettingsApplier struct {
 	projectKeyMap    map[string]projectMapping
 	defsByOrg        map[string]map[string]types.SettingDefinition
 	projectDefsByOrg map[string]map[string]types.SettingDefinition
+	sqsDefaults      *sqsSettingDefaults
 	coveredMu        *sync.Mutex
 	covered          map[string]map[string]bool
 	skippedKeys      *settingKeyTally
 	rejectedKeys     *settingKeyTally
+	defaultKeys      *settingKeyTally
 	counter          *TaskCounter
 
 	// Records seen per project, used to spot a leaked global settings
@@ -500,6 +516,26 @@ func (a *projectSettingsApplier) skipKey(settingKey string, raw json.RawMessage,
 		if a.skippedKeys.mark(settingKey) {
 			a.e.Logger.Info("setProjectSettings: setting has no SonarQube Cloud project-scope counterpart, skipping",
 				"setting", settingKey, "reason", reason, "first_project", pm.CloudKey)
+		}
+		return true
+	}
+	// The project is on the SonarQube Server default for this key, so
+	// there is no operator decision to carry over. Writing it anyway
+	// would turn an inherited value into a pinned project override on
+	// SonarQube Cloud, which then stops tracking the organization
+	// default and has to be unset by hand later.
+	//
+	// The extract already drops records SonarQube Server flagged
+	// inherited=true, which covers the same ground for a clean corpus.
+	// This is the check that holds when the corpus is not clean — a
+	// leaked global settings table, a pre-inherited-flag export, or a
+	// value explicitly re-set to the default across several server
+	// upgrades (issue #196 at global scope).
+	if a.sqsDefaults.leftAtDefault(settingKey, raw) {
+		if a.defaultKeys.mark(settingKey) {
+			a.e.Logger.Info("setProjectSettings: setting matches its SonarQube Server default, leaving SonarQube Cloud on its own default",
+				"setting", settingKey, "reason", "left-at-sqs-default", "first_project", pm.CloudKey,
+				"why", "the project inherits this value on SonarQube Server rather than overriding it, so there is nothing project-specific to migrate")
 		}
 		return true
 	}
@@ -577,7 +613,7 @@ func (a *projectSettingsApplier) propagateGlobalsToProjects(ctx context.Context)
 	e := a.e
 	projectKeyMap, covered := a.projectKeyMap, a.covered
 
-	customizedGlobals, err := readCustomizedSQSGlobals(e)
+	customizedGlobals, err := readCustomizedSQSGlobals(e, a.sqsDefaults)
 	if err != nil {
 		return fmt.Errorf("setProjectSettings: reading customized SQS globals: %w", err)
 	}

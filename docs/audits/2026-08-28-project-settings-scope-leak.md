@@ -205,3 +205,137 @@ it was not told.
 
 Live-verified: by-design on the settings rejections, customer-environment-issue on the project-creation refusal, and
 the per-item class matching the summary breakdown in both cases.
+
+## Leaving SonarQube Server defaults alone
+<!-- updated: 2026-08-28_16:45:00 -->
+
+Recommended change 2 above listed three filters for the project write path. Two shipped in the first
+pass (`IsInternalSqsSetting`, `resolveSQSOnlyHandler`); the third, `IsSettingCustomized`, did not, and
+the Implementation table's row 2 is the accurate record of what landed. This section closes that gap.
+
+### The rule
+
+Three conditions describe what the project write path must do with an extracted setting:
+
+| # | Condition | Where |
+| --- | --- | --- |
+| 1 | Cloud refuses a key at project scope ⇒ reject once, then skip it for every remaining project in the run | `rejectedKeys` memo in `skipKey` and in `propagateOne` |
+| 2 | The project is on the SonarQube Server default ⇒ do not write it; leave Cloud on its own default | `sqsDefaults.leftAtDefault` in `skipKey` **(new)** |
+| 3 | The project overrides the default and Cloud accepts the key ⇒ apply it | `applySettingByDef` |
+
+### Why 2 needed its own check
+
+Extract already drops records SonarQube Server flagged `inherited: true`, and at project scope that
+flag means "no row at this level, you are seeing the value from above". For a corpus this extract
+produced, condition 2 therefore held at extract time and needed nothing further.
+
+It stopped holding the moment the corpus was not clean. The customer corpus carried a leaked **global**
+settings table under each project (214 records/project, 11 genuine overrides estate-wide), where the
+`inherited` flag is absent because the values really are set — just at the wrong scope. The repo's own
+committed corpus shows the same shape at small scale: of 19 `getProjectSettings` records,
+`sonar.autodetect.ai.code = true` on `okorach-oss_sonar-tools` has `parentValue: true`, i.e. the project
+is inheriting, and the old code wrote it anyway. (A second such record,
+`dvpa / sonar.cfamily.generateComputedConfig`, never reached the API — the curated SQS-only table
+already stopped it.)
+
+Writing an inherited value is not harmless. `POST api/settings/set` with `component=` creates a
+**pinned project override** on SonarQube Cloud. From then on the project no longer tracks the
+organization default, and someone has to `api/settings/reset` it by hand to restore inheritance.
+
+### How "is this the default?" is decided
+
+`sqsSettingDefaults.leftAtDefault` ([tasks_settings_helpers.go](../../go/internal/migrate/tasks_settings_helpers.go))
+compares against the two baselines SonarQube Server actually exposes, in priority order:
+
+1. `parentValue` / `parentValues` on the record — what the scope above supplies. Authoritative when
+   present. Multi-value keys compare as **sets**; `api/settings/values` does not promise element order.
+2. `defaultValue` from `getServerSettingsDefinitions` — the static declared default, and the only
+   baseline for a key no higher scope has touched.
+
+The two mistakes are not symmetric. Wrongly applying a default-valued setting costs one redundant API
+call; wrongly skipping one silently drops a value the operator set on purpose. So **no baseline means
+apply**: an undeclared key with no `parentValue`, a declared key whose `defaultValue` is empty (missing
+and genuinely-empty are indistinguishable in the payload), and every `PROPERTY_SET` record all fail
+open. A nil baseline — a definitions extract that failed to load — degrades to the pre-existing
+"apply everything" behaviour rather than skipping wholesale.
+
+The definitions extract is now read **once** per `setProjectSettings` run and shared with the
+global-propagation post-pass, which used to read it itself.
+
+### The deliberate divergence
+
+Condition 2 as specified leaves Cloud on *Cloud's* default, which is not always *Server's* default.
+Where the two differ, the target ends up on a different effective value than the source. Migrating the
+value anyway would preserve effective parity, and `applySettingByDef` already has the Cloud
+`defaultValue` in hand to make that call.
+
+That is not what happens, deliberately: the requirement is to leave a non-decision alone, and it
+matches how `setGlobalSettings` has always behaved at global scope (issue #196). It is recorded here
+because it is a real behavioural difference, not an oversight.
+
+### Reporting
+
+A setting left at its default is not a failure and is not counted as one — counting it would push
+`failed > 0, succeeded == 0` on a healthy run whose settings are all defaults, which `LogSummary`
+escalates to ERROR. It is surfaced the way the curated skips are: one end-of-task INFO line per
+setting key with `projects_affected`, carrying `reason=left-at-sqs-default` and a plain-language
+`why`. One line per key, not per (project, key) pair — the distinction that matters when the shape is
+214 keys × 858 projects.
+
+### Live verification of the default check
+<!-- updated: 2026-08-28_16:50:00 -->
+
+Source `localhost:9000` (SonarQube Server 2026.3.1, 86 projects) → target `sc-staging.io`, org
+`open-digital-society-1`. Baseline binary built from a worktree at the branch tip; both binaries run
+against one shared extract so the input is byte-identical.
+
+**Whole-tool regression, old → new → old.** The third run is an ordering control: if the two old runs
+disagree, the target org drifted and the comparison means nothing.
+
+| Comparison | Task outcomes | Records written |
+| --- | --- | --- |
+| old#1 vs **new** | 22 tasks, **0 differing** | 53 tasks, **0 differing** |
+| old#1 vs old#2 | 22 tasks, **0 differing** | 53 tasks, **0 differing** |
+
+Outcomes compare `succeeded`/`failed`/`total` plus the full per-cause breakdown. Every run exited 0
+in 79–83 s.
+
+**`setProjectSettings` could not be exercised by that regression.** `createProjects` fails for all 10
+projects on this org (`The organization 'open-digital-society-1' is not allowed to use private
+projects`, correctly classified `customer-environment-issue`), so `projectKeyMap` is empty and all 20
+records are skipped upstream as "project not found in migration scope" — the same result in both
+binaries, for the wrong reason. All 10 target projects already exist, so the task was driven directly
+against them with synthesised `createProjects` records and `--target_task setProjectSettings`, with
+the probe keys reset on SonarQube Cloud before each run.
+
+| | old | new |
+| --- | --- | --- |
+| settings written | 19 | **17** |
+| `okorach-oss_sonar-tools` / `sonar.autodetect.ai.code` (value == parentValue) | PINNED `true` | **ABSENT — inheriting** |
+| `laravel` / `sonar.python.file.suffixes` (values set-equal to parentValues) | PINNED `[py]` | **ABSENT — inheriting** |
+| `okorach-oss_sonar-tools` / `sonar.cfamily.ignoreHeaderComments` (real override) | PINNED `false` | PINNED `false` |
+| `laravel` / `sonar.apex.file.suffixes` (real override) | PINNED `[.cls,.trigger,.apex]` | PINNED `[.cls,.trigger,.apex]` |
+
+The set difference is **exactly** those two records — `only in NEW` is empty and the other 17 are
+identical. Target state read back from `api/settings/values?component=` after each run, not inferred
+from logs.
+
+`sonar.cfamily.generateComputedConfig` on `dvpa` is the third default-valued record in the corpus; it
+never reaches the new check because the curated SQS-only table already stops it, in both binaries.
+`sonar.python.file.suffixes` is skipped on `laravel` and applied on `okorach-oss_sonar-tools` in the
+same run, which is the point: the decision is per record, only the logging is per key.
+
+End-of-task summary from the new binary:
+
+```
+setting skipped for every project (no SonarQube Cloud project scope)  setting=sonar.cfamily.generateComputedConfig projects_affected=1
+setting left at its SonarQube Server default, not written to SonarQube Cloud  setting=sonar.autodetect.ai.code   projects_affected=1
+setting left at its SonarQube Server default, not written to SonarQube Cloud  setting=sonar.python.file.suffixes projects_affected=1
+task summary  task=setProjectSettings succeeded=17 failed=0 total=17
+```
+
+`failed=0` is deliberate — see *Reporting* above.
+
+Source instance restored to as-found (the seeded `laravel` override was reset; the key reports
+`inherited: true` again). Both Go modules build, `go vet` clean, full test suites green, `gofmt` clean
+on every changed file.

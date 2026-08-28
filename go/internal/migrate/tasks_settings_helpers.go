@@ -191,29 +191,88 @@ func loadProjectScopedSettingDefinitionsForOrgs(ctx context.Context, e *Executor
 	return out
 }
 
-// readCustomizedSQSGlobals reads getServerSettings +
-// getServerSettingsDefinitions from the extract and returns the SQS
-// global settings whose value differs from the declared defaultValue
-// — the same filter used by setGlobalSettings (issue #186) and now
-// reused by setProjectSettings (issue #189/#191) to feed the
-// project-scope propagation pass.
+// sqsSettingDefaults is the getServerSettingsDefinitions baseline for
+// the source SonarQube Server: the declared defaultValue per setting
+// key, plus which keys the server declared at all. It is what lets a
+// real operator override be told apart from a value that merely
+// repeats what the scope above already supplies.
 //
-// Errors reading either extract are surfaced; callers downstream
-// treat them as fatal because they signal an incomplete extract.
-func readCustomizedSQSGlobals(e *Executor) ([]json.RawMessage, error) {
+// Loaded once per setProjectSettings run and shared by both write
+// paths, because the definitions extract is the only place the static
+// defaults live and re-reading it per path was pure waste.
+type sqsSettingDefaults struct {
+	defaultValue map[string]string
+	declared     map[string]bool
+}
+
+// readSQSSettingDefaults loads the definitions extract into a baseline.
+// A missing or unreadable extract yields an empty (not nil) baseline:
+// every lookup then reports "no baseline", and callers fall back to
+// their fail-open behaviour rather than making a decision on no data.
+func readSQSSettingDefaults(e *Executor) (*sqsSettingDefaults, error) {
 	defItems, err := readExtractItems(e, "getServerSettingsDefinitions")
 	if err != nil {
 		return nil, fmt.Errorf("reading getServerSettingsDefinitions: %w", err)
 	}
-	defaults := make(map[string]string, len(defItems))
-	declared := make(map[string]bool, len(defItems))
-	for _, d := range defItems {
-		k := extractField(d.Data, "key")
+	d := &sqsSettingDefaults{
+		defaultValue: make(map[string]string, len(defItems)),
+		declared:     make(map[string]bool, len(defItems)),
+	}
+	for _, it := range defItems {
+		k := extractField(it.Data, "key")
 		if k == "" {
 			continue
 		}
-		defaults[k] = extractField(d.Data, "defaultValue")
-		declared[k] = true
+		d.defaultValue[k] = extractField(it.Data, "defaultValue")
+		d.declared[k] = true
+	}
+	return d, nil
+}
+
+// leftAtDefault reports whether a settings record carries a value
+// indistinguishable from the one its scope would inherit anyway, so
+// writing it to SonarQube Cloud would pin an override that reproduces
+// nothing the operator actually chose.
+//
+// SonarQube Server does not answer "is this customized?" directly. It
+// hands back two baselines, and both are needed:
+//
+//   - parentValue / parentValues on the record itself — what the scope
+//     above supplies. Authoritative when present.
+//   - defaultValue from list_definitions — the static declared default.
+//     The only baseline for a key no higher scope has touched.
+//
+// When neither is available the answer is unknowable, and the two
+// mistakes are not symmetric: wrongly applying a default-valued
+// setting costs one redundant API call, while wrongly skipping one
+// silently drops a value the operator set on purpose. So no baseline
+// means "not at default" — apply it.
+//
+// A nil receiver behaves the same way, so a failed load degrades to
+// the pre-existing "apply everything" behaviour instead of skipping
+// wholesale.
+func (d *sqsSettingDefaults) leftAtDefault(settingKey string, raw json.RawMessage) bool {
+	if d == nil {
+		return false
+	}
+	def := d.defaultValue[settingKey]
+	if def == "" && !hasParentValue(raw) {
+		return false
+	}
+	return !IsSettingCustomized(raw, def)
+}
+
+// readCustomizedSQSGlobals reads getServerSettings from the extract and
+// returns the SQS global settings whose value differs from the declared
+// defaultValue in `defaults` — the same filter used by setGlobalSettings
+// (issue #186) and now reused by setProjectSettings (issue #189/#191) to
+// feed the project-scope propagation pass.
+//
+// Errors reading the extract are surfaced; callers downstream treat them
+// as fatal because they signal an incomplete extract.
+func readCustomizedSQSGlobals(e *Executor, defaults *sqsSettingDefaults) ([]json.RawMessage, error) {
+	if defaults == nil {
+		defaults = &sqsSettingDefaults{}
 	}
 	valueItems, err := readExtractItems(e, "getServerSettings")
 	if err != nil {
@@ -249,10 +308,10 @@ func readCustomizedSQSGlobals(e *Executor) ([]json.RawMessage, error) {
 		// keys entered the customized set. Fall back to parentValue
 		// when the definition is missing, and skip when there is no
 		// baseline to compare against at all.
-		if !declared[key] && !hasParentValue(it.Data) {
+		if !defaults.declared[key] && !hasParentValue(it.Data) {
 			continue
 		}
-		if !IsSettingCustomized(it.Data, defaults[key]) {
+		if !IsSettingCustomized(it.Data, defaults.defaultValue[key]) {
 			continue
 		}
 		customized = append(customized, it.Data)
