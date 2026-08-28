@@ -335,25 +335,11 @@ func warnUnboundOrgs(ctx context.Context, raw *common.RawClient, cfg MigrateConf
 		if ctx.Err() != nil {
 			return
 		}
-		body, err := raw.Get(ctx, "api/alm_integration/show_bound_organization",
-			url.Values{"organization": {org}})
-		if err != nil {
-			// Only the statuses getOrgBinding treats as an answer mean
-			// "not bound". Anything else — a 502, a timeout that outlived
-			// its retries — is an unknown, and telling the operator to go
-			// bind an organization that may already be bound would send
-			// them after the wrong thing.
-			if common.IsHTTPError(err, orgBindingNotBoundCodes...) {
-				unbound = append(unbound, org)
-			} else {
-				unknown = append(unknown, org)
-			}
-			continue
-		}
-		almURL, dopOrg := parseBoundOrganization(body)
-		if alm := almFromURL(almURL); alm == "" && dopOrg == "" {
+		switch probeOrgBinding(ctx, raw, org) {
+		case orgBindingUnbound:
 			unbound = append(unbound, org)
-			continue
+		case orgBindingUnknown:
+			unknown = append(unknown, org)
 		}
 	}
 	if len(unknown) > 0 {
@@ -368,4 +354,36 @@ func warnUnboundOrgs(ctx context.Context, raw *common.RawClient, cfg MigrateConf
 		"organizations", strings.Join(unbound, ","),
 		"consequence", "source links and pull-request decoration will not be configured for projects whose source project was bound",
 		"how_to_fix", "bind the organization to its DevOps platform in SonarQube Cloud, then re-run with --target_task matchProjectRepos")
+}
+
+// orgBindingProbe is the outcome of one pre-flight binding check.
+type orgBindingProbe int
+
+const (
+	orgBindingBound orgBindingProbe = iota
+	orgBindingUnbound
+	orgBindingUnknown
+)
+
+// probeOrgBinding asks SonarQube Cloud whether one organization is bound to a
+// DevOps platform.
+//
+// Only the statuses getOrgBinding treats as an answer mean "not bound".
+// Anything else — a 502, a timeout that outlived its retries — is an unknown:
+// telling an operator to go bind an organization that may already be bound
+// would send them after the wrong thing.
+func probeOrgBinding(ctx context.Context, raw *common.RawClient, org string) orgBindingProbe {
+	body, err := raw.Get(ctx, "api/alm_integration/show_bound_organization",
+		url.Values{"organization": {org}})
+	if err != nil {
+		if common.IsHTTPError(err, orgBindingNotBoundCodes...) {
+			return orgBindingUnbound
+		}
+		return orgBindingUnknown
+	}
+	almURL, dopOrg := parseBoundOrganization(body)
+	if almFromURL(almURL) == "" && dopOrg == "" {
+		return orgBindingUnbound
+	}
+	return orgBindingBound
 }
