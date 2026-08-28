@@ -208,6 +208,10 @@ func runSetProjectGates(ctx context.Context, e *Executor) error {
 		gateLookup[orgKey+name] = id
 	}
 
+	// Gate names that could not be resolved to a target gate. Reported once
+	// per name with a project count rather than once per project.
+	unresolved := newSettingKeyTally()
+
 	counter := TaskCounterFromContext(ctx)
 	err := forEachMigrateItem(ctx, e, "setProjectGates", "createProjects",
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
@@ -215,10 +219,37 @@ func runSetProjectGates(ctx context.Context, e *Executor) error {
 			projectKey := extractField(item, "cloud_project_key")
 			gateName := extractField(item, "gate_name")
 			if gateName == "" {
+				// The source project used no explicit gate, so there is
+				// nothing to bind; it inherits the organization default.
+				e.Logger.Debug("setProjectGates: source project had no quality gate, leaving the organization default",
+					"project", projectKey, "org", orgKey)
 				return nil
 			}
 			gateID, ok := gateLookup[orgKey+gateName]
 			if !ok {
+				// The project names a gate that createGates produced no
+				// record for, so it stays on the organization default and
+				// the source binding is lost.
+				//
+				// This used to be a bare `return nil`: no log at any level,
+				// no counter, no output record. A run that bound ZERO
+				// projects was indistinguishable from a clean one, and the
+				// report then described the gate as "not used by any
+				// migrated project" — the opposite of what happened.
+				//
+				// The most common reason is structural rather than a fault:
+				// structure/gates.go excludes built-in source gates from
+				// gates.csv, while structure/projects.go still records
+				// gate_name for them, so every project sitting on the source
+				// built-in ("Sonar way") lands here by construction. Those
+				// projects legitimately keep the target's own default gate;
+				// what was wrong was doing it silently.
+				if unresolved.mark(gateName) {
+					e.Logger.Warn("setProjectGates: no target quality gate matches the source gate, leaving the project on the organization default",
+						"project", projectKey, "gate", gateName, "org", orgKey,
+						"why", "createGates produced no record for this gate name — built-in source gates are deliberately not migrated, and a non-built-in gate here means its creation or lookup failed earlier in the run")
+				}
+				counter.FailWith(FailureByDesign)
 				return nil
 			}
 			e.Logger.Debug("project api call: POST /api/qualitygates/select",
@@ -230,6 +261,7 @@ func runSetProjectGates(ctx context.Context, e *Executor) error {
 			}
 			return nil
 		})
+	unresolved.logSummary(e.Logger, "setProjectGates: source quality gate had no target counterpart, project left on the organization default")
 	return err
 }
 
