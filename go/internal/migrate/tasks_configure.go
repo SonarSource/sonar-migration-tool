@@ -9,8 +9,9 @@ import (
 	"encoding/json"
 	"strconv"
 
-	"github.com/sonar-solutions/sq-api-go/cloud"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
+	sqapi "github.com/sonar-solutions/sq-api-go"
+	"github.com/sonar-solutions/sq-api-go/cloud"
 )
 
 // configureTasks returns tasks that configure profiles, gates, and defaults.
@@ -141,7 +142,8 @@ func runAddGateConditions(ctx context.Context, e *Executor) error {
 	// dropped because no SQC equivalent exists.
 	notesW, _ := e.Store.Writer("addGateConditions.notes")
 	counter := TaskCounterFromContext(ctx)
-	err := forEachMigrateItem(ctx, e, "addGateConditions", "getGateConditions",
+	err := forEachMigrateItemTransformed(ctx, e, "addGateConditions", "getGateConditions",
+		mergeGateRecordsByCloudGate,
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
 			orgKey := extractField(item, "sonarcloud_org_key")
 			gateIDStr := extractField(item, "cloud_gate_id")
@@ -260,12 +262,25 @@ func runAddGateConditions(ctx context.Context, e *Executor) error {
 					GateID: gateID, Organization: orgKey,
 					Metric: tc.Metric, Op: tc.Op, Error: tc.Error,
 				})
-				if err != nil {
-					counter.Fail()
-					logAPIWarn(e.Logger, "addGateConditions failed", err,
-						"metric", tc.Metric, "source_metric", tc.SourceMetric)
-				} else {
+				switch {
+				case err == nil:
 					counter.Success()
+				case sqapi.IsAlreadyExists(err), sqapi.IsMangledAlreadyExists(err):
+					// The condition is already on the target gate, so the
+					// desired end state holds — treat as success like every
+					// other create-style task does. IsMangledAlreadyExists
+					// covers the percent-named metrics whose message the
+					// server destroys (see the SDK doc comment).
+					e.Logger.Debug("addGateConditions: condition already present on target gate",
+						"gate", gateName, "metric", tc.Metric, "org", orgKey)
+					counter.Success()
+				default:
+					counter.Fail()
+					// gate/op/error are on the line because the source
+					// threshold is otherwise unrecoverable from the log.
+					logAPIWarn(e.Logger, "addGateConditions failed", err,
+						"gate", gateName, "metric", tc.Metric, "source_metric", tc.SourceMetric,
+						"op", tc.Op, "threshold", tc.Error)
 				}
 			}
 			return nil
@@ -342,6 +357,14 @@ func clearTargetGateConditions(ctx context.Context, e *Executor, counter *TaskCo
 		e.Logger.Debug("gate api call: POST /api/qualitygates/delete_condition",
 			"gate", gateName, "condition_id", cond.ID, "metric", cond.Metric, "org", orgKey)
 		if err := e.Cloud.QualityGates.DeleteCondition(ctx, cond.ID, orgKey); err != nil {
+			if sqapi.IsNotFound(err) {
+				// Already gone — the goal of the clear is met. Happens when
+				// the target gate was mutated between the getGateConditions
+				// read and this delete.
+				e.Logger.Debug("addGateConditions: condition already removed from target gate",
+					"gate", gateName, "condition_id", cond.ID, "metric", cond.Metric)
+				continue
+			}
 			counter.Fail()
 			logAPIWarn(e.Logger, "addGateConditions: delete existing condition failed", err,
 				"gate", gateName, "condition_id", cond.ID, "metric", cond.Metric)
@@ -420,4 +443,80 @@ func runSetDefaultTemplates(ctx context.Context, e *Executor) error {
 			return nil
 		})
 	return err
+}
+
+// mergeGateRecordsByCloudGate folds every getGateConditions record that
+// targets the same SonarQube Cloud gate into a single record whose
+// conditions are the union of theirs.
+//
+// gates.csv is deduplicated on the SOURCE organization key
+// (internal/structure/gates.go), but the CSV-to-JSONL load then joins
+// source org to CLOUD org, and that join is many-to-one. N source orgs
+// sharing a gate name therefore yield N createGates rows — and N
+// getGateConditions rows — all carrying the same cloud_gate_id. Fanned
+// out 25-wide, each ran "show -> delete every condition -> create every
+// condition" against the same gate concurrently: one worker won every
+// race and the others logged 404s on delete and "already exists" on
+// create, with the surviving condition set decided by interleaving.
+//
+// Merging first makes the outcome deterministic and lets the existing
+// per-metric resolver (#234) collapse collisions across source gates
+// exactly as it already does within one, keeping the most stringent
+// threshold per metric. was_preexisting is OR-ed so the clear still
+// happens if any contributing record saw an existing target gate.
+func mergeGateRecordsByCloudGate(items []json.RawMessage) []json.RawMessage {
+	type merged struct {
+		base        map[string]json.RawMessage
+		conditions  []map[string]any
+		preexisting bool
+	}
+	order := make([]string, 0, len(items))
+	byGate := make(map[string]*merged, len(items))
+	passthrough := make([]json.RawMessage, 0)
+
+	for _, item := range items {
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(item, &obj); err != nil {
+			passthrough = append(passthrough, item)
+			continue
+		}
+		gateID := extractField(item, "cloud_gate_id")
+		org := extractField(item, "sonarcloud_org_key")
+		if gateID == "" {
+			// Nothing to key on; leave it for the task body to skip.
+			passthrough = append(passthrough, item)
+			continue
+		}
+		var conds []map[string]any
+		if raw, ok := obj["conditions"]; ok {
+			_ = json.Unmarshal(raw, &conds)
+		}
+		key := org + "\x00" + gateID
+		m, seen := byGate[key]
+		if !seen {
+			order = append(order, key)
+			byGate[key] = &merged{base: obj, conditions: conds, preexisting: extractBool(item, "was_preexisting")}
+			continue
+		}
+		m.conditions = append(m.conditions, conds...)
+		m.preexisting = m.preexisting || extractBool(item, "was_preexisting")
+	}
+
+	out := make([]json.RawMessage, 0, len(order)+len(passthrough))
+	for _, key := range order {
+		m := byGate[key]
+		condRaw, err := json.Marshal(m.conditions)
+		if err != nil {
+			continue
+		}
+		m.base["conditions"] = condRaw
+		preRaw, _ := json.Marshal(m.preexisting)
+		m.base["was_preexisting"] = preRaw
+		rec, err := json.Marshal(m.base)
+		if err != nil {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return append(out, passthrough...)
 }
