@@ -16,6 +16,7 @@ import (
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
+	sqapi "github.com/sonar-solutions/sq-api-go"
 	"github.com/sonar-solutions/sq-api-go/cloud"
 	"github.com/sonar-solutions/sq-api-go/types"
 	"golang.org/x/sync/errgroup"
@@ -305,7 +306,7 @@ func applyGroupPermissions(ctx context.Context, e *Executor, data json.RawMessag
 //   - "value":       single scalar value (e.g. sonar.cfamily.ignoreHeaderComments=false)
 //   - "values":      multi-value array (e.g. sonar.exclusions=[a,b,c])
 //   - "fieldValues": property-set array of objects (e.g.
-//                    sonar.issue.ignore.allfile=[{fileRegexp:...}])
+//     sonar.issue.ignore.allfile=[{fileRegexp:...}])
 //
 // Until this change only "value" was forwarded; multi-value and
 // property-set settings were silently dropped. Each shape now routes to
@@ -349,6 +350,19 @@ func runSetProjectSettings(ctx context.Context, e *Executor) error {
 	var coveredMu sync.Mutex
 	covered := make(map[string]map[string]bool, len(projectKeyMap))
 
+	// Keys the curated tables classify as unmigratable, and keys SonarQube
+	// Cloud has already rejected at project scope. Both are properties of
+	// the key, not of the project, so each is logged once with a project
+	// count instead of once per (project, key) pair.
+	skippedKeys := newSettingKeyTally()
+	rejectedKeys := newSettingKeyTally()
+
+	// Pre-flight: catch a leaked global settings table before spending
+	// one HTTP round-trip per (project, setting) discovering it.
+	if items, readErr := readExtractItems(e, "getProjectSettings"); readErr == nil {
+		warnIfProjectSettingsLookLikeGlobals(e.Logger, items)
+	}
+
 	counter := TaskCounterFromContext(ctx)
 	err := forEachExtractItem(ctx, e, "setProjectSettings", "getProjectSettings",
 		func(ctx context.Context, item structure.ExtractItem, w *common.ChunkWriter) error {
@@ -371,6 +385,29 @@ func runSetProjectSettings(ctx context.Context, e *Executor) error {
 				return nil
 			}
 			if settingKey == "" {
+				return nil
+			}
+
+			// Curated pre-flight: server-internal and SQS-only keys have
+			// no project-scope counterpart on SonarQube Cloud. The global
+			// path drops these before any API call; do the same here so a
+			// global setting that leaked into the per-project extract does
+			// not become one HTTP 400 per project.
+			if reason, skip := skipProjectSettingKey(settingKey, item.Data); skip {
+				if skippedKeys.mark(settingKey) {
+					e.Logger.Info("setProjectSettings: setting has no SonarQube Cloud project-scope counterpart, skipping",
+						"setting", settingKey, "reason", reason, "first_project", pm.CloudKey)
+				}
+				return nil
+			}
+
+			// Runtime memo: once SonarQube Cloud has told us a key is not
+			// settable at project scope, that verdict holds for every
+			// other project in the run. Mirrors the orgRejected memo in
+			// runSetGlobalSettings.
+			if rejectedKeys.has(settingKey) {
+				rejectedKeys.mark(settingKey)
+				counter.Fail()
 				return nil
 			}
 
@@ -404,6 +441,15 @@ func runSetProjectSettings(ctx context.Context, e *Executor) error {
 				// Empty payload — skip silently, do not count as success
 				// or failure.
 				return nil
+			case sqapi.IsProjectLevelRejection(err):
+				// Not settable at project scope on SonarQube Cloud. Log
+				// the key once and abandon it for the remaining projects.
+				counter.Fail()
+				if rejectedKeys.mark(settingKey) {
+					logAPIWarn(e.Logger, "setProjectSettings: setting cannot be set at project scope on SonarQube Cloud, abandoning it for the remaining projects", err,
+						"project", pm.CloudKey, "setting", settingKey)
+				}
+				return nil
 			case err != nil:
 				counter.Fail()
 				logAPIWarn(e.Logger, "setProjectSettings failed", err,
@@ -417,6 +463,9 @@ func runSetProjectSettings(ctx context.Context, e *Executor) error {
 	if err != nil {
 		return err
 	}
+
+	skippedKeys.logSummary(e.Logger, "setProjectSettings: setting skipped for every project (no SonarQube Cloud project scope)")
+	rejectedKeys.logSummary(e.Logger, "setProjectSettings: setting rejected at project scope by SonarQube Cloud")
 
 	// Post-pass: propagate customized SQS globals to every SQC project
 	// when the key is project-scope-only on SQC. Issues #189 (language
@@ -453,9 +502,9 @@ func propagateGlobalsToProjects(ctx context.Context, e *Executor,
 	// org's projects only if it's in projectDefsByOrg[org] but NOT in
 	// orgDefsByOrg[org]. Computed once per org rather than per project.
 	type globalEntry struct {
-		raw  json.RawMessage
-		def  types.SettingDefinition
-		key  string
+		raw json.RawMessage
+		def types.SettingDefinition
+		key string
 	}
 	bucketByOrg := make(map[string][]globalEntry)
 	for org := range projectDefsByOrg {

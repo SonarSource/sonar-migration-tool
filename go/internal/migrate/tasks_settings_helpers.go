@@ -9,8 +9,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"sort"
 	"strings"
+	"sync"
 
+	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 	"github.com/sonar-solutions/sq-api-go/types"
 )
 
@@ -18,6 +22,93 @@ import (
 // extract record had no value / values / fieldValues to send. Callers
 // silently skip the record — it is not a real error.
 var errSettingEmpty = errors.New("setting has no value")
+
+// settingKeyTally counts occurrences per setting key so a task can log
+// one line per key instead of one per (project, key) pair.
+//
+// setProjectSettings iterates the cross-product of projects and
+// settings, so any per-record Warn is emitted O(projects) times for a
+// fault that is really a property of the key alone. A single customer
+// run produced 42,048 identical warnings for 49 keys across 858
+// projects, which buried every other diagnostic in the log.
+type settingKeyTally struct {
+	mu     sync.Mutex
+	counts map[string]int
+}
+
+func newSettingKeyTally() *settingKeyTally {
+	return &settingKeyTally{counts: make(map[string]int)}
+}
+
+// mark records one occurrence of key and reports whether it was the
+// first. Callers log only when first is true.
+func (t *settingKeyTally) mark(key string) (first bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	first = t.counts[key] == 0
+	t.counts[key]++
+	return first
+}
+
+// has reports whether key has been marked at least once.
+func (t *settingKeyTally) has(key string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.counts[key] > 0
+}
+
+// logSummary emits one line per tallied key, in key order so the output
+// is stable across runs. No-op when nothing was tallied.
+func (t *settingKeyTally) logSummary(logger *slog.Logger, msg string) {
+	t.mu.Lock()
+	keys := make([]string, 0, len(t.counts))
+	for k := range t.counts {
+		keys = append(keys, k)
+	}
+	counts := make(map[string]int, len(t.counts))
+	for k, v := range t.counts {
+		counts[k] = v
+	}
+	t.mu.Unlock()
+
+	if len(keys) == 0 {
+		return
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		logger.Info(msg, "setting", k, "projects_affected", counts[k])
+	}
+}
+
+// skipProjectSettingKey reports whether a getProjectSettings record
+// should never be POSTed at project scope, and why.
+//
+// setGlobalSettings applies both of these filters before any API call
+// (IsInternalSqsSetting at tasks_setglobalsettings.go and the curated
+// sqsOnly* tables via partitionSQSOnlySettings). setProjectSettings
+// historically applied neither, so a SonarQube Server global setting
+// that reached the per-project extract was pushed to every project and
+// rejected by SonarQube Cloud with HTTP 400.
+//
+// Both lists are curated and deliberately not exhaustive; the runtime
+// IsProjectLevelRejection memoisation in runSetProjectSettings is what
+// catches the remainder.
+func skipProjectSettingKey(settingKey string, raw json.RawMessage) (reason string, skip bool) {
+	if IsInternalSqsSetting(settingKey) {
+		return "internal-sqs-setting", true
+	}
+	handler, ok := resolveSQSOnlyHandler(settingKey)
+	if !ok {
+		return "", false
+	}
+	if handler(raw).SkipSilently {
+		return "sqs-only", true
+	}
+	// The key is SQS-only but carries an operator-meaningful value.
+	// setGlobalSettings surfaces it as a report note rather than
+	// migrating it; there is nothing to write at project scope either.
+	return "sqs-only-note", true
+}
 
 // loadSettingDefinitionsForOrgs fetches /api/settings/list_definitions
 // once for each SonarQube Cloud organization in the supplied set and
@@ -116,12 +207,14 @@ func readCustomizedSQSGlobals(e *Executor) ([]json.RawMessage, error) {
 		return nil, fmt.Errorf("reading getServerSettingsDefinitions: %w", err)
 	}
 	defaults := make(map[string]string, len(defItems))
+	declared := make(map[string]bool, len(defItems))
 	for _, d := range defItems {
 		k := extractField(d.Data, "key")
 		if k == "" {
 			continue
 		}
 		defaults[k] = extractField(d.Data, "defaultValue")
+		declared[k] = true
 	}
 	valueItems, err := readExtractItems(e, "getServerSettings")
 	if err != nil {
@@ -133,12 +226,54 @@ func readCustomizedSQSGlobals(e *Executor) ([]json.RawMessage, error) {
 		if key == "" {
 			continue
 		}
+		// At GLOBAL scope inherited=true means "no row at this level,
+		// the value shown is the definition default", so the setting is
+		// by definition not customized. This is authoritative and needs
+		// no defaultValue comparison — measured on SonarQube Server
+		// 2026.3, 81 of 255 global records carry the flag.
+		if extractBool(it.Data, "inherited") {
+			continue
+		}
+		// Never propagate server-internal or curated SQS-only keys.
+		// setGlobalSettings drops these before any API call; this
+		// function feeds the project-scope propagation pass, which had
+		// no equivalent filter.
+		if _, skip := skipProjectSettingKey(key, it.Data); skip {
+			continue
+		}
+		// A key absent from getServerSettingsDefinitions has no known
+		// defaultValue. Treating the zero value as "the default is
+		// empty" makes every such key look customized — on a 2026.3
+		// instance 55 of 246 keys returned by /api/settings/values are
+		// absent from list_definitions (hidden, secured, or permission-
+		// filtered), which is how the bundled .NET analyzer manifest
+		// keys entered the customized set. Fall back to parentValue
+		// when the definition is missing, and skip when there is no
+		// baseline to compare against at all.
+		if !declared[key] && !hasParentValue(it.Data) {
+			continue
+		}
 		if !IsSettingCustomized(it.Data, defaults[key]) {
 			continue
 		}
 		customized = append(customized, it.Data)
 	}
 	return customized, nil
+}
+
+// hasParentValue reports whether a settings record carries the parent
+// value that /api/settings/values populates when more than one scope
+// supplied a value. Presence is NOT a reliable "this is an override"
+// test on its own — inherited records carry it too — but it does mean a
+// comparison baseline exists.
+func hasParentValue(raw json.RawMessage) bool {
+	if extractField(raw, "parentValue") != "" {
+		return true
+	}
+	if len(extractStringArray(raw, "parentValues")) > 0 {
+		return true
+	}
+	return len(extractObjectArray(raw, "parentFieldValues")) > 0
 }
 
 // applySettingByDef is the shared definition-aware dispatcher used by both
@@ -244,4 +379,70 @@ func extractObjectArray(raw json.RawMessage, key string) []map[string]any {
 		return nil
 	}
 	return arr
+}
+
+// warnIfProjectSettingsLookLikeGlobals inspects the getProjectSettings
+// extract for the signature of a leaked global settings table and warns
+// loudly if it finds one.
+//
+// /api/settings/values?component=X returns the project's EFFECTIVE
+// configuration — the whole instance-scope set plus any project rows —
+// and the extract is supposed to keep only records the server marked
+// non-inherited. When that filter does not take effect (an extract
+// produced by an older build, or a source whose responses omit the
+// flag), every project ends up carrying an identical copy of the global
+// table. One customer run reached 244,399 records for 1,142 projects:
+// 214.01 per project, i.e. ~11 genuine overrides in the whole estate
+// and 42,048 HTTP 400s from the ~49 instance-scope-only keys.
+//
+// The signature is cheap to spot: a high per-project record count that
+// is near-identical for every project. Real overrides are sparse and
+// uneven.
+func warnIfProjectSettingsLookLikeGlobals(logger *slog.Logger, items []structure.ExtractItem) {
+	const (
+		minProjects       = 5  // too few to reason about a distribution
+		suspiciousPerProj = 25 // real per-project override sets are small
+	)
+	perProject := make(map[string]int)
+	for _, it := range items {
+		key := extractField(it.Data, "project")
+		if key == "" {
+			key = extractField(it.Data, "projectKey")
+		}
+		if key == "" {
+			continue
+		}
+		perProject[it.ServerURL+key]++
+	}
+	if len(perProject) < minProjects {
+		return
+	}
+	total := 0
+	minCount, maxCount := -1, 0
+	for _, n := range perProject {
+		total += n
+		if minCount < 0 || n < minCount {
+			minCount = n
+		}
+		if n > maxCount {
+			maxCount = n
+		}
+	}
+	mean := float64(total) / float64(len(perProject))
+	if mean < suspiciousPerProj {
+		return
+	}
+	// Uniformity: a leaked global table gives every project the same
+	// count, so the spread is a tiny fraction of the mean.
+	if float64(maxCount-minCount) > 0.25*mean {
+		return
+	}
+	logger.Warn("setProjectSettings: the per-project settings extract looks like a copy of the source's GLOBAL settings, not per-project overrides",
+		"projects", len(perProject),
+		"records", total,
+		"records_per_project", fmt.Sprintf("%.2f", mean),
+		"min_per_project", minCount,
+		"max_per_project", maxCount,
+		"why_this_matters", "instance-scope-only keys will be rejected by SonarQube Cloud, and project-settable ones will be written as per-project overrides that shadow future org-level changes",
+		"how_to_confirm", "GET api/settings/values?component=<project> on the source and check whether the records carry \"inherited\": true; if they do, re-run extract with a current build")
 }
