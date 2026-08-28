@@ -183,7 +183,11 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 		return "", err
 	}
 
-	clients := newMigrateClients(cfg, logger)
+	// Installed on the HTTP clients now and pointed at the run directory
+	// once it exists; entries are buffered until then.
+	reqLog := newRequestLogWriter()
+	defer reqLog.Close()
+	clients := newMigrateClients(cfg, logger, reqLog)
 
 	// Verify every SQC organization the migration will touch exists and
 	// is visible to the token, and that the project-key pattern doesn't
@@ -193,11 +197,19 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 		return "", err
 	}
 
+	// Advisory pre-flight: surface unbound target organizations now rather
+	// than once per affected project in phase 4.
+	warnUnboundOrgs(ctx, clients.Raw, cfg, appliedDefault, logger)
+
 	mp, err := prepareMigratePlan(cfg, logger)
 	if err != nil {
 		return "", err
 	}
 	runIDOut = mp.RunID
+
+	// The run directory now exists: flush buffered request records and
+	// stream the rest straight to requests.log.
+	reqLog.Open(mp.RunDir, logger)
 
 	// Best-effort run artifacts: written on every exit path (success or
 	// error) without altering retErr or panicking.
@@ -297,7 +309,7 @@ type migrateClients struct {
 // newMigrateClients builds the standard and enterprise Cloud API clients
 // for a migrate run, wiring retry, rate-limit, and (when cfg.Debug is set)
 // full HTTP request/response logging into each one.
-func newMigrateClients(cfg MigrateConfig, logger *slog.Logger) *migrateClients {
+func newMigrateClients(cfg MigrateConfig, logger *slog.Logger, reqLog *requestLogWriter) *migrateClients {
 	cloudURL := cfg.URL
 	apiURL := strings.Replace(cloudURL, "https://", "https://api.", 1)
 
@@ -331,6 +343,9 @@ func newMigrateClients(cfg MigrateConfig, logger *slog.Logger) *migrateClients {
 		sqapi.WithRetryLogger(retryLog),
 		sqapi.WithRateLimitObserver(rateLimitObs),
 		sqapi.WithRateLimitRecoveryLogger(rateLimitRecovery),
+	}
+	if reqLog != nil {
+		clientOpts = append(clientOpts, sqapi.WithRequestLogger(reqLog.Log))
 	}
 	if cfg.Debug {
 		clientOpts = append(clientOpts, sqapi.WithDebugLogger(common.NewHTTPDebugLogger(logger)))
@@ -459,9 +474,21 @@ func writeRateLimitArtifact(runDir string, tracker *RateLimitTracker, logger *sl
 	}
 }
 
+// maxConcurrentTasksPerPhase caps task-level fan-out within a phase.
+// Combined with the per-task limit of cap(e.Sem) this bounds total
+// in-flight requests at maxConcurrentTasksPerPhase * concurrency.
+const maxConcurrentTasksPerPhase = 6
+
 func runPhase(ctx context.Context, e *Executor, taskNames []string, registry map[string]*TaskDef, phaseIdx int, tm *RunTimings) error {
 	phaseStart := time.Now()
 	g, ctx := errgroup.WithContext(ctx)
+	// Bound how many tasks in a phase run at once. Each task opens its
+	// own errgroup limited to cap(e.Sem), so an unbounded phase
+	// multiplies that by the task count — a 14-task phase at the default
+	// concurrency of 25 puts up to 350 requests in flight against one
+	// host. Tasks stay concurrent (they are few and mostly I/O bound),
+	// just not unboundedly so.
+	g.SetLimit(maxConcurrentTasksPerPhase)
 	for _, name := range taskNames {
 		def := registry[name]
 		e.Logger.Info("running task", "task", name)

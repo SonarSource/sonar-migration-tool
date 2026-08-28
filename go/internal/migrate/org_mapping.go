@@ -9,6 +9,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -281,4 +282,79 @@ func readOrgCSVHeaders(path string) ([]string, error) {
 		return nil, err
 	}
 	return headers, nil
+}
+
+// migrateOrgKeys returns the distinct SonarQube Cloud organization keys a
+// migrate run will write to, using the same derivation as
+// validateOrgsExist: the default organization when one was applied,
+// otherwise every mapped key in organizations.csv.
+func migrateOrgKeys(cfg MigrateConfig, appliedDefault bool) ([]string, error) {
+	if appliedDefault {
+		if cfg.DefaultOrganization == "" {
+			return nil, nil
+		}
+		return []string{cfg.DefaultOrganization}, nil
+	}
+	rows, err := structure.LoadCSV(cfg.ExportDirectory, orgCSVFileName)
+	if err != nil {
+		return nil, fmt.Errorf("loading organizations.csv: %w", err)
+	}
+	seen := make(map[string]bool)
+	ordered := make([]string, 0)
+	for _, row := range rows {
+		k, _ := row["sonarcloud_org_key"].(string)
+		k = strings.TrimSpace(k)
+		if k == "" || k == "SKIPPED" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		ordered = append(ordered, k)
+	}
+	return ordered, nil
+}
+
+// warnUnboundOrgs probes each target organization's DevOps-platform
+// binding before the run starts and warns about any that is unbound.
+//
+// Project DevOps bindings (#122) can only be created when the target
+// organization is itself bound to the platform the source project used.
+// Until now that was discovered per project, deep into phase 4: one
+// customer run emitted 26 identical warnings five minutes in, long after
+// projects had been created, and the run still reported success. Probing
+// up front turns that into one line before any write happens.
+//
+// Advisory only: bindings are optional, so nothing here aborts the run.
+func warnUnboundOrgs(ctx context.Context, raw *common.RawClient, cfg MigrateConfig, appliedDefault bool, logger *slog.Logger) {
+	orgs, err := migrateOrgKeys(cfg, appliedDefault)
+	if err != nil || len(orgs) == 0 {
+		return
+	}
+	unbound := make([]string, 0, len(orgs))
+	for _, org := range orgs {
+		if ctx.Err() != nil {
+			return
+		}
+		body, err := raw.Get(ctx, "api/alm_integration/show_bound_organization",
+			url.Values{"organization": {org}})
+		if err != nil {
+			// Any error here means "no binding could be read". The
+			// distinction between a genuine unbound org and a transient
+			// fault is deliberately not made at this level — getOrgBinding
+			// owns that classification (see orgBindingNotBoundCodes).
+			unbound = append(unbound, org)
+			continue
+		}
+		almURL, dopOrg := parseBoundOrganization(body)
+		if alm := almFromURL(almURL); alm == "" && dopOrg == "" {
+			unbound = append(unbound, org)
+			continue
+		}
+	}
+	if len(unbound) == 0 {
+		return
+	}
+	logger.Warn("pre-flight: target organization(s) are not bound to a DevOps platform, so project DevOps bindings will be skipped",
+		"organizations", strings.Join(unbound, ","),
+		"consequence", "source links and pull-request decoration will not be configured for projects whose source project was bound",
+		"how_to_fix", "bind the organization to its DevOps platform in SonarQube Cloud, then re-run with --target_task matchProjectRepos")
 }
