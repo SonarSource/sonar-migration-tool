@@ -258,7 +258,9 @@ func forEachMigrateItemFiltered(ctx context.Context, e *Executor, taskName, depT
 	filterFn func(json.RawMessage) bool,
 	fn func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error) error {
 
-	return forEachMigrateItemImpl(ctx, e, taskName, depTask, filterFn, cap(e.Sem), nil, fn)
+	return forEachMigrateItemImpl(ctx, e, migrateItemLoop{
+		taskName: taskName, depTask: depTask, filterFn: filterFn, concurrency: cap(e.Sem),
+	}, fn)
 }
 
 // forEachMigrateItemTransformed is forEachMigrateItemFiltered with a hook
@@ -270,7 +272,9 @@ func forEachMigrateItemTransformed(ctx context.Context, e *Executor, taskName, d
 	transformFn func([]json.RawMessage) []json.RawMessage,
 	fn func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error) error {
 
-	return forEachMigrateItemImpl(ctx, e, taskName, depTask, nil, cap(e.Sem), transformFn, fn)
+	return forEachMigrateItemImpl(ctx, e, migrateItemLoop{
+		taskName: taskName, depTask: depTask, transformFn: transformFn, concurrency: cap(e.Sem),
+	}, fn)
 }
 
 // forEachMigrateItemSerial is forEachMigrateItemFiltered with concurrency
@@ -284,24 +288,37 @@ func forEachMigrateItemSerial(ctx context.Context, e *Executor, taskName, depTas
 	filterFn func(json.RawMessage) bool,
 	fn func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error) error {
 
-	return forEachMigrateItemImpl(ctx, e, taskName, depTask, filterFn, 1, nil, fn)
+	return forEachMigrateItemImpl(ctx, e, migrateItemLoop{
+		taskName: taskName, depTask: depTask, filterFn: filterFn, concurrency: 1,
+	}, fn)
 }
 
 // forEachMigrateItemImpl is the shared body that backs the concurrent
 // and serial migrate iterators. `concurrency` is the errgroup limit
 // (pass 1 to serialize, or cap(e.Sem) for the default fan-out).
-func forEachMigrateItemImpl(ctx context.Context, e *Executor, taskName, depTask string,
-	filterFn func(json.RawMessage) bool,
-	concurrency int,
-	transformFn func([]json.RawMessage) []json.RawMessage,
+// migrateItemLoop bundles the knobs of the shared migrate-item iterator.
+// Passed as one value rather than five positional parameters, which the
+// signature had grown past the point of readability.
+type migrateItemLoop struct {
+	taskName    string
+	depTask     string
+	filterFn    func(json.RawMessage) bool
+	transformFn func([]json.RawMessage) []json.RawMessage
+	concurrency int
+}
+
+func forEachMigrateItemImpl(ctx context.Context, e *Executor, loop migrateItemLoop,
 	fn func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error) error {
+
+	taskName, depTask := loop.taskName, loop.depTask
+	filterFn, concurrency := loop.filterFn, loop.concurrency
 
 	items, err := e.Store.ReadAll(depTask)
 	if err != nil {
 		return fmt.Errorf("%s: reading %s: %w", taskName, depTask, err)
 	}
-	if transformFn != nil {
-		items = transformFn(items)
+	if loop.transformFn != nil {
+		items = loop.transformFn(items)
 	}
 
 	// Pre-filter to get accurate count for progress logging.
@@ -516,6 +533,11 @@ func logAPIWarn(logger *slog.Logger, msg string, err error, attrs ...any) {
 	logger.Warn(msg, attrs...)
 }
 
+// taskSummaryMsg is the end-of-task log message. Log consumers and the
+// #333 merged-summary contract match on it verbatim, so it must not vary
+// with severity.
+const taskSummaryMsg = "task summary"
+
 // failAPI records one failed operation in both places at once: the
 // verbose per-item log line and the task's per-cause tally.
 //
@@ -655,13 +677,13 @@ func (c *TaskCounter) LogSummary(logger *slog.Logger, duration time.Duration) {
 		attrs = append(attrs,
 			"failed_by_design", c.byDesign.Load(),
 			"failed_already_done", c.alreadyDone.Load(),
-			"failed_environment", c.environment.Load(),
+			"failed_customer_environment_issue", c.environment.Load(),
 			"failed_bugs", bugs,
 			"failed_unclassified", c.unclassified.Load(),
 		)
 	}
 
-	// The message text stays "task summary" so log consumers and the
+	// The message text stays taskSummaryMsg so log consumers and the
 	// #333 merged-summary contract keep matching; only the level varies.
 	//
 	// Severity follows the cause, not the count: a suspected defect or a
@@ -669,11 +691,11 @@ func (c *TaskCounter) LogSummary(logger *slog.Logger, duration time.Duration) {
 	// limitations are a warning however many there are.
 	switch {
 	case bugs > 0, f > 0 && s == 0:
-		logger.Error("task summary", attrs...)
+		logger.Error(taskSummaryMsg, attrs...)
 	case f > 0:
-		logger.Warn("task summary", attrs...)
+		logger.Warn(taskSummaryMsg, attrs...)
 	default:
-		logger.Info("task summary", attrs...)
+		logger.Info(taskSummaryMsg, attrs...)
 	}
 }
 
