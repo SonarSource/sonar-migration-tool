@@ -128,11 +128,28 @@ func buildTransport(cfg *clientConfig, token string, version float64) http.Round
 		tlsCfg.MinVersion = tls.VersionTLS12
 	}
 
-	base := &http.Transport{
-		TLSClientConfig: tlsCfg,
-		MaxIdleConns:    cfg.maxConns,
-		IdleConnTimeout: 90 * time.Second,
+	// Clone the stdlib default rather than building a bare Transport:
+	// a zero-value http.Transport has no dial, TLS-handshake or
+	// response-header timeout, ignores HTTP_PROXY, and leaves
+	// MaxIdleConnsPerHost at the package default of 2. The migration
+	// runs many concurrent requests against a single host, so a 2-deep
+	// idle pool forces a fresh TCP+TLS handshake for almost every call
+	// and shows up as connection-level failures (status=0) under load.
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		base = &http.Transport{}
 	}
+	base = base.Clone()
+	base.TLSClientConfig = tlsCfg
+	base.MaxIdleConns = cfg.maxConns
+	// Every request in a run targets the same host, so the per-host pool
+	// must be as deep as the global one or connection reuse never happens.
+	base.MaxIdleConnsPerHost = cfg.maxConns
+	base.IdleConnTimeout = 90 * time.Second
+	// Clone() preserves ForceAttemptHTTP2 from DefaultTransport, but
+	// setting a non-nil TLSClientConfig disables the automatic upgrade
+	// unless it stays explicitly on.
+	base.ForceAttemptHTTP2 = true
 
 	retry := &retryTransport{
 		inner:         base,
@@ -146,6 +163,9 @@ func buildTransport(cfg *clientConfig, token string, version float64) http.Round
 	}
 
 	var rt http.RoundTripper = retry
+	if cfg.requestLogFn != nil {
+		rt = &requestLogTransport{inner: rt, fn: cfg.requestLogFn}
+	}
 	if cfg.debugLogFn != nil {
 		rt = &debugTransport{inner: rt, fn: cfg.debugLogFn}
 	}
