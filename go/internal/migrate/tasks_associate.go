@@ -386,12 +386,6 @@ func runSetProjectSettings(ctx context.Context, e *Executor) error {
 	skippedKeys := newSettingKeyTally()
 	rejectedKeys := newSettingKeyTally()
 
-	// Pre-flight: catch a leaked global settings table before spending
-	// one HTTP round-trip per (project, setting) discovering it.
-	if items, readErr := readExtractItems(e, "getProjectSettings"); readErr == nil {
-		warnIfProjectSettingsLookLikeGlobals(e.Logger, items)
-	}
-
 	counter := TaskCounterFromContext(ctx)
 	applier := &projectSettingsApplier{
 		e:                e,
@@ -403,22 +397,26 @@ func runSetProjectSettings(ctx context.Context, e *Executor) error {
 		skippedKeys:      skippedKeys,
 		rejectedKeys:     rejectedKeys,
 		counter:          counter,
+		perProject:       make(map[string]int),
 	}
 	err := forEachExtractItem(ctx, e, "setProjectSettings", "getProjectSettings", applier.apply)
 	if err != nil {
 		return err
 	}
 
-	skippedKeys.logSummary(e.Logger, "setProjectSettings: setting skipped for every project (no SonarQube Cloud project scope)")
-	rejectedKeys.logSummary(e.Logger, "setProjectSettings: setting rejected at project scope by SonarQube Cloud")
-
 	// Post-pass: propagate customized SQS globals to every SQC project
 	// when the key is project-scope-only on SQC. Issues #189 (language
 	// settings) and #191 (external analyzer settings) — and any future
 	// global setting that has no SQC org-level counterpart.
-	if err := propagateGlobalsToProjects(ctx, e, projectKeyMap, defsByOrg, projectDefsByOrg, covered, counter); err != nil {
+	if err := applier.propagateGlobalsToProjects(ctx); err != nil {
 		return err
 	}
+
+	applier.warnIfRecordsLookLikeGlobals()
+
+	// After the post-pass, so the counts cover both paths.
+	skippedKeys.logSummary(e.Logger, "setProjectSettings: setting skipped for every project (no SonarQube Cloud project scope)")
+	rejectedKeys.logSummary(e.Logger, "setProjectSettings: setting rejected at project scope by SonarQube Cloud")
 
 	return nil
 }
@@ -436,6 +434,15 @@ type projectSettingsApplier struct {
 	skippedKeys      *settingKeyTally
 	rejectedKeys     *settingKeyTally
 	counter          *TaskCounter
+
+	// Records seen per project, used to spot a leaked global settings
+	// table. Counted while iterating rather than from a second full read
+	// of the extract: the corpus reaches a quarter of a million records on
+	// a large instance, and materializing it twice was a needless
+	// doubling of peak memory in the task that exists to stop exactly
+	// that kind of waste.
+	perProjectMu sync.Mutex
+	perProject   map[string]int
 }
 
 // apply migrates one extracted project setting.
@@ -448,6 +455,12 @@ func (a *projectSettingsApplier) apply(ctx context.Context, item structure.Extra
 		projectKey = extractField(item.Data, "projectKey")
 	}
 	settingKey := extractField(item.Data, "key")
+
+	if projectKey != "" {
+		a.perProjectMu.Lock()
+		a.perProject[item.ServerURL+projectKey]++
+		a.perProjectMu.Unlock()
+	}
 
 	pm, ok := a.projectKeyMap[item.ServerURL+projectKey]
 	if !ok {
@@ -560,12 +573,10 @@ func (a *projectSettingsApplier) record(err error, pm projectMapping, settingKey
 // setGlobalSettings), and only when the project doesn't already have a
 // per-project override on SQS (the override wins, recorded in
 // `covered`). Issues #189 / #191.
-func propagateGlobalsToProjects(ctx context.Context, e *Executor,
-	projectKeyMap map[string]projectMapping,
-	orgDefsByOrg, projectDefsByOrg map[string]map[string]types.SettingDefinition,
-	covered map[string]map[string]bool,
-	counter *TaskCounter,
-) error {
+func (a *projectSettingsApplier) propagateGlobalsToProjects(ctx context.Context) error {
+	e := a.e
+	projectKeyMap, covered := a.projectKeyMap, a.covered
+
 	customizedGlobals, err := readCustomizedSQSGlobals(e)
 	if err != nil {
 		return fmt.Errorf("setProjectSettings: reading customized SQS globals: %w", err)
@@ -574,33 +585,7 @@ func propagateGlobalsToProjects(ctx context.Context, e *Executor,
 		return nil
 	}
 
-	// Pre-bucket customized globals by org: a key is propagated to an
-	// org's projects only if it's in projectDefsByOrg[org] but NOT in
-	// orgDefsByOrg[org]. Computed once per org rather than per project.
-	type globalEntry struct {
-		raw json.RawMessage
-		def types.SettingDefinition
-		key string
-	}
-	bucketByOrg := make(map[string][]globalEntry)
-	for org := range projectDefsByOrg {
-		projectDefs := projectDefsByOrg[org]
-		orgDefs := orgDefsByOrg[org]
-		for _, raw := range customizedGlobals {
-			key := extractField(raw, "key")
-			if key == "" {
-				continue
-			}
-			def, atProject := projectDefs[key]
-			if !atProject {
-				continue
-			}
-			if _, atOrg := orgDefs[key]; atOrg {
-				continue // setGlobalSettings handles this one
-			}
-			bucketByOrg[org] = append(bucketByOrg[org], globalEntry{raw: raw, def: def, key: key})
-		}
-	}
+	bucketByOrg := a.bucketPropagatableGlobals(customizedGlobals)
 	if len(bucketByOrg) == 0 {
 		return nil
 	}
@@ -614,33 +599,14 @@ func propagateGlobalsToProjects(ctx context.Context, e *Executor,
 		}
 		coverSet := covered[projLookupKey]
 		for _, entry := range bucket {
-			if coverSet[entry.key] {
-				e.Logger.Debug("setProjectSettings: per-project override wins, skipping global propagation",
-					"project", pm.CloudKey, "key", entry.key, "org", pm.OrgKey)
+			if a.skipPropagation(pm, entry, coverSet) {
 				continue
 			}
 			g.Go(func() error {
 				if gctx.Err() != nil {
 					return gctx.Err()
 				}
-				e.Logger.Debug("setProjectSettings: propagating SQS global to project",
-					"project", pm.CloudKey, "key", entry.key, "org", pm.OrgKey)
-				// Retry through the SQC project-indexing window
-				// (#334). Same hazard as setGlobalSettings fan-out.
-				err := retryOnProjectNotFound(gctx, e.Logger, func() error {
-					return applySettingByDef(gctx, e, pm.CloudKey, pm.OrgKey, entry.raw, entry.key, entry.def, true)
-				}, "endpoint", "/api/settings/set", "project", pm.CloudKey, "org", pm.OrgKey, "setting_key", entry.key)
-				switch {
-				case errors.Is(err, errSettingEmpty):
-					return nil
-				case err != nil:
-					counter.FailAPI(err)
-					logAPIWarn(e.Logger, "setProjectSettings: global propagation failed", err,
-						"project", pm.CloudKey, "setting", entry.key)
-				default:
-					counter.Success()
-				}
-				return nil
+				return a.propagateOne(gctx, pm, entry)
 			})
 		}
 	}
@@ -1518,4 +1484,117 @@ func runSetGlobalWebhooks(ctx context.Context, e *Executor) error {
 		}
 	}
 	return nil
+}
+
+// warnIfRecordsLookLikeGlobals reports a leaked global settings table, using
+// the counts tallied while iterating rather than a second full read of the
+// extract.
+func (a *projectSettingsApplier) warnIfRecordsLookLikeGlobals() {
+	a.perProjectMu.Lock()
+	counts := make(perProjectRecordCounts, len(a.perProject))
+	for k, v := range a.perProject {
+		counts[k] = v
+	}
+	a.perProjectMu.Unlock()
+
+	mean, min, max, ok := counts.looksLikeLeakedGlobals()
+	if !ok {
+		return
+	}
+	a.e.Logger.Warn("setProjectSettings: the per-project settings extract looks like a copy of the source's GLOBAL settings, not per-project overrides",
+		"projects", len(counts),
+		"records_per_project", fmt.Sprintf("%.2f", mean),
+		"min_per_project", min,
+		"max_per_project", max,
+		"why_this_matters", "instance-scope-only keys are rejected by SonarQube Cloud, and project-settable ones are written as per-project overrides that shadow future org-level changes",
+		"how_to_confirm", `GET api/settings/values?component=<project> on the source and check whether the records carry "inherited": true; if they do, re-run extract with a current build`)
+}
+
+// globalEntry is one customized SonarQube Server global setting that has to
+// be written at project scope because SonarQube Cloud exposes it there and
+// not at organization level.
+type globalEntry struct {
+	raw json.RawMessage
+	def types.SettingDefinition
+	key string
+}
+
+// bucketPropagatableGlobals groups the customized globals by target
+// organization. A key is propagated to an org's projects only when Cloud
+// defines it at project scope and NOT at org scope — the org-scope ones are
+// setGlobalSettings' job. Computed once per org rather than per project.
+func (a *projectSettingsApplier) bucketPropagatableGlobals(customizedGlobals []json.RawMessage) map[string][]globalEntry {
+	bucketByOrg := make(map[string][]globalEntry)
+	for org, projectDefs := range a.projectDefsByOrg {
+		orgDefs := a.defsByOrg[org]
+		for _, raw := range customizedGlobals {
+			key := extractField(raw, "key")
+			if key == "" {
+				continue
+			}
+			def, atProject := projectDefs[key]
+			if !atProject {
+				continue
+			}
+			if _, atOrg := orgDefs[key]; atOrg {
+				continue // setGlobalSettings handles this one
+			}
+			bucketByOrg[org] = append(bucketByOrg[org], globalEntry{raw: raw, def: def, key: key})
+		}
+	}
+	return bucketByOrg
+}
+
+// propagateOne writes a single customized global to a single project.
+func (a *projectSettingsApplier) propagateOne(ctx context.Context, pm projectMapping, entry globalEntry) error {
+	a.e.Logger.Debug("setProjectSettings: propagating SQS global to project",
+		"project", pm.CloudKey, "key", entry.key, "org", pm.OrgKey)
+
+	// Retry through the SQC project-indexing window (#334). Same hazard as
+	// the setGlobalSettings fan-out.
+	err := retryOnProjectNotFound(ctx, a.e.Logger, func() error {
+		return applySettingByDef(ctx, a.e, pm.CloudKey, pm.OrgKey, entry.raw, entry.key, entry.def, true)
+	}, "endpoint", "/api/settings/set", "project", pm.CloudKey, "org", pm.OrgKey, "setting_key", entry.key)
+
+	switch {
+	case errors.Is(err, errSettingEmpty):
+		return nil
+	case sqapi.IsProjectLevelRejection(err):
+		// Same verdict and same memo as the per-record path: log the key
+		// once and abandon it for every remaining project.
+		a.counter.FailAPI(err)
+		if a.rejectedKeys.mark(entry.key) {
+			logAPIWarn(a.e.Logger, "setProjectSettings: global setting cannot be set at project scope on SonarQube Cloud, abandoning it for the remaining projects", err,
+				"project", pm.CloudKey, "setting", entry.key)
+		}
+	case err != nil:
+		failAPI(a.counter, a.e.Logger, "setProjectSettings: global propagation failed", err,
+			"project", pm.CloudKey, "setting", entry.key)
+	default:
+		a.counter.Success()
+	}
+	return nil
+}
+
+// skipPropagation reports whether this (project, global) pair should not be
+// written: either the project already carries an explicit SonarQube Server
+// override for the key, or SonarQube Cloud has already rejected the key at
+// project scope earlier in this run.
+//
+// The second check shares the per-record loop's verdict. Without it the
+// post-pass re-ran every rejected key against every remaining project,
+// reproducing the very warning storm this task now avoids on the per-record
+// path — 49 keys x 1,142 projects in the incident that prompted the fix.
+func (a *projectSettingsApplier) skipPropagation(pm projectMapping, entry globalEntry, coverSet map[string]bool) bool {
+	if coverSet[entry.key] {
+		a.e.Logger.Debug("setProjectSettings: per-project override wins, skipping global propagation",
+			"project", pm.CloudKey, "key", entry.key, "org", pm.OrgKey)
+		return true
+	}
+	if a.rejectedKeys.has(entry.key) {
+		a.rejectedKeys.mark(entry.key)
+		a.counter.FailWith(FailureByDesign)
+		return true
+	}
+	return false
 }

@@ -114,7 +114,11 @@ func IsMangledAlreadyExists(err error) bool {
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
 		return false
 	}
-	return strings.Contains(apiErr.Message(), "Conversion = ")
+	// Match only the "%)" case, which is the one the already-exists message
+	// produces for percent-named metrics. A broader match on "Conversion = "
+	// would silently absorb any other server-side format failure as a
+	// success, which is not something to guess at.
+	return strings.Contains(apiErr.Message(), `Conversion = ')'`)
 }
 
 // IsOrgLevelRejection reports whether err is an APIError with status 400

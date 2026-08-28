@@ -151,6 +151,7 @@ func runAddGateConditions(ctx context.Context, e *Executor) error {
 				return nil
 			}
 			gateID, _ := strconv.Atoi(gateIDStr)
+			gate := gateRef{id: gateID, idStr: gateIDStr, name: gateName, orgKey: orgKey}
 
 			// Extract conditions from the gate data. Done BEFORE any
 			// destructive step — see the clear below.
@@ -174,16 +175,16 @@ func runAddGateConditions(ctx context.Context, e *Executor) error {
 			// actual POSTs are deferred so the resolver (#234) can collapse
 			// collisions across multiple source conditions before any HTTP
 			// traffic.
-			pending := buildTargetConditions(e, notesW, counter, gateIDStr, gateName, conditions)
+			pending := buildTargetConditions(e, notesW, counter, gate, conditions)
 
 			// Second pass: collapse collisions per #234.
 			targets := resolveTargetConditions(pending)
 
-			if !prepareTargetGate(ctx, e, counter, gateName, orgKey, wasPreexisting, len(targets), len(conditions)) {
+			if !prepareTargetGate(ctx, e, counter, gate, wasPreexisting, len(targets), len(conditions)) {
 				return nil
 			}
 
-			createTargetConditions(ctx, e, counter, gateID, gateName, orgKey, targets)
+			createTargetConditions(ctx, e, counter, gate, targets)
 			return nil
 		})
 	return err
@@ -360,8 +361,9 @@ func runSetDefaultTemplates(ctx context.Context, e *Executor) error {
 // workflow that reported "we are having all quality gates but not having any
 // conditions there".
 func prepareTargetGate(ctx context.Context, e *Executor, counter *TaskCounter,
-	gateName, orgKey string, wasPreexisting bool, targetCount, sourceCount int) bool {
+	gate gateRef, wasPreexisting bool, targetCount, sourceCount int) bool {
 
+	gateName, orgKey := gate.name, gate.orgKey
 	if targetCount == 0 {
 		if wasPreexisting {
 			e.Logger.Warn("addGateConditions: no conditions to migrate for this gate, leaving the target gate's existing conditions in place",
@@ -382,8 +384,9 @@ func prepareTargetGate(ctx context.Context, e *Executor, counter *TaskCounter,
 // the mangled variant, where SonarQube destroys its own message for metrics
 // whose short name contains a percent sign (see IsMangledAlreadyExists).
 func createTargetConditions(ctx context.Context, e *Executor, counter *TaskCounter,
-	gateID int, gateName, orgKey string, targets []targetCondition) {
+	gate gateRef, targets []targetCondition) {
 
+	gateID, gateName, orgKey := gate.id, gate.name, gate.orgKey
 	for _, tc := range targets {
 		e.Logger.Debug("gate api call: POST /api/qualitygates/create_condition",
 			"gate_id", gateID, "metric", tc.Metric, "op", tc.Op, "error", tc.Error, "org", orgKey,
@@ -395,9 +398,17 @@ func createTargetConditions(ctx context.Context, e *Executor, counter *TaskCount
 		switch {
 		case err == nil:
 			counter.Success()
-		case sqapi.IsAlreadyExists(err), sqapi.IsMangledAlreadyExists(err):
+		case sqapi.IsAlreadyExists(err):
 			e.Logger.Debug("addGateConditions: condition already present on target gate",
 				"gate", gateName, "metric", tc.Metric, "org", orgKey)
+			counter.Success()
+		case sqapi.IsMangledAlreadyExists(err):
+			// The server destroyed its own message, so "already exists" is
+			// inferred rather than read. Say so at Warn: the end state is
+			// almost certainly correct, but it is an inference.
+			e.Logger.Warn("addGateConditions: SonarQube returned an unreadable error for this condition; assuming it already exists on the target gate",
+				"gate", gateName, "metric", tc.Metric, "org", orgKey,
+				"why", "the server formats its 'already exists' message twice, and this metric's display name contains a percent sign, so the real message is lost")
 			counter.Success()
 		default:
 			counter.FailAPI(err)
@@ -410,14 +421,32 @@ func createTargetConditions(ctx context.Context, e *Executor, counter *TaskCount
 	}
 }
 
+// gateRef identifies one target quality gate. Bundled because the id (both
+// forms), the name and the organization travel together through every step
+// of the condition rebuild.
+type gateRef struct {
+	id     int
+	idStr  string
+	name   string
+	orgKey string
+}
+
+// sourceCondition is one condition as it came from SonarQube Server.
+type sourceCondition struct {
+	metric string
+	op     string
+	error  string
+}
+
 // buildTargetConditions expands each source condition into zero or more
 // target conditions, recording a sidecar note for every drop and non-obvious
 // remap. Split out of runAddGateConditions to keep that function readable;
 // the POSTs are deliberately deferred to the caller so the resolver (#234)
 // can collapse collisions before any HTTP traffic.
 func buildTargetConditions(e *Executor, notesW *common.ChunkWriter, counter *TaskCounter,
-	gateIDStr, gateName string, conditions []map[string]any) []targetCondition {
+	gate gateRef, conditions []map[string]any) []targetCondition {
 
+	gateName := gate.name
 	var pending []targetCondition
 	for _, cond := range conditions {
 		metric, _ := cond["metric"].(string)
@@ -431,7 +460,7 @@ func buildTargetConditions(e *Executor, notesW *common.ChunkWriter, counter *Tas
 		if mapped && len(targets) == 0 {
 			e.Logger.Warn("addGateConditions: source metric has no SonarQube Cloud equivalent — condition skipped (#143)",
 				"gate", gateName, "metric", metric, "op", op, "error", errorVal)
-			recordGateConditionNote(notesW, gateIDStr, gateName, gateConditionNoteInput{
+			recordGateConditionNote(notesW, gate.idStr, gateName, gateConditionNoteInput{
 				Action:       "dropped",
 				SourceMetric: metric,
 				SourceOp:     op,
@@ -448,7 +477,8 @@ func buildTargetConditions(e *Executor, notesW *common.ChunkWriter, counter *Tas
 
 		targetConds := effectiveTargetConditions(metric, op, errorVal, targets)
 		if mapped {
-			recordRemapNote(e, notesW, gateIDStr, gateName, metric, op, errorVal, targets, targetConds)
+			recordRemapNote(e, notesW, gate,
+				sourceCondition{metric: metric, op: op, error: errorVal}, targets, targetConds)
 		}
 		pending = append(pending, targetConds...)
 	}
@@ -483,9 +513,11 @@ func effectiveTargetConditions(metric, op, errorVal string, targets []Replacemen
 // software_quality_* rating to its same-axis Cloud equivalent), which would
 // otherwise classify the gate as "Near Perfect" with an Issues line nobody
 // needs to read.
-func recordRemapNote(e *Executor, notesW *common.ChunkWriter, gateIDStr, gateName,
-	metric, op, errorVal string, targets []ReplacementCondition, targetConds []targetCondition) {
+func recordRemapNote(e *Executor, notesW *common.ChunkWriter, gate gateRef,
+	src sourceCondition, targets []ReplacementCondition, targetConds []targetCondition) {
 
+	gateIDStr, gateName := gate.idStr, gate.name
+	metric, op, errorVal := src.metric, src.op, src.error
 	e.Logger.Info("addGateConditions: source metric remapped to SonarQube Cloud equivalent(s) (#143)",
 		"gate", gateName, "source_metric", metric, "target_metrics", targets)
 	targetMetrics := make([]string, 0, len(targetConds))

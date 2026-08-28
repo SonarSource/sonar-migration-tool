@@ -330,6 +330,7 @@ func warnUnboundOrgs(ctx context.Context, raw *common.RawClient, cfg MigrateConf
 		return
 	}
 	unbound := make([]string, 0, len(orgs))
+	unknown := make([]string, 0, len(orgs))
 	for _, org := range orgs {
 		if ctx.Err() != nil {
 			return
@@ -337,11 +338,16 @@ func warnUnboundOrgs(ctx context.Context, raw *common.RawClient, cfg MigrateConf
 		body, err := raw.Get(ctx, "api/alm_integration/show_bound_organization",
 			url.Values{"organization": {org}})
 		if err != nil {
-			// Any error here means "no binding could be read". The
-			// distinction between a genuine unbound org and a transient
-			// fault is deliberately not made at this level — getOrgBinding
-			// owns that classification (see orgBindingNotBoundCodes).
-			unbound = append(unbound, org)
+			// Only the statuses getOrgBinding treats as an answer mean
+			// "not bound". Anything else — a 502, a timeout that outlived
+			// its retries — is an unknown, and telling the operator to go
+			// bind an organization that may already be bound would send
+			// them after the wrong thing.
+			if common.IsHTTPError(err, orgBindingNotBoundCodes...) {
+				unbound = append(unbound, org)
+			} else {
+				unknown = append(unknown, org)
+			}
 			continue
 		}
 		almURL, dopOrg := parseBoundOrganization(body)
@@ -349,6 +355,11 @@ func warnUnboundOrgs(ctx context.Context, raw *common.RawClient, cfg MigrateConf
 			unbound = append(unbound, org)
 			continue
 		}
+	}
+	if len(unknown) > 0 {
+		logger.Warn("pre-flight: could not read the DevOps binding for some target organization(s); project DevOps bindings may be skipped",
+			"organizations", strings.Join(unknown, ","),
+			"remediation", "usually transient — if project bindings come out missing, re-run with --target_task matchProjectRepos")
 	}
 	if len(unbound) == 0 {
 		return

@@ -293,9 +293,6 @@ func forEachMigrateItemSerial(ctx context.Context, e *Executor, taskName, depTas
 	}, fn)
 }
 
-// forEachMigrateItemImpl is the shared body that backs the concurrent
-// and serial migrate iterators. `concurrency` is the errgroup limit
-// (pass 1 to serialize, or cap(e.Sem) for the default fan-out).
 // migrateItemLoop bundles the knobs of the shared migrate-item iterator.
 // Passed as one value rather than five positional parameters, which the
 // signature had grown past the point of readability.
@@ -307,6 +304,9 @@ type migrateItemLoop struct {
 	concurrency int
 }
 
+// forEachMigrateItemImpl is the shared body that backs the concurrent and
+// serial migrate iterators. loop.concurrency is the errgroup limit (1 to
+// serialize, cap(e.Sem) for the default fan-out).
 func forEachMigrateItemImpl(ctx context.Context, e *Executor, loop migrateItemLoop,
 	fn func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error) error {
 

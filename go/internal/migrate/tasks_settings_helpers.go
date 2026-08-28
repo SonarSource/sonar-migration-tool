@@ -14,7 +14,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 	"github.com/sonar-solutions/sq-api-go/types"
 )
 
@@ -381,68 +380,51 @@ func extractObjectArray(raw json.RawMessage, key string) []map[string]any {
 	return arr
 }
 
-// warnIfProjectSettingsLookLikeGlobals inspects the getProjectSettings
-// extract for the signature of a leaked global settings table and warns
-// loudly if it finds one.
+// perProjectRecordCounts is the record count per project observed while
+// iterating the extract.
+type perProjectRecordCounts map[string]int
+
+// looksLikeLeakedGlobals reports the leaked-global-table signature: a high
+// record count per project that is near-identical for every project.
 //
 // /api/settings/values?component=X returns the project's EFFECTIVE
-// configuration — the whole instance-scope set plus any project rows —
-// and the extract is supposed to keep only records the server marked
-// non-inherited. When that filter does not take effect (an extract
-// produced by an older build, or a source whose responses omit the
-// flag), every project ends up carrying an identical copy of the global
-// table. One customer run reached 244,399 records for 1,142 projects:
-// 214.01 per project, i.e. ~11 genuine overrides in the whole estate
-// and 42,048 HTTP 400s from the ~49 instance-scope-only keys.
+// configuration — the whole instance-scope set plus any project rows — and
+// the extract is supposed to keep only records the server marked
+// non-inherited. When that filter does not take effect (an extract produced
+// by an older build, or a source whose responses omit the flag), every
+// project ends up carrying an identical copy of the global table. One
+// customer run reached 244,399 records for 1,142 projects: 214.01 each, i.e.
+// ~11 genuine overrides in the whole estate and 42,048 HTTP 400s from the
+// ~49 instance-scope-only keys.
 //
-// The signature is cheap to spot: a high per-project record count that
-// is near-identical for every project. Real overrides are sparse and
-// uneven.
-func warnIfProjectSettingsLookLikeGlobals(logger *slog.Logger, items []structure.ExtractItem) {
+// Real overrides are sparse and uneven, so uniformity is the tell.
+func (c perProjectRecordCounts) looksLikeLeakedGlobals() (mean float64, min, max int, ok bool) {
 	const (
 		minProjects       = 5  // too few to reason about a distribution
 		suspiciousPerProj = 25 // real per-project override sets are small
 	)
-	perProject := make(map[string]int)
-	for _, it := range items {
-		key := extractField(it.Data, "project")
-		if key == "" {
-			key = extractField(it.Data, "projectKey")
-		}
-		if key == "" {
-			continue
-		}
-		perProject[it.ServerURL+key]++
-	}
-	if len(perProject) < minProjects {
-		return
+	if len(c) < minProjects {
+		return 0, 0, 0, false
 	}
 	total := 0
-	minCount, maxCount := -1, 0
-	for _, n := range perProject {
+	min, max = -1, 0
+	for _, n := range c {
 		total += n
-		if minCount < 0 || n < minCount {
-			minCount = n
+		if min < 0 || n < min {
+			min = n
 		}
-		if n > maxCount {
-			maxCount = n
+		if n > max {
+			max = n
 		}
 	}
-	mean := float64(total) / float64(len(perProject))
+	mean = float64(total) / float64(len(c))
 	if mean < suspiciousPerProj {
-		return
+		return mean, min, max, false
 	}
-	// Uniformity: a leaked global table gives every project the same
-	// count, so the spread is a tiny fraction of the mean.
-	if float64(maxCount-minCount) > 0.25*mean {
-		return
+	// A leaked global table gives every project the same count, so the
+	// spread is a tiny fraction of the mean.
+	if float64(max-min) > 0.25*mean {
+		return mean, min, max, false
 	}
-	logger.Warn("setProjectSettings: the per-project settings extract looks like a copy of the source's GLOBAL settings, not per-project overrides",
-		"projects", len(perProject),
-		"records", total,
-		"records_per_project", fmt.Sprintf("%.2f", mean),
-		"min_per_project", minCount,
-		"max_per_project", maxCount,
-		"why_this_matters", "instance-scope-only keys will be rejected by SonarQube Cloud, and project-settable ones will be written as per-project overrides that shadow future org-level changes",
-		"how_to_confirm", "GET api/settings/values?component=<project> on the source and check whether the records carry \"inherited\": true; if they do, re-run extract with a current build")
+	return mean, min, max, true
 }

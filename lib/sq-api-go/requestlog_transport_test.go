@@ -24,7 +24,10 @@ func TestRequestLogTransportRecordsCalls(t *testing.T) {
 			_, _ = w.Write([]byte(`{"errors":[{"msg":"Setting 'bad.key' cannot be set on a Project"}]}`))
 			return
 		}
-		w.WriteHeader(http.StatusNoContent)
+		// A 200 WITH a body, so "success bodies are not captured" is
+		// actually exercised — a 204 would make the assertion vacuous.
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ignored":"payload that must not reach requests.log"}`))
 	})
 	mux.HandleFunc("GET /api/big", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(strings.Repeat("x", 100)))
@@ -68,7 +71,7 @@ func TestRequestLogTransportRecordsCalls(t *testing.T) {
 
 	ok, bad, big := entries[0], entries[1], entries[2]
 
-	if ok.Status != http.StatusNoContent || ok.URL != "/api/settings/set" || ok.Method != http.MethodPost {
+	if ok.Status != http.StatusOK || ok.URL != "/api/settings/set" || ok.Method != http.MethodPost {
 		t.Errorf("success entry wrong: %+v", ok)
 	}
 	if ok.Data["key"] != "good.key" || ok.Data["component"] != "org_proj" {
@@ -76,6 +79,9 @@ func TestRequestLogTransportRecordsCalls(t *testing.T) {
 	}
 	if ok.Response != "" {
 		t.Errorf("success bodies must not be captured, got %q", ok.Response)
+	}
+	if strings.Contains(ok.Response, "must not reach") {
+		t.Error("the success payload leaked into the log entry")
 	}
 
 	if bad.Status != http.StatusBadRequest {

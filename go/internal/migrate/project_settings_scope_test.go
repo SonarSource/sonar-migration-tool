@@ -5,19 +5,14 @@
 package migrate
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
-
-	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 )
 
 // A global setting that leaked into the per-project extract used to be
@@ -168,58 +163,41 @@ func TestRunSetProjectSettingsFiltersInternalAndSQSOnlyKeys(t *testing.T) {
 }
 
 // The leaked-globals signature is a high, near-uniform per-project record
-// count. Detecting it before the task fans out turns a multi-thousand-line
-// warning storm into one actionable line.
-func TestWarnIfProjectSettingsLookLikeGlobals(t *testing.T) {
+// count. Detecting it turns a multi-thousand-line warning storm into one
+// actionable line — and it is computed from counts tallied during the
+// iteration, not a second full read of a quarter-million-record corpus.
+func TestLooksLikeLeakedGlobals(t *testing.T) {
+	build := func(projects, minPerProj, maxPerProj int) perProjectRecordCounts {
+		c := perProjectRecordCounts{}
+		for p := 0; p < projects; p++ {
+			n := minPerProj
+			if projects > 1 && maxPerProj > minPerProj {
+				n = minPerProj + (maxPerProj-minPerProj)*p/(projects-1)
+			}
+			c[fmt.Sprintf("srv/proj%02d", p)] = n
+		}
+		return c
+	}
 	cases := []struct {
 		name       string
 		projects   int
 		minPerProj int
 		maxPerProj int
-		wantWarn   bool
+		want       bool
 	}{
 		// The customer shape: 214 settings on every project.
-		{name: "uniform high count", projects: 10, minPerProj: 214, maxPerProj: 214, wantWarn: true},
-		{name: "uniform high count with jitter", projects: 12, minPerProj: 40, maxPerProj: 41, wantWarn: true},
-		// Realistic override sets are small and uneven.
-		{name: "sparse overrides", projects: 10, minPerProj: 1, maxPerProj: 6, wantWarn: false},
-		// High mean but a wide spread is not the leak signature.
-		{name: "high but uneven", projects: 10, minPerProj: 5, maxPerProj: 90, wantWarn: false},
-		// Too few projects to infer a distribution.
-		{name: "too few projects", projects: 3, minPerProj: 214, maxPerProj: 214, wantWarn: false},
+		{name: "uniform high count", projects: 10, minPerProj: 214, maxPerProj: 214, want: true},
+		{name: "uniform high with jitter", projects: 12, minPerProj: 40, maxPerProj: 41, want: true},
+		{name: "sparse overrides", projects: 10, minPerProj: 1, maxPerProj: 6, want: false},
+		{name: "high but uneven", projects: 10, minPerProj: 5, maxPerProj: 90, want: false},
+		{name: "too few projects", projects: 3, minPerProj: 214, maxPerProj: 214, want: false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			var buf bytes.Buffer
-			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-			warnIfProjectSettingsLookLikeGlobals(logger, fakeProjectSettingItems(c.projects, c.minPerProj, c.maxPerProj))
-
-			warned := strings.Contains(buf.String(), "looks like a copy of the source's GLOBAL settings")
-			if warned != c.wantWarn {
-				t.Errorf("warned = %v, want %v; log:\n%s", warned, c.wantWarn, buf.String())
+			_, _, _, got := build(c.projects, c.minPerProj, c.maxPerProj).looksLikeLeakedGlobals()
+			if got != c.want {
+				t.Errorf("looksLikeLeakedGlobals = %v, want %v", got, c.want)
 			}
 		})
 	}
-}
-
-// fakeProjectSettingItems builds a getProjectSettings item slice with
-// `projects` projects whose record counts ramp linearly from minPerProj to
-// maxPerProj, so a test can dial the uniformity of the distribution.
-func fakeProjectSettingItems(projects, minPerProj, maxPerProj int) []structure.ExtractItem {
-	var items []structure.ExtractItem
-	for p := 0; p < projects; p++ {
-		n := minPerProj
-		if projects > 1 && maxPerProj > minPerProj {
-			n = minPerProj + (maxPerProj-minPerProj)*p/(projects-1)
-		}
-		for i := 0; i < n; i++ {
-			data, _ := json.Marshal(map[string]any{
-				"project": fmt.Sprintf("proj%02d", p),
-				"key":     fmt.Sprintf("sonar.key%03d", i),
-				"value":   "v",
-			})
-			items = append(items, structure.ExtractItem{ServerURL: testServerURL, Data: data})
-		}
-	}
-	return items
 }

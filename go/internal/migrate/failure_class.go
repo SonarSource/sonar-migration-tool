@@ -7,7 +7,10 @@ package migrate
 import (
 	"context"
 	"errors"
+	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
@@ -168,14 +171,28 @@ func ClassifyFailure(err error) FailureVerdict {
 		}
 	}
 
+	// A request that never got a response produces a plain transport error,
+	// not an APIError — APIError is only built from a real response, so its
+	// StatusCode is never 0 in practice. Without this branch a DNS failure,
+	// a refused connection, a TLS error or a proxy timeout was classified as
+	// a reportable defect in the tool, which is exactly the misdirection the
+	// classification exists to prevent.
+	if isTransportFailure(err) {
+		return FailureVerdict{
+			Class:       FailureEnvironment,
+			Why:         "the request never reached SonarQube Cloud — it failed at the network or TLS layer, after the retry budget was spent",
+			Remediation: "check connectivity, DNS, proxy and TLS interception between the runner and SonarQube Cloud; the run is resumable with --run_id",
+		}
+	}
+
 	f := asHTTPFailure(err)
 	if !f.ok {
-		// Not an HTTP failure at all: a context error, a JSON decode
-		// failure, a nil dereference surfaced as an error. None of these
-		// are the platform's fault.
+		// Not an HTTP failure and not a transport failure: a JSON decode
+		// error, a bad type assertion, a nil dereference surfaced as an
+		// error. None of these are the platform's fault.
 		return FailureVerdict{
 			Class:       FailureBug,
-			Why:         "the operation failed before or outside an HTTP response, so this is a fault in the migration tool rather than a SonarQube Cloud limitation",
+			Why:         "the operation failed without ever producing an HTTP response or a network error, so this is a fault in the migration tool rather than a SonarQube Cloud limitation",
 			Remediation: "re-run with --debug and report the error with the surrounding log lines",
 			Reportable:  true,
 		}
@@ -189,13 +206,6 @@ func ClassifyFailure(err error) FailureVerdict {
 	}
 
 	switch {
-	case f.status == 0:
-		return FailureVerdict{
-			Class:       FailureEnvironment,
-			Why:         "no HTTP response was received — the connection failed at the transport level",
-			Remediation: "check network reachability, proxy settings and TLS interception between the runner and SonarQube Cloud; retries already covered transient blips",
-		}
-
 	case f.status == http.StatusUnauthorized:
 		return FailureVerdict{
 			Class:       FailureEnvironment,
@@ -248,4 +258,34 @@ func ClassifyFailure(err error) FailureVerdict {
 		Remediation: "report this with the endpoint, the message above and the run id",
 		Reportable:  true,
 	}
+}
+
+// isTransportFailure reports whether err is a network-layer failure rather
+// than a response the server chose to send.
+//
+// The typed clients only build an APIError once they have a response, so
+// anything that dies on the wire arrives as *url.Error wrapping a
+// net.Error, a DNS error, or an EOF. Those are the customer's environment,
+// never a defect in this tool.
+func isTransportFailure(err error) bool {
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		return true
+	}
+	// http.Client wraps everything it cannot complete in *url.Error; the
+	// checks above catch the common payloads, this catches the rest
+	// (including TLS handshake failures, which are plain errors).
+	var urlErr *url.Error
+	return errors.As(err, &urlErr)
 }

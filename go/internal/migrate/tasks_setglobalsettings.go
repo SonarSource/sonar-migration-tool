@@ -856,8 +856,11 @@ func fanOutOutcome(ctx context.Context, e *Executor, raw json.RawMessage,
 	for range applied {
 		counter.Success()
 	}
-	for range failed {
-		counter.Fail()
+	for _, f := range failed {
+		// Classify from the verdict the fan-out already computed, so the
+		// summary breakdown agrees with the per-project log lines instead
+		// of dumping every fan-out failure into "unclassified".
+		counter.FailWith(f.class)
 	}
 
 	// Branch the Detail wording on actual per-project counts so the
@@ -925,6 +928,9 @@ func fanOutOutcome(ctx context.Context, e *Executor, raw json.RawMessage,
 type projectFanOutFailure struct {
 	project string
 	reason  string
+	// class is the verdict computed where the error was still in hand, so
+	// the task summary can bucket it by cause instead of guessing.
+	class FailureClass
 }
 
 // fanOutGlobalToProjects applies a global setting record to every
@@ -969,7 +975,11 @@ func fanOutGlobalToProjects(ctx context.Context, e *Executor, raw json.RawMessag
 		case err != nil:
 			logAPIWarn(e.Logger, "setGlobalSettings: project fan-out failed", err,
 				"key", key, "project", pm.CloudKey, "org", org)
-			failed = append(failed, projectFanOutFailure{project: pm.CloudKey, reason: err.Error()})
+			failed = append(failed, projectFanOutFailure{
+				project: pm.CloudKey,
+				reason:  err.Error(),
+				class:   ClassifyFailure(err).Class,
+			})
 		default:
 			applied = append(applied, pm.CloudKey)
 		}

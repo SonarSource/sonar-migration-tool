@@ -8,6 +8,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -66,9 +68,33 @@ func TestClassifyFailure(t *testing.T) {
 		{name: "rate limited", err: apiErr(429, "slow down"), wantClass: FailureEnvironment},
 		{name: "server error", err: apiErr(503, "unavailable"), wantClass: FailureEnvironment},
 		{
-			name:      "transport failure has no status",
-			err:       apiErr(0, ""),
+			// A request that never reached the server arrives as *url.Error,
+			// not an APIError — APIError is only built from a real response.
+			// This used to be classified as a reportable tool bug.
+			name: "connection refused is the customer's environment",
+			err: &url.Error{Op: "Post", URL: "https://sonarcloud.io/api/settings/set",
+				Err: &net.OpError{Op: "dial", Err: errors.New("connection refused")}},
 			wantClass: FailureEnvironment,
+		},
+		{
+			name: "DNS failure is the customer's environment",
+			err: &url.Error{Op: "Get", URL: "https://sonarcloud.io/api/x",
+				Err: &net.DNSError{Err: "no such host", Name: "sonarcloud.io"}},
+			wantClass: FailureEnvironment,
+		},
+		{
+			name: "TLS handshake failure is the customer's environment",
+			err: &url.Error{Op: "Get", URL: "https://sonarcloud.io/api/x",
+				Err: errors.New("tls: failed to verify certificate")},
+			wantClass: FailureEnvironment,
+		},
+		{
+			// Still a bug: no response and no network error means the tool
+			// broke on its own.
+			name:           "decode error remains a reportable bug",
+			err:            errors.New("json: cannot unmarshal string into int"),
+			wantClass:      FailureBug,
+			wantReportable: true,
 		},
 		{
 			// The important one: a 400 the tool cannot explain means it
