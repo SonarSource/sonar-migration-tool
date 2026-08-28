@@ -62,6 +62,16 @@ func TestClassifyFailure(t *testing.T) {
 			err:       apiErr(400, "This organization is not bound to an ALM application"),
 			wantClass: FailureEnvironment,
 		},
+		{
+			// Cloud returns entitlement refusals as 400, not 403, so
+			// without an explicit hint they fall through to "bug" and send
+			// operators chasing a defect that is really a subscription or
+			// permission problem. A live regression run mislabelled 6 of
+			// these before the hint existed.
+			name:      "organization not allowed to perform this action",
+			err:       apiErr(400, "Organization 'abc' is not allowed to perform this action"),
+			wantClass: FailureEnvironment,
+		},
 		{name: "unauthorized", err: apiErr(401, "no"), wantClass: FailureEnvironment},
 		{name: "forbidden", err: apiErr(403, "no"), wantClass: FailureEnvironment},
 		{name: "not found", err: apiErr(404, "gone"), wantClass: FailureEnvironment},

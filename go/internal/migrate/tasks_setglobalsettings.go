@@ -835,10 +835,16 @@ func fanOutOutcome(ctx context.Context, e *Executor, raw json.RawMessage,
 
 	projectDef, hasProjDef := projectDefsByOrg[org][key]
 	if !hasProjDef {
-		// Pathological — org said yes, project says no. SonarQube
-		// Cloud's own definition lists disagree, so neither scope can
-		// take the value; worth reporting rather than absorbing.
-		counter.FailWith(FailureBug)
+		// Pathological — org said yes, project says no. SonarQube Cloud's
+		// own definition lists disagree, so the value has no home at
+		// either scope.
+		//
+		// Classified by-design rather than as a bug: the request the tool
+		// built was correct, Cloud simply will not take the value
+		// anywhere, and calling that a defect sends operators to file a
+		// report about someone else's metadata. A live regression run
+		// escalated 18 such keys to ERROR on that basis.
+		counter.FailWith(FailureByDesign)
 		return orgOutcome{
 			Org: org, Status: outcomeFailed,
 			Reason: "rejected at org scope, key absent from project scope",

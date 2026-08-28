@@ -110,6 +110,16 @@ var environmentMessageHints = []struct {
 		Remediation: "bind the organization to its DevOps platform, then re-run with --target_task matchProjectRepos",
 	},
 	{
+		Substring:   "is not allowed to perform this action",
+		Why:         "the target organization's plan or permissions do not allow this operation",
+		Remediation: "check the organization's subscription and that the migration token has Administer on it; SonarQube Cloud returns this as a 400 rather than a 403",
+	},
+	{
+		Substring:   "not allowed to use",
+		Why:         "the target organization's plan does not include this capability",
+		Remediation: "check the organization's subscription, then re-run",
+	},
+	{
 		Substring:   "maximum number of",
 		Why:         "an organization or plan limit was reached",
 		Remediation: "raise the limit on the target organization or reduce the migration scope, then re-run",
