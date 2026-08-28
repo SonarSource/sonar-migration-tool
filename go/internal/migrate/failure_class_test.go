@@ -5,7 +5,9 @@
 package migrate
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -82,26 +84,46 @@ func TestClassifyFailure(t *testing.T) {
 			wantClass:      FailureBug,
 			wantReportable: true,
 		},
+		{
+			// A cascade from an earlier fatal error or an OOM kill. Calling
+			// it a bug would send people chasing the wrong thing.
+			name:      "cancelled context is a cascade, not a defect",
+			err:       fmt.Errorf(`Post "https://sonarcloud.io/api/projects/create": %w`, context.Canceled),
+			wantClass: FailureEnvironment,
+		},
+		{
+			name:      "deadline exceeded is treated the same way",
+			err:       fmt.Errorf("request: %w", context.DeadlineExceeded),
+			wantClass: FailureEnvironment,
+		},
 		{name: "nil is not a failure", err: nil, wantClass: ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			v := ClassifyFailure(c.err)
-			if v.Class != c.wantClass {
-				t.Errorf("class = %q, want %q", v.Class, c.wantClass)
-			}
-			if v.Reportable != c.wantReportable {
-				t.Errorf("reportable = %v, want %v", v.Reportable, c.wantReportable)
-			}
-			if c.wantClass != "" {
-				if v.Why == "" {
-					t.Error("every classified failure must explain why")
-				}
-				if v.Remediation == "" {
-					t.Error("every classified failure must say what to do (or that nothing is needed)")
-				}
-			}
+			assertVerdict(t, ClassifyFailure(c.err), c.wantClass, c.wantReportable)
 		})
+	}
+}
+
+// assertVerdict checks a verdict against the expected class, and enforces
+// the contract that every classified failure explains itself — a class with
+// no "why" or no remediation would defeat the point of classifying at all.
+func assertVerdict(t *testing.T, v FailureVerdict, wantClass FailureClass, wantReportable bool) {
+	t.Helper()
+	if v.Class != wantClass {
+		t.Errorf("class = %q, want %q", v.Class, wantClass)
+	}
+	if v.Reportable != wantReportable {
+		t.Errorf("reportable = %v, want %v", v.Reportable, wantReportable)
+	}
+	if wantClass == "" {
+		return
+	}
+	if v.Why == "" {
+		t.Error("every classified failure must explain why")
+	}
+	if v.Remediation == "" {
+		t.Error("every classified failure must say what to do (or that nothing is needed)")
 	}
 }
 
@@ -144,7 +166,7 @@ func TestTaskCounterSummaryBreakdownAndSeverity(t *testing.T) {
 		c := NewTaskCounter("createProjects")
 		c.FailAPI(apiErr(400, "The organization 'x' is not allowed to use private projects."))
 		logs := captureSummary(t, c)
-		assertContains(t, logs, `level=ERROR`, `failed_environment=1`)
+		assertContains(t, logs, `level=ERROR`, `failed_customer_environment_issue=1`)
 	})
 
 	t.Run("a clean task stays informational and carries no breakdown", func(t *testing.T) {

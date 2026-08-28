@@ -5,6 +5,7 @@
 package migrate
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -36,11 +37,15 @@ const (
 	// failure in any meaningful sense.
 	FailureAlreadyDone FailureClass = "already-done"
 
-	// FailureEnvironment means something outside the tool blocked the
-	// operation: token permissions, org subscription or quota, rate
-	// limiting, connectivity, a Cloud-side 5xx. Re-running or fixing the
-	// environment may succeed.
-	FailureEnvironment FailureClass = "environment"
+	// FailureEnvironment means something in the customer's environment
+	// blocked the operation: token permissions, org subscription or quota,
+	// rate limiting, connectivity, a Cloud-side 5xx. Nothing is wrong with
+	// the migration itself; re-running after fixing the environment may
+	// succeed.
+	//
+	// Named "customer-environment-issue" in the log so an operator reading
+	// a support ticket is not left guessing whose environment is meant.
+	FailureEnvironment FailureClass = "customer-environment-issue"
 
 	// FailureBug means the request was rejected for a reason the tool does
 	// not recognise. The payload it sent is most likely wrong. These are
@@ -145,6 +150,21 @@ func ClassifyFailure(err error) FailureVerdict {
 			Class:       FailureByDesign,
 			Why:         "SonarQube Cloud lists this setting at organization scope but refuses to write it there; it only takes effect per project",
 			Remediation: "none needed; the migration falls back to setting the value on each project in the organization",
+		}
+	}
+
+	// A cancelled context means the run was already being torn down — by an
+	// earlier fatal error, an operator interrupt, or the process running out
+	// of memory. The failure is a cascade, not its own fault, and calling it
+	// a bug sends people chasing the wrong thing. One customer saw
+	// "createProjects: create failed ... context canceled" for a project
+	// that already existed, while the real problem was the extract phase
+	// exhausting the host.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return FailureVerdict{
+			Class:       FailureEnvironment,
+			Why:         "the migration was already shutting down when this operation ran, so it never reached SonarQube Cloud — this failure is a consequence of an earlier one, not an independent problem",
+			Remediation: "find the first error in the run and address that; re-run with --run_id to resume once it is fixed",
 		}
 	}
 
