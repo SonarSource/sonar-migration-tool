@@ -180,6 +180,14 @@ func mockMigrate(err error) func() {
 	return func() { runMigrateFn = orig }
 }
 
+func mockResolveProjectKeys(keys []string, err error) func() {
+	orig := resolveProjectKeysFn
+	resolveProjectKeysFn = func(_ context.Context, _ extract.ExtractConfig, _ string) ([]string, error) {
+		return keys, err
+	}
+	return func() { resolveProjectKeysFn = orig }
+}
+
 // --- Phase 1: Extract with mocked RunExtract ---
 
 func TestPhaseExtractSuccess(t *testing.T) {
@@ -189,7 +197,7 @@ func TestPhaseExtractSuccess(t *testing.T) {
 	dir := t.TempDir()
 	state := &WizardState{Phase: PhaseExtract}
 	p := &MockPrompter{
-		ExtractFormResponses: []ExtractFormResponse{
+		ExtractFormResponses: []ExtractFormResult{
 			{URL: testSQServerURL, Token: "token123", IncludeProjectData: true, IncludeIssueSync: true},
 		},
 	}
@@ -209,6 +217,100 @@ func TestPhaseExtractSuccess(t *testing.T) {
 	}
 }
 
+// #515: a non-empty project key pattern must be resolved to a concrete
+// key list before extraction starts, and that list threaded into
+// ExtractConfig.ProjectKeys.
+func TestPhaseExtractResolvesProjectKeyPattern(t *testing.T) {
+	var captured extract.ExtractConfig
+	origFn := runExtractFn
+	runExtractFn = func(_ context.Context, cfg extract.ExtractConfig) ([]string, error) {
+		captured = cfg
+		return nil, nil
+	}
+	defer func() { runExtractFn = origFn }()
+
+	restoreResolve := mockResolveProjectKeys([]string{"proj-a", "proj-b"}, nil)
+	defer restoreResolve()
+
+	dir := t.TempDir()
+	state := &WizardState{Phase: PhaseExtract}
+	p := &MockPrompter{
+		ExtractFormResponses: []ExtractFormResult{
+			{URL: testSQServerURL, Token: "token123", ProjectKeyPattern: "BANKING_.+", IncludeProjectData: true, IncludeIssueSync: true},
+		},
+	}
+
+	if err := phaseExtract(context.Background(), p, state, dir); err != nil {
+		t.Fatalf("phaseExtract: %v", err)
+	}
+	if len(captured.ProjectKeys) != 2 || captured.ProjectKeys[0] != "proj-a" || captured.ProjectKeys[1] != "proj-b" {
+		t.Errorf("ProjectKeys: got %v, want [proj-a proj-b]", captured.ProjectKeys)
+	}
+	if ptrStr(state.ProjectKeyPattern) != "BANKING_.+" {
+		t.Errorf("ProjectKeyPattern: got %q, want BANKING_.+", ptrStr(state.ProjectKeyPattern))
+	}
+}
+
+// #515: a pattern that matches zero projects must fail phaseExtract
+// before extraction ever runs, instead of silently extracting everything.
+func TestPhaseExtractProjectKeyPatternNoMatchesFails(t *testing.T) {
+	extractCalled := false
+	origFn := runExtractFn
+	runExtractFn = func(_ context.Context, _ extract.ExtractConfig) ([]string, error) {
+		extractCalled = true
+		return nil, nil
+	}
+	defer func() { runExtractFn = origFn }()
+
+	restoreResolve := mockResolveProjectKeys(nil, fmt.Errorf("no project matches pattern"))
+	defer restoreResolve()
+
+	dir := t.TempDir()
+	state := &WizardState{Phase: PhaseExtract}
+	p := &MockPrompter{
+		ExtractFormResponses: []ExtractFormResult{
+			{URL: testSQServerURL, Token: "token123", ProjectKeyPattern: "NOPE_.+", IncludeProjectData: true, IncludeIssueSync: true},
+		},
+	}
+
+	if err := phaseExtract(context.Background(), p, state, dir); err == nil {
+		t.Fatal("expected error when project key pattern matches nothing")
+	}
+	if extractCalled {
+		t.Error("runExtractFn should not be called when project key resolution fails")
+	}
+}
+
+// #515: leaving the project key pattern blank must not trigger a
+// resolution round-trip — the default "extract everything" behavior.
+func TestPhaseExtractNoPatternSkipsResolution(t *testing.T) {
+	resolveCalled := false
+	origResolve := resolveProjectKeysFn
+	resolveProjectKeysFn = func(_ context.Context, _ extract.ExtractConfig, _ string) ([]string, error) {
+		resolveCalled = true
+		return nil, nil
+	}
+	defer func() { resolveProjectKeysFn = origResolve }()
+
+	restore := mockExtract(nil)
+	defer restore()
+
+	dir := t.TempDir()
+	state := &WizardState{Phase: PhaseExtract}
+	p := &MockPrompter{
+		ExtractFormResponses: []ExtractFormResult{
+			{URL: testSQServerURL, Token: "token123", IncludeProjectData: true, IncludeIssueSync: true},
+		},
+	}
+
+	if err := phaseExtract(context.Background(), p, state, dir); err != nil {
+		t.Fatalf("phaseExtract: %v", err)
+	}
+	if resolveCalled {
+		t.Error("resolveProjectKeysFn should not be called when pattern is empty")
+	}
+}
+
 func TestRunExtractWithRetrySuccess(t *testing.T) {
 	restore := mockExtract(nil)
 	defer restore()
@@ -217,7 +319,7 @@ func TestRunExtractWithRetrySuccess(t *testing.T) {
 	state := &WizardState{}
 	p := &MockPrompter{}
 
-	_, err := runExtractWithRetry(context.Background(), p, state, dir, testSQServerURL, "token")
+	_, err := runExtractWithRetry(context.Background(), p, state, dir, testSQServerURL, "token", certConfig{}, nil)
 	if err != nil {
 		t.Fatalf("runExtractWithRetry: %v", err)
 	}
@@ -239,7 +341,7 @@ func TestRunExtractWithRetrySetsProgressCallback(t *testing.T) {
 	state := &WizardState{}
 	p := &MockPrompter{}
 
-	if _, err := runExtractWithRetry(context.Background(), p, state, dir, testSQServerURL, "token"); err != nil {
+	if _, err := runExtractWithRetry(context.Background(), p, state, dir, testSQServerURL, "token", certConfig{}, nil); err != nil {
 		t.Fatalf("runExtractWithRetry: %v", err)
 	}
 	if captured.ProgressCallback == nil {
@@ -270,7 +372,7 @@ func TestRunExtractWithRetryTranslatesScopeToSkipFlags(t *testing.T) {
 	state := &WizardState{IncludeProjectData: &includeData, IncludeIssueSync: &includeSync}
 	p := &MockPrompter{}
 
-	if _, err := runExtractWithRetry(context.Background(), p, state, dir, testSQServerURL, "token"); err != nil {
+	if _, err := runExtractWithRetry(context.Background(), p, state, dir, testSQServerURL, "token", certConfig{}, nil); err != nil {
 		t.Fatalf("runExtractWithRetry: %v", err)
 	}
 	if captured.IncludeProjectData {
@@ -297,7 +399,7 @@ func TestRunExtractWithRetryDefaultsToIncludeEverything(t *testing.T) {
 	state := &WizardState{}
 	p := &MockPrompter{}
 
-	if _, err := runExtractWithRetry(context.Background(), p, state, dir, testSQServerURL, "token"); err != nil {
+	if _, err := runExtractWithRetry(context.Background(), p, state, dir, testSQServerURL, "token", certConfig{}, nil); err != nil {
 		t.Fatalf("runExtractWithRetry: %v", err)
 	}
 	if !captured.IncludeProjectData {
@@ -327,12 +429,48 @@ func TestRunExtractWithRetrySSLError(t *testing.T) {
 		PasswordResponses: []string{""},
 	}
 
-	_, err := runExtractWithRetry(context.Background(), p, state, dir, testSQServerURL, "token")
+	_, err := runExtractWithRetry(context.Background(), p, state, dir, testSQServerURL, "token", certConfig{}, nil)
 	if err != nil {
 		t.Fatalf("runExtractWithRetry with SSL retry: %v", err)
 	}
 	if callCount != 2 {
 		t.Errorf("expected 2 extract calls, got %d", callCount)
+	}
+}
+
+// #515: a cert entered reactively after an SSL error must be persisted
+// onto state so it survives Cancel/Back the same way an upfront form
+// override would — not just used for the immediate retry.
+func TestRunExtractWithRetryPersistsCertOverrideOnSSLRetry(t *testing.T) {
+	callCount := 0
+	origFn := runExtractFn
+	runExtractFn = func(_ context.Context, cfg extract.ExtractConfig) ([]string, error) {
+		callCount++
+		if callCount == 1 {
+			return nil, fmt.Errorf("connect: %w", x509.UnknownAuthorityError{})
+		}
+		return nil, nil
+	}
+	defer func() { runExtractFn = origFn }()
+
+	dir := t.TempDir()
+	state := &WizardState{}
+	p := &MockPrompter{
+		TextResponses:     []string{"/new-cert.pem", "/new-cert.key"},
+		PasswordResponses: []string{"newpass"},
+	}
+
+	if _, err := runExtractWithRetry(context.Background(), p, state, dir, testSQServerURL, "token", certConfig{}, nil); err != nil {
+		t.Fatalf("runExtractWithRetry with SSL retry: %v", err)
+	}
+	if ptrStr(state.PEMFilePath) != "/new-cert.pem" {
+		t.Errorf("PEMFilePath: got %q, want /new-cert.pem", ptrStr(state.PEMFilePath))
+	}
+	if ptrStr(state.KeyFilePath) != "/new-cert.key" {
+		t.Errorf("KeyFilePath: got %q, want /new-cert.key", ptrStr(state.KeyFilePath))
+	}
+	if ptrStr(state.CertPassword) != "newpass" {
+		t.Errorf("CertPassword: got %q, want newpass", ptrStr(state.CertPassword))
 	}
 }
 
@@ -346,7 +484,7 @@ func TestRunExtractWithRetryDecline(t *testing.T) {
 		ConfirmResponses: []bool{false}, // decline retry
 	}
 
-	_, err := runExtractWithRetry(context.Background(), p, state, dir, testSQServerURL, "token")
+	_, err := runExtractWithRetry(context.Background(), p, state, dir, testSQServerURL, "token", certConfig{}, nil)
 	if err == nil {
 		t.Fatal("expected error when declining retry")
 	}
@@ -414,7 +552,7 @@ func TestPhaseMigrateSuccess(t *testing.T) {
 		EnterpriseKey: strPtr(testEntKey),
 	}
 	p := &MockPrompter{
-		MigrateFormResponses: []MigrateFormResponse{
+		MigrateFormResponses: []MigrateFormResult{
 			{URL: testSQCloudURL, Token: "token", EnterpriseKey: testEntKey, IncludeProjectData: true, IncludeIssueSync: true},
 		},
 	}
@@ -557,10 +695,10 @@ func TestRunFullWizardMocked(t *testing.T) {
 			testEntKey,  // enterprise key
 			"cloud-org", // cloud org key for org-1
 		},
-		ExtractFormResponses: []ExtractFormResponse{
+		ExtractFormResponses: []ExtractFormResult{
 			{URL: testSQServerURL, Token: "server-token", IncludeProjectData: false, IncludeIssueSync: false},
 		},
-		MigrateFormResponses: []MigrateFormResponse{
+		MigrateFormResponses: []MigrateFormResult{
 			{URL: testSQCloudURL, Token: "cloud-token", EnterpriseKey: testEntKey, IncludeProjectData: false, IncludeIssueSync: false},
 		},
 		ConfirmResponses: []bool{
@@ -584,7 +722,7 @@ func TestRunFullWizardMocked(t *testing.T) {
 func TestPromptExtractCredentialsAcceptFirst(t *testing.T) {
 	state := &WizardState{}
 	p := &MockPrompter{
-		ExtractFormResponses: []ExtractFormResponse{
+		ExtractFormResponses: []ExtractFormResult{
 			{URL: testSQServerURL, Token: "token123", IncludeProjectData: true, IncludeIssueSync: true},
 		},
 	}
@@ -615,7 +753,7 @@ func TestPromptExtractCredentialsCancelPropagatesError(t *testing.T) {
 func TestPromptExtractCredentialsCapturesScope(t *testing.T) {
 	state := &WizardState{}
 	p := &MockPrompter{
-		ExtractFormResponses: []ExtractFormResponse{
+		ExtractFormResponses: []ExtractFormResult{
 			{URL: testSQServerURL, Token: "token123", IncludeProjectData: false, IncludeIssueSync: false},
 		},
 	}
@@ -662,7 +800,7 @@ func TestPromptExtractCredentialsUsesExistingURL(t *testing.T) {
 func TestPromptExtractCredentialsBlankTokenKeepsSeeded(t *testing.T) {
 	state := &WizardState{SourceToken: strPtr("seeded-token")}
 	p := &MockPrompter{
-		ExtractFormResponses: []ExtractFormResponse{
+		ExtractFormResponses: []ExtractFormResult{
 			{URL: testSQServerURL, Token: "", IncludeProjectData: true, IncludeIssueSync: true},
 		},
 	}
@@ -704,7 +842,7 @@ func TestPromptCertConfig(t *testing.T) {
 func TestPromptMigrateCredentialsAcceptFirst(t *testing.T) {
 	state := &WizardState{}
 	p := &MockPrompter{
-		MigrateFormResponses: []MigrateFormResponse{
+		MigrateFormResponses: []MigrateFormResult{
 			{URL: testSQCloudURL, Token: "token", EnterpriseKey: testEntKey, IncludeProjectData: true, IncludeIssueSync: true},
 		},
 	}
@@ -745,7 +883,7 @@ func TestPromptMigrateCredentialsUsesExistingValues(t *testing.T) {
 func TestPromptMigrateCredentialsBlankTokenKeepsSeeded(t *testing.T) {
 	state := &WizardState{TargetToken: strPtr("seeded-token")}
 	p := &MockPrompter{
-		MigrateFormResponses: []MigrateFormResponse{
+		MigrateFormResponses: []MigrateFormResult{
 			{URL: testSQCloudURL, Token: "", EnterpriseKey: testEntKey, IncludeProjectData: true, IncludeIssueSync: true},
 		},
 	}

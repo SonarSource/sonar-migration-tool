@@ -18,6 +18,60 @@ type KV struct {
 	Value string
 }
 
+// ExtractFormDefaults carries the pre-fill values for the Extract
+// phase's combined credentials/scope/cert/project-key form (#515).
+type ExtractFormDefaults struct {
+	URL               string
+	TokenOptional     bool
+	PEMFilePath       string
+	KeyFilePath       string
+	CertPasswordKnown bool
+	ProjectKeyPattern string
+
+	IncludeProjectData bool
+	IncludeIssueSync   bool
+}
+
+// ExtractFormResult is what the user submitted on the Extract form.
+// An empty Token / CertPassword means "keep the existing/seeded
+// value" — the caller falls back to the known value.
+type ExtractFormResult struct {
+	URL          string
+	Token        string
+	PEMFilePath  string
+	KeyFilePath  string
+	CertPassword string
+
+	ProjectKeyPattern string
+
+	IncludeProjectData bool
+	IncludeIssueSync   bool
+}
+
+// MigrateFormDefaults carries the pre-fill values for the Migrate
+// phase's combined credentials/scope form (#515).
+type MigrateFormDefaults struct {
+	URL                 string
+	TokenOptional       bool
+	EnterpriseKey       string
+	DefaultOrganization string
+
+	IncludeProjectData bool
+	IncludeIssueSync   bool
+}
+
+// MigrateFormResult is what the user submitted on the Migrate form. An
+// empty Token means "keep the existing/seeded value".
+type MigrateFormResult struct {
+	URL                 string
+	Token               string
+	EnterpriseKey       string
+	DefaultOrganization string
+
+	IncludeProjectData bool
+	IncludeIssueSync   bool
+}
+
 // Prompter abstracts all user-facing I/O so phase handlers can be driven
 // by CLI (survey), GUI (Wails), or tests (mock).
 type Prompter interface {
@@ -38,22 +92,27 @@ type Prompter interface {
 	// Returns true if the user confirms, false to re-enter.
 	ConfirmReview(title string, details []KV) (bool, error)
 
-	// PromptExtractForm asks for the source URL, admin token, and the
-	// two dependent migration-scope choices (include project data,
-	// include issue sync) together in a single screen. tokenOptional
+	// PromptExtractForm asks for the source URL, admin token, client
+	// certificate settings, a project-key scoping pattern, and the two
+	// dependent migration-scope choices (include project data, include
+	// issue sync) together in a single screen. defaults.TokenOptional
 	// means a token is already known (e.g. seeded via --config, #388),
 	// so the token field may be submitted blank — the caller falls back
-	// to the known token when the returned token is empty. When
-	// includeProjectData is false, includeIssueSync is forced false
-	// too, mirroring the migrate.MigrateConfig cascade. There is no
-	// separate review step: submitting the form finalizes the values.
-	PromptExtractForm(defaultURL string, tokenOptional bool, defaultIncludeProjectData, defaultIncludeIssueSync bool) (url, token string, includeProjectData, includeIssueSync bool, err error)
+	// to the known token when the returned token is empty. Likewise
+	// defaults.CertPasswordKnown means a cert password is already known
+	// without echoing it back to the caller (#515); a blank result
+	// falls back the same way. When IncludeProjectData is false,
+	// IncludeIssueSync is forced false too, mirroring the
+	// migrate.MigrateConfig cascade. There is no separate review step:
+	// submitting the form finalizes the values.
+	PromptExtractForm(defaults ExtractFormDefaults) (ExtractFormResult, error)
 
 	// PromptMigrateForm asks for the target Cloud URL, admin token,
-	// enterprise key, and the two migration-scope checkboxes together
-	// in a single screen, right before migration executes. Same
-	// tokenOptional/no-review-step semantics as PromptExtractForm.
-	PromptMigrateForm(defaultURL string, tokenOptional bool, defaultEnterpriseKey string, defaultIncludeProjectData, defaultIncludeIssueSync bool) (url, token, enterpriseKey string, includeProjectData, includeIssueSync bool, err error)
+	// enterprise key, default organization, and the two migration-scope
+	// checkboxes together in a single screen, right before migration
+	// executes. Same tokenOptional/no-review-step semantics as
+	// PromptExtractForm.
+	PromptMigrateForm(defaults MigrateFormDefaults) (MigrateFormResult, error)
 
 	// PromptChoice presents a list of options and returns the 0-based index.
 	PromptChoice(message string, options []string) (int, error)

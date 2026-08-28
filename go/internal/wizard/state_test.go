@@ -144,7 +144,11 @@ func TestJSONFormat(t *testing.T) {
   "validation_passed": false,
   "migration_run_id": null,
   "include_project_data": null,
-  "include_issue_sync": null
+  "include_issue_sync": null,
+  "pem_file_path": null,
+  "key_file_path": null,
+  "project_key_pattern": null,
+  "default_organization": null
 }`
 
 	if string(data) != expected {
@@ -201,9 +205,24 @@ func TestResetPhaseStateExtract(t *testing.T) {
 	if s.SkippedProjects != nil {
 		t.Error("SkippedProjects should be nil after reset")
 	}
+	if s.PEMFilePath != nil {
+		t.Error("PEMFilePath should be nil after reset")
+	}
+	if s.KeyFilePath != nil {
+		t.Error("KeyFilePath should be nil after reset")
+	}
+	if s.CertPassword != nil {
+		t.Error("CertPassword should be nil after reset")
+	}
+	if s.ProjectKeyPattern != nil {
+		t.Error("ProjectKeyPattern should be nil after reset")
+	}
 	// Unrelated fields should remain.
 	if s.TargetURL == nil {
 		t.Error("TargetURL should be untouched")
+	}
+	if s.DefaultOrganization == nil {
+		t.Error("DefaultOrganization should be untouched")
 	}
 }
 
@@ -252,8 +271,14 @@ func TestResetPhaseStateMigrate(t *testing.T) {
 	if s.EnterpriseKey != nil {
 		t.Error("EnterpriseKey should be nil after reset")
 	}
+	if s.DefaultOrganization != nil {
+		t.Error("DefaultOrganization should be nil after reset")
+	}
 	if s.SourceURL == nil {
 		t.Error("SourceURL should be untouched")
+	}
+	if s.PEMFilePath == nil {
+		t.Error("PEMFilePath should be untouched")
 	}
 }
 
@@ -278,5 +303,10 @@ func fullyPopulatedState() *WizardState {
 		ValidationPassed:    true,
 		MigrationRunID:      strPtr("run-1"),
 		SkippedProjects:     []string{"proj-1"},
+		PEMFilePath:         strPtr("/cert.pem"),
+		KeyFilePath:         strPtr("/cert.key"),
+		CertPassword:        strPtr("certsecret"),
+		ProjectKeyPattern:   strPtr("BANKING_.+"),
+		DefaultOrganization: strPtr("my-org"),
 	}
 }

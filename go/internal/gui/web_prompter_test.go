@@ -204,12 +204,19 @@ func TestPromptExtractFormRoundTrips(t *testing.T) {
 	wp := NewWebPrompter(ctx, sendFn)
 
 	done := make(chan struct{})
-	var url, token string
-	var includeProjectData, includeIssueSync bool
+	var result wizard.ExtractFormResult
 
 	go func() {
-		url, token, includeProjectData, includeIssueSync, _ = wp.PromptExtractForm(
-			"https://sq.example.com", true, true, true)
+		result, _ = wp.PromptExtractForm(wizard.ExtractFormDefaults{
+			URL:                "https://sq.example.com",
+			TokenOptional:      true,
+			PEMFilePath:        "/etc/cert.pem",
+			KeyFilePath:        "/etc/cert.key",
+			CertPasswordKnown:  true,
+			ProjectKeyPattern:  "BANKING_.+",
+			IncludeProjectData: true,
+			IncludeIssueSync:   true,
+		})
 		close(done)
 	}()
 
@@ -227,25 +234,53 @@ func TestPromptExtractFormRoundTrips(t *testing.T) {
 	if !sent.DefaultIncludeProjectData || !sent.DefaultIncludeIssueSync {
 		t.Errorf("defaults: got %v/%v, want true/true", sent.DefaultIncludeProjectData, sent.DefaultIncludeIssueSync)
 	}
+	if sent.DefaultPEMFilePath != "/etc/cert.pem" {
+		t.Errorf("default_pem_file_path: got %q", sent.DefaultPEMFilePath)
+	}
+	if sent.DefaultKeyFilePath != "/etc/cert.key" {
+		t.Errorf("default_key_file_path: got %q", sent.DefaultKeyFilePath)
+	}
+	if !sent.CertPasswordKnown {
+		t.Error("cert_password_known: got false, want true")
+	}
+	if sent.DefaultProjectKeyPattern != "BANKING_.+" {
+		t.Errorf("default_project_key_pattern: got %q", sent.DefaultProjectKeyPattern)
+	}
 
 	wp.HandleResponse(ClientMessage{ID: sent.ID, Value: map[string]any{
 		"url":                "https://sq.other.com",
 		"token":              "secret",
+		"pemFilePath":        "/other/cert.pem",
+		"keyFilePath":        "/other/cert.key",
+		"certPassword":       "certsecret",
+		"projectKeyPattern":  "OTHER_.+",
 		"includeProjectData": false,
 		"includeIssueSync":   false,
 	}})
 	<-done
 
-	if url != "https://sq.other.com" {
-		t.Errorf("url: got %q", url)
+	if result.URL != "https://sq.other.com" {
+		t.Errorf("url: got %q", result.URL)
 	}
-	if token != "secret" {
-		t.Errorf("token: got %q", token)
+	if result.Token != "secret" {
+		t.Errorf("token: got %q", result.Token)
 	}
-	if includeProjectData {
+	if result.PEMFilePath != "/other/cert.pem" {
+		t.Errorf("pemFilePath: got %q", result.PEMFilePath)
+	}
+	if result.KeyFilePath != "/other/cert.key" {
+		t.Errorf("keyFilePath: got %q", result.KeyFilePath)
+	}
+	if result.CertPassword != "certsecret" {
+		t.Errorf("certPassword: got %q", result.CertPassword)
+	}
+	if result.ProjectKeyPattern != "OTHER_.+" {
+		t.Errorf("projectKeyPattern: got %q", result.ProjectKeyPattern)
+	}
+	if result.IncludeProjectData {
 		t.Error("includeProjectData: want false")
 	}
-	if includeIssueSync {
+	if result.IncludeIssueSync {
 		t.Error("includeIssueSync: want false")
 	}
 }
@@ -259,7 +294,11 @@ func TestPromptExtractFormCancelledByContext(t *testing.T) {
 	var err error
 
 	go func() {
-		_, _, _, _, err = wp.PromptExtractForm("https://sq.example.com", false, true, true)
+		_, err = wp.PromptExtractForm(wizard.ExtractFormDefaults{
+			URL:                "https://sq.example.com",
+			IncludeProjectData: true,
+			IncludeIssueSync:   true,
+		})
 		close(done)
 	}()
 
@@ -283,12 +322,17 @@ func TestPromptMigrateFormRoundTrips(t *testing.T) {
 	wp := NewWebPrompter(ctx, sendFn)
 
 	done := make(chan struct{})
-	var url, token, enterpriseKey string
-	var includeProjectData, includeIssueSync bool
+	var result wizard.MigrateFormResult
 
 	go func() {
-		url, token, enterpriseKey, includeProjectData, includeIssueSync, _ = wp.PromptMigrateForm(
-			"https://sonarcloud.io", true, "my-enterprise", true, true)
+		result, _ = wp.PromptMigrateForm(wizard.MigrateFormDefaults{
+			URL:                 "https://sonarcloud.io",
+			TokenOptional:       true,
+			EnterpriseKey:       "my-enterprise",
+			DefaultOrganization: "my-org",
+			IncludeProjectData:  true,
+			IncludeIssueSync:    true,
+		})
 		close(done)
 	}()
 
@@ -306,32 +350,39 @@ func TestPromptMigrateFormRoundTrips(t *testing.T) {
 	if sent.DefaultEnterpriseKey != "my-enterprise" {
 		t.Errorf("default_enterprise_key: got %q", sent.DefaultEnterpriseKey)
 	}
+	if sent.DefaultOrganization != "my-org" {
+		t.Errorf("default_organization: got %q", sent.DefaultOrganization)
+	}
 	if !sent.DefaultIncludeProjectData || !sent.DefaultIncludeIssueSync {
 		t.Errorf("defaults: got %v/%v, want true/true", sent.DefaultIncludeProjectData, sent.DefaultIncludeIssueSync)
 	}
 
 	wp.HandleResponse(ClientMessage{ID: sent.ID, Value: map[string]any{
-		"url":                "https://other.sonarcloud.io",
-		"token":              "secret",
-		"enterpriseKey":      "other-enterprise",
-		"includeProjectData": false,
-		"includeIssueSync":   false,
+		"url":                 "https://other.sonarcloud.io",
+		"token":               "secret",
+		"enterpriseKey":       "other-enterprise",
+		"defaultOrganization": "other-org",
+		"includeProjectData":  false,
+		"includeIssueSync":    false,
 	}})
 	<-done
 
-	if url != "https://other.sonarcloud.io" {
-		t.Errorf("url: got %q", url)
+	if result.URL != "https://other.sonarcloud.io" {
+		t.Errorf("url: got %q", result.URL)
 	}
-	if token != "secret" {
-		t.Errorf("token: got %q", token)
+	if result.Token != "secret" {
+		t.Errorf("token: got %q", result.Token)
 	}
-	if enterpriseKey != "other-enterprise" {
-		t.Errorf("enterpriseKey: got %q", enterpriseKey)
+	if result.EnterpriseKey != "other-enterprise" {
+		t.Errorf("enterpriseKey: got %q", result.EnterpriseKey)
 	}
-	if includeProjectData {
+	if result.DefaultOrganization != "other-org" {
+		t.Errorf("defaultOrganization: got %q", result.DefaultOrganization)
+	}
+	if result.IncludeProjectData {
 		t.Error("includeProjectData: want false")
 	}
-	if includeIssueSync {
+	if result.IncludeIssueSync {
 		t.Error("includeIssueSync: want false")
 	}
 }
@@ -345,7 +396,12 @@ func TestPromptMigrateFormCancelledByContext(t *testing.T) {
 	var err error
 
 	go func() {
-		_, _, _, _, _, err = wp.PromptMigrateForm("https://sonarcloud.io", false, "my-enterprise", true, true)
+		_, err = wp.PromptMigrateForm(wizard.MigrateFormDefaults{
+			URL:                "https://sonarcloud.io",
+			EnterpriseKey:      "my-enterprise",
+			IncludeProjectData: true,
+			IncludeIssueSync:   true,
+		})
 		close(done)
 	}()
 
@@ -605,8 +661,12 @@ func TestToStringCoercion(t *testing.T) {
 	if got := toString(42); got != "42" {
 		t.Errorf("toString(int) = %q", got)
 	}
-	if got := toString(nil); got != "<nil>" {
-		t.Errorf("toString(nil) = %q", got)
+	// #515: a missing map key (e.g. an optional form field the client
+	// didn't send) decodes as an untyped nil — it must become "", not
+	// the literal string "<nil>", or it corrupts a WizardState field
+	// like PEMFilePath with a bogus non-empty value.
+	if got := toString(nil); got != "" {
+		t.Errorf("toString(nil) = %q, want empty string", got)
 	}
 }
 

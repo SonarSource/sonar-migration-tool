@@ -11,6 +11,8 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/version"
 )
 
 //go:embed templates/*.html
@@ -37,6 +39,10 @@ func ParseTemplates() (*Templates, error) {
 		"safeHTML": func(s string) template.HTML {
 			return template.HTML(s) //nolint:gosec // trusted server-generated HTML
 		},
+		// toolName / toolVersion expose the build identity to base.html's
+		// footer, shared by every page without threading it through PageData.
+		"toolName":    func() string { return version.ToolName },
+		"toolVersion": func() string { return version.Version },
 	}
 
 	baseTmpl, err := fs.ReadFile(templateFS, "templates/base.html")

@@ -78,7 +78,14 @@ func runGUI(cmd *cobra.Command, args []string) error {
 		hub.SetPrompter(prompter)
 		hub.Send(gui.ServerMessage{Type: gui.TypeWizardStarted})
 
-		go runWizardAsync(wizCtx, prompter, hub, exportDir, seed, &wizMu, &wizActive)
+		// currentSeed snapshots the shared `seed` variable under wizMu;
+		// runWizardAsync writes the run's final state back into the same
+		// variable (via &seed) once it finishes, so the next "Start
+		// Wizard" click carries forward every override made this run —
+		// including in-memory-only tokens/cert password — instead of
+		// reverting to the original --config values after Cancel (#515).
+		currentSeed := seed
+		go runWizardAsync(wizCtx, prompter, hub, exportDir, currentSeed, &seed, &wizMu, &wizActive)
 	}
 
 	hub.OnCancelWizard = func() {
@@ -101,11 +108,12 @@ func runGUI(cmd *cobra.Command, args []string) error {
 	return <-errCh
 }
 
-func runWizardAsync(ctx context.Context, prompter *gui.WebPrompter, hub *gui.Hub, exportDir string, seed *wizard.WizardState, mu *sync.Mutex, active *bool) {
-	err := wizard.RunWithSeed(ctx, prompter, exportDir, seed)
+func runWizardAsync(ctx context.Context, prompter *gui.WebPrompter, hub *gui.Hub, exportDir string, seed *wizard.WizardState, seedOut **wizard.WizardState, mu *sync.Mutex, active *bool) {
+	finalState, err := wizard.RunWithSeed(ctx, prompter, exportDir, seed)
 
 	mu.Lock()
 	*active = false
+	*seedOut = finalState
 	mu.Unlock()
 
 	msg := gui.ServerMessage{Type: gui.TypeWizardFinished}
@@ -121,8 +129,10 @@ func runWizardAsync(ctx context.Context, prompter *gui.WebPrompter, hub *gui.Hub
 }
 
 // resolveGUIDefaults reads --config (if any) plus --export_directory
-// and returns the export dir to use plus a wizard seed for the URLs
-// + tokens + enterprise key the config carries. Returns (exportDir,
+// and returns the export dir to use plus a wizard seed for every
+// wizard-relevant setting the config carries: URLs, tokens, enterprise
+// key, cert settings, default organization, project key pattern, and
+// the migration-scope checkboxes (#388, #515). Returns (exportDir,
 // nil, nil) when --config is absent — the wizard then starts with a
 // blank form, preserving the pre-#388 behaviour.
 //
@@ -186,6 +196,40 @@ func resolveGUIDefaults(cmd *cobra.Command) (string, *wizard.WizardState, error)
 	seed.IncludeProjectData = &includeProjectData
 	includeIssueSync := !extractCfg.SkipIssueSync
 	seed.IncludeIssueSync = &includeIssueSync
+
+	// #515: source cert settings and target default organization are
+	// already parsed by LoadExtractConfigFile / LoadMigrateConfigFile
+	// for every documented config shape — just carry them into the seed.
+	if extractCfg.PEMFilePath != "" {
+		v := extractCfg.PEMFilePath
+		seed.PEMFilePath = &v
+	}
+	if extractCfg.KeyFilePath != "" {
+		v := extractCfg.KeyFilePath
+		seed.KeyFilePath = &v
+	}
+	if extractCfg.CertPassword != "" {
+		v := extractCfg.CertPassword
+		seed.CertPassword = &v
+	}
+	if migrateCfg.DefaultOrganization != "" {
+		v := migrateCfg.DefaultOrganization
+		seed.DefaultOrganization = &v
+	}
+
+	// #515: project_key has no parser in extract/migrate's config
+	// loaders — it's transfer's top-level, project-scoping field
+	// (#529). Reuse transfer's overlay loader directly (same package,
+	// no new export) to pre-fill the wizard's project-key pattern.
+	overlay, err := loadTransferOverlay(configFile)
+	if err != nil {
+		return "", nil, fmt.Errorf("loading --config: %w", err)
+	}
+	if overlay.ProjectKey != "" {
+		v := overlay.ProjectKey
+		seed.ProjectKeyPattern = &v
+	}
+
 	return exportDir, seed, nil
 }
 

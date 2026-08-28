@@ -116,37 +116,58 @@ func (wp *WebPrompter) ConfirmReview(title string, details []wizard.KV) (bool, e
 	return toBool(resp.Value), nil
 }
 
-func (wp *WebPrompter) PromptExtractForm(defaultURL string, tokenOptional bool, defaultIncludeProjectData, defaultIncludeIssueSync bool) (string, string, bool, bool, error) {
+func (wp *WebPrompter) PromptExtractForm(defaults wizard.ExtractFormDefaults) (wizard.ExtractFormResult, error) {
 	resp, err := wp.prompt(ServerMessage{
 		Type:                      TypePromptExtractForm,
 		Title:                     "Source Server Credentials",
-		DefaultURL:                defaultURL,
-		TokenOptional:             tokenOptional,
-		DefaultIncludeProjectData: defaultIncludeProjectData,
-		DefaultIncludeIssueSync:   defaultIncludeIssueSync,
+		DefaultURL:                defaults.URL,
+		TokenOptional:             defaults.TokenOptional,
+		DefaultIncludeProjectData: defaults.IncludeProjectData,
+		DefaultIncludeIssueSync:   defaults.IncludeIssueSync,
+		DefaultPEMFilePath:        defaults.PEMFilePath,
+		DefaultKeyFilePath:        defaults.KeyFilePath,
+		CertPasswordKnown:         defaults.CertPasswordKnown,
+		DefaultProjectKeyPattern:  defaults.ProjectKeyPattern,
 	})
 	if err != nil {
-		return "", "", false, false, err
+		return wizard.ExtractFormResult{}, err
 	}
 	values, _ := resp.Value.(map[string]any)
-	return toString(values["url"]), toString(values["token"]), toBool(values["includeProjectData"]), toBool(values["includeIssueSync"]), nil
+	return wizard.ExtractFormResult{
+		URL:                toString(values["url"]),
+		Token:              toString(values["token"]),
+		PEMFilePath:        toString(values["pemFilePath"]),
+		KeyFilePath:        toString(values["keyFilePath"]),
+		CertPassword:       toString(values["certPassword"]),
+		ProjectKeyPattern:  toString(values["projectKeyPattern"]),
+		IncludeProjectData: toBool(values["includeProjectData"]),
+		IncludeIssueSync:   toBool(values["includeIssueSync"]),
+	}, nil
 }
 
-func (wp *WebPrompter) PromptMigrateForm(defaultURL string, tokenOptional bool, defaultEnterpriseKey string, defaultIncludeProjectData, defaultIncludeIssueSync bool) (string, string, string, bool, bool, error) {
+func (wp *WebPrompter) PromptMigrateForm(defaults wizard.MigrateFormDefaults) (wizard.MigrateFormResult, error) {
 	resp, err := wp.prompt(ServerMessage{
 		Type:                      TypePromptMigrateForm,
 		Title:                     "Target Cloud Credentials",
-		DefaultURL:                defaultURL,
-		TokenOptional:             tokenOptional,
-		DefaultEnterpriseKey:      defaultEnterpriseKey,
-		DefaultIncludeProjectData: defaultIncludeProjectData,
-		DefaultIncludeIssueSync:   defaultIncludeIssueSync,
+		DefaultURL:                defaults.URL,
+		TokenOptional:             defaults.TokenOptional,
+		DefaultEnterpriseKey:      defaults.EnterpriseKey,
+		DefaultIncludeProjectData: defaults.IncludeProjectData,
+		DefaultIncludeIssueSync:   defaults.IncludeIssueSync,
+		DefaultOrganization:       defaults.DefaultOrganization,
 	})
 	if err != nil {
-		return "", "", "", false, false, err
+		return wizard.MigrateFormResult{}, err
 	}
 	values, _ := resp.Value.(map[string]any)
-	return toString(values["url"]), toString(values["token"]), toString(values["enterpriseKey"]), toBool(values["includeProjectData"]), toBool(values["includeIssueSync"]), nil
+	return wizard.MigrateFormResult{
+		URL:                 toString(values["url"]),
+		Token:               toString(values["token"]),
+		EnterpriseKey:       toString(values["enterpriseKey"]),
+		DefaultOrganization: toString(values["defaultOrganization"]),
+		IncludeProjectData:  toBool(values["includeProjectData"]),
+		IncludeIssueSync:    toBool(values["includeIssueSync"]),
+	}, nil
 }
 
 func (wp *WebPrompter) PromptChoice(message string, options []string) (int, error) {
@@ -286,6 +307,9 @@ func newPromptID() string {
 }
 
 func toString(v any) string {
+	if v == nil {
+		return ""
+	}
 	if s, ok := v.(string); ok {
 		return s
 	}
