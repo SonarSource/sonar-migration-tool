@@ -48,9 +48,32 @@
 | main | LONG | submitted | AY-task-1 |
 
 ## Failure Ledger
-| Entity Type | Name | Organization | HTTP | Error |
-|:---|:---|:---|:---|:---|
-| Project | Proj Failed | org1 | 400 | already exists \| duplicate key |
+| Entity Type | Name | Organization | HTTP | Cause | Error |
+|:---|:---|:---|:---|:---|:---|
+| Project | Proj Failed | org1 | 400 | Already present | already exists \| duplicate key |
+| Setting | sonar.dbcleaner.x | org1 | 400 | Not supported on Cloud | Setting 'sonar.dbcleaner.x' cannot be set on a Project |
+| Group | devs | org1 | 400 | Needs reporting | Value of parameter 'x' must be one of: [a, b] |
+
+### Why these failed
+
+**Not supported on Cloud** — 42048 failures
+
+- **What happened:** no project-scope counterpart on Cloud
+- **What to do:** none available; expected to be dropped
+- **Examples:** sonar.dbcleaner.x
+
+**Already present** — 1 failure
+
+- **What happened:** the entity already exists on the target
+- **What to do:** none needed
+- **Examples:** Proj Failed
+
+**Needs reporting** — 1 failure
+
+- **What happened:** Cloud rejected the request for an unrecognised reason
+- **What to do:** report this with the run id
+- **Please report this** — it indicates a defect in the migration tool, not a limitation of SonarQube Cloud.
+- **Examples:** devs
 
 ## Warnings, Retries & Skips
 

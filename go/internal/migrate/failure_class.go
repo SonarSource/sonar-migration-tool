@@ -143,27 +143,15 @@ func ClassifyFailure(err error) FailureVerdict {
 		return FailureVerdict{}
 	}
 
+	// Detectors that need the error itself, because they inspect the raw
+	// body rather than the decoded message.
 	switch {
 	case sqapi.IsAlreadyExists(err), sqapi.IsMangledAlreadyExists(err):
-		return FailureVerdict{
-			Class:       FailureAlreadyDone,
-			Why:         "the entity already exists on the target, so the state the migration wanted is already in place",
-			Remediation: "none needed; expected when re-running a migration or migrating into a populated organization",
-		}
-
+		return alreadyDoneVerdict()
 	case sqapi.IsProjectLevelRejection(err):
-		return FailureVerdict{
-			Class:       FailureByDesign,
-			Why:         "SonarQube Cloud's definition for this setting does not include the project qualifier, so it cannot be set on a project",
-			Remediation: "none available; the setting is instance-scope-only on SonarQube Server and has no project-scope counterpart on Cloud. It is expected to be dropped",
-		}
-
+		return projectScopeVerdict()
 	case sqapi.IsOrgLevelRejection(err):
-		return FailureVerdict{
-			Class:       FailureByDesign,
-			Why:         "SonarQube Cloud lists this setting at organization scope but refuses to write it there; it only takes effect per project",
-			Remediation: "none needed; the migration falls back to setting the value on each project in the organization",
-		}
+		return orgScopeVerdict()
 	}
 
 	// A cancelled context means the run was already being torn down — by an
@@ -195,20 +183,42 @@ func ClassifyFailure(err error) FailureVerdict {
 		}
 	}
 
-	f := asHTTPFailure(err)
-	if !f.ok {
-		// Not an HTTP failure and not a transport failure: a JSON decode
-		// error, a bad type assertion, a nil dereference surfaced as an
-		// error. None of these are the platform's fault.
-		return FailureVerdict{
-			Class:       FailureBug,
-			Why:         "the operation failed without ever producing an HTTP response or a network error, so this is a fault in the migration tool rather than a SonarQube Cloud limitation",
-			Remediation: "re-run with --debug and report the error with the surrounding log lines",
-			Reportable:  true,
-		}
+	if f := asHTTPFailure(err); f.ok {
+		return ClassifyHTTPFailure(f.status, f.message)
 	}
 
-	lower := strings.ToLower(f.message)
+	// Neither an HTTP failure nor a transport failure: a JSON decode error, a
+	// bad type assertion, a nil dereference surfaced as an error. None of
+	// these are the platform's fault.
+	return FailureVerdict{
+		Class:       FailureBug,
+		Why:         "the operation failed without ever producing an HTTP response or a network error, so this is a fault in the migration tool rather than a SonarQube Cloud limitation",
+		Remediation: "re-run with --debug and report the error with the surrounding log lines",
+		Reportable:  true,
+	}
+}
+
+// ClassifyHTTPFailure explains a failed request from the status and message
+// alone, with no error object.
+//
+// Exported so the migration report can classify the failures recorded in
+// requests.log using exactly these rules rather than a second copy of them
+// that would drift.
+func ClassifyHTTPFailure(status int, message string) FailureVerdict {
+	lower := strings.ToLower(message)
+
+	// The message-shaped equivalents of the error detectors above, so a
+	// failure read back from requests.log lands in the same class as it did
+	// when it happened.
+	switch {
+	case strings.Contains(lower, "already exists"), strings.Contains(message, `Conversion = ')'`):
+		return alreadyDoneVerdict()
+	case strings.Contains(lower, "cannot be set on a"):
+		return projectScopeVerdict()
+	case strings.Contains(lower, "at organization level"):
+		return orgScopeVerdict()
+	}
+
 	for _, hint := range environmentMessageHints {
 		if strings.Contains(lower, hint.Substring) {
 			return FailureVerdict{Class: FailureEnvironment, Why: hint.Why, Remediation: hint.Remediation}
@@ -216,44 +226,51 @@ func ClassifyFailure(err error) FailureVerdict {
 	}
 
 	switch {
-	case f.status == http.StatusUnauthorized:
+	case status == http.StatusUnauthorized:
 		return FailureVerdict{
 			Class:       FailureEnvironment,
 			Why:         "SonarQube Cloud rejected the credentials",
 			Remediation: "check the target token is valid and not expired",
 		}
 
-	case f.status == http.StatusForbidden:
+	case status == http.StatusForbidden:
 		return FailureVerdict{
 			Class:       FailureEnvironment,
 			Why:         "the token is valid but lacks permission for this operation",
 			Remediation: "grant the migration user Administer on the target organization (and Execute Analysis where project data is imported)",
 		}
 
-	case f.status == http.StatusNotFound:
+	case status == http.StatusNotFound:
 		return FailureVerdict{
 			Class:       FailureEnvironment,
 			Why:         "the target entity does not exist",
 			Remediation: "expected for delete-style cleanup and shortly after project creation while Cloud indexes; otherwise check the entity was created earlier in the run",
 		}
 
-	case f.status == http.StatusTooManyRequests:
+	case status == http.StatusTooManyRequests:
 		return FailureVerdict{
 			Class:       FailureEnvironment,
 			Why:         "SonarQube Cloud rate-limited the request and the retry budget was exhausted",
 			Remediation: "lower --concurrency and re-run; the run is resumable with --run_id",
 		}
 
-	case f.status >= 500:
+	case status >= 500:
 		return FailureVerdict{
 			Class:       FailureEnvironment,
 			Why:         "SonarQube Cloud returned a server-side error",
 			Remediation: "re-run with --run_id to resume; if it persists for the same operation, raise it with SonarQube Cloud support",
 		}
 
-	case f.status == http.StatusBadRequest:
-		// Everything the tool understands about 400s has been matched
-		// above. A 400 it cannot explain means the payload was wrong.
+	case status == 0:
+		return FailureVerdict{
+			Class:       FailureEnvironment,
+			Why:         "the request never reached SonarQube Cloud — it failed at the network or TLS layer",
+			Remediation: "check connectivity, DNS, proxy and TLS interception between the runner and SonarQube Cloud",
+		}
+
+	case status == http.StatusBadRequest:
+		// Everything the tool understands about 400s has been matched above.
+		// A 400 it cannot explain means the payload was wrong.
 		return FailureVerdict{
 			Class:       FailureBug,
 			Why:         "SonarQube Cloud rejected the request and the migration tool does not recognise the reason, which means the payload it built is probably invalid",
@@ -267,6 +284,32 @@ func ClassifyFailure(err error) FailureVerdict {
 		Why:         "the operation failed with a status the migration tool does not classify",
 		Remediation: "report this with the endpoint, the message above and the run id",
 		Reportable:  true,
+	}
+}
+
+// The three verdicts shared by the error-based and message-based paths.
+
+func alreadyDoneVerdict() FailureVerdict {
+	return FailureVerdict{
+		Class:       FailureAlreadyDone,
+		Why:         "the entity already exists on the target, so the state the migration wanted is already in place",
+		Remediation: "none needed; expected when re-running a migration or migrating into a populated organization",
+	}
+}
+
+func projectScopeVerdict() FailureVerdict {
+	return FailureVerdict{
+		Class:       FailureByDesign,
+		Why:         "SonarQube Cloud's definition for this setting does not include the project qualifier, so it cannot be set on a project",
+		Remediation: "none available; the setting is instance-scope-only on SonarQube Server and has no project-scope counterpart on Cloud. It is expected to be dropped",
+	}
+}
+
+func orgScopeVerdict() FailureVerdict {
+	return FailureVerdict{
+		Class:       FailureByDesign,
+		Why:         "SonarQube Cloud lists this setting at organization scope but refuses to write it there; it only takes effect per project",
+		Remediation: "none needed; the migration falls back to setting the value on each project in the organization",
 	}
 }
 
