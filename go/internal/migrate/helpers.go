@@ -258,7 +258,19 @@ func forEachMigrateItemFiltered(ctx context.Context, e *Executor, taskName, depT
 	filterFn func(json.RawMessage) bool,
 	fn func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error) error {
 
-	return forEachMigrateItemImpl(ctx, e, taskName, depTask, filterFn, cap(e.Sem), fn)
+	return forEachMigrateItemImpl(ctx, e, taskName, depTask, filterFn, cap(e.Sem), nil, fn)
+}
+
+// forEachMigrateItemTransformed is forEachMigrateItemFiltered with a hook
+// that rewrites the whole item slice before filtering and iteration.
+// Used when several dependency records must be folded into one unit of
+// work — addGateConditions merges every record that targets the same
+// cloud_gate_id so one target gate is cleared and rebuilt exactly once.
+func forEachMigrateItemTransformed(ctx context.Context, e *Executor, taskName, depTask string,
+	transformFn func([]json.RawMessage) []json.RawMessage,
+	fn func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error) error {
+
+	return forEachMigrateItemImpl(ctx, e, taskName, depTask, nil, cap(e.Sem), transformFn, fn)
 }
 
 // forEachMigrateItemSerial is forEachMigrateItemFiltered with concurrency
@@ -272,7 +284,7 @@ func forEachMigrateItemSerial(ctx context.Context, e *Executor, taskName, depTas
 	filterFn func(json.RawMessage) bool,
 	fn func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error) error {
 
-	return forEachMigrateItemImpl(ctx, e, taskName, depTask, filterFn, 1, fn)
+	return forEachMigrateItemImpl(ctx, e, taskName, depTask, filterFn, 1, nil, fn)
 }
 
 // forEachMigrateItemImpl is the shared body that backs the concurrent
@@ -281,11 +293,15 @@ func forEachMigrateItemSerial(ctx context.Context, e *Executor, taskName, depTas
 func forEachMigrateItemImpl(ctx context.Context, e *Executor, taskName, depTask string,
 	filterFn func(json.RawMessage) bool,
 	concurrency int,
+	transformFn func([]json.RawMessage) []json.RawMessage,
 	fn func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error) error {
 
 	items, err := e.Store.ReadAll(depTask)
 	if err != nil {
 		return fmt.Errorf("%s: reading %s: %w", taskName, depTask, err)
+	}
+	if transformFn != nil {
+		items = transformFn(items)
 	}
 
 	// Pre-filter to get accurate count for progress logging.
@@ -531,13 +547,27 @@ func (c *TaskCounter) LogSummary(logger *slog.Logger, duration time.Duration) {
 		common.LogTaskDuration(logger, c.task, duration)
 		return
 	}
-	logger.Info("task summary",
+	// Escalate by outcome. A task that failed every single item used to
+	// render at Info, identically to a perfect run — so a migration phase
+	// that achieved nothing was indistinguishable from one that worked
+	// (one customer run logged 42,181 warnings and zero errors).
+	attrs := []any{
 		"task", c.task,
 		"succeeded", s,
 		"failed", f,
 		"total", total,
 		"duration", common.FormatHMSMillis(duration),
-	)
+	}
+	// The message text stays "task summary" so log consumers and the
+	// #333 merged-summary contract keep matching; only the level varies.
+	switch {
+	case f > 0 && s == 0:
+		logger.Error("task summary", attrs...)
+	case f > 0:
+		logger.Warn("task summary", attrs...)
+	default:
+		logger.Info("task summary", attrs...)
+	}
 }
 
 // Progress logging is shared with the extract package via
