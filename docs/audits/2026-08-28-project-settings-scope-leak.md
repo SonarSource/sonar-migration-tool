@@ -165,3 +165,39 @@ to one cloud gate. It is covered by unit tests and reproduces on the committed f
 instance currently refuses private projects, and the tool hardcodes `visibility: "private"`
 ([tasks_create.go:76](../../go/internal/migrate/tasks_create.go#L76)), which also blocks the
 already-exists path because SonarCloud validates visibility before existence.
+
+## Failure classification
+<!-- updated: 2026-08-28_09:40:00 -->
+
+Added after the fixes above, because the investigation kept hitting the same wall: a migration says
+`failed=42048` and nothing says whether that is the tool being wrong or SonarQube Cloud legitimately
+refusing something it cannot do.
+
+`ClassifyFailure` ([failure_class.go](../../go/internal/migrate/failure_class.go)) returns one of four
+classes plus a plain-language `why` and a `remediation`:
+
+| Class | Meaning |
+| --- | --- |
+| `by-design` | Cloud cannot do this and never will. Working as intended. |
+| `already-done` | The desired end state already holds. |
+| `environment` | Permissions, subscription/quota, rate limiting, connectivity, 5xx. |
+| `bug` | Rejected for an unrecognised reason — the payload is probably wrong. Reportable. |
+
+An unrecognised 400 is deliberately a **bug**, not a shrug. Account-state messages (private projects not
+permitted, org not bound, plan limits) are matched first so nobody chases a defect that is really a
+subscription problem. Both `sqapi.APIError` and `common.HTTPError` normalize to the same verdict.
+
+Severity follows the cause, not the count: a bug or a task that achieved nothing is ERROR; expected
+limitations stay WARN however many there are. `TaskCounter` reports the per-cause breakdown
+(`failed_by_design`, `failed_already_done`, `failed_environment`, `failed_bugs`,
+`failed_unclassified`).
+
+`logAPIWarn` carries the classification, which lifted all ~157 existing failure sites with no opt-in.
+The 62 sites that paired `counter.Fail()` with `logAPIWarn(..., err, ...)` now go through one
+`failAPI()` call — that pair had already drifted in a live run, logging an item as
+`failure_class=environment` inside a summary claiming `failed_by_design=1`. `Fail()` keeps a separate
+`unclassified` bucket rather than being folded into `by-design`, so the breakdown never claims a cause
+it was not told.
+
+Live-verified: by-design on the settings rejections, environment on the project-creation refusal, and
+the per-item class matching the summary breakdown in both cases.
