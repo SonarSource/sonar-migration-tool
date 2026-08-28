@@ -62,50 +62,52 @@ func RunWithSeed(ctx context.Context, p Prompter, exportDir string, seed *Wizard
 	return state, err
 }
 
+// mergeDiskWins returns seed when dst is unset (nil) and seed carries a
+// non-empty value, else it returns dst unchanged — the disk-wins rule
+// used for every non-secret seeded field: a previously-completed phase
+// keeps the value it recorded even if a new --config supplies a
+// different one.
+func mergeDiskWins(dst, seed *string) *string {
+	if dst == nil && seed != nil && *seed != "" {
+		return seed
+	}
+	return dst
+}
+
+// mergeSeedWins returns seed whenever it carries a non-empty value,
+// else dst unchanged. Used for the in-memory-only secret fields
+// (tokens, CertPassword) that never reach disk (json:"-"): disk can
+// never have a competing value, so "disk wins" degenerates to "seed
+// wins when present".
+func mergeSeedWins(dst, seed *string) *string {
+	if seed != nil && *seed != "" {
+		return seed
+	}
+	return dst
+}
+
 // mergeSeed copies any field from seed into state when state's
-// corresponding field is unset. The disk-wins rule preserves resume
-// semantics: a previously-completed phase keeps the values it
-// recorded even if a new --config supplies different ones.
+// corresponding field is unset. See mergeDiskWins / mergeSeedWins for
+// the two precedence rules applied.
 func mergeSeed(state, seed *WizardState) {
-	if state.SourceURL == nil && seed.SourceURL != nil && *seed.SourceURL != "" {
-		state.SourceURL = seed.SourceURL
-	}
-	if state.TargetURL == nil && seed.TargetURL != nil && *seed.TargetURL != "" {
-		state.TargetURL = seed.TargetURL
-	}
-	if state.EnterpriseKey == nil && seed.EnterpriseKey != nil && *seed.EnterpriseKey != "" {
-		state.EnterpriseKey = seed.EnterpriseKey
-	}
+	state.SourceURL = mergeDiskWins(state.SourceURL, seed.SourceURL)
+	state.TargetURL = mergeDiskWins(state.TargetURL, seed.TargetURL)
+	state.EnterpriseKey = mergeDiskWins(state.EnterpriseKey, seed.EnterpriseKey)
+	state.PEMFilePath = mergeDiskWins(state.PEMFilePath, seed.PEMFilePath)
+	state.KeyFilePath = mergeDiskWins(state.KeyFilePath, seed.KeyFilePath)
+	state.ProjectKeyPattern = mergeDiskWins(state.ProjectKeyPattern, seed.ProjectKeyPattern)
+	state.DefaultOrganization = mergeDiskWins(state.DefaultOrganization, seed.DefaultOrganization)
+
 	if state.IncludeProjectData == nil && seed.IncludeProjectData != nil {
 		state.IncludeProjectData = seed.IncludeProjectData
 	}
 	if state.IncludeIssueSync == nil && seed.IncludeIssueSync != nil {
 		state.IncludeIssueSync = seed.IncludeIssueSync
 	}
-	if state.PEMFilePath == nil && seed.PEMFilePath != nil && *seed.PEMFilePath != "" {
-		state.PEMFilePath = seed.PEMFilePath
-	}
-	if state.KeyFilePath == nil && seed.KeyFilePath != nil && *seed.KeyFilePath != "" {
-		state.KeyFilePath = seed.KeyFilePath
-	}
-	if state.ProjectKeyPattern == nil && seed.ProjectKeyPattern != nil && *seed.ProjectKeyPattern != "" {
-		state.ProjectKeyPattern = seed.ProjectKeyPattern
-	}
-	if state.DefaultOrganization == nil && seed.DefaultOrganization != nil && *seed.DefaultOrganization != "" {
-		state.DefaultOrganization = seed.DefaultOrganization
-	}
-	// Tokens / CertPassword are always seeded when supplied — disk
-	// never has them (json:"-"), so the "disk wins" rule degenerates
-	// to "seed wins when present" for these fields.
-	if seed.SourceToken != nil && *seed.SourceToken != "" {
-		state.SourceToken = seed.SourceToken
-	}
-	if seed.TargetToken != nil && *seed.TargetToken != "" {
-		state.TargetToken = seed.TargetToken
-	}
-	if seed.CertPassword != nil && *seed.CertPassword != "" {
-		state.CertPassword = seed.CertPassword
-	}
+
+	state.SourceToken = mergeSeedWins(state.SourceToken, seed.SourceToken)
+	state.TargetToken = mergeSeedWins(state.TargetToken, seed.TargetToken)
+	state.CertPassword = mergeSeedWins(state.CertPassword, seed.CertPassword)
 }
 
 // handleResume prompts the user when a previous session exists.
