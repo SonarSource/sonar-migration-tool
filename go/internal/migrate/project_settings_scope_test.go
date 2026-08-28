@@ -201,3 +201,102 @@ func TestLooksLikeLeakedGlobals(t *testing.T) {
 		})
 	}
 }
+
+// The rejection memo must be shared by BOTH paths in the task. It was wired
+// into the per-record loop only, so the global-propagation post-pass re-ran
+// every key SonarQube Cloud had already rejected against every remaining
+// project — reproducing the exact warning storm the memo exists to stop.
+//
+// Here one key is rejected at project scope AND is a customized global that
+// Cloud lists at project scope but not org scope, so both paths want to write
+// it. Only a handful of attempts may reach the API, not one per project.
+func TestRunSetProjectSettingsSharesRejectionMemoWithGlobalPropagation(t *testing.T) {
+	const projects = 20
+	rejected := "sonar.leaky.global"
+
+	var mu sync.Mutex
+	attempts := map[string]int{}
+
+	cloudMux := http.NewServeMux()
+	cloudMux.HandleFunc("POST /api/settings/set", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		key := r.FormValue("key")
+		mu.Lock()
+		attempts[key]++
+		mu.Unlock()
+		if key == rejected {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `{"errors":[{"msg":"Setting '%s' cannot be set on a Project"}]}`, key)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	// Project scope defines the key; org scope does not — which is what makes
+	// the post-pass want to propagate it to every project.
+	mountSettingsDefinitionsScoped(cloudMux,
+		[]map[string]any{{"key": "sonar.exclusions", "type": "STRING"}},
+		[]map[string]any{
+			{"key": "sonar.exclusions", "type": "STRING"},
+			{"key": rejected, "type": "STRING"},
+		})
+	addDefaultCloudHandler(cloudMux)
+	e := newCustomCloudTest(t, cloudMux)
+
+	// The customized-globals corpus the post-pass reads.
+	base := filepath.Join(e.ExportDir, "extract-01")
+	for task, recs := range map[string][]map[string]any{
+		"getServerSettingsDefinitions": {{"key": rejected, "defaultValue": "off"}},
+		"getServerSettings":            {{"key": rejected, "value": "on", "parentValue": "off"}},
+	} {
+		dir := filepath.Join(base, task)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		f, _ := os.Create(filepath.Join(dir, "results.1.jsonl"))
+		for _, r := range recs {
+			b, _ := json.Marshal(r)
+			f.Write(b)
+			f.Write([]byte("\n"))
+		}
+		f.Close()
+	}
+
+	// One project carries the key as an explicit record so the per-record
+	// loop hits the rejection first; the rest only get it via the post-pass.
+	psDir := filepath.Join(base, "getProjectSettings")
+	if err := os.MkdirAll(psDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	pf, _ := os.Create(filepath.Join(psDir, "results.1.jsonl"))
+	b, _ := json.Marshal(map[string]any{"project": "proj00", "key": rejected, "value": "on"})
+	pf.Write(b)
+	pf.Write([]byte("\n"))
+	pf.Close()
+
+	pw, _ := e.Store.Writer("createProjects")
+	for i := 0; i < projects; i++ {
+		proj := fmt.Sprintf("proj%02d", i)
+		rec, _ := json.Marshal(map[string]any{
+			"key": proj, "server_url": testServerURL,
+			"sonarcloud_org_key": "org1", "cloud_project_key": "org1_" + proj,
+		})
+		pw.WriteOne(rec)
+	}
+
+	if err := runSetProjectSettings(context.Background(), e); err != nil {
+		t.Fatalf("runSetProjectSettings: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	got := attempts[rejected]
+	maxExpected := cap(e.Sem) + 2 // in-flight width plus scheduling slack
+	if got > maxExpected {
+		t.Errorf("rejected key attempted %d times across %d projects (fan-out %d) — the post-pass does not share the memo",
+			got, projects, cap(e.Sem))
+	}
+	if got == 0 {
+		t.Error("the key was never attempted, so the memo cannot have been learned")
+	}
+	t.Logf("rejected key attempted %d/%d times across both paths", got, projects)
+}
