@@ -655,10 +655,19 @@ func runResetPermissionTemplates(ctx context.Context, e *Executor) error {
 				}
 			}
 			if builtIn == nil {
-				e.Logger.Error("resetPermissionTemplates: no built-in \"Default Template\" found; refusing to proceed with template reset for this org",
+				// Fail this org, not the whole run: forEachMigrateItem fans
+				// out over an errgroup, so returning an error here would
+				// cancel every other confirmed org's reset too — one
+				// renamed built-in shouldn't block the rest.
+				// deleteTemplates' isCurrentDefaultTemplate net (see
+				// runDeleteTemplates) already refuses to delete whatever
+				// this org's actual current default is, named "Default
+				// Template" or not, so skipping the promotion here
+				// doesn't reopen that risk.
+				e.Logger.Error("resetPermissionTemplates: no built-in \"Default Template\" found; skipping template-default reset for this org",
 					"org", orgKey, "templates_returned", summarisePermissionTemplates(templates))
-				return fmt.Errorf("resetPermissionTemplates: no built-in %q found in org %s; refusing to proceed with template reset for this org",
-					defaultPermissionTemplateName, orgKey)
+				counter.Fail()
+				return nil
 			}
 
 			for _, q := range resetPermissionTemplateQualifiers {

@@ -271,6 +271,12 @@ func TestRunResetDefaultProfilesNoBuiltIn(t *testing.T) {
 // proceeding let deleteTemplates run against an org whose built-in was
 // renamed (so it never got promoted to default), risking deletion of
 // whatever template legitimately IS the current default.
+// #551: a renamed built-in must fail only the affected org, not the
+// whole reset run — forEachMigrateItem fans out over an errgroup, and
+// this task is a dependency of deleteTemplates, so an error here would
+// have cancelled every other confirmed org's reset too.
+// deleteTemplates' isCurrentDefaultTemplate net independently protects
+// against destroying the real current default regardless of name.
 func TestRunResetPermissionTemplatesNoBuiltIn(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/permissions/search_templates", func(w http.ResponseWriter, _ *http.Request) {
@@ -285,7 +291,7 @@ func TestRunResetPermissionTemplatesNoBuiltIn(t *testing.T) {
 	})
 	e := newDeleteTest(t, mux)
 	err := runResetPermissionTemplates(context.Background(), e)
-	if err == nil {
-		t.Fatal("runResetPermissionTemplates: expected an error when no built-in \"Default Template\" is found, got nil")
+	if err != nil {
+		t.Fatalf("runResetPermissionTemplates: expected nil (fail the org, not the run) when no built-in \"Default Template\" is found, got %v", err)
 	}
 }

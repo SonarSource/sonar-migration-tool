@@ -50,12 +50,20 @@ var resetCmd = &cobra.Command{
 		orgPattern, _ := cmd.Flags().GetString(flagResetOrganization)
 		dryRun, _ := cmd.Flags().GetBool(flagResetDryRun)
 
-		fmt.Fprintln(os.Stdout, "WARNING: This will delete migrated entities from the listed SonarCloud organizations.")
+		if dryRun {
+			fmt.Fprintln(os.Stdout, "Dry run: no organizations will be modified.")
+		} else {
+			fmt.Fprintln(os.Stdout, "WARNING: This will delete migrated entities from the listed SonarCloud organizations.")
+		}
 		// cfg.ConfirmedOrgs may already carry a config-file-supplied
 		// confirmed_orgs list (#550) — pass it through as the preset so
 		// a --yes run without --organization can honor it instead of
-		// defaulting to "every mapped org".
-		confirmed, err := confirmResetOrgs(cfg.ExportDirectory, autoYes, orgPattern, cfg.ConfirmedOrgs, os.Stdin, os.Stdout)
+		// defaulting to "every mapped org". A dry run previews the plan
+		// without deleting anything, so it also skips the interactive
+		// "type the org keys to confirm" prompt — there's nothing to
+		// confirm — and takes the (possibly --organization-filtered)
+		// candidate list the same way --yes does.
+		confirmed, err := confirmResetOrgs(cfg.ExportDirectory, autoYes || dryRun, orgPattern, cfg.ConfirmedOrgs, os.Stdin, os.Stdout)
 		if err != nil {
 			return err
 		}

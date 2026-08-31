@@ -183,6 +183,10 @@ func TestIsValidRunID(t *testing.T) {
 	}{
 		{"2026-08-27-0001", true},
 		{"2026-08-27-101", true},
+		// Legacy pre-#108 MM-DD-YYYY-N naming still exists in export
+		// directories on users' disks and must still be accepted (#551
+		// follow-up — the ISO-only pattern silently dropped these).
+		{"08-27-2026-0001", true},
 		{"zzz-evil", false},
 		{"", false},
 		{"2026-08-27", false},

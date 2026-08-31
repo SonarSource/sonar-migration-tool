@@ -8,6 +8,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
@@ -133,6 +135,17 @@ func runGrantMigrationUserProjectPermissions(ctx context.Context, e *Executor) e
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
 			orgKey := extractField(item, "sonarcloud_org_key")
 			if shouldSkipOrg(orgKey) {
+				return nil
+			}
+			// createProjects writes an explicit "failed" record (still
+			// carrying a non-empty cloud_project_key — the originally
+			// requested key, not the actual one) when it couldn't create
+			// the project in our org: a cross-org key collision (#525)
+			// or an empty key returned by a fresh create (#550). The
+			// project doesn't exist here, so every grant below would
+			// fail — skip rather than letting that surface as "all
+			// grants failed" and abort every other project in this run.
+			if extractField(item, "status") == "failed" {
 				return nil
 			}
 			cloudKey := extractField(item, "cloud_project_key")
@@ -271,6 +284,15 @@ func runSetOrgGroupPermissions(ctx context.Context, e *Executor) error {
 	orgKeys := buildServerOrgLookup(e)
 
 	counter := TaskCounterFromContext(ctx)
+	// #551: applyOrgPermissions' total-failure error must not be
+	// returned from the per-item closure — forEachExtractItem fans out
+	// over an errgroup, so the first item to return an error cancels
+	// the shared context and aborts every other group/org still being
+	// processed. Accumulate failures instead and report them once,
+	// after every item has run, so one ungrantable group doesn't stop
+	// the rest of the migration.
+	var failMu sync.Mutex
+	var totalFailures []string
 	err := forEachExtractItem(ctx, e, "setOrgGroupPermissions", "getGroups",
 		func(ctx context.Context, item structure.ExtractItem, w *common.ChunkWriter) error {
 			name := extractField(item.Data, "name")
@@ -281,10 +303,19 @@ func runSetOrgGroupPermissions(ctx context.Context, e *Executor) error {
 			if shouldSkipOrg(orgKey) {
 				return nil
 			}
-			err := applyOrgPermissions(ctx, e, item.Data, name, orgKey, counter)
+			if err := applyOrgPermissions(ctx, e, item.Data, name, orgKey, counter); err != nil {
+				failMu.Lock()
+				totalFailures = append(totalFailures, err.Error())
+				failMu.Unlock()
+			}
 			_ = w.WriteOne(item.Data)
-			return err
+			return nil
 		})
+	if err == nil && len(totalFailures) > 0 {
+		sort.Strings(totalFailures)
+		err = fmt.Errorf("setOrgGroupPermissions: %d group(s) received no permissions at all: %s",
+			len(totalFailures), strings.Join(totalFailures, "; "))
+	}
 	return err
 }
 
@@ -306,9 +337,11 @@ func applyOrgPermissions(ctx context.Context, e *Executor, data json.RawMessage,
 		// into an org-wide admin grant. The other permissions in this
 		// same group still get applied normally.
 		if skipAdminForBuiltInAlias(name, perm) {
+			// #551: this is a deliberate security decision, not a
+			// failure — no attempt was made and none should be counted
+			// as failed. Logger.Warn already gives it visibility.
 			e.Logger.Warn("setOrgGroupPermissions: admin NOT auto-granted to Members — source aliased it from sonar-users; grant manually if genuinely intended",
 				"group", cloudName, "org", orgKey)
-			counter.Fail()
 			continue
 		}
 		attempted++
@@ -340,6 +373,12 @@ func runSetProfileGroupPermissions(ctx context.Context, e *Executor) error {
 	}
 
 	counter := TaskCounterFromContext(ctx)
+	// #551: see runSetOrgGroupPermissions — accumulate total-failure
+	// errors instead of returning them from the per-item closure, so
+	// one ungrantable group doesn't cancel the errgroup and abort every
+	// other profile/group still being processed.
+	var failMu sync.Mutex
+	var totalFailures []string
 	err := forEachExtractItem(ctx, e, "setProfileGroupPermissions", "getProfileGroups",
 		func(ctx context.Context, item structure.ExtractItem, w *common.ChunkWriter) error {
 			profileKey := extractField(item.Data, "profileKey")
@@ -357,10 +396,11 @@ func runSetProfileGroupPermissions(ctx context.Context, e *Executor) error {
 			// alias silently hand every org member edit rights on the
 			// profile; skip the grant entirely and require manual review.
 			if skipAdminForBuiltInAlias(groupName, "admin") {
+				// #551: a deliberate security skip, not a failure — no
+				// counter increment (Logger.Warn already surfaces it).
 				for _, ref := range refs {
 					e.Logger.Warn("setProfileGroupPermissions: edit rights NOT auto-granted to Members — source aliased it from sonar-users; grant manually if genuinely intended",
 						"profile", ref.Name, "group", cloudGroup)
-					counter.Fail()
 				}
 				_ = w.WriteOne(item.Data)
 				return nil
@@ -379,11 +419,17 @@ func runSetProfileGroupPermissions(ctx context.Context, e *Executor) error {
 			}
 			_ = w.WriteOne(item.Data)
 			if attempted > 0 && succeeded == 0 {
-				return fmt.Errorf("all %d permission grant(s) failed for group %s on profile group %s",
-					attempted, cloudGroup, groupName)
+				failMu.Lock()
+				totalFailures = append(totalFailures, fmt.Sprintf("group %s on profile group %s", cloudGroup, groupName))
+				failMu.Unlock()
 			}
 			return nil
 		})
+	if err == nil && len(totalFailures) > 0 {
+		sort.Strings(totalFailures)
+		err = fmt.Errorf("setProfileGroupPermissions: %d group(s) received no permissions at all: %s",
+			len(totalFailures), strings.Join(totalFailures, "; "))
+	}
 	return err
 }
 
@@ -459,6 +505,18 @@ func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 	applied := make(map[triple]bool)
 	var appliedMu sync.Mutex
 
+	// #551: track attempted/succeeded per (template, group) pair ACROSS
+	// both feeds, not per apply() invocation. Without this, a group
+	// whose scanners-feed row already succeeded on one permission would
+	// still be reported as "all grants failed" if the viewers-feed row
+	// for the SAME pair carries one additional permission that fails —
+	// each feed's row was previously tallied independently, so the
+	// earlier feed's success was invisible to the later one.
+	type pairKey struct{ cloudTemplate, group string }
+	type pairStat struct{ attempted, succeeded int }
+	pairStats := make(map[pairKey]*pairStat)
+	var statsMu sync.Mutex
+
 	counter := TaskCounterFromContext(ctx)
 
 	apply := func(ctx context.Context, srvURL string, data json.RawMessage) error {
@@ -484,7 +542,6 @@ func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 			return nil
 		}
 		perms := extractStringArray(data, "permissions")
-		var attempted, succeeded int
 		for _, perm := range perms {
 			if perm == "" {
 				continue
@@ -493,9 +550,10 @@ func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 			// alias into an admin grant on the permission template. The
 			// other permissions for this group/template still apply.
 			if skipAdminForBuiltInAlias(groupName, perm) {
+				// #551: a deliberate security skip, not a failure — no
+				// counter increment (Logger.Warn already surfaces it).
 				e.Logger.Warn("setTemplateGroupPermissions: admin NOT auto-granted to Members — source aliased it from sonar-users; grant manually if genuinely intended",
 					"template", tmpl.cloudID, "group", cloudGroup)
-				counter.Fail()
 				continue
 			}
 			k := triple{tmpl.cloudID, cloudGroup, perm}
@@ -506,29 +564,56 @@ func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 			}
 			applied[k] = true
 			appliedMu.Unlock()
-			attempted++
+
+			pk := pairKey{tmpl.cloudID, cloudGroup}
+			statsMu.Lock()
+			stat, ok := pairStats[pk]
+			if !ok {
+				stat = &pairStat{}
+				pairStats[pk] = stat
+			}
+			stat.attempted++
+			statsMu.Unlock()
+
 			if err := e.Cloud.Permissions.AddGroupToTemplate(ctx, tmpl.cloudID, cloudGroup, perm, tmpl.org); err != nil {
 				failAPI(counter, e.Logger, "setTemplateGroupPermissions failed", err,
 					"template", tmpl.cloudID, "group", cloudGroup, "perm", perm)
 				continue
 			}
-			succeeded++
+			statsMu.Lock()
+			stat.succeeded++
+			statsMu.Unlock()
 			counter.Success()
-		}
-		if attempted > 0 && succeeded == 0 {
-			return fmt.Errorf("all %d permission grant(s) failed for group %s on template %s",
-				attempted, cloudGroup, tmpl.cloudID)
 		}
 		return nil
 	}
 
+	// #551: run both feeds to completion (don't abort the second on the
+	// first feed's error) and defer the total-failure verdict until
+	// every (template, group) pair's stats are final across both feeds.
+	var feedErrs []string
 	for _, feed := range []string{"getTemplateGroupsScanners", "getTemplateGroupsViewers"} {
 		if err := forEachExtractItem(ctx, e, feed+":apply", feed,
 			func(ctx context.Context, item structure.ExtractItem, _ *common.ChunkWriter) error {
 				return apply(ctx, item.ServerURL, item.Data)
 			}); err != nil {
-			return err
+			feedErrs = append(feedErrs, err.Error())
 		}
+	}
+	if len(feedErrs) > 0 {
+		return fmt.Errorf("setTemplateGroupPermissions: %s", strings.Join(feedErrs, "; "))
+	}
+
+	var totalFailures []string
+	for k, stat := range pairStats {
+		if stat.attempted > 0 && stat.succeeded == 0 {
+			totalFailures = append(totalFailures, fmt.Sprintf("group %s on template %s", k.group, k.cloudTemplate))
+		}
+	}
+	if len(totalFailures) > 0 {
+		sort.Strings(totalFailures)
+		return fmt.Errorf("setTemplateGroupPermissions: %d group(s) received no permissions at all: %s",
+			len(totalFailures), strings.Join(totalFailures, "; "))
 	}
 	return nil
 }

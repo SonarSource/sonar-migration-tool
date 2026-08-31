@@ -124,6 +124,54 @@ func TestRunGrantMigrationUserProjectPermissionsAPIError(t *testing.T) {
 	}
 }
 
+// #551: createProjects writes an explicit "failed" record — still
+// carrying a non-empty cloud_project_key, the originally requested one
+// — when it couldn't create the project in our org (#525 cross-org
+// collision, #550 empty returned key). That project doesn't exist, so
+// every grant on it would fail; before this fix that 100%-failure
+// error propagated out of the errgroup and cancelled every other
+// project's grants too. Confirm a "failed" record is skipped entirely
+// (no add_user calls for it) and does not prevent a genuinely valid
+// project in the same run from getting its grants.
+func TestRunGrantMigrationUserProjectPermissionsSkipsFailedRecords(t *testing.T) {
+	var (
+		mu     sync.Mutex
+		byProj = map[string]int{}
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/permissions/add_user", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		mu.Lock()
+		byProj[r.FormValue("projectKey")]++
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	e := newCustomCloudTest(t, mux)
+
+	writeTaskJSONL(t, e, "getMigrationUser", []map[string]any{{"login": "migration-user"}})
+	writeTaskJSONL(t, e, "createProjects", []map[string]any{
+		{"key": "proj1", "cloud_project_key": "cloud-proj-good", "sonarcloud_org_key": "cloud-org"},
+		{"key": "proj2", "cloud_project_key": "cloud-proj-bad", "sonarcloud_org_key": "cloud-org",
+			"status": "failed", "error": "empty project key"},
+	})
+
+	if err := runGrantMigrationUserProjectPermissions(context.Background(), e); err != nil {
+		t.Fatalf("runGrantMigrationUserProjectPermissions: %v (a failed record must not abort the whole task)", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got, want := byProj["cloud-proj-good"], len(migrationUserProjectPermissions); got != want {
+		t.Errorf("cloud-proj-good: got %d add_user calls, want %d", got, want)
+	}
+	if got := byProj["cloud-proj-bad"]; got != 0 {
+		t.Errorf("cloud-proj-bad (status=failed): got %d add_user calls, want 0 — failed records must be skipped", got)
+	}
+}
+
 // --- runSetTemplateGroupPermissions (was 0.0%) ---
 
 // setupTemplateGroupExtract writes the two template-group feeds plus the
