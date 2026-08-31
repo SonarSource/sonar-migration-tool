@@ -131,6 +131,8 @@ func runGrantMigrationUserProjectPermissions(ctx context.Context, e *Executor) e
 	}
 
 	counter := TaskCounterFromContext(ctx)
+	var failMu sync.Mutex
+	var totalFailures []string
 	err := forEachMigrateItem(ctx, e, "grantMigrationUserProjectPermissions", "createProjects",
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
 			orgKey := extractField(item, "sonarcloud_org_key")
@@ -145,7 +147,7 @@ func runGrantMigrationUserProjectPermissions(ctx context.Context, e *Executor) e
 			// project doesn't exist here, so every grant below would
 			// fail — skip rather than letting that surface as "all
 			// grants failed" and abort every other project in this run.
-			if extractField(item, "status") == "failed" {
+			if isFailedMigrateRecord(item) {
 				return nil
 			}
 			cloudKey := extractField(item, "cloud_project_key")
@@ -170,15 +172,25 @@ func runGrantMigrationUserProjectPermissions(ctx context.Context, e *Executor) e
 			// so the other permissions still get applied — but if EVERY
 			// grant on this project failed, the migration user very
 			// likely can't administer it at all, and every downstream
-			// per-project task will 403. Surface that as a real task
-			// error so the DAG halts instead of silently proceeding as
-			// if the permissions were granted.
+			// per-project task will 403. #551: accumulate this rather
+			// than returning it directly — forEachMigrateItem runs items
+			// in an errgroup, so returning an error here would cancel
+			// the shared context and abort every other project still in
+			// flight. Report one aggregated error after all items have
+			// been attempted, same as the sibling permission tasks.
 			if attempted > 0 && succeeded == 0 {
-				return fmt.Errorf("all %d permission grant(s) failed for project %s (org %s)",
-					attempted, cloudKey, orgKey)
+				failMu.Lock()
+				totalFailures = append(totalFailures, fmt.Sprintf("project %s (org %s): all %d grant(s) failed",
+					cloudKey, orgKey, attempted))
+				failMu.Unlock()
 			}
 			return nil
 		})
+	if err == nil && len(totalFailures) > 0 {
+		sort.Strings(totalFailures)
+		err = fmt.Errorf("grantMigrationUserProjectPermissions: %d project(s) received no permissions at all: %s",
+			len(totalFailures), strings.Join(totalFailures, "; "))
+	}
 	return err
 }
 

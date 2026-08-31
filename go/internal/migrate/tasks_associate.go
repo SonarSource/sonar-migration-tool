@@ -153,6 +153,9 @@ func runSetProjectProfiles(ctx context.Context, e *Executor) error {
 	projects, _ := e.Store.ReadAll("createProjects")
 	projectLookup := make(map[string]projTarget, len(projects))
 	for _, p := range projects {
+		if isFailedMigrateRecord(p) {
+			continue
+		}
 		server := extractField(p, "server_url")
 		srcKey := extractField(p, "key")
 		cloudKey := extractField(p, "cloud_project_key")
@@ -215,6 +218,9 @@ func runSetProjectGates(ctx context.Context, e *Executor) error {
 	counter := TaskCounterFromContext(ctx)
 	err := forEachMigrateItem(ctx, e, "setProjectGates", "createProjects",
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
+			if isFailedMigrateRecord(item) {
+				return nil
+			}
 			orgKey := extractField(item, "sonarcloud_org_key")
 			projectKey := extractField(item, "cloud_project_key")
 			gateName := extractField(item, "gate_name")
@@ -270,6 +276,9 @@ func runSetProjectGroupPermissions(ctx context.Context, e *Executor) error {
 	projects, _ := e.Store.ReadAll("createProjects")
 	projectKeyMap := make(map[string]projectMapping) // serverURL+key -> mapping
 	for _, p := range projects {
+		if isFailedMigrateRecord(p) {
+			continue
+		}
 		serverURL := extractField(p, "server_url")
 		key := extractField(p, "key")
 		projectKeyMap[serverURL+key] = projectMapping{
@@ -346,6 +355,9 @@ func runSetProjectSettings(ctx context.Context, e *Executor) error {
 	projectKeyMap := make(map[string]projectMapping)
 	orgs := make(map[string]struct{})
 	for _, p := range projects {
+		if isFailedMigrateRecord(p) {
+			continue
+		}
 		serverURL := extractField(p, "server_url")
 		key := extractField(p, "key")
 		pm := projectMapping{
@@ -693,6 +705,9 @@ func runSetNewCodePeriods(ctx context.Context, e *Executor) error {
 	projects, _ := e.Store.ReadAll("createProjects")
 	projectKeyMap := make(map[string]projectInfo, len(projects))
 	for _, p := range projects {
+		if isFailedMigrateRecord(p) {
+			continue
+		}
 		serverURL := extractField(p, "server_url")
 		key := extractField(p, "key")
 		main := extractField(p, "main_branch")
@@ -1041,6 +1056,9 @@ func runSetProjectTags(ctx context.Context, e *Executor) error {
 	projects, _ := e.Store.ReadAll("createProjects")
 	projectKeyMap := make(map[string]projectMapping)
 	for _, p := range projects {
+		if isFailedMigrateRecord(p) {
+			continue
+		}
 		serverURL := extractField(p, "server_url")
 		key := extractField(p, "key")
 		projectKeyMap[serverURL+key] = projectMapping{
@@ -1101,6 +1119,9 @@ func runSetProjectLinks(ctx context.Context, e *Executor) error {
 	projects, _ := e.Store.ReadAll("createProjects")
 	projectKeyMap := make(map[string]projectMapping)
 	for _, p := range projects {
+		if isFailedMigrateRecord(p) {
+			continue
+		}
 		serverURL := extractField(p, "server_url")
 		key := extractField(p, "key")
 		projectKeyMap[serverURL+key] = projectMapping{CloudKey: extractField(p, "cloud_project_key")}
@@ -1225,6 +1246,9 @@ func runSetProjectSourceLink(ctx context.Context, e *Executor) error {
 	counter := TaskCounterFromContext(ctx)
 	err := forEachMigrateItem(ctx, e, "setProjectSourceLink", "createProjects",
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
+			if isFailedMigrateRecord(item) {
+				return nil
+			}
 			cloudKey := extractField(item, "cloud_project_key")
 			if cloudKey == "" {
 				return nil
@@ -1282,6 +1306,9 @@ func runSetProjectWebhooks(ctx context.Context, e *Executor) error {
 	projects, _ := e.Store.ReadAll("createProjects")
 	projectKeyMap := make(map[string]projectMapping)
 	for _, p := range projects {
+		if isFailedMigrateRecord(p) {
+			continue
+		}
 		serverURL := extractField(p, "server_url")
 		key := extractField(p, "key")
 		projectKeyMap[serverURL+key] = projectMapping{

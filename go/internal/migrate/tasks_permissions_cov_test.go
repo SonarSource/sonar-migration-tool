@@ -172,6 +172,56 @@ func TestRunGrantMigrationUserProjectPermissionsSkipsFailedRecords(t *testing.T)
 	}
 }
 
+// #551 (Gitar round 2): a genuinely-existing project whose four add_user
+// calls all 403 (e.g. the migration token lacks admin on it) used to
+// return that as a hard error straight out of the forEachMigrateItem
+// closure, cancelling the shared errgroup context and aborting every
+// other project still in flight — a cascade of spurious "context
+// canceled" failures burying the one real cause. Confirm the sibling
+// project's grants still complete, and the task still reports the
+// total-failure as an error (just accumulated, not fatal-mid-flight).
+func TestRunGrantMigrationUserProjectPermissionsOneProjectFailureDoesNotAbortSiblings(t *testing.T) {
+	var (
+		mu     sync.Mutex
+		byProj = map[string]int{}
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/permissions/add_user", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		project := r.FormValue("projectKey")
+		mu.Lock()
+		byProj[project]++
+		mu.Unlock()
+		if project == "cloud-proj-forbidden" {
+			http.Error(w, `{"errors":[{"msg":"Insufficient privileges"}]}`, http.StatusForbidden)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	e := newCustomCloudTest(t, mux)
+
+	writeTaskJSONL(t, e, "getMigrationUser", []map[string]any{{"login": "migration-user"}})
+	writeTaskJSONL(t, e, "createProjects", []map[string]any{
+		{"key": "proj1", "cloud_project_key": "cloud-proj-forbidden", "sonarcloud_org_key": "cloud-org"},
+		{"key": "proj2", "cloud_project_key": "cloud-proj-good", "sonarcloud_org_key": "cloud-org"},
+	})
+
+	err := runGrantMigrationUserProjectPermissions(context.Background(), e)
+	if err == nil {
+		t.Fatal("expected an aggregated error reporting the forbidden project's total failure, got nil")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got, want := byProj["cloud-proj-good"], len(migrationUserProjectPermissions); got != want {
+		t.Errorf("cloud-proj-good: got %d add_user calls, want %d — one project's total failure must not abort a sibling's grants",
+			got, want)
+	}
+}
+
 // --- runSetTemplateGroupPermissions (was 0.0%) ---
 
 // setupTemplateGroupExtract writes the two template-group feeds plus the

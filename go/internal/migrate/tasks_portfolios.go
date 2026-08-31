@@ -193,6 +193,9 @@ func buildProjectCloudKeyIndex(e *Executor) map[string]cloudProjectInfo {
 	projects, _ := e.Store.ReadAll("createProjects")
 	out := make(map[string]cloudProjectInfo, len(projects))
 	for _, p := range projects {
+		if isFailedMigrateRecord(p) {
+			continue
+		}
 		serverURL := extractField(p, "server_url")
 		key := extractField(p, "key")
 		if serverURL == "" || key == "" {

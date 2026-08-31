@@ -542,6 +542,9 @@ func runSetGlobalSettings(ctx context.Context, e *Executor) error {
 	projects, _ := e.Store.ReadAll("createProjects")
 	projectKeyMap := make(map[string]projectMapping, len(projects))
 	for _, p := range projects {
+		if isFailedMigrateRecord(p) {
+			continue
+		}
 		serverURL := extractField(p, "server_url")
 		key := extractField(p, "key")
 		projectKeyMap[serverURL+key] = projectMapping{

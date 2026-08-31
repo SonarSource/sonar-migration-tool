@@ -735,3 +735,14 @@ var extractField = common.ExtractField
 
 // extractBool is a convenience alias.
 var extractBool = common.ExtractBool
+
+// isFailedMigrateRecord reports whether a task output record was written
+// as an explicit failure (e.g. createProjects' #525 cross-org-collision
+// and #550 empty-key branches, tasks_create.go): such a record still
+// carries the originally requested identifier fields (like
+// cloud_project_key) even though the entity was never created, so every
+// downstream task that iterates it must skip it rather than attempt API
+// calls against something that doesn't exist (#551).
+func isFailedMigrateRecord(item json.RawMessage) bool {
+	return extractField(item, "status") == "failed"
+}

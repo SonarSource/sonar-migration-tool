@@ -562,3 +562,35 @@ func TestRunSyncHotspotMetadataWritesRecord(t *testing.T) {
 		t.Errorf("synced = %d, want 1", got.Synced)
 	}
 }
+
+// #551 (Gitar round 2): a createProjects record written with
+// status:"failed" (#525 cross-org collision, #550 empty-key branch)
+// still carries a non-empty cloud_project_key for the project SonarQube
+// Cloud never actually created. runSyncHotspotMetadata is one of
+// several createProjects consumers that has no reason to know the
+// project doesn't exist unless it checks — confirm it's skipped
+// entirely rather than being synced against (and reported as if it
+// were a real project).
+func TestRunSyncHotspotMetadataSkipsFailedCreateProjectsRecord(t *testing.T) {
+	rec := &hotspotIssueSyncRecorder{}
+	mux := http.NewServeMux()
+	rec.mount(mux)
+	e := newCustomCloudTest(t, mux)
+
+	writeTaskJSONL(t, e, "createProjects", []map[string]any{
+		{"cloud_project_key": "cloud_proj1", "sonarcloud_org_key": "org1", "server_url": testServerURL,
+			"key": "proj1", "status": "failed", "error": "empty project key"},
+	})
+
+	if err := runSyncHotspotMetadata(context.Background(), e); err != nil {
+		t.Fatalf("runSyncHotspotMetadata: %v", err)
+	}
+
+	items, err := e.Store.ReadAll("syncHotspotMetadata")
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(items) != 0 {
+		t.Errorf("expected 0 syncHotspotMetadata records for a failed createProjects record, got %d: %s", len(items), items)
+	}
+}
