@@ -50,19 +50,25 @@ func TestResolveGUIDefaults_NoConfig(t *testing.T) {
 	}
 }
 
-// #388: with --config pointing at a unified-shape config, the seed
-// carries every URL, token, and enterprise key the file declares.
+// #388/#515: with --config pointing at a unified-shape config, the
+// seed carries every URL, token, enterprise key, cert setting, default
+// organization, and project key pattern the file declares.
 func TestResolveGUIDefaults_UnifiedShapeFillsSeed(t *testing.T) {
 	path := writeGUIConfig(t, `{
 		"export_directory": "/tmp/from-cfg",
+		"project_key": "BANKING_.+",
 		"source": {
 			"url": "https://sq.example.com",
-			"token": "sq-token"
+			"token": "sq-token",
+			"pem_file_path": "/etc/cert.pem",
+			"key_file_path": "/etc/cert.key",
+			"cert_password": "certsecret"
 		},
 		"target": {
 			"url": "https://sonarcloud.io/",
 			"token": "sc-token",
-			"enterprise_key": "ent-key"
+			"enterprise_key": "ent-key",
+			"default_organization": "my-org"
 		}
 	}`)
 
@@ -85,6 +91,34 @@ func TestResolveGUIDefaults_UnifiedShapeFillsSeed(t *testing.T) {
 	assertSeedStringField(t, "TargetURL", seed.TargetURL, "https://sonarcloud.io/")
 	assertSeedStringField(t, "TargetToken", seed.TargetToken, "sc-token")
 	assertSeedStringField(t, "EnterpriseKey", seed.EnterpriseKey, "ent-key")
+	assertSeedStringField(t, "PEMFilePath", seed.PEMFilePath, "/etc/cert.pem")
+	assertSeedStringField(t, "KeyFilePath", seed.KeyFilePath, "/etc/cert.key")
+	assertSeedStringField(t, "CertPassword", seed.CertPassword, "certsecret")
+	assertSeedStringField(t, "DefaultOrganization", seed.DefaultOrganization, "my-org")
+	assertSeedStringField(t, "ProjectKeyPattern", seed.ProjectKeyPattern, "BANKING_.+")
+}
+
+// #515: the top-level project_key field (transfer's convention) is
+// parsed via the shared overlay loader even when the rest of the
+// config is otherwise minimal.
+func TestResolveGUIDefaults_ProjectKeyFromOverlay(t *testing.T) {
+	path := writeGUIConfig(t, `{
+		"project_key": "my-project",
+		"source": {"url": "https://sq"},
+		"target": {"url": "https://sc"}
+	}`)
+	cmd := newGUITestCmd()
+	if err := cmd.ParseFlags([]string{"-c", path}); err != nil {
+		t.Fatal(err)
+	}
+	_, seed, err := resolveGUIDefaults(cmd)
+	if err != nil {
+		t.Fatalf("resolveGUIDefaults: %v", err)
+	}
+	if seed == nil {
+		t.Fatal("expected non-nil seed")
+	}
+	assertSeedStringField(t, "ProjectKeyPattern", seed.ProjectKeyPattern, "my-project")
 }
 
 // #388: --export_directory on the CLI must win over the config-file
@@ -140,6 +174,21 @@ func TestResolveGUIDefaults_MissingFieldsLeaveSeedFieldNil(t *testing.T) {
 	}
 	if seed.EnterpriseKey != nil {
 		t.Errorf("EnterpriseKey: got %v, want nil", seed.EnterpriseKey)
+	}
+	if seed.PEMFilePath != nil {
+		t.Errorf("PEMFilePath: got %v, want nil", seed.PEMFilePath)
+	}
+	if seed.KeyFilePath != nil {
+		t.Errorf("KeyFilePath: got %v, want nil", seed.KeyFilePath)
+	}
+	if seed.CertPassword != nil {
+		t.Errorf("CertPassword: got %v, want nil", seed.CertPassword)
+	}
+	if seed.DefaultOrganization != nil {
+		t.Errorf("DefaultOrganization: got %v, want nil", seed.DefaultOrganization)
+	}
+	if seed.ProjectKeyPattern != nil {
+		t.Errorf("ProjectKeyPattern: got %v, want nil", seed.ProjectKeyPattern)
 	}
 }
 

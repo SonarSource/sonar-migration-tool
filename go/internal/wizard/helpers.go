@@ -206,6 +206,17 @@ func mapInt(m map[string]any, key string) int {
 // strPtr returns a pointer to the given string.
 func strPtr(s string) *string { return &s }
 
+// strPtrOrNil returns nil for an empty string, else a pointer to it.
+// Used for optional WizardState fields (#515) so an unset value
+// serializes as JSON null and mergeSeed's non-empty checks stay
+// meaningful, instead of persisting an empty-string sentinel.
+func strPtrOrNil(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
 // ptrStr safely dereferences a string pointer, returning "" for nil.
 func ptrStr(p *string) string {
 	if p == nil {

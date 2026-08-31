@@ -23,23 +23,6 @@ const (
 	errExpectExtract = "expected PhaseExtract, got %s"
 )
 
-// ExtractFormResponse pre-programs a PromptExtractForm answer.
-type ExtractFormResponse struct {
-	URL                string
-	Token              string
-	IncludeProjectData bool
-	IncludeIssueSync   bool
-}
-
-// MigrateFormResponse pre-programs a PromptMigrateForm answer.
-type MigrateFormResponse struct {
-	URL                string
-	Token              string
-	EnterpriseKey      string
-	IncludeProjectData bool
-	IncludeIssueSync   bool
-}
-
 // MockPrompter supplies pre-programmed responses for tests.
 type MockPrompter struct {
 	URLResponses         []string
@@ -48,10 +31,10 @@ type MockPrompter struct {
 	ConfirmResponses     []bool
 	ReviewResponses      []bool
 	ChoiceResponses      []int
-	ExtractFormResponses []ExtractFormResponse // optional; falls back to the caller's defaults when exhausted
-	ExtractFormErr       error                 // if set, PromptExtractForm returns this error once (e.g. simulating Cancel)
-	MigrateFormResponses []MigrateFormResponse // optional; falls back to the caller's defaults when exhausted
-	MigrateFormErr       error                 // if set, PromptMigrateForm returns this error once (e.g. simulating Cancel)
+	ExtractFormResponses []ExtractFormResult // optional; falls back to the caller's defaults when exhausted
+	ExtractFormErr       error               // if set, PromptExtractForm returns this error once (e.g. simulating Cancel)
+	MigrateFormResponses []MigrateFormResult // optional; falls back to the caller's defaults when exhausted
+	MigrateFormErr       error               // if set, PromptMigrateForm returns this error once (e.g. simulating Cancel)
 
 	Messages             []string // captures DisplayMessage, DisplayError, etc.
 	OverallProgressCalls []OverallProgressCall
@@ -104,38 +87,47 @@ func (m *MockPrompter) ConfirmReview(title string, details []KV) (bool, error) {
 	return r, nil
 }
 
-func (m *MockPrompter) PromptExtractForm(defaultURL string, tokenOptional bool, defaultIncludeProjectData, defaultIncludeIssueSync bool) (string, string, bool, bool, error) {
+func (m *MockPrompter) PromptExtractForm(defaults ExtractFormDefaults) (ExtractFormResult, error) {
 	if m.ExtractFormErr != nil {
 		err := m.ExtractFormErr
 		m.ExtractFormErr = nil
-		return "", "", false, false, err
+		return ExtractFormResult{}, err
 	}
 
-	url, token := defaultURL, ""
-	includeProjectData, includeIssueSync := defaultIncludeProjectData, defaultIncludeIssueSync
+	result := ExtractFormResult{
+		URL:                defaults.URL,
+		PEMFilePath:        defaults.PEMFilePath,
+		KeyFilePath:        defaults.KeyFilePath,
+		ProjectKeyPattern:  defaults.ProjectKeyPattern,
+		IncludeProjectData: defaults.IncludeProjectData,
+		IncludeIssueSync:   defaults.IncludeIssueSync,
+	}
 	if m.extractFormIdx < len(m.ExtractFormResponses) {
-		r := m.ExtractFormResponses[m.extractFormIdx]
-		url, token, includeProjectData, includeIssueSync = r.URL, r.Token, r.IncludeProjectData, r.IncludeIssueSync
+		result = m.ExtractFormResponses[m.extractFormIdx]
 		m.extractFormIdx++
 	}
-	return url, token, includeProjectData, includeIssueSync, nil
+	return result, nil
 }
 
-func (m *MockPrompter) PromptMigrateForm(defaultURL string, tokenOptional bool, defaultEnterpriseKey string, defaultIncludeProjectData, defaultIncludeIssueSync bool) (string, string, string, bool, bool, error) {
+func (m *MockPrompter) PromptMigrateForm(defaults MigrateFormDefaults) (MigrateFormResult, error) {
 	if m.MigrateFormErr != nil {
 		err := m.MigrateFormErr
 		m.MigrateFormErr = nil
-		return "", "", "", false, false, err
+		return MigrateFormResult{}, err
 	}
 
-	url, token, entKey := defaultURL, "", defaultEnterpriseKey
-	includeProjectData, includeIssueSync := defaultIncludeProjectData, defaultIncludeIssueSync
+	result := MigrateFormResult{
+		URL:                 defaults.URL,
+		EnterpriseKey:       defaults.EnterpriseKey,
+		DefaultOrganization: defaults.DefaultOrganization,
+		IncludeProjectData:  defaults.IncludeProjectData,
+		IncludeIssueSync:    defaults.IncludeIssueSync,
+	}
 	if m.migrateFormIdx < len(m.MigrateFormResponses) {
-		r := m.MigrateFormResponses[m.migrateFormIdx]
-		url, token, entKey, includeProjectData, includeIssueSync = r.URL, r.Token, r.EnterpriseKey, r.IncludeProjectData, r.IncludeIssueSync
+		result = m.MigrateFormResponses[m.migrateFormIdx]
 		m.migrateFormIdx++
 	}
-	return url, token, entKey, includeProjectData, includeIssueSync, nil
+	return result, nil
 }
 
 func (m *MockPrompter) PromptChoice(msg string, options []string) (int, error) {
@@ -485,6 +477,112 @@ func TestRunCancelledAtDeterminePhase(t *testing.T) {
 	}
 }
 
+// --- RunWithSeed final-state carry-forward (#515) ---
+
+// TestRunWithSeedReturnsStateOnSuccess confirms RunWithSeed hands back
+// the final in-memory state alongside a nil error on a normal
+// completion, so a caller (cmd/gui.go) can use it as the next call's seed.
+func TestRunWithSeedReturnsStateOnSuccess(t *testing.T) {
+	restoreMig := mockMigrate(nil)
+	defer restoreMig()
+
+	dir := t.TempDir()
+	writeMinimalCSVs(t, dir)
+
+	state := &WizardState{
+		Phase:         PhaseValidate,
+		TargetURL:     strPtr(testSQCloudURL),
+		EnterpriseKey: strPtr(testEntKey),
+	}
+	state.Save(dir)
+
+	p := &MockPrompter{
+		ConfirmResponses:  []bool{true, true},
+		PasswordResponses: []string{"token"},
+	}
+
+	finalState, err := RunWithSeed(context.Background(), p, dir, nil)
+	if err != nil {
+		t.Fatalf("RunWithSeed: %v", err)
+	}
+	if finalState == nil {
+		t.Fatal("expected non-nil final state")
+	}
+	if finalState.Phase != PhaseComplete {
+		t.Errorf("expected PhaseComplete, got %s", finalState.Phase)
+	}
+}
+
+// TestRunWithSeedReturnsStateOnCancel confirms RunWithSeed hands back
+// whatever state was committed before an in-flight cancellation, even
+// though it also returns a non-nil error.
+func TestRunWithSeedReturnsStateOnCancel(t *testing.T) {
+	dir := t.TempDir()
+	state := &WizardState{Phase: PhaseExtract, SourceURL: strPtr(testSQServerURL)}
+	state.Save(dir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately, before any phase runs
+
+	p := &MockPrompter{ConfirmResponses: []bool{true}} // resume=yes
+
+	finalState, err := RunWithSeed(ctx, p, dir, nil)
+	if err == nil {
+		t.Fatal("expected error from cancelled context")
+	}
+	if finalState == nil {
+		t.Fatal("expected non-nil final state even on cancellation")
+	}
+	if finalState.Phase != PhaseExtract {
+		t.Errorf("expected phase EXTRACT preserved, got %s", finalState.Phase)
+	}
+	if ptrStr(finalState.SourceURL) != testSQServerURL {
+		t.Errorf("SourceURL: got %q, want %q", ptrStr(finalState.SourceURL), testSQServerURL)
+	}
+}
+
+// TestRunWithSeedCarriesTokenAcrossCancelSimulation reproduces the
+// exact GUI bug fixed by #515: SourceToken never touches disk
+// (json:"-"), so a second RunWithSeed call against the same exportDir
+// would normally lose any in-memory-only override unless the caller
+// re-seeds it with the first call's returned state.
+func TestRunWithSeedCarriesTokenAcrossCancelSimulation(t *testing.T) {
+	dir := t.TempDir()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // simulate an immediate Cancel click
+
+	seed := &WizardState{SourceToken: strPtr("overridden-token")}
+	firstState, err := RunWithSeed(ctx, &MockPrompter{}, dir, seed)
+	if err == nil {
+		t.Fatal("expected error from cancelled context")
+	}
+	if ptrStr(firstState.SourceToken) != "overridden-token" {
+		t.Fatalf("first run: SourceToken = %q, want %q", ptrStr(firstState.SourceToken), "overridden-token")
+	}
+
+	// Disk never carried the token — confirm the bug precondition holds.
+	reloaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if reloaded.SourceToken != nil {
+		t.Fatalf("disk state should never carry SourceToken, got %q", *reloaded.SourceToken)
+	}
+
+	// Re-run seeded with the first call's returned state (as
+	// cmd/gui.go's OnStartWizard now does) — the override must survive.
+	secondCtx, secondCancel := context.WithCancel(context.Background())
+	secondCancel()
+	secondState, err := RunWithSeed(secondCtx, &MockPrompter{}, dir, firstState)
+	if err == nil {
+		t.Fatal("expected error from cancelled context")
+	}
+	if ptrStr(secondState.SourceToken) != "overridden-token" {
+		t.Errorf("second run: SourceToken = %q, want %q (override lost)", ptrStr(secondState.SourceToken), "overridden-token")
+	}
+}
+
 // --- Skipped projects display ---
 
 func TestRunWithSkippedProjects(t *testing.T) {
@@ -598,18 +696,28 @@ func TestMergeSeed(t *testing.T) {
 			name:  "empty state — every seed field applied",
 			state: WizardState{},
 			seed: WizardState{
-				SourceURL:     strPtr("https://sq"),
-				TargetURL:     strPtr("https://sc"),
-				EnterpriseKey: strPtr("ent"),
-				SourceToken:   strPtr("sq-tok"),
-				TargetToken:   strPtr("sc-tok"),
+				SourceURL:           strPtr("https://sq"),
+				TargetURL:           strPtr("https://sc"),
+				EnterpriseKey:       strPtr("ent"),
+				SourceToken:         strPtr("sq-tok"),
+				TargetToken:         strPtr("sc-tok"),
+				PEMFilePath:         strPtr("/cert.pem"),
+				KeyFilePath:         strPtr("/cert.key"),
+				CertPassword:        strPtr("certsecret"),
+				ProjectKeyPattern:   strPtr("BANKING_.+"),
+				DefaultOrganization: strPtr("my-org"),
 			},
 			want: WizardState{
-				SourceURL:     strPtr("https://sq"),
-				TargetURL:     strPtr("https://sc"),
-				EnterpriseKey: strPtr("ent"),
-				SourceToken:   strPtr("sq-tok"),
-				TargetToken:   strPtr("sc-tok"),
+				SourceURL:           strPtr("https://sq"),
+				TargetURL:           strPtr("https://sc"),
+				EnterpriseKey:       strPtr("ent"),
+				SourceToken:         strPtr("sq-tok"),
+				TargetToken:         strPtr("sc-tok"),
+				PEMFilePath:         strPtr("/cert.pem"),
+				KeyFilePath:         strPtr("/cert.key"),
+				CertPassword:        strPtr("certsecret"),
+				ProjectKeyPattern:   strPtr("BANKING_.+"),
+				DefaultOrganization: strPtr("my-org"),
 			},
 		},
 		{
@@ -618,20 +726,27 @@ func TestMergeSeed(t *testing.T) {
 				SourceURL:     strPtr("disk-sq"),
 				TargetURL:     strPtr("disk-sc"),
 				EnterpriseKey: strPtr("disk-ent"),
+				PEMFilePath:   strPtr("disk-cert.pem"),
 			},
 			seed: WizardState{
-				SourceURL:     strPtr("seed-sq"),
-				TargetURL:     strPtr("seed-sc"),
-				EnterpriseKey: strPtr("seed-ent"),
-				SourceToken:   strPtr("sq-tok"),
-				TargetToken:   strPtr("sc-tok"),
+				SourceURL:           strPtr("seed-sq"),
+				TargetURL:           strPtr("seed-sc"),
+				EnterpriseKey:       strPtr("seed-ent"),
+				SourceToken:         strPtr("sq-tok"),
+				TargetToken:         strPtr("sc-tok"),
+				PEMFilePath:         strPtr("seed-cert.pem"),
+				CertPassword:        strPtr("certsecret"),
+				DefaultOrganization: strPtr("seed-org"),
 			},
 			want: WizardState{
-				SourceURL:     strPtr("disk-sq"),
-				TargetURL:     strPtr("disk-sc"),
-				EnterpriseKey: strPtr("disk-ent"),
-				SourceToken:   strPtr("sq-tok"),
-				TargetToken:   strPtr("sc-tok"),
+				SourceURL:           strPtr("disk-sq"),
+				TargetURL:           strPtr("disk-sc"),
+				EnterpriseKey:       strPtr("disk-ent"),
+				SourceToken:         strPtr("sq-tok"),
+				TargetToken:         strPtr("sc-tok"),
+				PEMFilePath:         strPtr("disk-cert.pem"), // disk wins, non-secret field
+				CertPassword:        strPtr("certsecret"),    // seed always wins, secret field
+				DefaultOrganization: strPtr("seed-org"),      // disk was nil, seed fills it
 			},
 		},
 		{
@@ -640,25 +755,34 @@ func TestMergeSeed(t *testing.T) {
 				SourceURL: strPtr("disk-sq"),
 			},
 			seed: WizardState{
-				SourceURL:     strPtr("seed-sq"),
-				TargetURL:     strPtr("seed-sc"),
-				EnterpriseKey: strPtr("seed-ent"),
+				SourceURL:         strPtr("seed-sq"),
+				TargetURL:         strPtr("seed-sc"),
+				EnterpriseKey:     strPtr("seed-ent"),
+				KeyFilePath:       strPtr("seed-cert.key"),
+				ProjectKeyPattern: strPtr("BANKING_.+"),
 			},
 			want: WizardState{
-				SourceURL:     strPtr("disk-sq"),
-				TargetURL:     strPtr("seed-sc"),
-				EnterpriseKey: strPtr("seed-ent"),
+				SourceURL:         strPtr("disk-sq"),
+				TargetURL:         strPtr("seed-sc"),
+				EnterpriseKey:     strPtr("seed-ent"),
+				KeyFilePath:       strPtr("seed-cert.key"),
+				ProjectKeyPattern: strPtr("BANKING_.+"),
 			},
 		},
 		{
 			name:  "empty-string seed values are no-ops",
 			state: WizardState{},
 			seed: WizardState{
-				SourceURL:     strPtr(""),
-				TargetURL:     strPtr(""),
-				EnterpriseKey: strPtr(""),
-				SourceToken:   strPtr(""),
-				TargetToken:   strPtr(""),
+				SourceURL:           strPtr(""),
+				TargetURL:           strPtr(""),
+				EnterpriseKey:       strPtr(""),
+				SourceToken:         strPtr(""),
+				TargetToken:         strPtr(""),
+				PEMFilePath:         strPtr(""),
+				KeyFilePath:         strPtr(""),
+				CertPassword:        strPtr(""),
+				ProjectKeyPattern:   strPtr(""),
+				DefaultOrganization: strPtr(""),
 			},
 			want: WizardState{},
 		},
@@ -672,6 +796,11 @@ func TestMergeSeed(t *testing.T) {
 			assertPtrEqual(t, "EnterpriseKey", state.EnterpriseKey, c.want.EnterpriseKey)
 			assertPtrEqual(t, "SourceToken", state.SourceToken, c.want.SourceToken)
 			assertPtrEqual(t, "TargetToken", state.TargetToken, c.want.TargetToken)
+			assertPtrEqual(t, "PEMFilePath", state.PEMFilePath, c.want.PEMFilePath)
+			assertPtrEqual(t, "KeyFilePath", state.KeyFilePath, c.want.KeyFilePath)
+			assertPtrEqual(t, "CertPassword", state.CertPassword, c.want.CertPassword)
+			assertPtrEqual(t, "ProjectKeyPattern", state.ProjectKeyPattern, c.want.ProjectKeyPattern)
+			assertPtrEqual(t, "DefaultOrganization", state.DefaultOrganization, c.want.DefaultOrganization)
 		})
 	}
 }
@@ -699,15 +828,16 @@ func TestMergeSeedIncludeFlags(t *testing.T) {
 	}
 }
 
-// #388: tokens carried in the wizard state must never reach
-// .wizard_state.json — they're json:"-" so Save() drops them. Resume
-// reloads the file and gets nil tokens.
+// #388/#515: tokens and CertPassword carried in the wizard state must
+// never reach .wizard_state.json — they're json:"-" so Save() drops
+// them. Resume reloads the file and gets them nil.
 func TestWizardState_TokensNotPersisted(t *testing.T) {
 	dir := t.TempDir()
 	state := &WizardState{
-		SourceURL:   strPtr("https://sq"),
-		SourceToken: strPtr("secret-sq"),
-		TargetToken: strPtr("secret-sc"),
+		SourceURL:    strPtr("https://sq"),
+		SourceToken:  strPtr("secret-sq"),
+		TargetToken:  strPtr("secret-sc"),
+		CertPassword: strPtr("secret-cert"),
 	}
 	if err := state.Save(dir); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -721,6 +851,9 @@ func TestWizardState_TokensNotPersisted(t *testing.T) {
 	}
 	if reloaded.TargetToken != nil {
 		t.Errorf("TargetToken must not persist; got %q on disk", *reloaded.TargetToken)
+	}
+	if reloaded.CertPassword != nil {
+		t.Errorf("CertPassword must not persist; got %q on disk", *reloaded.CertPassword)
 	}
 	if reloaded.SourceURL == nil || *reloaded.SourceURL != "https://sq" {
 		t.Errorf("SourceURL did not round-trip; got %v", reloaded.SourceURL)

@@ -83,6 +83,18 @@ type ServerMessage struct {
 	DefaultEnterpriseKey      string `json:"default_enterprise_key,omitempty"`
 	DefaultIncludeProjectData bool   `json:"default_include_project_data"`
 	DefaultIncludeIssueSync   bool   `json:"default_include_issue_sync"`
+
+	// DefaultPEMFilePath / DefaultKeyFilePath / CertPasswordKnown /
+	// DefaultProjectKeyPattern carry the #515 Extract-form additions.
+	// CertPasswordKnown mirrors TokenOptional: signals a password is
+	// already configured without echoing the secret to the browser.
+	DefaultPEMFilePath       string `json:"default_pem_file_path,omitempty"`
+	DefaultKeyFilePath       string `json:"default_key_file_path,omitempty"`
+	CertPasswordKnown        bool   `json:"cert_password_known,omitempty"`
+	DefaultProjectKeyPattern string `json:"default_project_key_pattern,omitempty"`
+
+	// DefaultOrganization carries the #515 Migrate-form addition.
+	DefaultOrganization string `json:"default_organization,omitempty"`
 }
 
 // ClientMessage is sent from the browser to the Go server.

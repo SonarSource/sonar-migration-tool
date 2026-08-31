@@ -30,6 +30,10 @@ var (
 	runMigrateFn   = func(ctx context.Context, cfg migrate.MigrateConfig) (string, error) {
 		return migrate.RunMigrate(ctx, cfg)
 	}
+	// resolveProjectKeysFn resolves a project-key pattern to a concrete,
+	// matched key list before extraction starts (#515). Test-overridable
+	// like the function vars above.
+	resolveProjectKeysFn = extract.ResolveProjectKeys
 )
 
 // CSV file names used across phases.
@@ -57,42 +61,80 @@ func phaseExtract(ctx context.Context, p Prompter, state *WizardState, exportDir
 		return err
 	}
 
-	certCfg, err := runExtractWithRetry(ctx, p, state, exportDir, sourceURL, token)
-	if err != nil {
-		return err
+	cert := certConfig{
+		pemFile:  ptrStr(state.PEMFilePath),
+		keyFile:  ptrStr(state.KeyFilePath),
+		password: ptrStr(state.CertPassword),
 	}
-	_ = certCfg // used internally by runExtractWithRetry
-	return nil
+
+	var projectKeys []string
+	if pattern := ptrStr(state.ProjectKeyPattern); pattern != "" {
+		projectKeys, err = resolveProjectKeysFn(ctx, extract.ExtractConfig{
+			URL:          sourceURL,
+			Token:        token,
+			Timeout:      120,
+			PEMFilePath:  cert.pemFile,
+			KeyFilePath:  cert.keyFile,
+			CertPassword: cert.password,
+		}, pattern)
+		if err != nil {
+			p.DisplayError(err.Error())
+			return err
+		}
+	}
+
+	_, err = runExtractWithRetry(ctx, p, state, exportDir, sourceURL, token, cert, projectKeys)
+	return err
 }
 
 func promptExtractCredentials(p Prompter, state *WizardState) (string, string, error) {
-	defaultIncludeProjectData := ptrBoolOr(state.IncludeProjectData, true)
-	defaultIncludeIssueSync := ptrBoolOr(state.IncludeIssueSync, true)
+	// #388: --config can pre-fill the token/cert password; the
+	// corresponding form fields are left optional when that's the
+	// case, so the operator isn't forced to retype a secret that's
+	// already known.
+	defaults := ExtractFormDefaults{
+		URL:                ptrStr(state.SourceURL),
+		TokenOptional:      ptrStr(state.SourceToken) != "",
+		PEMFilePath:        ptrStr(state.PEMFilePath),
+		KeyFilePath:        ptrStr(state.KeyFilePath),
+		CertPasswordKnown:  ptrStr(state.CertPassword) != "",
+		ProjectKeyPattern:  ptrStr(state.ProjectKeyPattern),
+		IncludeProjectData: ptrBoolOr(state.IncludeProjectData, true),
+		IncludeIssueSync:   ptrBoolOr(state.IncludeIssueSync, true),
+	}
 
-	// #388: --config can pre-fill the token; the form field is left
-	// optional when that's the case, so the operator isn't forced to
-	// retype a token that's already known.
-	tokenOptional := ptrStr(state.SourceToken) != ""
-
-	url, token, includeProjectData, includeIssueSync, err := p.PromptExtractForm(
-		ptrStr(state.SourceURL), tokenOptional, defaultIncludeProjectData, defaultIncludeIssueSync)
+	result, err := p.PromptExtractForm(defaults)
 	if err != nil {
 		return "", "", err
 	}
+
+	token := result.Token
 	if token == "" {
 		token = ptrStr(state.SourceToken)
 	}
+	certPassword := result.CertPassword
+	if certPassword == "" {
+		certPassword = ptrStr(state.CertPassword)
+	}
 
-	state.IncludeProjectData = &includeProjectData
-	state.IncludeIssueSync = &includeIssueSync
-	return url, token, nil
+	state.IncludeProjectData = &result.IncludeProjectData
+	state.IncludeIssueSync = &result.IncludeIssueSync
+	state.PEMFilePath = strPtrOrNil(result.PEMFilePath)
+	state.KeyFilePath = strPtrOrNil(result.KeyFilePath)
+	state.CertPassword = strPtrOrNil(certPassword)
+	state.ProjectKeyPattern = strPtrOrNil(result.ProjectKeyPattern)
+	// Write the resolved token back onto state (not just the seeded
+	// value) so a user override is reflected in the in-memory state
+	// RunWithSeed hands back to its caller — the carry-forward that
+	// makes an override survive Cancel across GUI process runs (#515).
+	state.SourceToken = strPtrOrNil(token)
+	return result.URL, token, nil
 }
 
-func runExtractWithRetry(ctx context.Context, p Prompter, state *WizardState, exportDir, sourceURL, token string) (certConfig, error) {
+func runExtractWithRetry(ctx context.Context, p Prompter, state *WizardState, exportDir, sourceURL, token string, cert certConfig, projectKeys []string) (certConfig, error) {
 	includeProjectData := ptrBoolOr(state.IncludeProjectData, true)
 	includeIssueSync := ptrBoolOr(state.IncludeIssueSync, true)
 
-	var cert certConfig
 	for {
 		extractID := common.GenerateRunID(exportDir)
 		cfg := extract.ExtractConfig{
@@ -104,6 +146,7 @@ func runExtractWithRetry(ctx context.Context, p Prompter, state *WizardState, ex
 			PEMFilePath:              cert.pemFile,
 			KeyFilePath:              cert.keyFile,
 			CertPassword:             cert.password,
+			ProjectKeys:              projectKeys,
 			IncludeProjectData:       includeProjectData,
 			SkipProjectDataMigration: !includeProjectData,
 			SkipIssueSync:            !includeIssueSync,
@@ -129,6 +172,11 @@ func runExtractWithRetry(ctx context.Context, p Prompter, state *WizardState, ex
 			if promptErr != nil {
 				return cert, promptErr
 			}
+			// Persist the reactively-entered cert so it survives
+			// Cancel/Back the same way an upfront form override would (#515).
+			state.PEMFilePath = strPtrOrNil(cert.pemFile)
+			state.KeyFilePath = strPtrOrNil(cert.keyFile)
+			state.CertPassword = strPtrOrNil(cert.password)
 			continue
 		}
 
@@ -376,27 +424,36 @@ func phaseMigrate(ctx context.Context, p Prompter, state *WizardState, exportDir
 }
 
 func promptMigrateCredentials(p Prompter, state *WizardState) (string, error) {
-	defaultIncludeProjectData := ptrBoolOr(state.IncludeProjectData, true)
-	defaultIncludeIssueSync := ptrBoolOr(state.IncludeIssueSync, true)
-
 	// #388: --config can pre-fill the token; the form field is left
 	// optional when that's the case, so the operator isn't forced to
 	// retype a token that's already known.
-	tokenOptional := ptrStr(state.TargetToken) != ""
+	defaults := MigrateFormDefaults{
+		URL:                 ptrStr(state.TargetURL),
+		TokenOptional:       ptrStr(state.TargetToken) != "",
+		EnterpriseKey:       ptrStr(state.EnterpriseKey),
+		DefaultOrganization: ptrStr(state.DefaultOrganization),
+		IncludeProjectData:  ptrBoolOr(state.IncludeProjectData, true),
+		IncludeIssueSync:    ptrBoolOr(state.IncludeIssueSync, true),
+	}
 
-	url, token, enterpriseKey, includeProjectData, includeIssueSync, err := p.PromptMigrateForm(
-		ptrStr(state.TargetURL), tokenOptional, ptrStr(state.EnterpriseKey), defaultIncludeProjectData, defaultIncludeIssueSync)
+	result, err := p.PromptMigrateForm(defaults)
 	if err != nil {
 		return "", err
 	}
+	token := result.Token
 	if token == "" {
 		token = ptrStr(state.TargetToken)
 	}
 
-	state.TargetURL = strPtr(url)
-	state.EnterpriseKey = strPtr(enterpriseKey)
-	state.IncludeProjectData = &includeProjectData
-	state.IncludeIssueSync = &includeIssueSync
+	state.TargetURL = strPtr(result.URL)
+	state.EnterpriseKey = strPtr(result.EnterpriseKey)
+	state.DefaultOrganization = strPtrOrNil(result.DefaultOrganization)
+	state.IncludeProjectData = &result.IncludeProjectData
+	state.IncludeIssueSync = &result.IncludeIssueSync
+	// Write the resolved token back onto state (not just the seeded
+	// value) so a user override is reflected in the in-memory state
+	// RunWithSeed hands back to its caller (#515, see promptExtractCredentials).
+	state.TargetToken = strPtrOrNil(token)
 	return token, nil
 }
 
@@ -410,6 +467,7 @@ func runMigrateWithRetry(ctx context.Context, p Prompter, state *WizardState, ex
 			Token:                    token,
 			EnterpriseKey:            ptrStr(state.EnterpriseKey),
 			URL:                      ptrStr(state.TargetURL),
+			DefaultOrganization:      ptrStr(state.DefaultOrganization),
 			ExportDirectory:          exportDir,
 			IncludeProjectData:       includeProjectData,
 			SkipProjectDataMigration: !includeProjectData,

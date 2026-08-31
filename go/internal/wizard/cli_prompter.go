@@ -87,87 +87,112 @@ func (p *CLIPrompter) ConfirmReview(title string, details []KV) (bool, error) {
 	return p.Confirm("Are these values correct?", false)
 }
 
-func (p *CLIPrompter) PromptExtractForm(defaultURL string, tokenOptional bool, defaultIncludeProjectData, defaultIncludeIssueSync bool) (string, string, bool, bool, error) {
-	url := defaultURL
+// PromptExtractForm implements Prompter for the CLI. Cert settings and
+// the project-key pattern have no dedicated interactive prompt here —
+// they pass through from defaults unchanged (the CLI's existing
+// reactive promptCertConfig, triggered on an SSL error in phases.go,
+// still applies and can override PEMFilePath/KeyFilePath/CertPassword;
+// #515 is GUI-scoped for the upfront fields). CertPassword is left
+// blank in the result so callers fall back to the known password.
+func (p *CLIPrompter) PromptExtractForm(defaults ExtractFormDefaults) (ExtractFormResult, error) {
+	url := defaults.URL
 	if url == "" {
 		var err error
 		url, err = p.PromptURL("SonarQube Server URL:", true)
 		if err != nil {
-			return "", "", false, false, err
+			return ExtractFormResult{}, err
 		}
 	}
 
 	var token string
-	if !tokenOptional {
+	if !defaults.TokenOptional {
 		var err error
 		token, err = p.PromptPassword("Admin token:")
 		if err != nil {
-			return "", "", false, false, err
+			return ExtractFormResult{}, err
 		}
 	}
 
-	includeProjectData, err := p.Confirm("Migrate project data (files, measures, issues, SCM data, ...)?", defaultIncludeProjectData)
+	includeProjectData, err := p.Confirm("Migrate project data (files, measures, issues, SCM data, ...)?", defaults.IncludeProjectData)
 	if err != nil {
-		return "", "", false, false, err
+		return ExtractFormResult{}, err
 	}
 
 	includeIssueSync := false
 	if includeProjectData {
-		includeIssueSync, err = p.Confirm("Sync issue/hotspot metadata after migration?", defaultIncludeIssueSync)
+		includeIssueSync, err = p.Confirm("Sync issue/hotspot metadata after migration?", defaults.IncludeIssueSync)
 		if err != nil {
-			return "", "", false, false, err
+			return ExtractFormResult{}, err
 		}
 	} else {
 		displayColorLine(colorYellow, "  Issue/hotspot sync disabled: it requires project data migration.")
 	}
 
-	return url, token, includeProjectData, includeIssueSync, nil
+	return ExtractFormResult{
+		URL:                url,
+		Token:              token,
+		PEMFilePath:        defaults.PEMFilePath,
+		KeyFilePath:        defaults.KeyFilePath,
+		ProjectKeyPattern:  defaults.ProjectKeyPattern,
+		IncludeProjectData: includeProjectData,
+		IncludeIssueSync:   includeIssueSync,
+	}, nil
 }
 
-func (p *CLIPrompter) PromptMigrateForm(defaultURL string, tokenOptional bool, defaultEnterpriseKey string, defaultIncludeProjectData, defaultIncludeIssueSync bool) (string, string, string, bool, bool, error) {
-	url := defaultURL
+// PromptMigrateForm implements Prompter for the CLI. DefaultOrganization
+// has no dedicated interactive prompt here — it passes through from
+// defaults unchanged (#515 is GUI-scoped for this field).
+func (p *CLIPrompter) PromptMigrateForm(defaults MigrateFormDefaults) (MigrateFormResult, error) {
+	url := defaults.URL
 	if url == "" {
 		var err error
 		url, err = p.PromptURL("SonarQube Cloud URL:", true)
 		if err != nil {
-			return "", "", "", false, false, err
+			return MigrateFormResult{}, err
 		}
 	}
 
 	var token string
-	if !tokenOptional {
+	if !defaults.TokenOptional {
 		var err error
 		token, err = p.PromptPassword("Cloud admin token:")
 		if err != nil {
-			return "", "", "", false, false, err
+			return MigrateFormResult{}, err
 		}
 	}
 
-	entKey := defaultEnterpriseKey
+	entKey := defaults.EnterpriseKey
 	if entKey == "" {
 		var err error
 		entKey, err = p.PromptText("Enterprise key:", "")
 		if err != nil {
-			return "", "", "", false, false, err
+			return MigrateFormResult{}, err
 		}
 	}
 
-	includeProjectData, err := p.Confirm("Migrate project data (files, measures, issues, SCM data, ...)?", defaultIncludeProjectData)
+	includeProjectData, err := p.Confirm("Migrate project data (files, measures, issues, SCM data, ...)?", defaults.IncludeProjectData)
 	if err != nil {
-		return "", "", "", false, false, err
+		return MigrateFormResult{}, err
 	}
 
 	includeIssueSync := false
 	if includeProjectData {
-		includeIssueSync, err = p.Confirm("Sync issue/hotspot metadata after migration?", defaultIncludeIssueSync)
+		includeIssueSync, err = p.Confirm("Sync issue/hotspot metadata after migration?", defaults.IncludeIssueSync)
 		if err != nil {
-			return "", "", "", false, false, err
+			return MigrateFormResult{}, err
 		}
 	} else {
 		displayColorLine(colorYellow, "  Issue/hotspot sync disabled: it requires project data migration.")
 	}
 
-	return url, token, entKey, includeProjectData, includeIssueSync, nil
+	return MigrateFormResult{
+		URL:                 url,
+		Token:               token,
+		EnterpriseKey:       entKey,
+		DefaultOrganization: defaults.DefaultOrganization,
+		IncludeProjectData:  includeProjectData,
+		IncludeIssueSync:    includeIssueSync,
+	}, nil
 }
 
 func (p *CLIPrompter) PromptChoice(message string, options []string) (int, error) {
