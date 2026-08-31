@@ -1,0 +1,344 @@
+// Copyright (C) SonarSource Sàrl
+// For more information, see https://sonarsource.com/legal/
+// mailto:info AT sonarsource DOT com
+
+package migrate
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"strings"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
+	sqapi "github.com/sonar-solutions/sq-api-go"
+)
+
+// FailureClass answers the only question an operator really has when a
+// migration reports a failure: is this the tool being wrong, or SonarQube
+// Cloud legitimately refusing something it does not support?
+//
+// Before this existed every failure looked alike. One customer run logged
+// 42,181 warnings and zero errors; 42,048 of them were a single expected
+// platform limitation and the rest were buried. Classifying each failure
+// lets the log, the task summary and the report separate "nothing you can
+// do" from "please report this".
+type FailureClass string
+
+const (
+	// FailureByDesign means SonarQube Cloud cannot do what was asked and
+	// never will: the setting has no project scope, the metric has no Cloud
+	// equivalent, the new-code type is unsupported. The migration is
+	// working correctly; the value is expected to be dropped.
+	FailureByDesign FailureClass = "by-design"
+
+	// FailureAlreadyDone means the desired end state already holds — the
+	// entity exists, or the thing being deleted is already gone. Not a
+	// failure in any meaningful sense.
+	FailureAlreadyDone FailureClass = "already-done"
+
+	// FailureEnvironment means something in the customer's environment
+	// blocked the operation: token permissions, org subscription or quota,
+	// rate limiting, connectivity, a Cloud-side 5xx. Nothing is wrong with
+	// the migration itself; re-running after fixing the environment may
+	// succeed.
+	//
+	// Named "customer-environment-issue" in the log so an operator reading
+	// a support ticket is not left guessing whose environment is meant.
+	FailureEnvironment FailureClass = "customer-environment-issue"
+
+	// FailureBug means the request was rejected for a reason the tool does
+	// not recognise. The payload it sent is most likely wrong. These are
+	// the ones worth a bug report.
+	FailureBug FailureClass = "bug"
+)
+
+// FailureVerdict is the full explanation attached to a failed operation.
+type FailureVerdict struct {
+	Class FailureClass
+	// Why explains the cause in operator language, not API language.
+	Why string
+	// Remediation is what to do about it, or why nothing need be done.
+	Remediation string
+	// Reportable marks failures that indicate a defect in this tool and
+	// should be raised with the maintainers.
+	Reportable bool
+}
+
+// httpFailure normalizes the two error shapes the codebase produces —
+// sqapi.APIError from the typed clients and common.HTTPError from the raw
+// reader — so classification does not have to care which one it got.
+type httpFailure struct {
+	status  int
+	message string
+	ok      bool
+}
+
+func asHTTPFailure(err error) httpFailure {
+	var apiErr *sqapi.APIError
+	if errors.As(err, &apiErr) {
+		return httpFailure{status: apiErr.StatusCode, message: apiErr.Message(), ok: true}
+	}
+	var httpErr *common.HTTPError
+	if errors.As(err, &httpErr) {
+		return httpFailure{status: httpErr.StatusCode, message: httpErr.Message(), ok: true}
+	}
+	return httpFailure{}
+}
+
+// environmentMessageHints maps substrings of SonarQube Cloud 400 messages
+// that describe an account or configuration state rather than a bad
+// request. Without these they would fall through to FailureBug, which
+// would send operators chasing a defect that is really a subscription or
+// permission problem.
+var environmentMessageHints = []struct {
+	Substring   string
+	Why         string
+	Remediation string
+}{
+	{
+		Substring:   "not allowed to use private projects",
+		Why:         "the target organization cannot create private projects, and the migration always creates them private",
+		Remediation: "enable private projects on the organization (a paid plan or an available private-project allowance), then re-run",
+	},
+	{
+		Substring:   "not bound to an alm application",
+		Why:         "the target organization is not bound to a DevOps platform",
+		Remediation: "bind the organization to its DevOps platform, then re-run with --target_task matchProjectRepos",
+	},
+	{
+		Substring:   "is not allowed to perform this action",
+		Why:         "the target organization's plan or permissions do not allow this operation",
+		Remediation: "check the organization's subscription and that the migration token has Administer on it; SonarQube Cloud returns this as a 400 rather than a 403",
+	},
+	{
+		Substring:   "not allowed to use",
+		Why:         "the target organization's plan does not include this capability",
+		Remediation: "check the organization's subscription, then re-run",
+	},
+	{
+		Substring:   "maximum number of",
+		Why:         "an organization or plan limit was reached",
+		Remediation: "raise the limit on the target organization or reduce the migration scope, then re-run",
+	},
+	{
+		Substring:   "no organization for key",
+		Why:         "the target organization key does not exist or is not visible to this token",
+		Remediation: "check organizations.csv and that the token can administer the organization",
+	},
+}
+
+// ClassifyFailure explains a failed operation.
+//
+// Ordering matters: the specific, recognised platform rejections are
+// matched first, then account/permission state, then transport, and only
+// what is left over is called a bug. An unrecognised 400 is deliberately
+// classified as a bug rather than shrugged off — the tool built a payload
+// SonarQube Cloud would not accept, and nothing else will notice.
+func ClassifyFailure(err error) FailureVerdict {
+	if err == nil {
+		return FailureVerdict{}
+	}
+
+	// Detectors that need the error itself, because they inspect the raw
+	// body rather than the decoded message.
+	switch {
+	case sqapi.IsAlreadyExists(err), sqapi.IsMangledAlreadyExists(err):
+		return alreadyDoneVerdict()
+	case sqapi.IsProjectLevelRejection(err):
+		return projectScopeVerdict()
+	case sqapi.IsOrgLevelRejection(err):
+		return orgScopeVerdict()
+	}
+
+	// A cancelled context means the run was already being torn down — by an
+	// earlier fatal error, an operator interrupt, or the process running out
+	// of memory. The failure is a cascade, not its own fault, and calling it
+	// a bug sends people chasing the wrong thing. One customer saw
+	// "createProjects: create failed ... context canceled" for a project
+	// that already existed, while the real problem was the extract phase
+	// exhausting the host.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return FailureVerdict{
+			Class:       FailureEnvironment,
+			Why:         "the migration was already shutting down when this operation ran, so it never reached SonarQube Cloud — this failure is a consequence of an earlier one, not an independent problem",
+			Remediation: "find the first error in the run and address that; re-run with --run_id to resume once it is fixed",
+		}
+	}
+
+	// A request that never got a response produces a plain transport error,
+	// not an APIError — APIError is only built from a real response, so its
+	// StatusCode is never 0 in practice. Without this branch a DNS failure,
+	// a refused connection, a TLS error or a proxy timeout was classified as
+	// a reportable defect in the tool, which is exactly the misdirection the
+	// classification exists to prevent.
+	if isTransportFailure(err) {
+		return FailureVerdict{
+			Class:       FailureEnvironment,
+			Why:         "the request never reached SonarQube Cloud — it failed at the network or TLS layer, after the retry budget was spent",
+			Remediation: "check connectivity, DNS, proxy and TLS interception between the runner and SonarQube Cloud; the run is resumable with --run_id",
+		}
+	}
+
+	if f := asHTTPFailure(err); f.ok {
+		return ClassifyHTTPFailure(f.status, f.message)
+	}
+
+	// Neither an HTTP failure nor a transport failure: a JSON decode error, a
+	// bad type assertion, a nil dereference surfaced as an error. None of
+	// these are the platform's fault.
+	return FailureVerdict{
+		Class:       FailureBug,
+		Why:         "the operation failed without ever producing an HTTP response or a network error, so this is a fault in the migration tool rather than a SonarQube Cloud limitation",
+		Remediation: "re-run with --debug and report the error with the surrounding log lines",
+		Reportable:  true,
+	}
+}
+
+// ClassifyHTTPFailure explains a failed request from the status and message
+// alone, with no error object.
+//
+// Exported so the migration report can classify the failures recorded in
+// requests.log using exactly these rules rather than a second copy of them
+// that would drift.
+func ClassifyHTTPFailure(status int, message string) FailureVerdict {
+	lower := strings.ToLower(message)
+
+	// The message-shaped equivalents of the error detectors above, so a
+	// failure read back from requests.log lands in the same class as it did
+	// when it happened.
+	switch {
+	case strings.Contains(lower, "already exists"), strings.Contains(message, `Conversion = ')'`):
+		return alreadyDoneVerdict()
+	case strings.Contains(lower, "cannot be set on a"):
+		return projectScopeVerdict()
+	case strings.Contains(lower, "at organization level"):
+		return orgScopeVerdict()
+	}
+
+	for _, hint := range environmentMessageHints {
+		if strings.Contains(lower, hint.Substring) {
+			return FailureVerdict{Class: FailureEnvironment, Why: hint.Why, Remediation: hint.Remediation}
+		}
+	}
+
+	switch {
+	case status == http.StatusUnauthorized:
+		return FailureVerdict{
+			Class:       FailureEnvironment,
+			Why:         "SonarQube Cloud rejected the credentials",
+			Remediation: "check the target token is valid and not expired",
+		}
+
+	case status == http.StatusForbidden:
+		return FailureVerdict{
+			Class:       FailureEnvironment,
+			Why:         "the token is valid but lacks permission for this operation",
+			Remediation: "grant the migration user Administer on the target organization (and Execute Analysis where project data is imported)",
+		}
+
+	case status == http.StatusNotFound:
+		return FailureVerdict{
+			Class:       FailureEnvironment,
+			Why:         "the target entity does not exist",
+			Remediation: "expected for delete-style cleanup and shortly after project creation while Cloud indexes; otherwise check the entity was created earlier in the run",
+		}
+
+	case status == http.StatusTooManyRequests:
+		return FailureVerdict{
+			Class:       FailureEnvironment,
+			Why:         "SonarQube Cloud rate-limited the request and the retry budget was exhausted",
+			Remediation: "lower --concurrency and re-run; the run is resumable with --run_id",
+		}
+
+	case status >= 500:
+		return FailureVerdict{
+			Class:       FailureEnvironment,
+			Why:         "SonarQube Cloud returned a server-side error",
+			Remediation: "re-run with --run_id to resume; if it persists for the same operation, raise it with SonarQube Cloud support",
+		}
+
+	case status == 0:
+		return FailureVerdict{
+			Class:       FailureEnvironment,
+			Why:         "the request never reached SonarQube Cloud — it failed at the network or TLS layer",
+			Remediation: "check connectivity, DNS, proxy and TLS interception between the runner and SonarQube Cloud",
+		}
+
+	case status == http.StatusBadRequest:
+		// Everything the tool understands about 400s has been matched above.
+		// A 400 it cannot explain means the payload was wrong.
+		return FailureVerdict{
+			Class:       FailureBug,
+			Why:         "SonarQube Cloud rejected the request and the migration tool does not recognise the reason, which means the payload it built is probably invalid",
+			Remediation: "report this with the endpoint, the message above and the run id; the request body is recorded in requests.log",
+			Reportable:  true,
+		}
+	}
+
+	return FailureVerdict{
+		Class:       FailureBug,
+		Why:         "the operation failed with a status the migration tool does not classify",
+		Remediation: "report this with the endpoint, the message above and the run id",
+		Reportable:  true,
+	}
+}
+
+// The three verdicts shared by the error-based and message-based paths.
+
+func alreadyDoneVerdict() FailureVerdict {
+	return FailureVerdict{
+		Class:       FailureAlreadyDone,
+		Why:         "the entity already exists on the target, so the state the migration wanted is already in place",
+		Remediation: "none needed; expected when re-running a migration or migrating into a populated organization",
+	}
+}
+
+func projectScopeVerdict() FailureVerdict {
+	return FailureVerdict{
+		Class:       FailureByDesign,
+		Why:         "SonarQube Cloud's definition for this setting does not include the project qualifier, so it cannot be set on a project",
+		Remediation: "none available; the setting is instance-scope-only on SonarQube Server and has no project-scope counterpart on Cloud. It is expected to be dropped",
+	}
+}
+
+func orgScopeVerdict() FailureVerdict {
+	return FailureVerdict{
+		Class:       FailureByDesign,
+		Why:         "SonarQube Cloud lists this setting at organization scope but refuses to write it there; it only takes effect per project",
+		Remediation: "none needed; the migration falls back to setting the value on each project in the organization",
+	}
+}
+
+// isTransportFailure reports whether err is a network-layer failure rather
+// than a response the server chose to send.
+//
+// The typed clients only build an APIError once they have a response, so
+// anything that dies on the wire arrives as *url.Error wrapping a
+// net.Error, a DNS error, or an EOF. Those are the customer's environment,
+// never a defect in this tool.
+func isTransportFailure(err error) bool {
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		return true
+	}
+	// http.Client wraps everything it cannot complete in *url.Error; the
+	// checks above catch the common payloads, this catches the rest
+	// (including TLS handshake failures, which are plain errors).
+	var urlErr *url.Error
+	return errors.As(err, &urlErr)
+}

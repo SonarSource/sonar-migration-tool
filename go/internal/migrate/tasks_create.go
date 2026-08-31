@@ -10,9 +10,9 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	sqapi "github.com/sonar-solutions/sq-api-go"
 	"github.com/sonar-solutions/sq-api-go/cloud"
-	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
 // createTasks returns tasks that create entities in SonarQube Cloud.
@@ -79,8 +79,7 @@ func runCreateProjects(ctx context.Context, e *Executor) error {
 			})
 			if err != nil {
 				if !sqapi.IsAlreadyExists(err) {
-					counter.Fail()
-					logAPIWarn(e.Logger, "createProjects: create failed", err, "key", key)
+					failAPI(counter, e.Logger, "createProjects: create failed", err, "key", key)
 					return nil
 				}
 				// SonarQube Cloud project keys are GLOBALLY unique, not
@@ -93,8 +92,7 @@ func runCreateProjects(ctx context.Context, e *Executor) error {
 				// recording it (issue #193).
 				exists, verifyErr := e.Cloud.Projects.ExistsInOrg(ctx, cloudKey, orgKey)
 				if verifyErr != nil {
-					counter.Fail()
-					logAPIWarn(e.Logger, "createProjects: could not verify already-existing project belongs to target org",
+					failAPI(counter, e.Logger, "createProjects: could not verify already-existing project belongs to target org",
 						verifyErr, "source_key", key, "cloud_key", cloudKey, "org", orgKey)
 					return nil
 				}
@@ -171,15 +169,13 @@ func runCreateProfiles(ctx context.Context, e *Executor) error {
 			})
 			if err != nil {
 				if !sqapi.IsAlreadyExists(err) {
-					counter.Fail()
-					logAPIWarn(e.Logger, "createProfiles: create failed", err, "name", name)
+					failAPI(counter, e.Logger, "createProfiles: create failed", err, "name", name)
 					return nil
 				}
 				e.Logger.Info("createProfiles: already exists, looking up", "name", name)
 				profileKey, err = lookupExistingProfile(ctx, e.Raw, name, lang, orgKey)
 				if err != nil {
-					counter.Fail()
-					logAPIWarn(e.Logger, "createProfiles: lookup failed", err, "name", name)
+					failAPI(counter, e.Logger, "createProfiles: lookup failed", err, "name", name)
 					return nil
 				}
 				counter.Success()
@@ -222,8 +218,7 @@ func runCreateGates(ctx context.Context, e *Executor) error {
 			gate, err := e.Cloud.QualityGates.Create(ctx, name, orgKey)
 			if err != nil {
 				if !sqapi.IsAlreadyExists(err) {
-					counter.Fail()
-					logAPIWarn(e.Logger, "createGates: create failed", err, "name", name)
+					failAPI(counter, e.Logger, "createGates: create failed", err, "name", name)
 					return nil
 				}
 				e.Logger.Info("createGates: already exists, will override conditions", "name", name)
@@ -231,8 +226,7 @@ func runCreateGates(ctx context.Context, e *Executor) error {
 					"name", name, "org", orgKey)
 				gateID, err = lookupExistingGate(ctx, e.Raw, name, orgKey)
 				if err != nil {
-					counter.Fail()
-					logAPIWarn(e.Logger, "createGates: lookup failed", err, "name", name)
+					failAPI(counter, e.Logger, "createGates: lookup failed", err, "name", name)
 					return nil
 				}
 				wasPreexisting = true
@@ -280,15 +274,13 @@ func runCreateGroups(ctx context.Context, e *Executor) error {
 			})
 			if err != nil {
 				if !sqapi.IsAlreadyExists(err) {
-					counter.Fail()
-					logAPIWarn(e.Logger, "createGroups: create failed", err, "name", name)
+					failAPI(counter, e.Logger, "createGroups: create failed", err, "name", name)
 					return nil
 				}
 				e.Logger.Info("createGroups: already exists, looking up", "name", name)
 				groupID, err = lookupExistingGroup(ctx, e.Raw, name, orgKey)
 				if err != nil {
-					counter.Fail()
-					logAPIWarn(e.Logger, "createGroups: lookup failed", err, "name", name)
+					failAPI(counter, e.Logger, "createGroups: lookup failed", err, "name", name)
 					return nil
 				}
 				counter.Success()
@@ -333,15 +325,13 @@ func runCreatePermissionTemplates(ctx context.Context, e *Executor) error {
 			})
 			if err != nil {
 				if !sqapi.IsAlreadyExists(err) {
-					counter.Fail()
-					logAPIWarn(e.Logger, "createPermissionTemplates: create failed", err, "name", name)
+					failAPI(counter, e.Logger, "createPermissionTemplates: create failed", err, "name", name)
 					return nil
 				}
 				e.Logger.Info("createPermissionTemplates: already exists, looking up", "name", name)
 				templateID, err = lookupExistingTemplate(ctx, e.Raw, name, orgKey)
 				if err != nil {
-					counter.Fail()
-					logAPIWarn(e.Logger, "createPermissionTemplates: lookup failed", err, "name", name)
+					failAPI(counter, e.Logger, "createPermissionTemplates: lookup failed", err, "name", name)
 					return nil
 				}
 				counter.Success()
@@ -410,8 +400,7 @@ func runCreatePortfolios(ctx context.Context, e *Executor) error {
 				Selection:    "projects",
 			})
 			if err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "createPortfolios: create failed", err, "name", name)
+				failAPI(counter, e.Logger, "createPortfolios: create failed", err, "name", name)
 				return nil
 			}
 

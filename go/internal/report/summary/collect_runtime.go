@@ -12,10 +12,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/analysis"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/migrate"
 )
 
 // targetMetricRe extracts metric names from the slog-formatted
@@ -74,6 +76,7 @@ type runtimeData struct {
 	Phases        []PhaseTiming
 	Tasks         []TaskTiming
 	Failures      []FailureRow
+	FailureCauses []FailureCause
 	Warnings      WarningLedger
 	Branches      []BranchStat
 	Throughput    ThroughputStats
@@ -85,8 +88,9 @@ type runtimeData struct {
 }
 
 // runMetaFile mirrors the on-disk run_meta.json written by the migrate
-// engine (shared contract A). Decoded locally so the summary package
-// stays free of any migrate-package import.
+// engine (shared contract A). Decoded locally rather than by reusing the
+// migrate type, so the on-disk shape is pinned here and a change on the
+// writing side shows up as a decode mismatch instead of compiling silently.
 type runMetaFile struct {
 	StartedAt         time.Time      `json:"started_at"`
 	CompletedAt       time.Time      `json:"completed_at"`
@@ -372,6 +376,10 @@ func collectFailureRows(runDir string, rt *runtimeData) {
 		if row.Outcome != "failure" {
 			continue
 		}
+		// Classify with the same rules the run used, so the report explains
+		// each failure instead of reprinting a raw API message.
+		status, _ := strconv.Atoi(row.HTTPStatus)
+		v := migrate.ClassifyHTTPFailure(status, row.ErrorMessage)
 		rt.Failures = append(rt.Failures, FailureRow{
 			EntityType:   row.EntityType,
 			EntityName:   row.EntityName,
@@ -379,6 +387,10 @@ func collectFailureRows(runDir string, rt *runtimeData) {
 			URL:          row.URL,
 			HTTPStatus:   row.HTTPStatus,
 			ErrorMessage: row.ErrorMessage,
+			Cause:        string(v.Class),
+			Why:          v.Why,
+			Remediation:  v.Remediation,
+			Reportable:   v.Reportable,
 		})
 	}
 	sort.SliceStable(rt.Failures, func(i, j int) bool {
@@ -387,6 +399,57 @@ func collectFailureRows(runDir string, rt *runtimeData) {
 		}
 		return rt.Failures[i].EntityName < rt.Failures[j].EntityName
 	})
+	rt.FailureCauses = groupFailureCauses(rt.Failures)
+}
+
+// maxCauseSampleEntities caps how many entity names a cause lists. The point
+// is orientation, not an inventory — the full set is in the ledger table.
+const maxCauseSampleEntities = 5
+
+// groupFailureCauses collapses the ledger into one entry per distinct
+// explanation, most frequent first, so a run with thousands of identical
+// failures explains itself in a handful of lines instead of repeating the
+// same prose on every row. A customer run produced 42,048 failures from a
+// single cause.
+//
+// Grouped on (class, explanation) rather than class alone. One class can
+// carry several genuinely different explanations — "not allowed to use
+// private projects", "not allowed to use custom permission templates" and
+// "lacks permission to modify quality gates" are all environment problems
+// with different fixes — and keying on the class alone would show whichever
+// one happened to be read first and silently misdescribe the rest.
+func groupFailureCauses(rows []FailureRow) []FailureCause {
+	if len(rows) == 0 {
+		return nil
+	}
+	type causeKey struct{ class, why string }
+	order := make([]causeKey, 0, 4)
+	byCause := make(map[causeKey]*FailureCause, 4)
+	for _, r := range rows {
+		if r.Cause == "" {
+			continue
+		}
+		k := causeKey{r.Cause, r.Why}
+		c, ok := byCause[k]
+		if !ok {
+			c = &FailureCause{
+				Cause: r.Cause, Why: r.Why,
+				Remediation: r.Remediation, Reportable: r.Reportable,
+			}
+			byCause[k] = c
+			order = append(order, k)
+		}
+		c.Count++
+		if len(c.Entities) < maxCauseSampleEntities && r.EntityName != "" {
+			c.Entities = append(c.Entities, r.EntityName)
+		}
+	}
+	out := make([]FailureCause, 0, len(order))
+	for _, k := range order {
+		out = append(out, *byCause[k])
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Count > out[j].Count })
+	return out
 }
 
 // branchFor returns the BranchStat for the given key, creating it (with

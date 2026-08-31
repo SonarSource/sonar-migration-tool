@@ -77,19 +77,19 @@ var sqsOnlySettings = map[string]func(raw json.RawMessage) sqsOnlyDecision{
 	// these before any API call; predict consults
 	// IsSilentlySkippedGlobalSetting to mirror that and keep the two
 	// reports identical.
-	"sonar.core.id":                                           silentSkip, // internal server identity
-	"sonar.core.serverBaseURL":                                silentSkip,
-	"sonar.core.startTime":                                    silentSkip, // read-only server timestamp
+	"sonar.core.id":            silentSkip, // internal server identity
+	"sonar.core.serverBaseURL": silentSkip,
+	"sonar.core.startTime":     silentSkip, // read-only server timestamp
 	"sonar.builtInQualityProfiles.disableNotificationOnUpdate": silentSkip,
-	"sonar.announcement.htmlMessage":                          silentSkip,
-	"sonar.announcement.message":                              silentSkip,
-	"sonar.cfamily.generateComputedConfig":                    silentSkip,
-	"sonar.documentation.baseUrl":                             silentSkip,
-	"sonar.login.displayMessage":                              silentSkip,
-	"sonar.login.message":                                     silentSkip,
-	"sonar.license.notifications.remainingLocThreshold":       silentSkip,
-	"sonar.mcp.healthCheckInterval":                           silentSkip,
-	"sonar.plugins.risk.consent":                              silentSkip,
+	"sonar.announcement.htmlMessage":                           silentSkip,
+	"sonar.announcement.message":                               silentSkip,
+	"sonar.cfamily.generateComputedConfig":                     silentSkip,
+	"sonar.documentation.baseUrl":                              silentSkip,
+	"sonar.login.displayMessage":                               silentSkip,
+	"sonar.login.message":                                      silentSkip,
+	"sonar.license.notifications.remainingLocThreshold":        silentSkip,
+	"sonar.mcp.healthCheckInterval":                            silentSkip,
+	"sonar.plugins.risk.consent":                               silentSkip,
 	// Bundled analyzer plugin manifest fields — server-emitted, not
 	// user-set, never portable. The sonar.cs.analyzer.* family is
 	// covered by the prefix list below; remaining vbnet keys stay
@@ -746,7 +746,7 @@ func applyOneGlobalSetting(ctx context.Context, e *Executor, raw json.RawMessage
 		// extra org.
 		if orgRejected {
 			rec.Outcomes = append(rec.Outcomes,
-				fanOutOutcome(ctx, e, raw, key, org, valueSummary, mergeSuffix, projectDefsByOrg, projectKeyMap, overrideCovered, counter, /*alreadyKnown=*/ true))
+				fanOutOutcome(ctx, e, raw, key, org, valueSummary, mergeSuffix, projectDefsByOrg, projectKeyMap, overrideCovered, counter /*alreadyKnown=*/, true))
 			continue
 		}
 
@@ -766,10 +766,9 @@ func applyOneGlobalSetting(ctx context.Context, e *Executor, raw json.RawMessage
 			// scope POST altogether.
 			orgRejected = true
 			rec.Outcomes = append(rec.Outcomes,
-				fanOutOutcome(ctx, e, raw, key, org, valueSummary, mergeSuffix, projectDefsByOrg, projectKeyMap, overrideCovered, counter, /*alreadyKnown=*/ false))
+				fanOutOutcome(ctx, e, raw, key, org, valueSummary, mergeSuffix, projectDefsByOrg, projectKeyMap, overrideCovered, counter /*alreadyKnown=*/, false))
 		case err != nil:
-			counter.Fail()
-			logAPIWarn(e.Logger, "setGlobalSettings failed", err, "key", key, "org", org)
+			failAPI(counter, e.Logger, "setGlobalSettings failed", err, "key", key, "org", org)
 			rec.Outcomes = append(rec.Outcomes, orgOutcome{
 				Org: org, Status: outcomeFailed, Reason: err.Error(),
 				Detail: "Failed: " + apiErrMessage(err) + mergeSuffix,
@@ -836,8 +835,16 @@ func fanOutOutcome(ctx context.Context, e *Executor, raw json.RawMessage,
 
 	projectDef, hasProjDef := projectDefsByOrg[org][key]
 	if !hasProjDef {
-		// Pathological — org said yes, project says no.
-		counter.Fail()
+		// Pathological — org said yes, project says no. SonarQube Cloud's
+		// own definition lists disagree, so the value has no home at
+		// either scope.
+		//
+		// Classified by-design rather than as a bug: the request the tool
+		// built was correct, Cloud simply will not take the value
+		// anywhere, and calling that a defect sends operators to file a
+		// report about someone else's metadata. A live regression run
+		// escalated 18 such keys to ERROR on that basis.
+		counter.FailWith(FailureByDesign)
 		return orgOutcome{
 			Org: org, Status: outcomeFailed,
 			Reason: "rejected at org scope, key absent from project scope",
@@ -855,8 +862,11 @@ func fanOutOutcome(ctx context.Context, e *Executor, raw json.RawMessage,
 	for range applied {
 		counter.Success()
 	}
-	for range failed {
-		counter.Fail()
+	for _, f := range failed {
+		// Classify from the verdict the fan-out already computed, so the
+		// summary breakdown agrees with the per-project log lines instead
+		// of dumping every fan-out failure into "unclassified".
+		counter.FailWith(f.class)
 	}
 
 	// Branch the Detail wording on actual per-project counts so the
@@ -924,6 +934,9 @@ func fanOutOutcome(ctx context.Context, e *Executor, raw json.RawMessage,
 type projectFanOutFailure struct {
 	project string
 	reason  string
+	// class is the verdict computed where the error was still in hand, so
+	// the task summary can bucket it by cause instead of guessing.
+	class FailureClass
 }
 
 // fanOutGlobalToProjects applies a global setting record to every
@@ -968,7 +981,11 @@ func fanOutGlobalToProjects(ctx context.Context, e *Executor, raw json.RawMessag
 		case err != nil:
 			logAPIWarn(e.Logger, "setGlobalSettings: project fan-out failed", err,
 				"key", key, "project", pm.CloudKey, "org", org)
-			failed = append(failed, projectFanOutFailure{project: pm.CloudKey, reason: err.Error()})
+			failed = append(failed, projectFanOutFailure{
+				project: pm.CloudKey,
+				reason:  err.Error(),
+				class:   ClassifyFailure(err).Class,
+			})
 		default:
 			applied = append(applied, pm.CloudKey)
 		}

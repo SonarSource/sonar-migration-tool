@@ -548,8 +548,7 @@ func runSetProjectBinding(ctx context.Context, e *Executor) error {
 				"alm":                extractField(item, "alm"),
 			}
 			if err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "setProjectBinding failed", err,
+				failAPI(counter, e.Logger, "setProjectBinding failed", err,
 					"project", cloudKey, "project_id", projID, "repo", repoID)
 				rec["status"] = "failed"
 				rec["error"] = err.Error()

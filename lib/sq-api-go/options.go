@@ -22,6 +22,7 @@ type clientConfig struct {
 	retryLogFn     RetryLogFunc
 	recoveryLogFn  RecoveryLogFunc
 	debugLogFn     DebugLogFunc
+	requestLogFn   RequestLogFunc
 	rateLimitObsFn RateLimitObserver
 }
 
@@ -123,5 +124,13 @@ func WithDebugLogger(fn DebugLogFunc) Option {
 func WithRateLimitObserver(fn RateLimitObserver) Option {
 	return func(cfg *clientConfig) {
 		cfg.rateLimitObsFn = fn
+	}
+}
+
+// WithRequestLogger installs a per-request callback used to persist
+// requests.log. One entry is emitted per logical call (after retries).
+func WithRequestLogger(fn RequestLogFunc) Option {
+	return func(c *clientConfig) {
+		c.requestLogFn = fn
 	}
 }

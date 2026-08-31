@@ -52,6 +52,7 @@ type MigrationSummary struct {
 	// the live progress bar uses (#520), so the two always agree.
 	PhaseBreakdown []PhaseBreakdownEntry
 	Failures       []FailureRow
+	FailureCauses  []FailureCause
 	Warnings       WarningLedger
 	Branches       []BranchStat
 	Throughput     ThroughputStats
@@ -159,6 +160,30 @@ type FailureRow struct {
 	URL          string
 	HTTPStatus   string
 	ErrorMessage string
+
+	// Cause, Why and Remediation explain the failure in operator terms,
+	// classified with the same rules the run used when it happened (see
+	// migrate.ClassifyHTTPFailure). Without them the ledger listed a raw
+	// API message and left the reader to work out whether anything could
+	// be done about it.
+	Cause       string
+	Why         string
+	Remediation string
+	// Reportable marks failures that indicate a defect in the tool rather
+	// than a platform limitation or an environment problem.
+	Reportable bool
+}
+
+// FailureCause groups the failures in the ledger by cause, so each
+// explanation is written once instead of repeated on every row.
+type FailureCause struct {
+	Cause       string
+	Why         string
+	Remediation string
+	Reportable  bool
+	Count       int
+	// Entities is a short sample of affected entity names, for orientation.
+	Entities []string
 }
 
 // RetryStat aggregates retried requests by method+endpoint.

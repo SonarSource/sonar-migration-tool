@@ -84,6 +84,14 @@ func forEachDepFiltered(ctx context.Context, e *Executor, taskName, depTask stri
 	}
 
 	g, ctx := errgroup.WithContext(ctx)
+	// Bound the fan-out. Without a limit this starts one goroutine per
+	// item — for a 1,139-project extract that is a very large live
+	// population, each pinning its item JSON and response buffers, which
+	// is how a customer run reached 97% host memory. The semaphore alone
+	// does not help: it limits who is *running*, not how many goroutines
+	// exist waiting to run. Migrate's equivalent iterator has always
+	// bounded its errgroup; extract never did.
+	g.SetLimit(cap(e.Sem))
 	for _, item := range filtered {
 		g.Go(func() error {
 			err := runWithSem(ctx, e, taskName, item, w, fn)

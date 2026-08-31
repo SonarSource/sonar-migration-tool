@@ -1,0 +1,240 @@
+// Copyright (C) SonarSource Sàrl
+// For more information, see https://sonarsource.com/legal/
+// mailto:info AT sonarsource DOT com
+
+package migrate
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"net/url"
+	"strings"
+	"testing"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
+	sqapi "github.com/sonar-solutions/sq-api-go"
+)
+
+func apiErr(status int, msg string) error {
+	return &sqapi.APIError{StatusCode: status, Method: "POST", URL: "/api/x",
+		Body: `{"errors":[{"msg":"` + msg + `"}]}`}
+}
+
+// The classification is the difference between "nothing you can do" and
+// "please report this", so each class must be reachable and an
+// unrecognised rejection must never be quietly excused.
+func TestClassifyFailure(t *testing.T) {
+	cases := []struct {
+		name           string
+		err            error
+		wantClass      FailureClass
+		wantReportable bool
+	}{
+		{
+			name:      "setting has no project scope on Cloud",
+			err:       apiErr(400, "Setting 'sonar.dbcleaner.x' cannot be set on a Project"),
+			wantClass: FailureByDesign,
+		},
+		{
+			name:      "setting cannot be written at org scope",
+			err:       apiErr(400, "Provided property can't be set at organization level: x"),
+			wantClass: FailureByDesign,
+		},
+		{
+			name:      "entity already exists",
+			err:       apiErr(400, "Quality gate with name 'x' already exists"),
+			wantClass: FailureAlreadyDone,
+		},
+		{
+			name:      "mangled already-exists is still already-done",
+			err:       apiErr(400, "Conversion = ')'"),
+			wantClass: FailureAlreadyDone,
+		},
+		{
+			name:      "private projects not permitted is an account state",
+			err:       apiErr(400, "The organization 'x' is not allowed to use private projects."),
+			wantClass: FailureEnvironment,
+		},
+		{
+			name:      "org not bound to a DevOps platform",
+			err:       apiErr(400, "This organization is not bound to an ALM application"),
+			wantClass: FailureEnvironment,
+		},
+		{
+			// Cloud returns entitlement refusals as 400, not 403, so
+			// without an explicit hint they fall through to "bug" and send
+			// operators chasing a defect that is really a subscription or
+			// permission problem. A live regression run mislabelled 6 of
+			// these before the hint existed.
+			name:      "organization not allowed to perform this action",
+			err:       apiErr(400, "Organization 'abc' is not allowed to perform this action"),
+			wantClass: FailureEnvironment,
+		},
+		{name: "unauthorized", err: apiErr(401, "no"), wantClass: FailureEnvironment},
+		{name: "forbidden", err: apiErr(403, "no"), wantClass: FailureEnvironment},
+		{name: "not found", err: apiErr(404, "gone"), wantClass: FailureEnvironment},
+		{name: "rate limited", err: apiErr(429, "slow down"), wantClass: FailureEnvironment},
+		{name: "server error", err: apiErr(503, "unavailable"), wantClass: FailureEnvironment},
+		{
+			// A request that never reached the server arrives as *url.Error,
+			// not an APIError — APIError is only built from a real response.
+			// This used to be classified as a reportable tool bug.
+			name: "connection refused is the customer's environment",
+			err: &url.Error{Op: "Post", URL: "https://sonarcloud.io/api/settings/set",
+				Err: &net.OpError{Op: "dial", Err: errors.New("connection refused")}},
+			wantClass: FailureEnvironment,
+		},
+		{
+			name: "DNS failure is the customer's environment",
+			err: &url.Error{Op: "Get", URL: "https://sonarcloud.io/api/x",
+				Err: &net.DNSError{Err: "no such host", Name: "sonarcloud.io"}},
+			wantClass: FailureEnvironment,
+		},
+		{
+			name: "TLS handshake failure is the customer's environment",
+			err: &url.Error{Op: "Get", URL: "https://sonarcloud.io/api/x",
+				Err: errors.New("tls: failed to verify certificate")},
+			wantClass: FailureEnvironment,
+		},
+		{
+			// Still a bug: no response and no network error means the tool
+			// broke on its own.
+			name:           "decode error remains a reportable bug",
+			err:            errors.New("json: cannot unmarshal string into int"),
+			wantClass:      FailureBug,
+			wantReportable: true,
+		},
+		{
+			// The important one: a 400 the tool cannot explain means it
+			// built a payload Cloud would not accept.
+			name:           "unrecognised 400 is a bug",
+			err:            apiErr(400, "Value of parameter 'foo' must be one of: [a, b]"),
+			wantClass:      FailureBug,
+			wantReportable: true,
+		},
+		{
+			name:           "non-HTTP error is a bug",
+			err:            errors.New("json: cannot unmarshal string into int"),
+			wantClass:      FailureBug,
+			wantReportable: true,
+		},
+		{
+			// A cascade from an earlier fatal error or an OOM kill. Calling
+			// it a bug would send people chasing the wrong thing.
+			name:      "cancelled context is a cascade, not a defect",
+			err:       fmt.Errorf(`Post "https://sonarcloud.io/api/projects/create": %w`, context.Canceled),
+			wantClass: FailureEnvironment,
+		},
+		{
+			name:      "deadline exceeded is treated the same way",
+			err:       fmt.Errorf("request: %w", context.DeadlineExceeded),
+			wantClass: FailureEnvironment,
+		},
+		{name: "nil is not a failure", err: nil, wantClass: ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assertVerdict(t, ClassifyFailure(c.err), c.wantClass, c.wantReportable)
+		})
+	}
+}
+
+// assertVerdict checks a verdict against the expected class, and enforces
+// the contract that every classified failure explains itself — a class with
+// no "why" or no remediation would defeat the point of classifying at all.
+func assertVerdict(t *testing.T, v FailureVerdict, wantClass FailureClass, wantReportable bool) {
+	t.Helper()
+	if v.Class != wantClass {
+		t.Errorf("class = %q, want %q", v.Class, wantClass)
+	}
+	if v.Reportable != wantReportable {
+		t.Errorf("reportable = %v, want %v", v.Reportable, wantReportable)
+	}
+	if wantClass == "" {
+		return
+	}
+	if v.Why == "" {
+		t.Error("every classified failure must explain why")
+	}
+	if v.Remediation == "" {
+		t.Error("every classified failure must say what to do (or that nothing is needed)")
+	}
+}
+
+// The raw reader produces common.HTTPError rather than sqapi.APIError;
+// both must classify identically or half the tool loses the explanation.
+func TestClassifyFailureHandlesRawClientErrors(t *testing.T) {
+	err := &common.HTTPError{StatusCode: 403, Method: "GET", URL: "/api/x",
+		Body: `{"errors":[{"msg":"Insufficient privileges"}]}`}
+	if got := ClassifyFailure(err).Class; got != FailureEnvironment {
+		t.Errorf("common.HTTPError 403 classified as %q, want %q", got, FailureEnvironment)
+	}
+}
+
+// A non-zero failure count means nothing on its own. The summary must say
+// whether those failures were expected, and escalate only when they were
+// not.
+func TestTaskCounterSummaryBreakdownAndSeverity(t *testing.T) {
+	t.Run("all by design stays a warning", func(t *testing.T) {
+		c := NewTaskCounter("setProjectSettings")
+		c.Success()
+		for i := 0; i < 5; i++ {
+			c.FailAPI(apiErr(400, "Setting 'x' cannot be set on a Project"))
+		}
+		logs := captureSummary(t, c)
+		assertContains(t, logs, `level=WARN`, `failed=5`, `failed_by_design=5`, `failed_bugs=0`)
+		assertNotContains(t, logs, `level=ERROR`)
+	})
+
+	t.Run("a single bug escalates to error", func(t *testing.T) {
+		c := NewTaskCounter("createProjects")
+		for i := 0; i < 20; i++ {
+			c.Success()
+		}
+		c.FailAPI(apiErr(400, "Value of parameter 'foo' must be one of: [a, b]"))
+		logs := captureSummary(t, c)
+		assertContains(t, logs, `level=ERROR`, `failed_bugs=1`)
+	})
+
+	t.Run("nothing succeeded is an error whatever the cause", func(t *testing.T) {
+		c := NewTaskCounter("createProjects")
+		c.FailAPI(apiErr(400, "The organization 'x' is not allowed to use private projects."))
+		logs := captureSummary(t, c)
+		assertContains(t, logs, `level=ERROR`, `failed_customer_environment_issue=1`)
+	})
+
+	t.Run("a clean task stays informational and carries no breakdown", func(t *testing.T) {
+		c := NewTaskCounter("createGates")
+		c.Success()
+		logs := captureSummary(t, c)
+		assertContains(t, logs, `level=INFO`, `failed=0`)
+		assertNotContains(t, logs, `failed_by_design`)
+	})
+}
+
+func captureSummary(t *testing.T, c *TaskCounter) string {
+	t.Helper()
+	logger, buf, _ := newEventLogger(t)
+	c.LogSummary(logger, 0)
+	return buf.String()
+}
+
+func assertContains(t *testing.T, haystack string, needles ...string) {
+	t.Helper()
+	for _, n := range needles {
+		if !strings.Contains(haystack, n) {
+			t.Errorf("expected %q in summary, got:\n%s", n, haystack)
+		}
+	}
+}
+
+func assertNotContains(t *testing.T, haystack string, needles ...string) {
+	t.Helper()
+	for _, n := range needles {
+		if strings.Contains(haystack, n) {
+			t.Errorf("did not expect %q in summary, got:\n%s", n, haystack)
+		}
+	}
+}

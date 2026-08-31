@@ -134,6 +134,7 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 		sum.Tasks = rt.Tasks
 		sum.PhaseBreakdown = buildPhaseBreakdown(rt.Tasks)
 		sum.Failures = rt.Failures
+		sum.FailureCauses = rt.FailureCauses
 		sum.Warnings = rt.Warnings
 		sum.Branches = rt.Branches
 		sum.Throughput = rt.Throughput

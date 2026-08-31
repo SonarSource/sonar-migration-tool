@@ -92,6 +92,54 @@ func fullySeededSummary() *MigrationSummary {
 				HTTPStatus:   "400",
 				// Pipe must be escaped so it does not split the cell.
 				ErrorMessage: "already exists | duplicate key",
+				Cause:        "already-done",
+				Why:          "the entity already exists on the target",
+				Remediation:  "none needed",
+			},
+			{
+				EntityType:   "Setting",
+				EntityName:   "sonar.dbcleaner.x",
+				Organization: "org1",
+				URL:          "/api/settings/set",
+				HTTPStatus:   "400",
+				ErrorMessage: "Setting 'sonar.dbcleaner.x' cannot be set on a Project",
+				Cause:        "by-design",
+				Why:          "no project-scope counterpart on Cloud",
+				Remediation:  "none available; expected to be dropped",
+			},
+			{
+				EntityType:   "Group",
+				EntityName:   "devs",
+				Organization: "org1",
+				URL:          "/api/user_groups/create",
+				HTTPStatus:   "400",
+				ErrorMessage: "Value of parameter 'x' must be one of: [a, b]",
+				Cause:        "bug",
+				Why:          "Cloud rejected the request for an unrecognised reason",
+				Remediation:  "report this with the run id",
+				Reportable:   true,
+			},
+		},
+		// Grouped explanations: written once per distinct cause, so a run
+		// with thousands of identical failures stays readable.
+		FailureCauses: []FailureCause{
+			{
+				Cause: "by-design", Count: 42048,
+				Why:         "no project-scope counterpart on Cloud",
+				Remediation: "none available; expected to be dropped",
+				Entities:    []string{"sonar.dbcleaner.x"},
+			},
+			{
+				Cause: "already-done", Count: 1,
+				Why:         "the entity already exists on the target",
+				Remediation: "none needed",
+				Entities:    []string{"Proj Failed"},
+			},
+			{
+				Cause: "bug", Count: 1, Reportable: true,
+				Why:         "Cloud rejected the request for an unrecognised reason",
+				Remediation: "report this with the run id",
+				Entities:    []string{"devs"},
 			},
 		},
 		Warnings: WarningLedger{

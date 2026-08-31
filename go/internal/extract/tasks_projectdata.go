@@ -213,16 +213,29 @@ func projectHotspotsFullTask() func(ctx context.Context, e *Executor) error {
 // REVIEWED subset.
 func enrichHotspotDetails(ctx context.Context, e *Executor, enriched []json.RawMessage) error {
 	g, ctx := errgroup.WithContext(ctx)
+	// Bound the fan-out, and deliberately do NOT take a semaphore slot per
+	// hotspot.
+	//
+	// This is the one place in the extract where a fan-out runs while its
+	// caller already holds a slot: forEachProjectBranch -> iterateBranches
+	// takes a slot for the project+branch, then calls this. Acquiring again
+	// here is hold-and-wait on a single shared pool. Today the project walk
+	// is sequential so only one goroutine is ever in that state and 24 of
+	// 25 slots stay drainable — but at --concurrency 1 it is a hard,
+	// permanent deadlock, and docs/TROUBLESHOOTING.md recommends lowering
+	// concurrency on large instances, so that is a reachable configuration.
+	//
+	// The caller's slot covers this whole enrichment instead. In-flight
+	// requests can therefore briefly reach cap(e.Sem) beneath one slot,
+	// which is a bounded over-subscription accepted in exchange for
+	// removing a deadlock that no timeout would ever break.
+	g.SetLimit(cap(e.Sem))
 	for i := range enriched {
 		hotspotKey := extractField(enriched[i], "key")
 		if hotspotKey == "" {
 			continue
 		}
 		g.Go(func() error {
-			if err := acquireSem(ctx, e.Sem); err != nil {
-				return err
-			}
-			defer func() { <-e.Sem }()
 			detail, err := e.Raw.Get(ctx, "api/hotspots/show", url.Values{"hotspot": {hotspotKey}})
 			if err != nil {
 				e.Logger.Debug("hotspot detail fetch failed", "hotspot", hotspotKey, "err", err)

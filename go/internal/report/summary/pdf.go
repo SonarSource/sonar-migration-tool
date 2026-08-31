@@ -1987,13 +1987,47 @@ func renderFailureLedger(pdf *fpdf.Fpdf, summary *MigrationSummary) {
 			f.EntityName,
 			f.Organization,
 			f.HTTPStatus,
+			failureCauseLabel(f.Cause),
 			f.ErrorMessage,
 		})
 	}
 	renderKVTable(pdf, "",
-		[]string{"Entity Type", "Name", "Organization", "HTTP", "Error"},
-		[]float64{30, 40, 30, 18, 62},
+		[]string{"Entity Type", "Name", "Organization", "HTTP", "Cause", "Error"},
+		[]float64{26, 36, 26, 14, 30, 48},
 		rows)
+
+	renderFailureCauses(pdf, summary)
+}
+
+// renderFailureCauses renders "Why these failed" — one block per distinct
+// cause with its explanation and remediation.
+//
+// One block per cause rather than per row: a run can produce tens of
+// thousands of failures from a single cause (one customer run produced
+// 42,048 from one), and repeating the same paragraph on every row would bury
+// the handful of causes that actually differ.
+func renderFailureCauses(pdf *fpdf.Fpdf, summary *MigrationSummary) {
+	if len(summary.FailureCauses) == 0 {
+		return
+	}
+	renderSubHeading(pdf, "Why these failed")
+
+	rows := make([][]string, 0, len(summary.FailureCauses)*2)
+	for _, c := range summary.FailureCauses {
+		label := fmt.Sprintf("%s (%d)", failureCauseLabel(c.Cause), c.Count)
+		explanation := c.Why
+		if c.Remediation != "" {
+			explanation += "\n\nWhat to do: " + c.Remediation
+		}
+		if c.Reportable {
+			explanation += "\n\nPlease report this — it indicates a defect in the migration tool, not a limitation of SonarQube Cloud."
+		}
+		if len(c.Entities) > 0 {
+			explanation += "\n\nExamples: " + strings.Join(c.Entities, ", ")
+		}
+		rows = append(rows, []string{label, explanation})
+	}
+	renderKVTable(pdf, "", []string{"Cause", "Explanation"}, []float64{50, 130}, rows)
 }
 
 // renderWarningsLedger renders the "Warnings ledger" section as up to

@@ -13,6 +13,7 @@
 *.dylib
 coverage.out
 coverage.sonar.out
+coverage.html
 go/sonar-migration-tool
 sonar-migration-tool-race
 sonar-migration-tool-fresh
@@ -85,7 +86,10 @@ regression-test/
 # Node (no longer used — frontend is Go templates + HTMX)
 node_modules/
 .gstack/
-# Transfer-verification harness: keep the reusable workflow script, ignore the
-# per-run output (logs, regtest dumps, baselines — may contain hosts/data).
-dynamic-workflows/verification-run/*
-!dynamic-workflows/verification-run/verify-workflow.js
+# Transfer-verification harness: scratch workflow scripts and per-run output
+# (logs, regtest dumps, baselines — may contain hosts/data).
+dynamic-workflows/
+
+# Archived run logs and other retired local artifacts
+.archives/
+INVESTIGATION-SUMMARY.md

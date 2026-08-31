@@ -11,9 +11,9 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	sqapi "github.com/sonar-solutions/sq-api-go"
 	"github.com/sonar-solutions/sq-api-go/types"
-	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
 // sonarWayGateName is the canonical name of SonarCloud's built-in
@@ -195,8 +195,7 @@ func runDeleteProjects(ctx context.Context, e *Executor) error {
 				"project", key)
 			err := e.Cloud.Projects.Delete(ctx, key)
 			if err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "deleteProjects failed", err, "key", key)
+				failAPI(counter, e.Logger, "deleteProjects failed", err, "key", key)
 			} else {
 				counter.Success()
 			}
@@ -222,8 +221,7 @@ func runDeleteProfiles(ctx context.Context, e *Executor) error {
 			}
 			profiles, err := e.Cloud.QualityProfiles.Search(ctx, orgKey)
 			if err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "deleteProfiles: listing profiles failed", err, "org", orgKey)
+				failAPI(counter, e.Logger, "deleteProfiles: listing profiles failed", err, "org", orgKey)
 				return nil
 			}
 			e.Logger.Debug("deleteProfiles: listed profiles",
@@ -237,8 +235,7 @@ func runDeleteProfiles(ctx context.Context, e *Executor) error {
 				e.Logger.Info("deleteProfiles: deleting non-built-in profile",
 					"org", orgKey, "profile", p.Name, "language", p.Language, "isDefault", p.IsDefault)
 				if err := e.Cloud.QualityProfiles.Delete(ctx, p.Language, p.Name, orgKey); err != nil {
-					counter.Fail()
-					logAPIWarn(e.Logger, "deleteProfiles failed", err,
+					failAPI(counter, e.Logger, "deleteProfiles failed", err,
 						"profile", p.Name, "language", p.Language, "org", orgKey, "isDefault", p.IsDefault)
 					continue
 				}
@@ -266,8 +263,7 @@ func runDeleteGates(ctx context.Context, e *Executor) error {
 			}
 			gates, err := e.Cloud.QualityGates.List(ctx, orgKey)
 			if err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "deleteGates: listing gates failed", err, "org", orgKey)
+				failAPI(counter, e.Logger, "deleteGates: listing gates failed", err, "org", orgKey)
 				return nil
 			}
 			e.Logger.Debug("deleteGates: listed gates",
@@ -281,8 +277,7 @@ func runDeleteGates(ctx context.Context, e *Executor) error {
 				e.Logger.Info("deleteGates: destroying non-built-in gate",
 					"org", orgKey, "gate", g.Name, "gate_id", g.ID, "isDefault", g.IsDefault)
 				if err := e.Cloud.QualityGates.Destroy(ctx, g.ID, orgKey); err != nil {
-					counter.Fail()
-					logAPIWarn(e.Logger, "deleteGates failed", err,
+					failAPI(counter, e.Logger, "deleteGates failed", err,
 						"gate", g.Name, "gate_id", g.ID, "org", orgKey, "isDefault", g.IsDefault)
 					continue
 				}
@@ -313,8 +308,7 @@ func runDeleteGroups(ctx context.Context, e *Executor) error {
 			}
 			groups, err := e.Cloud.Groups.List(ctx, orgKey)
 			if err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "deleteGroups: listing groups failed", err, "org", orgKey)
+				failAPI(counter, e.Logger, "deleteGroups: listing groups failed", err, "org", orgKey)
 				return nil
 			}
 			e.Logger.Info("deleteGroups: listed groups", "org", orgKey, "count", len(groups))
@@ -330,8 +324,7 @@ func runDeleteGroups(ctx context.Context, e *Executor) error {
 						counter.Success()
 						continue
 					}
-					counter.Fail()
-					logAPIWarn(e.Logger, "deleteGroups failed", err, "group", g.Name, "org", orgKey)
+					failAPI(counter, e.Logger, "deleteGroups failed", err, "group", g.Name, "org", orgKey)
 					continue
 				}
 				counter.Success()
@@ -358,8 +351,7 @@ func runDeleteTemplates(ctx context.Context, e *Executor) error {
 			}
 			templates, _, err := searchPermissionTemplates(ctx, e, orgKey)
 			if err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "deleteTemplates: listing templates failed", err, "org", orgKey)
+				failAPI(counter, e.Logger, "deleteTemplates: listing templates failed", err, "org", orgKey)
 				return nil
 			}
 			e.Logger.Debug("deleteTemplates: listed templates",
@@ -373,8 +365,7 @@ func runDeleteTemplates(ctx context.Context, e *Executor) error {
 				e.Logger.Info("deleteTemplates: deleting template",
 					"org", orgKey, "template", tpl.Name, "template_id", tpl.ID)
 				if err := e.Cloud.Permissions.DeleteTemplate(ctx, tpl.ID, orgKey); err != nil {
-					counter.Fail()
-					logAPIWarn(e.Logger, "deleteTemplates failed", err,
+					failAPI(counter, e.Logger, "deleteTemplates failed", err,
 						"template", tpl.Name, "template_id", tpl.ID, "org", orgKey)
 					continue
 				}
@@ -395,8 +386,7 @@ func runDeletePortfolios(ctx context.Context, e *Executor) error {
 			}
 			err := e.CloudAPI.Enterprises.DeletePortfolio(ctx, portfolioID)
 			if err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "deletePortfolios failed", err, "portfolio", portfolioID)
+				failAPI(counter, e.Logger, "deletePortfolios failed", err, "portfolio", portfolioID)
 			} else {
 				counter.Success()
 			}
@@ -423,8 +413,7 @@ func runResetGlobalSettings(ctx context.Context, e *Executor) error {
 
 			values, err := e.Cloud.Settings.Values(ctx, "", orgKey)
 			if err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "resetGlobalSettings: listing org settings failed", err, "org", orgKey)
+				failAPI(counter, e.Logger, "resetGlobalSettings: listing org settings failed", err, "org", orgKey)
 				return nil
 			}
 
@@ -445,8 +434,7 @@ func runResetGlobalSettings(ctx context.Context, e *Executor) error {
 			e.Logger.Debug("settings api call: POST /api/settings/reset",
 				"org", orgKey, "keys", keys)
 			if err := e.Cloud.Settings.Reset(ctx, "", keys, orgKey); err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "resetGlobalSettings: reset failed", err, "org", orgKey, "keys", keys)
+				failAPI(counter, e.Logger, "resetGlobalSettings: reset failed", err, "org", orgKey, "keys", keys)
 				return nil
 			}
 			counter.Success()
@@ -477,8 +465,7 @@ func runResetDefaultProfiles(ctx context.Context, e *Executor) error {
 			}
 			profiles, err := e.Cloud.QualityProfiles.Search(ctx, orgKey)
 			if err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "resetDefaultProfiles: listing profiles failed", err, "org", orgKey)
+				failAPI(counter, e.Logger, "resetDefaultProfiles: listing profiles failed", err, "org", orgKey)
 				return nil
 			}
 			e.Logger.Debug("resetDefaultProfiles: listed profiles",
@@ -513,8 +500,7 @@ func runResetDefaultProfiles(ctx context.Context, e *Executor) error {
 				e.Logger.Info("resetDefaultProfiles: promoting built-in to default",
 					"org", orgKey, "language", lang, "profile", bi.Name)
 				if err := e.Cloud.QualityProfiles.SetDefault(ctx, lang, bi.Name, orgKey); err != nil {
-					counter.Fail()
-					logAPIWarn(e.Logger, "resetDefaultProfiles: set_default failed", err,
+					failAPI(counter, e.Logger, "resetDefaultProfiles: set_default failed", err,
 						"org", orgKey, "language", lang, "profile", bi.Name)
 					continue
 				}
@@ -553,8 +539,7 @@ func runResetDefaultGates(ctx context.Context, e *Executor) error {
 			}
 			gates, err := e.Cloud.QualityGates.List(ctx, orgKey)
 			if err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "resetDefaultGates: listing gates failed", err, "org", orgKey)
+				failAPI(counter, e.Logger, "resetDefaultGates: listing gates failed", err, "org", orgKey)
 				return nil
 			}
 			e.Logger.Debug("resetDefaultGates: listed gates",
@@ -585,8 +570,7 @@ func runResetDefaultGates(ctx context.Context, e *Executor) error {
 			e.Logger.Info("resetDefaultGates: promoting built-in to default",
 				"org", orgKey, "gate", builtInName, "gate_id", *builtIn)
 			if err := e.Cloud.QualityGates.SetDefault(ctx, *builtIn, orgKey); err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "resetDefaultGates: set_as_default failed", err, "org", orgKey, "gate_id", *builtIn)
+				failAPI(counter, e.Logger, "resetDefaultGates: set_as_default failed", err, "org", orgKey, "gate_id", *builtIn)
 				return nil
 			}
 			counter.Success()
@@ -626,8 +610,7 @@ func runResetPermissionTemplates(ctx context.Context, e *Executor) error {
 			}
 			templates, defaults, err := searchPermissionTemplates(ctx, e, orgKey)
 			if err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "resetPermissionTemplates: listing templates failed", err, "org", orgKey)
+				failAPI(counter, e.Logger, "resetPermissionTemplates: listing templates failed", err, "org", orgKey)
 				return nil
 			}
 			e.Logger.Debug("resetPermissionTemplates: listed templates",
@@ -657,8 +640,7 @@ func runResetPermissionTemplates(ctx context.Context, e *Executor) error {
 				e.Logger.Info("resetPermissionTemplates: promoting built-in to default",
 					"org", orgKey, "qualifier", q, "template", builtIn.Name, "template_id", builtIn.ID)
 				if err := e.Cloud.Permissions.SetDefaultTemplate(ctx, builtIn.ID, q, orgKey); err != nil {
-					counter.Fail()
-					logAPIWarn(e.Logger, "resetPermissionTemplates: set_default_template failed", err,
+					failAPI(counter, e.Logger, "resetPermissionTemplates: set_default_template failed", err,
 						"org", orgKey, "qualifier", q, "template_id", builtIn.ID)
 					continue
 				}

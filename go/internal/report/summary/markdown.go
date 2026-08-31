@@ -296,6 +296,7 @@ func renderMarkdownFailureLedger(sb *strings.Builder, summary *MigrationSummary)
 		{Header: "Name", Key: "name"},
 		{Header: "Organization", Key: "organization"},
 		{Header: "HTTP", Key: "http"},
+		{Header: "Cause", Key: "cause"},
 		{Header: "Error", Key: "error"},
 	}
 	rows := make([]map[string]any, 0, len(summary.Failures))
@@ -305,12 +306,71 @@ func renderMarkdownFailureLedger(sb *strings.Builder, summary *MigrationSummary)
 			"name":         mdCell(f.EntityName),
 			"organization": mdCell(f.Organization),
 			"http":         mdCell(f.HTTPStatus),
+			"cause":        mdCell(failureCauseLabel(f.Cause)),
 			"error":        mdCell(f.ErrorMessage),
 		})
 	}
 	sb.WriteString(report.GenerateSection(columns, rows,
 		report.WithTitle("Failure Ledger", 2)))
 	sb.WriteString("\n")
+
+	renderMarkdownFailureCauses(sb, summary)
+}
+
+// failureCauseLabel turns a classification into a short table cell.
+func failureCauseLabel(cause string) string {
+	switch cause {
+	case "by-design":
+		return "Not supported on Cloud"
+	case "already-done":
+		return "Already present"
+	case "customer-environment-issue":
+		return "Environment"
+	case "bug":
+		return "Needs reporting"
+	case "":
+		return "Unclassified"
+	}
+	return cause
+}
+
+// renderMarkdownFailureCauses writes "### Why these failed" — one block per
+// distinct cause, explaining what it means and what to do about it.
+//
+// Written once per cause rather than per row on purpose: a run can produce
+// tens of thousands of failures from a single cause (one customer run
+// produced 42,048 from one), and repeating the same paragraph on every row
+// would bury the handful of causes that actually differ.
+func renderMarkdownFailureCauses(sb *strings.Builder, summary *MigrationSummary) {
+	if len(summary.FailureCauses) == 0 {
+		return
+	}
+	sb.WriteString("### Why these failed\n\n")
+	for _, c := range summary.FailureCauses {
+		sb.WriteString(fmt.Sprintf("**%s** — %d %s\n\n",
+			failureCauseLabel(c.Cause), c.Count, plural(c.Count, "failure", "failures")))
+		if c.Why != "" {
+			sb.WriteString(fmt.Sprintf("- **What happened:** %s\n", c.Why))
+		}
+		if c.Remediation != "" {
+			sb.WriteString(fmt.Sprintf("- **What to do:** %s\n", c.Remediation))
+		}
+		if c.Reportable {
+			sb.WriteString("- **Please report this** — it indicates a defect in the migration tool, not a limitation of SonarQube Cloud.\n")
+		}
+		if len(c.Entities) > 0 {
+			sb.WriteString(fmt.Sprintf("- **Examples:** %s\n", mdCell(strings.Join(c.Entities, ", "))))
+		}
+		sb.WriteString("\n")
+	}
+}
+
+// plural picks the singular or plural noun for n.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 // renderMarkdownWarnings writes the "## Warnings, Retries & Skips" section

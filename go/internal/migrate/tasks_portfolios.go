@@ -11,8 +11,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/sonar-solutions/sq-api-go/cloud"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
+	"github.com/sonar-solutions/sq-api-go/cloud"
 )
 
 // portfolioTasks returns tasks for Enterprise portfolio management.
@@ -167,8 +167,7 @@ func runConfigurePortfolios(ctx context.Context, e *Executor) error {
 				"projects", len(params.Projects),
 			)
 			if err := e.CloudAPI.Enterprises.UpdatePortfolio(ctx, params); err != nil {
-				counter.Fail()
-				logAPIWarn(e.Logger, "configurePortfolios failed", err,
+				failAPI(counter, e.Logger, "configurePortfolios failed", err,
 					"portfolio", portfolioID, "selection", selectionMode)
 				recordPortfolioFailure(failW, portfolioID, name, "PATCH /enterprises/portfolios/<id>: "+err.Error())
 			} else {
