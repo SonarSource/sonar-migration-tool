@@ -102,7 +102,7 @@ func TestMapProfiles(t *testing.T) {
 
 	// Build project org mapping from test data.
 	projectOrgMapping := map[string]string{
-		testProjOrgKey: "org1",
+		testProjOrgKey:                 "org1",
 		"https://sq.example.com/proj2": "org1",
 	}
 
@@ -126,7 +126,7 @@ func TestMapGates(t *testing.T) {
 	dir := setupTestExtract(t)
 	mapping := ExtractMapping{testSQURL: testExtractID}
 	projectOrgMapping := map[string]string{
-		testProjOrgKey: "org1",
+		testProjOrgKey:                 "org1",
 		"https://sq.example.com/proj2": "org1",
 	}
 
@@ -230,7 +230,7 @@ func TestGetUniqueExtracts(t *testing.T) {
 		t.Fatalf("expected 1 extract, got %d", len(mapping))
 	}
 	if mapping[testSQURL] != testExtractID {
-		t.Errorf("expected extract-01, got %q", mapping[testSQURL])
+		t.Errorf("expected %q, got %q", testExtractID, mapping[testSQURL])
 	}
 }
 

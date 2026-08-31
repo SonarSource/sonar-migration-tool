@@ -13,7 +13,7 @@ import (
 
 const (
 	testSQURL      = "https://sq.example.com/"
-	testExtractID  = "extract-01"
+	testExtractID  = "2026-08-20-0001"
 	testCustomGate = "Custom Gate"
 	testSonarWay   = "Sonar way"
 	testProjOrgKey = "https://sq.example.com/proj1"

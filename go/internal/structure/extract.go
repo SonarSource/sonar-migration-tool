@@ -51,6 +51,19 @@ func buildURLMappings(directory string, entries []os.DirEntry) map[string]map[st
 		if err := json.Unmarshal(data, &meta); err != nil || meta.URL == "" {
 			continue
 		}
+		if !common.IsValidRunID(entry.Name()) {
+			// A directory name that isn't a well-formed run ID must never
+			// become a candidate: RunIDAfter falls back to a plain string
+			// compare for anything that doesn't parse as "<prefix>-<digits>",
+			// and since real run IDs always start with a digit, a rogue
+			// name (e.g. planted by an attacker who can write to the
+			// export directory) would beat every legitimate dated run in
+			// that string compare (#550). Filtering here keeps
+			// RunIDAfter's fallback intact for its other legitimate
+			// callers/tests while closing this path off entirely.
+			slog.Debug("skipping non-conforming extract directory name", "name", entry.Name())
+			continue
+		}
 		if urlMappings[meta.URL] == nil {
 			urlMappings[meta.URL] = make(map[string]bool)
 		}

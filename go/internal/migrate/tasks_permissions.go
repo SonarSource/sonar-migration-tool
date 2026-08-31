@@ -7,6 +7,7 @@ package migrate
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
@@ -78,6 +79,30 @@ func permissionTasks() []TaskDef {
 	}
 }
 
+// sonarUsersGroupName is the SonarQube Server built-in "everyone on this
+// server" group. Kept as a named constant so the three call sites that
+// guard against the admin-escalation alias (issue #550, see
+// skipAdminForBuiltInAlias) compare against the same literal.
+const sonarUsersGroupName = "sonar-users"
+
+// skipAdminForBuiltInAlias reports whether granting perm to a group would
+// be an accidental privilege escalation introduced by the sonar-users →
+// Members built-in alias (MapGroupNameToCloud, issue #269). That alias
+// remaps SQS's "everyone on this server" group to SQC's "everyone in
+// this org" group with zero awareness of which permission is being
+// carried over: a global admin permission granted to sonar-users on the
+// source would otherwise be faithfully re-granted to Members at org (or
+// resource) scope on the target, making every single org member an
+// administrator (issue #550).
+//
+// originalName MUST be the SOURCE group name, captured before
+// MapGroupNameToCloud runs — comparing the mapped name instead would
+// also catch a legitimately named custom "Members" group, which is not
+// what this guard is for.
+func skipAdminForBuiltInAlias(originalName, perm string) bool {
+	return originalName == sonarUsersGroupName && perm == "admin"
+}
+
 // migrationUserProjectPermissions are the four permissions the
 // migration user grants itself on every project it just created.
 // user=Browse, admin=Administer, issueadmin=Administer Issues,
@@ -114,7 +139,9 @@ func runGrantMigrationUserProjectPermissions(ctx context.Context, e *Executor) e
 			if cloudKey == "" {
 				return nil
 			}
+			var attempted, succeeded int
 			for _, perm := range migrationUserProjectPermissions {
+				attempted++
 				e.Logger.Debug("grantMigrationUserProjectPermissions: POST /api/permissions/add_user",
 					"login", login, "perm", perm, "project", cloudKey, "org", orgKey)
 				err := e.Cloud.Permissions.AddUser(ctx, login, perm, orgKey, cloudKey)
@@ -123,7 +150,19 @@ func runGrantMigrationUserProjectPermissions(ctx context.Context, e *Executor) e
 						"login", login, "project", cloudKey, "perm", perm)
 					continue
 				}
+				succeeded++
 				counter.Success()
+			}
+			// Issue #550: partial failure is expected and swallowed above
+			// so the other permissions still get applied — but if EVERY
+			// grant on this project failed, the migration user very
+			// likely can't administer it at all, and every downstream
+			// per-project task will 403. Surface that as a real task
+			// error so the DAG halts instead of silently proceeding as
+			// if the permissions were granted.
+			if attempted > 0 && succeeded == 0 {
+				return fmt.Errorf("all %d permission grant(s) failed for project %s (org %s)",
+					attempted, cloudKey, orgKey)
 			}
 			return nil
 		})
@@ -242,33 +281,49 @@ func runSetOrgGroupPermissions(ctx context.Context, e *Executor) error {
 			if shouldSkipOrg(orgKey) {
 				return nil
 			}
-			applyOrgPermissions(ctx, e, item.Data, name, orgKey, counter)
+			err := applyOrgPermissions(ctx, e, item.Data, name, orgKey, counter)
 			_ = w.WriteOne(item.Data)
-			return nil
+			return err
 		})
 	return err
 }
 
-func applyOrgPermissions(ctx context.Context, e *Executor, data json.RawMessage, name, orgKey string, counter *TaskCounter) {
+func applyOrgPermissions(ctx context.Context, e *Executor, data json.RawMessage, name, orgKey string, counter *TaskCounter) error {
 	// Issue #269: remap SQS built-in groups to their SQC equivalents
 	// (today: sonar-users → Members). Skip the grant if no equivalent
 	// exists.
 	cloudName, ok := MapGroupNameToCloud(name)
 	if !ok {
-		return
+		return nil
 	}
 	perms := extractPermissions(data)
+	var attempted, succeeded int
 	for _, perm := range perms {
 		if !validPermissions[perm] {
 			continue
 		}
+		// Issue #550: never auto-escalate the sonar-users → Members alias
+		// into an org-wide admin grant. The other permissions in this
+		// same group still get applied normally.
+		if skipAdminForBuiltInAlias(name, perm) {
+			e.Logger.Warn("setOrgGroupPermissions: admin NOT auto-granted to Members — source aliased it from sonar-users; grant manually if genuinely intended",
+				"group", cloudName, "org", orgKey)
+			counter.Fail()
+			continue
+		}
+		attempted++
 		err := e.Cloud.Permissions.AddGroup(ctx, cloudName, perm, orgKey, "")
 		if err != nil {
 			failAPI(counter, e.Logger, "setOrgGroupPermissions failed", err, "group", cloudName, "perm", perm)
-		} else {
-			counter.Success()
+			continue
 		}
+		succeeded++
+		counter.Success()
 	}
+	if attempted > 0 && succeeded == 0 {
+		return fmt.Errorf("all %d permission grant(s) failed for group %s in org %s", attempted, cloudName, orgKey)
+	}
+	return nil
 }
 
 func runSetProfileGroupPermissions(ctx context.Context, e *Executor) error {
@@ -295,16 +350,38 @@ func runSetProfileGroupPermissions(ctx context.Context, e *Executor) error {
 				return nil
 			}
 			refs := profileInfo[profileKey]
+			// api/qualityprofiles/add_group has no separate permission
+			// argument — the grant itself is "this group may edit the
+			// profile", i.e. it IS the admin-equivalent action for this
+			// resource. Issue #550: don't let the sonar-users → Members
+			// alias silently hand every org member edit rights on the
+			// profile; skip the grant entirely and require manual review.
+			if skipAdminForBuiltInAlias(groupName, "admin") {
+				for _, ref := range refs {
+					e.Logger.Warn("setProfileGroupPermissions: edit rights NOT auto-granted to Members — source aliased it from sonar-users; grant manually if genuinely intended",
+						"profile", ref.Name, "group", cloudGroup)
+					counter.Fail()
+				}
+				_ = w.WriteOne(item.Data)
+				return nil
+			}
+			var attempted, succeeded int
 			for _, ref := range refs {
+				attempted++
 				err := e.Cloud.QualityProfiles.AddGroup(ctx, ref.Language, ref.Name, cloudGroup, ref.OrgKey)
 				if err != nil {
 					failAPI(counter, e.Logger, "setProfileGroupPermissions failed", err,
 						"profile", ref.Name, "group", cloudGroup)
-				} else {
-					counter.Success()
+					continue
 				}
+				succeeded++
+				counter.Success()
 			}
 			_ = w.WriteOne(item.Data)
+			if attempted > 0 && succeeded == 0 {
+				return fmt.Errorf("all %d permission grant(s) failed for group %s on profile group %s",
+					attempted, cloudGroup, groupName)
+			}
 			return nil
 		})
 	return err
@@ -384,15 +461,15 @@ func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 
 	counter := TaskCounterFromContext(ctx)
 
-	apply := func(ctx context.Context, srvURL string, data json.RawMessage) {
+	apply := func(ctx context.Context, srvURL string, data json.RawMessage) error {
 		srcTemplateID := extractField(data, "templateId")
 		groupName := extractField(data, "name")
 		if srcTemplateID == "" || groupName == "" || skipGroups[groupName] {
-			return
+			return nil
 		}
 		tmpl, ok := templateMap[srvURL+"\x00"+srcTemplateID]
 		if !ok || tmpl.cloudID == "" || tmpl.org == "" {
-			return
+			return nil
 		}
 		// Issue #269: remap SQS built-in groups (sonar-users → Members).
 		// Aliased built-ins exist on SQC by default and won't appear in
@@ -400,15 +477,25 @@ func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 		// for them.
 		cloudGroup, mapOK := MapGroupNameToCloud(groupName)
 		if !mapOK {
-			return
+			return nil
 		}
 		aliased := cloudGroup != groupName
 		if !aliased && !groupExists[tmpl.org+"\x00"+groupName] {
-			return
+			return nil
 		}
 		perms := extractStringArray(data, "permissions")
+		var attempted, succeeded int
 		for _, perm := range perms {
 			if perm == "" {
+				continue
+			}
+			// Issue #550: never auto-escalate the sonar-users → Members
+			// alias into an admin grant on the permission template. The
+			// other permissions for this group/template still apply.
+			if skipAdminForBuiltInAlias(groupName, perm) {
+				e.Logger.Warn("setTemplateGroupPermissions: admin NOT auto-granted to Members — source aliased it from sonar-users; grant manually if genuinely intended",
+					"template", tmpl.cloudID, "group", cloudGroup)
+				counter.Fail()
 				continue
 			}
 			k := triple{tmpl.cloudID, cloudGroup, perm}
@@ -419,20 +506,26 @@ func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 			}
 			applied[k] = true
 			appliedMu.Unlock()
+			attempted++
 			if err := e.Cloud.Permissions.AddGroupToTemplate(ctx, tmpl.cloudID, cloudGroup, perm, tmpl.org); err != nil {
 				failAPI(counter, e.Logger, "setTemplateGroupPermissions failed", err,
 					"template", tmpl.cloudID, "group", cloudGroup, "perm", perm)
-			} else {
-				counter.Success()
+				continue
 			}
+			succeeded++
+			counter.Success()
 		}
+		if attempted > 0 && succeeded == 0 {
+			return fmt.Errorf("all %d permission grant(s) failed for group %s on template %s",
+				attempted, cloudGroup, tmpl.cloudID)
+		}
+		return nil
 	}
 
 	for _, feed := range []string{"getTemplateGroupsScanners", "getTemplateGroupsViewers"} {
 		if err := forEachExtractItem(ctx, e, feed+":apply", feed,
 			func(ctx context.Context, item structure.ExtractItem, _ *common.ChunkWriter) error {
-				apply(ctx, item.ServerURL, item.Data)
-				return nil
+				return apply(ctx, item.ServerURL, item.Data)
 			}); err != nil {
 			return err
 		}

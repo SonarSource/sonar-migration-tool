@@ -124,8 +124,45 @@ func runCreateProjects(ctx context.Context, e *Executor) error {
 				counter.Success()
 				e.Logger.Info("createProjects: already exists", "source_key", key, "cloud_key", cloudKey, "org", orgKey)
 			} else {
-				counter.Success()
+				requestedKey := cloudKey
 				cloudKey = proj.Key
+				if cloudKey == "" {
+					// Defensive-correctness guard (#550): Organization is a
+					// required parameter of the Create API call, so a
+					// successful create is structurally guaranteed to be in
+					// the requested org — there's no ExistsInOrg-style
+					// ambiguity on this branch. But nothing otherwise
+					// guarantees proj.Key is non-empty, and an empty
+					// cloud_project_key would silently propagate into every
+					// downstream task that reads this task's output
+					// (permission grants, settings, quality profile/gate
+					// wiring, etc.), each issuing calls against a blank
+					// project key. Fail loudly instead, mirroring the
+					// already-exists-but-wrong-org failure record shape
+					// above (#525) so consumers of this task's JSONL see a
+					// consistent "failed" shape either way.
+					counter.Fail()
+					e.Logger.Warn("createProjects: create succeeded but server returned an empty project key",
+						"source_key", key, "requested_key", requestedKey, "name", name, "org", orgKey)
+					msg := fmt.Sprintf(
+						"project %q: SonarQube Cloud returned a successful create response with an empty project key; "+
+							"refusing to record cloud_project_key as empty",
+						requestedKey)
+					result := common.EnrichRaw(item, map[string]any{
+						"cloud_project_key":  requestedKey,
+						"sonarcloud_org_key": orgKey,
+						"status":             "failed",
+						"error":              msg,
+					})
+					return w.WriteOne(result)
+				}
+				counter.Success()
+				if cloudKey != requestedKey {
+					// Not a bug — the API is allowed to normalize/rewrite
+					// the requested key. Audit trail only.
+					e.Logger.Debug("createProjects: server returned a different key than requested",
+						"source_key", key, "requested", requestedKey, "actual", cloudKey, "org", orgKey)
+				}
 				e.Logger.Debug("project operation: created new project",
 					"source_key", key, "cloud_key", cloudKey, "name", name, "org", orgKey)
 			}

@@ -316,8 +316,8 @@ func TestRunResetDefaultGatesSkipsWhenAlreadyDefault(t *testing.T) {
 // restoring. Issue #214.
 func TestRunResetDefaultProfilesPerLanguage(t *testing.T) {
 	var (
-		mu          sync.Mutex
-		setDefault  []map[string]string
+		mu         sync.Mutex
+		setDefault []map[string]string
 	)
 
 	mux := http.NewServeMux()
@@ -383,8 +383,8 @@ func TestRunResetDefaultProfilesPerLanguage(t *testing.T) {
 // never touches a built-in. Issue #214.
 func TestRunDeleteProfilesDeletesOnlyNonBuiltIn(t *testing.T) {
 	var (
-		mu       sync.Mutex
-		deleted  []map[string]string
+		mu      sync.Mutex
+		deleted []map[string]string
 	)
 
 	mux := http.NewServeMux()
@@ -477,7 +477,7 @@ func TestRunResetPermissionTemplatesPromotesBuiltInForEveryQualifier(t *testing.
 	mux.HandleFunc("GET /api/permissions/search_templates", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"permissionTemplates": []map[string]any{
-				{"id": "tpl-default", "name": "Default Template"},
+				{"id": "tpl-default", "name": defaultPermissionTemplateName},
 				{"id": "tpl-custom-proj", "name": "Custom Project Template"},
 				{"id": "tpl-custom-app", "name": "Mobile Apps"},
 			},
@@ -541,7 +541,7 @@ func TestRunResetPermissionTemplatesSkipsWhenAlreadyDefault(t *testing.T) {
 	mux.HandleFunc("GET /api/permissions/search_templates", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"permissionTemplates": []map[string]any{
-				{"id": "tpl-default", "name": "Default Template"},
+				{"id": "tpl-default", "name": defaultPermissionTemplateName},
 			},
 			"defaultTemplates": []map[string]any{
 				{"templateId": "tpl-default", "qualifier": "TRK"},
@@ -578,7 +578,7 @@ func TestRunDeleteTemplatesEnumeratesAndDeletes(t *testing.T) {
 	mux.HandleFunc("GET /api/permissions/search_templates", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"permissionTemplates": []map[string]any{
-				{"id": "tpl-default", "name": "Default Template"},
+				{"id": "tpl-default", "name": defaultPermissionTemplateName},
 				{"id": "tpl-1", "name": "DEFAULT"},
 				{"id": "tpl-2", "name": "Mobile Apps"},
 				// Trimmed + alternate case must still match the built-in.
@@ -618,5 +618,62 @@ func TestRunDeleteTemplatesEnumeratesAndDeletes(t *testing.T) {
 	}
 	if deletedSet["tpl-default"] || deletedSet["tpl-default-alt"] {
 		t.Error("built-in \"Default Template\" must never be deleted (case-insensitive name match)")
+	}
+}
+
+// TestRunDeleteTemplatesKeepsRenamedCurrentDefault pins the #550 fix: a
+// permission template renamed away from "Default Template" fails the
+// name-based built-in check, but if it is still listed as the org's
+// current default for some qualifier in the defaultTemplates map, it
+// must NOT be deleted. This is the scenario an admin renaming the org's
+// built-in template produces — without this second safety net,
+// isBuiltInPermissionTemplate's pure name match would let the renamed
+// built-in be destroyed even though it's still institutionally "the
+// default".
+func TestRunDeleteTemplatesKeepsRenamedCurrentDefault(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		deleted []string
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/permissions/search_templates", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"permissionTemplates": []map[string]any{
+				// Renamed away from "Default Template" — fails the name
+				// check — but still the current default for TRK.
+				{"id": "tpl-1", "name": "Company Default"},
+				{"id": "tpl-2", "name": "Mobile Apps"},
+			},
+			"defaultTemplates": []map[string]any{
+				{"templateId": "tpl-1", "qualifier": "TRK"},
+			},
+		})
+	})
+	mux.HandleFunc("POST /api/permissions/delete_template", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		mu.Lock()
+		deleted = append(deleted, r.FormValue("templateId"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	e := newDeleteTest(t, mux)
+
+	if err := runDeleteTemplates(context.Background(), e); err != nil {
+		t.Fatalf("runDeleteTemplates: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(deleted) != 1 {
+		t.Fatalf("expected exactly 1 delete (\"Mobile Apps\"), got %d: %v", len(deleted), deleted)
+	}
+	if deleted[0] != "tpl-2" {
+		t.Errorf("expected \"Mobile Apps\" (tpl-2) deleted, got %v", deleted)
+	}
+	for _, id := range deleted {
+		if id == "tpl-1" {
+			t.Error("renamed built-in still listed as current default (tpl-1) must never be deleted")
+		}
 	}
 }

@@ -123,11 +123,6 @@ func RunSyncIssues(ctx context.Context, cfg SyncIssuesConfig) (SyncIssuesSummary
 		return summary, common.NewExitError(2, fmt.Errorf("invalid project_key_pattern: %w", err))
 	}
 
-	appliedDefault, err := applyOrgMapping(cfg.ExportDirectory, cfg.DefaultOrganization, logger)
-	if err != nil {
-		return summary, err
-	}
-
 	cloudURL := cfg.URL
 	clientOpts := []sqapi.Option{sqapi.WithTimeout(cfg.Timeout)}
 	if cfg.Debug {
@@ -136,6 +131,15 @@ func RunSyncIssues(ctx context.Context, cfg SyncIssuesConfig) (SyncIssuesSummary
 	cloudClient := sqapi.NewCloudClient(cloudURL, cfg.Token, clientOpts...)
 	cc := cloud.New(cloudClient)
 	raw := common.NewRawClient(cloudClient.HTTPClient(), cloudClient.BaseURL())
+
+	// Built ahead of applyOrgMapping (issue #550) so --default_organization
+	// is checked against the live SonarQube Cloud API before it is ever
+	// written to organizations.csv — see the identical reordering in
+	// RunMigrate for the full rationale.
+	appliedDefault, err := applyOrgMapping(ctx, cc.Organizations, cfg.ExportDirectory, cfg.DefaultOrganization, cfg.EnterpriseKey, logger)
+	if err != nil {
+		return summary, err
+	}
 
 	if err := validateOrgsExist(ctx, cc.Organizations, cfg.ExportDirectory, cfg.EnterpriseKey, cfg.DefaultOrganization, appliedDefault); err != nil {
 		return summary, err

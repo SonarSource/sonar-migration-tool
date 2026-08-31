@@ -14,10 +14,10 @@ import (
 	"strings"
 	"time"
 
-	sqapi "github.com/sonar-solutions/sq-api-go"
-	"github.com/sonar-solutions/sq-api-go/cloud"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/version"
+	sqapi "github.com/sonar-solutions/sq-api-go"
+	"github.com/sonar-solutions/sq-api-go/cloud"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -33,16 +33,38 @@ type ResetConfig struct {
 
 	// ConfirmedOrgs is the operator-confirmed subset of mapped
 	// SonarCloud organizations to actually wipe (#381). Populated by
-	// the reset command's interactive confirmation prompt or by the
-	// --yes flag for non-interactive runs. When empty / nil, no
-	// filter is applied (all mapped orgs get reset — the legacy
-	// behaviour for callers that don't go through cmd/reset.go).
+	// the reset command's interactive confirmation prompt, the
+	// --organization flag, the --yes flag for non-interactive runs, or
+	// a config file's confirmed_orgs field (#550, see
+	// configFileShape.ConfirmedOrgs / toResetConfig).
+	//
+	// Fail-closed (#550): when empty / nil, RunReset returns an error
+	// instead of resetting every mapped org. cmd/reset.go is the only
+	// current caller and it always populates this field (via
+	// confirmResetOrgs) before calling RunReset, so this is safe for
+	// the one real caller; any future non-CLI caller must explicitly
+	// opt in to a scope rather than silently wiping everything.
 	ConfirmedOrgs []string
+
+	// DryRun, when true, makes RunReset build and print the reset plan
+	// — which organizations are in scope and which tasks would run —
+	// without issuing any destructive API call, then return nil before
+	// the phase-execution loop starts (#550).
+	DryRun bool
 }
 
 // RunReset deletes all migrated entities from SonarQube Cloud.
 func RunReset(ctx context.Context, cfg ResetConfig) error {
 	cfg.applyDefaults()
+
+	// #550 — fail closed: an empty/nil ConfirmedOrgs used to mean "no
+	// filter, reset every mapped org." cmd/reset.go always populates it
+	// (via confirmResetOrgs) before calling RunReset, so a genuinely
+	// empty value here means some caller skipped confirmation entirely
+	// — refuse rather than silently wiping the whole enterprise.
+	if len(cfg.ConfirmedOrgs) == 0 {
+		return fmt.Errorf("no organizations confirmed for reset — pass --organization/confirm via the CLI prompt, or set confirmed_orgs in the config file")
+	}
 
 	cmdStart := time.Now()
 
@@ -121,6 +143,14 @@ func RunReset(ctx context.Context, cfg ResetConfig) error {
 	data, _ := json.MarshalIndent(meta, "", "  ")
 	_ = os.WriteFile(filepath.Join(runDir, "clear.json"), data, 0o644)
 
+	// #550 — dry run: the plan is already fully built and written to
+	// disk above; print it and return before the executor (and any
+	// destructive HTTP call) is even constructed.
+	if cfg.DryRun {
+		printResetDryRunPlan(cfg, plan, runDir)
+		return nil
+	}
+
 	store := common.NewDataStore(runDir)
 
 	executor := &Executor{
@@ -156,6 +186,29 @@ func RunReset(ctx context.Context, cfg ResetConfig) error {
 
 	fmt.Printf("%s v%s - Reset Complete: %s\n", version.ToolName, version.Version, runID)
 	return nil
+}
+
+// printResetDryRunPlan renders the reset plan for --dry-run (#550):
+// which organizations are in scope, how many migrate-created projects
+// each carries (reusing the same createProjects-JSONL-derived counts
+// cmd/reset.go's confirmation prompt shows, via
+// MigrateCreatedProjectCounts), and the task phases that would run —
+// without making any destructive API call.
+func printResetDryRunPlan(cfg ResetConfig, plan [][]string, runDir string) {
+	fmt.Println("Dry run: no organizations were modified.")
+	fmt.Printf("Organizations in scope (%d): %s\n", len(cfg.ConfirmedOrgs), strings.Join(cfg.ConfirmedOrgs, ", "))
+
+	if counts, err := MigrateCreatedProjectCounts(cfg.ExportDirectory); err == nil && counts != nil {
+		for _, org := range cfg.ConfirmedOrgs {
+			fmt.Printf("  - %s (%d projects would be deleted)\n", org, counts[org])
+		}
+	}
+
+	fmt.Println("Planned tasks, in execution order:")
+	for i, phase := range plan {
+		fmt.Printf("  Phase %d: %s\n", i+1, strings.Join(phase, ", "))
+	}
+	fmt.Printf("Plan written to %s\n", filepath.Join(runDir, "clear.json"))
 }
 
 func runResetPhase(ctx context.Context, e *Executor, taskNames []string, registry map[string]*TaskDef) error {

@@ -103,8 +103,9 @@ func TestRunGrantMigrationUserProjectPermissionsBlankLogin(t *testing.T) {
 	}
 }
 
-// add_user failing (403) exercises the counter.Fail()/continue branch without
-// failing the task.
+// add_user failing (403) for every permission on the project means the
+// migration user got nothing on it — issue #550 (Fix B) now surfaces that
+// as a task error instead of silently swallowing a 100% failure.
 func TestRunGrantMigrationUserProjectPermissionsAPIError(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/permissions/add_user", func(w http.ResponseWriter, _ *http.Request) {
@@ -118,8 +119,8 @@ func TestRunGrantMigrationUserProjectPermissionsAPIError(t *testing.T) {
 	writeTaskJSONL(t, e, "createProjects", []map[string]any{
 		{"key": "proj1", "cloud_project_key": "cloud-proj", "sonarcloud_org_key": "cloud-org"},
 	})
-	if err := runGrantMigrationUserProjectPermissions(context.Background(), e); err != nil {
-		t.Fatalf("add_user 403 must be swallowed, got err %v", err)
+	if err := runGrantMigrationUserProjectPermissions(context.Background(), e); err == nil {
+		t.Fatal("expected an error when every add_user grant on the project fails (100% failure), got nil")
 	}
 }
 
@@ -222,6 +223,11 @@ func TestRunSetTemplateGroupPermissionsNoTemplates(t *testing.T) {
 
 // --- runSetOrgGroupPermissions error branch (add_group fails) ---
 
+// add_group failing (403) for the only permission on the only group means
+// that group ended up with nothing granted — issue #550 (Fix B) now
+// surfaces that as a task error instead of silently swallowing a 100%
+// failure. Requires a generateOrganizationMappings row so the org isn't
+// treated as skipped (shouldSkipOrg) and the grant is actually attempted.
 func TestRunSetOrgGroupPermissionsAddGroupError(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/permissions/add_group", func(w http.ResponseWriter, _ *http.Request) {
@@ -237,13 +243,169 @@ func TestRunSetOrgGroupPermissionsAddGroupError(t *testing.T) {
 	dir := t.TempDir()
 	setupExtractData(dir) // getGroups row: sonar-users (→ Members) with scan perm
 	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	writeTaskJSONL(t, e, "generateOrganizationMappings", []map[string]any{
+		{"server_url": testServerURL, "sonarcloud_org_key": "cloud-org"},
+	})
 
-	if err := runSetOrgGroupPermissions(context.Background(), e); err != nil {
-		t.Fatalf("add_group 403 must be swallowed, got %v", err)
+	if err := runSetOrgGroupPermissions(context.Background(), e); err == nil {
+		t.Fatal("expected an error when every add_group grant on the group fails (100% failure), got nil")
 	}
 }
 
 // extractPath returns the extract-run directory path for a feed name.
 func extractPath(e *Executor, feed string) string {
 	return filepath.Join(e.ExportDir, "extract-01", feed)
+}
+
+// --- Fix A (issue #550): sonar-users → Members must never auto-escalate admin ---
+
+// TestRunSetOrgGroupPermissionsSkipsAdminForSonarUsersAlias exercises
+// applyOrgPermissions' org-level guard: when the source sonar-users group
+// (aliased to SQC's Members) held the global admin permission, that grant
+// must be skipped — re-granting it would make every org member an admin —
+// while the group's other permissions are still applied normally.
+func TestRunSetOrgGroupPermissionsSkipsAdminForSonarUsersAlias(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		calls []string // "<group>:<perm>"
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/permissions/add_group", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		mu.Lock()
+		calls = append(calls, r.FormValue("groupName")+":"+r.FormValue("permission"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	e := newCustomCloudTest(t, mux)
+
+	writeTaskJSONL(t, e, "generateOrganizationMappings", []map[string]any{
+		{"server_url": testServerURL, "sonarcloud_org_key": "cloud-org"},
+	})
+	// sonar-users source group holds both admin (dangerous) and scan (fine).
+	writeJSONL(extractPath(e, "getGroups"), []map[string]any{
+		{"id": "1", "name": testSonarUsers, "permissions": []string{"admin", "scan"},
+			"serverUrl": testServerURL},
+	})
+
+	if err := runSetOrgGroupPermissions(context.Background(), e); err != nil {
+		t.Fatalf("runSetOrgGroupPermissions: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	got := map[string]bool{}
+	for _, c := range calls {
+		got[c] = true
+	}
+	if got["Members:admin"] {
+		t.Errorf("admin must NOT be auto-granted to Members via the sonar-users alias (issue #550), calls=%v", calls)
+	}
+	if !got["Members:scan"] {
+		t.Errorf("expected scan still granted to Members, got %v", calls)
+	}
+}
+
+// TestRunSetProfileGroupPermissionsSkipsSonarUsersAlias exercises the
+// quality-profile call site. api/qualityprofiles/add_group has no separate
+// permission argument — the grant itself hands the group edit rights on
+// the profile, so it is treated as the admin-equivalent action and skipped
+// entirely for the sonar-users → Members alias, while a normal custom
+// group's grant on the same profile still goes through.
+func TestRunSetProfileGroupPermissionsSkipsSonarUsersAlias(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		calls []string // "<group>"
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/qualityprofiles/add_group", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		mu.Lock()
+		calls = append(calls, r.FormValue("group"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	e := newCustomCloudTest(t, mux)
+
+	writeTaskJSONL(t, e, "createProfiles", []map[string]any{
+		{"source_profile_key": "prof1", "sonarcloud_org_key": "cloud-org",
+			"name": "Custom", "language": "java"},
+	})
+	writeJSONL(extractPath(e, "getProfileGroups"), []map[string]any{
+		{"profileKey": "prof1", "name": testSonarUsers, "serverUrl": testServerURL},
+		{"profileKey": "prof1", "name": "developers", "serverUrl": testServerURL},
+	})
+
+	if err := runSetProfileGroupPermissions(context.Background(), e); err != nil {
+		t.Fatalf("runSetProfileGroupPermissions: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	got := map[string]bool{}
+	for _, c := range calls {
+		got[c] = true
+	}
+	if got["Members"] {
+		t.Errorf("Members (sonar-users alias) must NOT be auto-granted edit rights on the profile (issue #550), calls=%v", calls)
+	}
+	if !got["developers"] {
+		t.Errorf("expected developers still granted on the profile, got %v", calls)
+	}
+}
+
+// TestRunSetTemplateGroupPermissionsSkipsAdminForSonarUsersAlias exercises
+// the permission-template call site: sonar-users holding admin on the
+// source template must not translate into an admin grant to Members on
+// the target, while its other permission (user) is still applied.
+func TestRunSetTemplateGroupPermissionsSkipsAdminForSonarUsersAlias(t *testing.T) {
+	var (
+		mu   sync.Mutex
+		adds []string // "<group>:<perm>"
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/permissions/add_group_to_template", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		mu.Lock()
+		adds = append(adds, r.FormValue("groupName")+":"+r.FormValue("permission"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	e := newCustomCloudTest(t, mux)
+
+	writeTaskJSONL(t, e, "createPermissionTemplates", []map[string]any{
+		{"server_url": testServerURL, "source_template_key": "tpl-src-1",
+			"cloud_template_id": "tpl-cloud-1", "sonarcloud_org_key": "cloud-org"},
+	})
+	writeJSONL(extractPath(e, "getTemplateGroupsScanners"), []map[string]any{
+		{"templateId": "tpl-src-1", "name": testSonarUsers,
+			"permissions": []string{"admin", "user"}, "serverUrl": testServerURL},
+	})
+	writeJSONL(extractPath(e, "getTemplateGroupsViewers"), nil)
+
+	if err := runSetTemplateGroupPermissions(context.Background(), e); err != nil {
+		t.Fatalf("runSetTemplateGroupPermissions: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	got := map[string]bool{}
+	for _, a := range adds {
+		got[a] = true
+	}
+	if got["Members:admin"] {
+		t.Errorf("admin must NOT be auto-granted to Members via the sonar-users alias (issue #550), adds=%v", adds)
+	}
+	if !got["Members:user"] {
+		t.Errorf("expected user still granted to Members, got %v", adds)
+	}
 }

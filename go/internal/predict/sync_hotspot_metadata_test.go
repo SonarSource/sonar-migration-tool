@@ -28,7 +28,7 @@ func TestSynthesizeSyncHotspotMetadataEligibility(t *testing.T) {
 	writeFile(t, exportDir, "gates.csv",
 		"name,server_url,source_gate_key,is_default,sonarqube_org_key\n")
 
-	extractDir := filepath.Join(exportDir, "extract-0001")
+	extractDir := filepath.Join(exportDir, "2026-08-20-0001")
 	writeFile(t, extractDir, "extract.json", `{"url":"`+testServerURL+`"}`)
 
 	writeJSONL(t, filepath.Join(extractDir, "getProjectHotspotsFull", "hotspots.jsonl"),

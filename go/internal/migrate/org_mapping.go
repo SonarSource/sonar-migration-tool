@@ -40,7 +40,16 @@ const orgCSVFileName = "organizations.csv"
 // Returns appliedDefault=true when the CSV was rewritten with the
 // default; this drives the message variant produced by
 // validateOrgsExist for issue #283.
-func applyOrgMapping(exportDir, defaultOrg string, logger *slog.Logger) (appliedDefault bool, err error) {
+//
+// Before writing defaultOrg anywhere, it is checked against the live
+// SonarQube Cloud API via validateOrgExists (issue #550). If the org
+// doesn't exist, this returns that error and organizations.csv is left
+// completely untouched — a prior bug validated defaultOrg only AFTER
+// writeOrgCSVWithDefault had already persisted it, so a wrong
+// --default_organization on a failed run got written to disk, and a
+// retry with a corrected value then found the file already "mapped"
+// (hasMapping above) and silently ignored the correction.
+func applyOrgMapping(ctx context.Context, lookup orgLookup, exportDir, defaultOrg, enterpriseKey string, logger *slog.Logger) (appliedDefault bool, err error) {
 	rows, loadErr := structure.LoadCSV(exportDir, orgCSVFileName)
 	if loadErr != nil {
 		return false, fmt.Errorf("loading organizations.csv: %w", loadErr)
@@ -73,6 +82,12 @@ func applyOrgMapping(exportDir, defaultOrg string, logger *slog.Logger) (applied
 	// No mapping defined.
 	if defaultOrg == "" {
 		return false, missingMappingError(csvPath)
+	}
+
+	// Validate defaultOrg against the live SonarQube Cloud API BEFORE
+	// writing anything to organizations.csv (issue #550).
+	if err := validateOrgExists(ctx, lookup, defaultOrg, enterpriseKey); err != nil {
+		return false, err
 	}
 
 	// Apply defaultOrg to every row and write back.
@@ -143,6 +158,28 @@ type orgLookup interface {
 	Search(ctx context.Context, keys ...string) ([]sqcTypes.Organization, error)
 }
 
+// validateOrgExists checks that a single SonarQube Cloud organization key
+// exists and is visible to the authenticated token, returning
+// defaultOrgMissingError (exit code 3) naming enterpriseKey if not. An
+// empty orgKey is treated as a no-op (nothing to check).
+//
+// Factored out of validateOrgsExist's appliedDefault branch (issue #283)
+// so applyOrgMapping can run the identical check on --default_organization
+// BEFORE it is ever persisted to organizations.csv (issue #550).
+func validateOrgExists(ctx context.Context, lookup orgLookup, orgKey, enterpriseKey string) error {
+	if orgKey == "" {
+		return nil
+	}
+	known, err := orgsByKey(ctx, lookup, []string{orgKey})
+	if err != nil {
+		return fmt.Errorf("looking up organization %q in SonarQube Cloud: %w", orgKey, err)
+	}
+	if _, ok := known[orgKey]; !ok {
+		return defaultOrgMissingError(orgKey, enterpriseKey)
+	}
+	return nil
+}
+
 // validateOrgsExist checks that every SonarQube Cloud organization the
 // migration is about to use actually exists / is visible to the
 // authenticated token. The two failure modes from issue #283:
@@ -158,17 +195,7 @@ func validateOrgsExist(ctx context.Context, lookup orgLookup, exportDir, enterpr
 	csvPath := filepath.Join(exportDir, orgCSVFileName)
 
 	if appliedDefault {
-		if defaultOrg == "" {
-			return nil
-		}
-		known, err := orgsByKey(ctx, lookup, []string{defaultOrg})
-		if err != nil {
-			return fmt.Errorf("looking up default organization in SonarQube Cloud: %w", err)
-		}
-		if _, ok := known[defaultOrg]; !ok {
-			return defaultOrgMissingError(defaultOrg, enterpriseKey)
-		}
-		return nil
+		return validateOrgExists(ctx, lookup, defaultOrg, enterpriseKey)
 	}
 
 	rows, err := structure.LoadCSV(exportDir, orgCSVFileName)

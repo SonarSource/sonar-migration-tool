@@ -308,6 +308,68 @@ func TestCreateProjects_AlreadyExistsInDifferentOrg(t *testing.T) {
 	}
 }
 
+// TestCreateProjects_EmptyKeyOnCreate covers issue #550: the fresh-success
+// branch of runCreateProjects trusts the API's returned proj.Key over the
+// locally-derived key (correct — Organization is a required Create param, so
+// a successful create is structurally guaranteed to be in the target org,
+// unlike the already-exists collision case above). But nothing else
+// guarantees that returned key is non-empty, and an empty cloud_project_key
+// would silently propagate into every downstream task that reads this task's
+// output (permission grants, settings, quality profile/gate wiring, etc.).
+// This asserts createProjects instead fails loudly and writes an explicit
+// failure record, mirroring the shape used by
+// TestCreateProjects_AlreadyExistsInDifferentOrg (#525) for consistency.
+func TestCreateProjects_EmptyKeyOnCreate(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/projects/create", func(w http.ResponseWriter, r *http.Request) {
+		// Simulate a "successful" create response with a missing/empty key.
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"project": map[string]any{
+				"key":  "",
+				"name": r.FormValue("name"),
+			},
+		})
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	})
+	cloudSrv := httptest.NewServer(mux)
+	defer cloudSrv.Close()
+
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+	dir := t.TempDir()
+	setupExtractData(dir)
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+
+	setupCSVs(t, dir)
+	runTask(t, e, "generateProjectMappings")
+
+	reg := BuildMigrateRegistry(RegisterAll())
+	if err := reg["createProjects"].Run(context.Background(), e); err != nil {
+		t.Fatalf("createProjects: %v", err)
+	}
+
+	items, _ := e.Store.ReadAll("createProjects")
+	if len(items) != 1 {
+		t.Fatalf("expected exactly 1 createProjects record when the API returns an empty key, got %d: %s",
+			len(items), items)
+	}
+	// No record should ever carry an empty cloud_project_key dressed up as
+	// a normal (non-failed) entry — downstream tasks key their lookups off
+	// this field.
+	if key := extractField(items[0], "cloud_project_key"); key == "" {
+		t.Error("expected cloud_project_key to fall back to the originally-requested key, not be empty")
+	}
+	if status := extractField(items[0], "status"); status != "failed" {
+		t.Errorf(`expected status "failed", got %q: %s`, status, items[0])
+	}
+	errMsg := extractField(items[0], "error")
+	if !strings.Contains(errMsg, "empty project key") {
+		t.Errorf("error message %q does not mention the empty key", errMsg)
+	}
+}
+
 func TestCreateProfiles_AlreadyExists(t *testing.T) {
 	items := runAlreadyExistsTask(t, "generateProfileMappings", "createProfiles")
 	if profKey := extractField(items[0], "cloud_profile_key"); profKey != "existing-prof-key" {
@@ -359,7 +421,7 @@ func setupCSVs(t *testing.T, dir string) {
 			"new_code_definition_value": 30, "alm": "github",
 			"repository": "myorg/myrepo", "slug": "", "monorepo": false,
 			"summary_comment_enabled": false,
-			"profiles": []map[string]any{{"key": "prof1", "name": "Custom", "language": "java"}}},
+			"profiles":                []map[string]any{{"key": "prof1", "name": "Custom", "language": "java"}}},
 	}
 	writeCSVFromMaps(t, dir, "projects", projects)
 

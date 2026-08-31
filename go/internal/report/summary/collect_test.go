@@ -247,7 +247,7 @@ func TestCollectSummaryGateBuiltInAndUnused(t *testing.T) {
 	os.MkdirAll(runDir, 0o755)
 
 	// Extract data: 3 gates — 1 built-in, 1 used, 1 unused.
-	extractDir := filepath.Join(dir, "extract-01")
+	extractDir := filepath.Join(dir, "2026-08-20-0001")
 	writeExtractMeta(t, extractDir, "https://sq.example.com")
 	writeTaskJSONL(t, extractDir, "getGates", []map[string]any{
 		{"name": "Sonar way", "isBuiltIn": true},
@@ -294,7 +294,7 @@ func TestCollectSummaryProfileBuiltInAndUnused(t *testing.T) {
 	runDir := filepath.Join(dir, runID)
 	os.MkdirAll(runDir, 0o755)
 
-	extractDir := filepath.Join(dir, "extract-01")
+	extractDir := filepath.Join(dir, "2026-08-20-0001")
 	writeExtractMeta(t, extractDir, "https://sq.example.com")
 	writeTaskJSONL(t, extractDir, "getProfiles", []map[string]any{
 		{"name": "Sonar way", "language": "java", "isBuiltIn": true},
@@ -442,7 +442,7 @@ func TestCollectSummaryPortfolioHierarchyPartial(t *testing.T) {
 	// Extract describes a top-level portfolio "Top" with one subportfolio
 	// "Mid" which itself has one subportfolio "Leaf"; plus a stand-alone
 	// portfolio "Solo" with no children.
-	extractDir := filepath.Join(dir, "extract-01")
+	extractDir := filepath.Join(dir, "2026-08-20-0001")
 	writeExtractMeta(t, extractDir, "https://sq.example.com")
 	writeTaskJSONL(t, extractDir, "getPortfolioDetails", []map[string]any{
 		{
@@ -550,7 +550,7 @@ func TestCollectSummaryPortfolioApplicationsClassification(t *testing.T) {
 	runDir := filepath.Join(dir, runID)
 	os.MkdirAll(runDir, 0o755)
 
-	extractDir := filepath.Join(dir, "extract-01")
+	extractDir := filepath.Join(dir, "2026-08-20-0001")
 	writeExtractMeta(t, extractDir, "https://sq.example.com")
 	writeTaskJSONL(t, extractDir, "getPortfolioDetails", []map[string]any{
 		{
@@ -634,7 +634,7 @@ func TestCollectSummaryPortfolioEmpty(t *testing.T) {
 	runDir := filepath.Join(dir, runID)
 	os.MkdirAll(runDir, 0o755)
 
-	extractDir := filepath.Join(dir, "extract-01")
+	extractDir := filepath.Join(dir, "2026-08-20-0001")
 	writeExtractMeta(t, extractDir, "https://sq.example.com")
 	// "NonEmpty" has one resolved project, "Empty" has none.
 	writeTaskJSONL(t, extractDir, "getPortfolioProjects", []map[string]any{
@@ -1185,7 +1185,7 @@ func TestCollectSummaryMentionsUnmigratedApplications(t *testing.T) {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	extractDir := filepath.Join(dir, "extract-01")
+	extractDir := filepath.Join(dir, "2026-08-20-0001")
 	writeExtractMeta(t, extractDir, "https://sq.example.com")
 	writeTaskJSONL(t, extractDir, "getApplications", []map[string]any{
 		{"key": "app1", "name": "Application 1"},
@@ -1235,7 +1235,7 @@ func TestCollectSummaryNCDLimitations(t *testing.T) {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	extractDir := filepath.Join(dir, "extract-01")
+	extractDir := filepath.Join(dir, "2026-08-20-0001")
 	writeExtractMeta(t, extractDir, "https://sq.example.com")
 	writeTaskJSONL(t, extractDir, "getNewCodePeriods", []map[string]any{
 		// main-branch records carry the project-level NCD. inherited=true
@@ -1305,7 +1305,7 @@ func TestCollectSummaryNCDFallbackMovesProjectToPartial(t *testing.T) {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	writeExtractMeta(t, filepath.Join(dir, "extract-01"), "https://sq.example.com")
+	writeExtractMeta(t, filepath.Join(dir, "2026-08-20-0001"), "https://sq.example.com")
 
 	writeTaskJSONL(t, runDir, "createProjects", []map[string]any{
 		{"name": "Project A", "sonarcloud_org_key": "org1", "cloud_project_key": "org1_projA"},
@@ -1360,7 +1360,7 @@ func TestCollectSummaryNoApplicationsLimitation(t *testing.T) {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	extractDir := filepath.Join(dir, "extract-01")
+	extractDir := filepath.Join(dir, "2026-08-20-0001")
 	writeExtractMeta(t, extractDir, "https://sq.example.com")
 	// getApplications dir exists but is empty.
 	writeTaskJSONL(t, extractDir, "getApplications", nil)
@@ -1431,7 +1431,7 @@ func TestCollectSummaryGlobalPermissionsLimitationTruncatesAt10(t *testing.T) {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	extractDir := filepath.Join(dir, "extract-01")
+	extractDir := filepath.Join(dir, "2026-08-20-0001")
 	writeExtractMeta(t, extractDir, "https://sq.example.com")
 	var items []map[string]any
 	for i := 1; i <= 12; i++ {
@@ -1472,7 +1472,7 @@ func TestCollectSummaryGlobalPermissionsLimitationListsAllBelow10(t *testing.T) 
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	extractDir := filepath.Join(dir, "extract-01")
+	extractDir := filepath.Join(dir, "2026-08-20-0001")
 	writeExtractMeta(t, extractDir, "https://sq.example.com")
 	writeTaskJSONL(t, extractDir, "getUserPermissions", []map[string]any{
 		{"login": "alice"}, {"login": "bob"}, {"login": "carol"}, {"login": "dave"},
@@ -1919,10 +1919,10 @@ func TestCollectSummaryRuntimeTelemetry(t *testing.T) {
 			"process_type": "request_completed",
 			"status":       "failure",
 			"payload": map[string]any{
-				"method": "POST",
-				"url":    "/api/projects/create",
-				"status": float64(400),
-				"data":   map[string]any{"name": "FailProj", "organization": "org1"},
+				"method":   "POST",
+				"url":      "/api/projects/create",
+				"status":   float64(400),
+				"data":     map[string]any{"name": "FailProj", "organization": "org1"},
 				"response": `{"errors":[{"msg":"already exists"}]}`,
 			},
 		},

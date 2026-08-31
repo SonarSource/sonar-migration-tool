@@ -266,8 +266,11 @@ func TestRunResetDefaultProfilesNoBuiltIn(t *testing.T) {
 	}
 }
 
-// resetPermissionTemplates: no built-in "Default Template" present hits the
-// "no built-in found" warn+fail branch.
+// resetPermissionTemplates: no built-in "Default Template" present must now
+// hard-fail the task (#550) rather than warn-and-continue. Silently
+// proceeding let deleteTemplates run against an org whose built-in was
+// renamed (so it never got promoted to default), risking deletion of
+// whatever template legitimately IS the current default.
 func TestRunResetPermissionTemplatesNoBuiltIn(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/permissions/search_templates", func(w http.ResponseWriter, _ *http.Request) {
@@ -281,7 +284,8 @@ func TestRunResetPermissionTemplatesNoBuiltIn(t *testing.T) {
 		})
 	})
 	e := newDeleteTest(t, mux)
-	if err := runResetPermissionTemplates(context.Background(), e); err != nil {
-		t.Fatalf("runResetPermissionTemplates: %v", err)
+	err := runResetPermissionTemplates(context.Background(), e)
+	if err == nil {
+		t.Fatal("runResetPermissionTemplates: expected an error when no built-in \"Default Template\" is found, got nil")
 	}
 }

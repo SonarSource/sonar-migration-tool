@@ -272,7 +272,7 @@ func TestConfirmResetOrgs_HappyPathSubset(t *testing.T) {
 
 	var out bytes.Buffer
 	in := strings.NewReader("cloud-a cloud-b\n")
-	got, err := confirmResetOrgs(dir, false, in, &out)
+	got, err := confirmResetOrgs(dir, false, "", nil, in, &out)
 	if err != nil {
 		t.Fatalf("confirmResetOrgs: %v", err)
 	}
@@ -313,7 +313,7 @@ func TestConfirmResetOrgs_CollapsesWhitespace(t *testing.T) {
 	dir := writeResetFixture(t,
 		"sonarqube_org_key,sonarcloud_org_key\norg1,cloud-a\norg2,cloud-b\n", "")
 
-	got, err := confirmResetOrgs(dir, false, strings.NewReader("   cloud-a    cloud-b   \n"), io.Discard)
+	got, err := confirmResetOrgs(dir, false, "", nil, strings.NewReader("   cloud-a    cloud-b   \n"), io.Discard)
 	if err != nil {
 		t.Fatalf("confirmResetOrgs: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestConfirmResetOrgs_EmptyEnterAborts(t *testing.T) {
 		"sonarqube_org_key,sonarcloud_org_key\norg1,cloud-a\n", "")
 
 	var out bytes.Buffer
-	got, err := confirmResetOrgs(dir, false, strings.NewReader("\n"), &out)
+	got, err := confirmResetOrgs(dir, false, "", nil, strings.NewReader("\n"), &out)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -344,7 +344,7 @@ func TestConfirmResetOrgs_EOFAborts(t *testing.T) {
 		"sonarqube_org_key,sonarcloud_org_key\norg1,cloud-a\n", "")
 
 	// Empty reader → immediate EOF; treated the same as Enter alone.
-	got, err := confirmResetOrgs(dir, false, strings.NewReader(""), io.Discard)
+	got, err := confirmResetOrgs(dir, false, "", nil, strings.NewReader(""), io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -357,7 +357,7 @@ func TestConfirmResetOrgs_UnknownKeyError(t *testing.T) {
 	dir := writeResetFixture(t,
 		"sonarqube_org_key,sonarcloud_org_key\norg1,cloud-a\n", "")
 
-	_, err := confirmResetOrgs(dir, false, strings.NewReader("cloud-a typo-org\n"), io.Discard)
+	_, err := confirmResetOrgs(dir, false, "", nil, strings.NewReader("cloud-a typo-org\n"), io.Discard)
 	if err == nil {
 		t.Fatal("expected error for unknown key, got nil")
 	}
@@ -370,7 +370,7 @@ func TestConfirmResetOrgs_DedupsInput(t *testing.T) {
 	dir := writeResetFixture(t,
 		"sonarqube_org_key,sonarcloud_org_key\norg1,cloud-a\norg2,cloud-b\n", "")
 
-	got, err := confirmResetOrgs(dir, false, strings.NewReader("cloud-a cloud-a cloud-b cloud-a\n"), io.Discard)
+	got, err := confirmResetOrgs(dir, false, "", nil, strings.NewReader("cloud-a cloud-a cloud-b cloud-a\n"), io.Discard)
 	if err != nil {
 		t.Fatalf("confirmResetOrgs: %v", err)
 	}
@@ -386,7 +386,7 @@ func TestConfirmResetOrgs_AutoYesSkipsPrompt(t *testing.T) {
 	// Reader returns content that would normally be parsed; autoYes
 	// must take precedence and never read from it.
 	in := strings.NewReader("this-should-not-be-read\n")
-	got, err := confirmResetOrgs(dir, true, in, io.Discard)
+	got, err := confirmResetOrgs(dir, true, "", nil, in, io.Discard)
 	if err != nil {
 		t.Fatalf("confirmResetOrgs: %v", err)
 	}
@@ -408,7 +408,7 @@ func TestConfirmResetOrgs_SkipsSkippedSentinel(t *testing.T) {
 		"sonarqube_org_key,sonarcloud_org_key\norg1,cloud-a\norg2,SKIPPED\norg3,\n", "")
 
 	var out bytes.Buffer
-	got, err := confirmResetOrgs(dir, true, strings.NewReader(""), &out)
+	got, err := confirmResetOrgs(dir, true, "", nil, strings.NewReader(""), &out)
 	if err != nil {
 		t.Fatalf("confirmResetOrgs: %v", err)
 	}
@@ -423,8 +423,142 @@ func TestConfirmResetOrgs_SkipsSkippedSentinel(t *testing.T) {
 func TestConfirmResetOrgs_EmptyOrgsCSVErrors(t *testing.T) {
 	// No organizations.csv → cannot continue.
 	dir := t.TempDir()
-	_, err := confirmResetOrgs(dir, false, strings.NewReader(""), io.Discard)
+	_, err := confirmResetOrgs(dir, false, "", nil, strings.NewReader(""), io.Discard)
 	if err == nil {
 		t.Fatal("expected error when organizations.csv is missing")
+	}
+}
+
+// #550: --organization narrows the candidate org list to those whose
+// key fully matches the pattern, BEFORE the prompt / --yes branch ever
+// runs — mirroring transfer's --project_key anchored-regex tests
+// (TestResolveTransferProjectKeys_PatternMatchesAnchored et al.).
+
+func TestConfirmResetOrgs_OrganizationFilterNarrowsCandidates(t *testing.T) {
+	dir := writeResetFixture(t,
+		"sonarqube_org_key,sonarcloud_org_key\norg1,cloud-a\norg2,cloud-b\norg3,cloud-c\n", "")
+
+	var out bytes.Buffer
+	got, err := confirmResetOrgs(dir, true, "cloud-a|cloud-b", nil, strings.NewReader(""), &out)
+	if err != nil {
+		t.Fatalf("confirmResetOrgs: %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{"cloud-a", "cloud-b"}) {
+		t.Errorf("got %+v, want [cloud-a cloud-b]", got)
+	}
+	if strings.Contains(out.String(), "cloud-c") {
+		t.Errorf("cloud-c should have been filtered out by --organization before display, got:\n%s", out.String())
+	}
+}
+
+// A pattern is always compiled as a full-match anchored regex (#529's
+// convention, replicated for --organization): "cloud-a" must not also
+// match "cloud-ab" as a substring.
+func TestConfirmResetOrgs_OrganizationFilterIsAnchored(t *testing.T) {
+	dir := writeResetFixture(t,
+		"sonarqube_org_key,sonarcloud_org_key\norg1,cloud-a\norg2,cloud-ab\n", "")
+
+	got, err := confirmResetOrgs(dir, true, "cloud-a", nil, strings.NewReader(""), io.Discard)
+	if err != nil {
+		t.Fatalf("confirmResetOrgs: %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{"cloud-a"}) {
+		t.Errorf("got %+v, want [cloud-a] (anchored match must exclude cloud-ab)", got)
+	}
+}
+
+func TestConfirmResetOrgs_OrganizationFilterInvalidRegexErrors(t *testing.T) {
+	dir := writeResetFixture(t,
+		"sonarqube_org_key,sonarcloud_org_key\norg1,cloud-a\n", "")
+
+	_, err := confirmResetOrgs(dir, true, "(unterminated", nil, strings.NewReader(""), io.Discard)
+	if err == nil {
+		t.Fatal("expected error for invalid --organization regex")
+	}
+}
+
+func TestConfirmResetOrgs_OrganizationFilterNoMatchErrors(t *testing.T) {
+	dir := writeResetFixture(t,
+		"sonarqube_org_key,sonarcloud_org_key\norg1,cloud-a\n", "")
+
+	_, err := confirmResetOrgs(dir, true, "no-such-org", nil, strings.NewReader(""), io.Discard)
+	if err == nil {
+		t.Fatal("expected error when --organization matches no mapped org")
+	}
+	if !strings.Contains(err.Error(), "no-such-org") {
+		t.Errorf("error %q should name the pattern", err.Error())
+	}
+}
+
+// #550: the --organization filter also narrows the interactive prompt's
+// candidate list, not just the --yes shortcut.
+func TestConfirmResetOrgs_OrganizationFilterAppliesToInteractivePrompt(t *testing.T) {
+	dir := writeResetFixture(t,
+		"sonarqube_org_key,sonarcloud_org_key\norg1,cloud-a\norg2,cloud-b\n", "")
+
+	// Typing the filtered-out org must be treated as unknown, since it
+	// was never displayed as a candidate.
+	_, err := confirmResetOrgs(dir, false, "cloud-a", nil, strings.NewReader("cloud-b\n"), io.Discard)
+	if err == nil {
+		t.Fatal("expected error: cloud-b was filtered out by --organization and should be unknown")
+	}
+}
+
+// #550: when --yes is used, --organization is absent, and the config
+// file already supplied confirmed_orgs, the config-file selection wins
+// over "reset every mapped org."
+func TestConfirmResetOrgs_PresetOrgsUsedWithYesWhenNoOrganizationFlag(t *testing.T) {
+	dir := writeResetFixture(t,
+		"sonarqube_org_key,sonarcloud_org_key\norg1,cloud-a\norg2,cloud-b\norg3,cloud-c\n", "")
+
+	got, err := confirmResetOrgs(dir, true, "", []string{"cloud-a", "cloud-c"}, strings.NewReader(""), io.Discard)
+	if err != nil {
+		t.Fatalf("confirmResetOrgs: %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{"cloud-a", "cloud-c"}) {
+		t.Errorf("got %+v, want [cloud-a cloud-c]", got)
+	}
+}
+
+// --organization takes precedence over a config-file confirmed_orgs
+// preset when both are present.
+func TestConfirmResetOrgs_OrganizationFlagWinsOverPresetOrgs(t *testing.T) {
+	dir := writeResetFixture(t,
+		"sonarqube_org_key,sonarcloud_org_key\norg1,cloud-a\norg2,cloud-b\n", "")
+
+	got, err := confirmResetOrgs(dir, true, "cloud-b", []string{"cloud-a"}, strings.NewReader(""), io.Discard)
+	if err != nil {
+		t.Fatalf("confirmResetOrgs: %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{"cloud-b"}) {
+		t.Errorf("got %+v, want [cloud-b] (--organization should win over config confirmed_orgs)", got)
+	}
+}
+
+func TestConfirmResetOrgs_PresetOrgsUnknownKeyErrors(t *testing.T) {
+	dir := writeResetFixture(t,
+		"sonarqube_org_key,sonarcloud_org_key\norg1,cloud-a\n", "")
+
+	_, err := confirmResetOrgs(dir, true, "", []string{"cloud-a", "typo-org"}, strings.NewReader(""), io.Discard)
+	if err == nil {
+		t.Fatal("expected error for unknown confirmed_orgs key from config file")
+	}
+	if !strings.Contains(err.Error(), "typo-org") {
+		t.Errorf("error %q does not mention the typo'd key", err.Error())
+	}
+}
+
+// presetOrgs only applies to the --yes shortcut; the interactive prompt
+// must still ask, ignoring any config-file preset.
+func TestConfirmResetOrgs_PresetOrgsIgnoredWhenNotAutoYes(t *testing.T) {
+	dir := writeResetFixture(t,
+		"sonarqube_org_key,sonarcloud_org_key\norg1,cloud-a\norg2,cloud-b\n", "")
+
+	got, err := confirmResetOrgs(dir, false, "", []string{"cloud-a"}, strings.NewReader("cloud-b\n"), io.Discard)
+	if err != nil {
+		t.Fatalf("confirmResetOrgs: %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{"cloud-b"}) {
+		t.Errorf("got %+v, want [cloud-b] (interactive prompt wins; presetOrgs only applies to --yes)", got)
 	}
 }

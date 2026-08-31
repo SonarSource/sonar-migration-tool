@@ -114,9 +114,12 @@ func TestCoerceCSVValue(t *testing.T) {
 		{"hello", "hello"},
 		{"", ""},
 		{"null", nil},
+		{"12345", float64(12345)},
 	}
 	for _, tt := range tests {
-		got := coerceCSVValue(tt.input)
+		// "project_count" is a plain data column (not "key"/"*_key"), so
+		// it still gets the normal numeric/JSON coercion behavior.
+		got := coerceCSVValue("project_count", tt.input)
 		switch expected := tt.expected.(type) {
 		case nil:
 			if got != nil {
@@ -130,11 +133,75 @@ func TestCoerceCSVValue(t *testing.T) {
 			if got != expected {
 				t.Errorf("coerceCSVValue(%q) = %v, want %v", tt.input, got, expected)
 			}
+		case float64:
+			if got != expected {
+				t.Errorf("coerceCSVValue(%q) = %v (%T), want %v", tt.input, got, got, expected)
+			}
 		default:
 			// For slices/maps, just check type.
 			if got == nil {
 				t.Errorf("coerceCSVValue(%q) = nil, want %v", tt.input, expected)
 			}
 		}
+	}
+}
+
+// Issue #550: identifier columns (the bare "key" column, and any column
+// whose header ends in "_key") must never be numeric-coerced, even when
+// their value happens to look like a number. Otherwise a purely-numeric
+// sonarcloud_org_key such as "12345" would silently become float64(12345),
+// and downstream code doing `val, _ := row["sonarcloud_org_key"].(string)`
+// would read back "" instead of the real key.
+func TestCoerceCSVValue_IdentifierColumnsNeverCoerced(t *testing.T) {
+	tests := []struct {
+		header string
+		input  string
+	}{
+		{"key", "12345"},
+		{"sonarcloud_org_key", "12345"},
+		{"sonarqube_org_key", "999"},
+		{"cloud_project_key", "42"},
+		{"binding_key", "true"},
+		{"binding_key", `["a","b"]`},
+	}
+	for _, tt := range tests {
+		got := coerceCSVValue(tt.header, tt.input)
+		if got != tt.input {
+			t.Errorf("coerceCSVValue(%q, %q) = %v (%T), want raw string %q", tt.header, tt.input, got, got, tt.input)
+		}
+	}
+}
+
+// Issue #550: LoadCSV must preserve a numeric-looking sonarcloud_org_key
+// as a string, not coerce it to float64, or downstream code relying on a
+// string type assertion silently drops the organization.
+func TestLoadCSV_NumericIdentifierColumnStaysString(t *testing.T) {
+	dir := t.TempDir()
+	contents := "sonarqube_org_key,sonarcloud_org_key,project_count\norg-a,12345,7\n"
+	if err := os.WriteFile(filepath.Join(dir, "organizations.csv"), []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := LoadCSV(dir, "organizations.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+
+	orgKey := rows[0]["sonarcloud_org_key"]
+	s, ok := orgKey.(string)
+	if !ok {
+		t.Fatalf("expected sonarcloud_org_key to be a string, got %v (%T)", orgKey, orgKey)
+	}
+	if s != "12345" {
+		t.Errorf("expected sonarcloud_org_key = %q, got %q", "12345", s)
+	}
+
+	// Non-identifier numeric columns keep their existing coercion.
+	count := rows[0]["project_count"]
+	if f, ok := count.(float64); !ok || f != 7 {
+		t.Errorf("expected project_count = float64(7), got %v (%T)", count, count)
 	}
 }

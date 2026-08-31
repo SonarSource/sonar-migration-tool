@@ -7,6 +7,7 @@ package common
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -77,4 +78,21 @@ func splitRunSuffix(id string) (prefix string, num int, ok bool) {
 		return "", 0, false
 	}
 	return id[:i], n, true
+}
+
+// runIDPattern matches exactly the shape GenerateRunID produces:
+// "YYYY-MM-DD-N" where N is one or more digits (unpadded past 9999,
+// per the #542 fix — see GenerateRunID).
+var runIDPattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}-\d+$`)
+
+// IsValidRunID reports whether id has exactly the shape GenerateRunID
+// produces. Callers that treat directory names as candidate run IDs
+// (e.g. structure.buildURLMappings) should use this to reject anything
+// else before it ever reaches RunIDAfter: since real run IDs always
+// start with a digit and any letter sorts above any digit in ASCII, a
+// non-conforming name (e.g. a directory an attacker planted, like
+// "zzz-evil") would otherwise win RunIDAfter's plain-string-compare
+// fallback over every legitimate dated run (#550).
+func IsValidRunID(id string) bool {
+	return runIDPattern.MatchString(id)
 }

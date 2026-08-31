@@ -5,8 +5,8 @@
 package summary
 
 import (
-	"path/filepath"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -24,7 +24,7 @@ func TestCollectSummary_DroppedUserPerms(t *testing.T) {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatalf("mkdir runDir: %v", err)
 	}
-	extractDir := filepath.Join(dir, "extract-01")
+	extractDir := filepath.Join(dir, "2026-08-20-0001")
 	writeExtractMeta(t, extractDir, "https://sq.example.com")
 
 	// ── Quality Gates ───────────────────────────────────────────
@@ -91,10 +91,10 @@ func TestCollectSummary_DroppedUserPerms(t *testing.T) {
 	// extract carries it as `templateId`.
 	writeTaskJSONL(t, runDir, "createPermissionTemplates", []map[string]any{
 		{
-			"name":                 "Banking Template",
-			"source_template_key":  "uuid-banking-tpl",
-			"cloud_template_id":    "cloud_banking_tpl",
-			"sonarcloud_org_key":   "org1",
+			"name":                "Banking Template",
+			"source_template_key": "uuid-banking-tpl",
+			"cloud_template_id":   "cloud_banking_tpl",
+			"sonarcloud_org_key":  "org1",
 		},
 	})
 	writeTaskJSONL(t, runDir, "generateTemplateMappings", []map[string]any{

@@ -1436,7 +1436,6 @@ func TestTasksWithFailingServer(t *testing.T) {
 		"setProjectSettings",
 		"setProjectTags",
 		// Permission tasks.
-		"setOrgGroupPermissions",
 		"setProfileGroupPermissions",
 		"createMigrationGroups",
 		"addMigrationGroupToTemplates",
@@ -1474,6 +1473,28 @@ func TestTasksWithFailingServer(t *testing.T) {
 		err := def.Run(context.Background(), e)
 		if err != nil {
 			t.Errorf("task %q should warn-and-swallow, but returned error: %v", taskName, err)
+		}
+	}
+
+	// Issue #550 (Fix B): a handful of permission-grant tasks now surface
+	// a real task error when EVERY grant they attempted failed, instead
+	// of silently swallowing a 100% failure like the tasks above (partial
+	// failure is still swallowed — only total failure changed). Against
+	// this fully-failing server, setOrgGroupPermissions attempts exactly
+	// one grant (sonar-users→Members "scan", from setupExtractData) and
+	// it fails, so it must now report the error so the DAG halts instead
+	// of proceeding as if the group had been granted anything.
+	totalFailureTasks := []string{
+		"setOrgGroupPermissions",
+	}
+	for _, taskName := range totalFailureTasks {
+		def, ok := reg[taskName]
+		if !ok {
+			t.Errorf("task %q not found in registry", taskName)
+			continue
+		}
+		if err := def.Run(context.Background(), e); err == nil {
+			t.Errorf("task %q should surface an error when every grant fails (issue #550), got nil", taskName)
 		}
 	}
 }
