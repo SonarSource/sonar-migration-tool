@@ -13,6 +13,7 @@ import (
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	sqapi "github.com/sonar-solutions/sq-api-go"
 	"github.com/sonar-solutions/sq-api-go/cloud"
+	"github.com/sonar-solutions/sq-api-go/types"
 )
 
 // createTasks returns tasks that create entities in SonarQube Cloud.
@@ -82,98 +83,103 @@ func runCreateProjects(ctx context.Context, e *Executor) error {
 					failAPI(counter, e.Logger, "createProjects: create failed", err, "key", key)
 					return nil
 				}
-				// SonarQube Cloud project keys are GLOBALLY unique, not
-				// org-scoped, so "key already exists" doesn't guarantee
-				// the existing project is in OUR target org. If it
-				// isn't, downstream tasks (setProjectSettings,
-				// setGlobalSettings fan-out, etc.) will issue PATCHes
-				// against a phantom project and get 404s. Verify the
-				// project is actually accessible in orgKey before
-				// recording it (issue #193).
-				exists, verifyErr := e.Cloud.Projects.ExistsInOrg(ctx, cloudKey, orgKey)
-				if verifyErr != nil {
-					failAPI(counter, e.Logger, "createProjects: could not verify already-existing project belongs to target org",
-						verifyErr, "source_key", key, "cloud_key", cloudKey, "org", orgKey)
-					return nil
-				}
-				if !exists {
-					counter.Fail()
-					e.Logger.Warn("createProjects: key already exists but project is not in target org",
-						"source_key", key, "cloud_key", cloudKey, "org", orgKey)
-					// #525: write an explicit failure record instead of
-					// silently dropping the project. Without this, the
-					// project only ends up in the report's Failed bucket
-					// incidentally (via a generic requests.log HTTP-status
-					// scan) with SonarQube Cloud's raw "already exists"
-					// string, which doesn't explain that the conflict is
-					// cross-organization or what to do about it.
-					msg := fmt.Sprintf(
-						"project key %q already exists under a different SonarQube Cloud organization than %q — "+
-							"SonarQube Cloud project keys must be unique across the entire SonarQube Cloud instance "+
-							"(not just within one enterprise or organization); "+
-							"rename the conflicting project on the target, or choose a different --project_key_pattern",
-						cloudKey, orgKey)
-					result := common.EnrichRaw(item, map[string]any{
-						"cloud_project_key":  cloudKey,
-						"sonarcloud_org_key": orgKey,
-						"status":             "failed",
-						"error":              msg,
-					})
-					return w.WriteOne(result)
-				}
-				counter.Success()
-				e.Logger.Info("createProjects: already exists", "source_key", key, "cloud_key", cloudKey, "org", orgKey)
-			} else {
-				requestedKey := cloudKey
-				cloudKey = proj.Key
-				if cloudKey == "" {
-					// Defensive-correctness guard (#550): Organization is a
-					// required parameter of the Create API call, so a
-					// successful create is structurally guaranteed to be in
-					// the requested org — there's no ExistsInOrg-style
-					// ambiguity on this branch. But nothing otherwise
-					// guarantees proj.Key is non-empty, and an empty
-					// cloud_project_key would silently propagate into every
-					// downstream task that reads this task's output
-					// (permission grants, settings, quality profile/gate
-					// wiring, etc.), each issuing calls against a blank
-					// project key. Fail loudly instead, mirroring the
-					// already-exists-but-wrong-org failure record shape
-					// above (#525) so consumers of this task's JSONL see a
-					// consistent "failed" shape either way.
-					counter.Fail()
-					e.Logger.Warn("createProjects: create succeeded but server returned an empty project key",
-						"source_key", key, "requested_key", requestedKey, "name", name, "org", orgKey)
-					msg := fmt.Sprintf(
-						"project %q: SonarQube Cloud returned a successful create response with an empty project key; "+
-							"refusing to record cloud_project_key as empty",
-						requestedKey)
-					result := common.EnrichRaw(item, map[string]any{
-						"cloud_project_key":  requestedKey,
-						"sonarcloud_org_key": orgKey,
-						"status":             "failed",
-						"error":              msg,
-					})
-					return w.WriteOne(result)
-				}
-				counter.Success()
-				if cloudKey != requestedKey {
-					// Not a bug — the API is allowed to normalize/rewrite
-					// the requested key. Audit trail only.
-					e.Logger.Debug("createProjects: server returned a different key than requested",
-						"source_key", key, "requested", requestedKey, "actual", cloudKey, "org", orgKey)
-				}
-				e.Logger.Debug("project operation: created new project",
-					"source_key", key, "cloud_key", cloudKey, "name", name, "org", orgKey)
+				return handleExistingProject(ctx, e, counter, w, item, key, cloudKey, orgKey)
 			}
-
-			result := common.EnrichRaw(item, map[string]any{
-				"cloud_project_key":  cloudKey,
-				"sonarcloud_org_key": orgKey,
-			})
-			return w.WriteOne(result)
+			return handleFreshProject(e, counter, w, item, key, cloudKey, name, orgKey, proj)
 		})
 	return err
+}
+
+// handleExistingProject handles the "already exists" branch of
+// runCreateProjects. SonarQube Cloud project keys are GLOBALLY unique,
+// not org-scoped, so "key already exists" doesn't guarantee the
+// existing project is in OUR target org. If it isn't, downstream tasks
+// (setProjectSettings, setGlobalSettings fan-out, etc.) will issue
+// PATCHes against a phantom project and get 404s — verify the project
+// is actually accessible in orgKey before recording it (issue #193).
+func handleExistingProject(ctx context.Context, e *Executor, counter *TaskCounter, w *common.ChunkWriter, item json.RawMessage, key, cloudKey, orgKey string) error {
+	exists, verifyErr := e.Cloud.Projects.ExistsInOrg(ctx, cloudKey, orgKey)
+	if verifyErr != nil {
+		failAPI(counter, e.Logger, "createProjects: could not verify already-existing project belongs to target org",
+			verifyErr, "source_key", key, "cloud_key", cloudKey, "org", orgKey)
+		return nil
+	}
+	if !exists {
+		counter.Fail()
+		e.Logger.Warn("createProjects: key already exists but project is not in target org",
+			"source_key", key, "cloud_key", cloudKey, "org", orgKey)
+		// #525: write an explicit failure record instead of silently
+		// dropping the project. Without this, the project only ends up
+		// in the report's Failed bucket incidentally (via a generic
+		// requests.log HTTP-status scan) with SonarQube Cloud's raw
+		// "already exists" string, which doesn't explain that the
+		// conflict is cross-organization or what to do about it.
+		msg := fmt.Sprintf(
+			"project key %q already exists under a different SonarQube Cloud organization than %q — "+
+				"SonarQube Cloud project keys must be unique across the entire SonarQube Cloud instance "+
+				"(not just within one enterprise or organization); "+
+				"rename the conflicting project on the target, or choose a different --project_key_pattern",
+			cloudKey, orgKey)
+		result := common.EnrichRaw(item, map[string]any{
+			"cloud_project_key":  cloudKey,
+			"sonarcloud_org_key": orgKey,
+			"status":             "failed",
+			"error":              msg,
+		})
+		return w.WriteOne(result)
+	}
+	counter.Success()
+	e.Logger.Info("createProjects: already exists", "source_key", key, "cloud_key", cloudKey, "org", orgKey)
+	result := common.EnrichRaw(item, map[string]any{
+		"cloud_project_key":  cloudKey,
+		"sonarcloud_org_key": orgKey,
+	})
+	return w.WriteOne(result)
+}
+
+// handleFreshProject handles the fresh-success branch of
+// runCreateProjects. Organization is a required parameter of the
+// Create API call, so a successful create is structurally guaranteed
+// to be in the requested org — there's no ExistsInOrg-style ambiguity
+// here. But nothing otherwise guarantees proj.Key is non-empty, and an
+// empty cloud_project_key would silently propagate into every
+// downstream task that reads this task's output (permission grants,
+// settings, quality profile/gate wiring, etc.). Fail loudly instead,
+// mirroring the already-exists-but-wrong-org failure record shape
+// above (#525) so consumers of this task's JSONL see a consistent
+// "failed" shape either way (issue #550).
+func handleFreshProject(e *Executor, counter *TaskCounter, w *common.ChunkWriter, item json.RawMessage, key, requestedKey, name, orgKey string, proj *types.Project) error {
+	cloudKey := proj.Key
+	if cloudKey == "" {
+		counter.Fail()
+		e.Logger.Warn("createProjects: create succeeded but server returned an empty project key",
+			"source_key", key, "requested_key", requestedKey, "name", name, "org", orgKey)
+		msg := fmt.Sprintf(
+			"project %q: SonarQube Cloud returned a successful create response with an empty project key; "+
+				"refusing to record cloud_project_key as empty",
+			requestedKey)
+		result := common.EnrichRaw(item, map[string]any{
+			"cloud_project_key":  requestedKey,
+			"sonarcloud_org_key": orgKey,
+			"status":             "failed",
+			"error":              msg,
+		})
+		return w.WriteOne(result)
+	}
+	counter.Success()
+	if cloudKey != requestedKey {
+		// Not a bug — the API is allowed to normalize/rewrite the
+		// requested key. Audit trail only.
+		e.Logger.Debug("createProjects: server returned a different key than requested",
+			"source_key", key, "requested", requestedKey, "actual", cloudKey, "org", orgKey)
+	}
+	e.Logger.Debug("project operation: created new project",
+		"source_key", key, "cloud_key", cloudKey, "name", name, "org", orgKey)
+	result := common.EnrichRaw(item, map[string]any{
+		"cloud_project_key":  cloudKey,
+		"sonarcloud_org_key": orgKey,
+	})
+	return w.WriteOne(result)
 }
 
 func runCreateProfiles(ctx context.Context, e *Executor) error {

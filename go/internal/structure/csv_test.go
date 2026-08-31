@@ -7,6 +7,7 @@ package structure
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -120,28 +121,8 @@ func TestCoerceCSVValue(t *testing.T) {
 		// "project_count" is a plain data column (not "key"/"*_key"), so
 		// it still gets the normal numeric/JSON coercion behavior.
 		got := coerceCSVValue("project_count", tt.input)
-		switch expected := tt.expected.(type) {
-		case nil:
-			if got != nil {
-				t.Errorf("coerceCSVValue(%q) = %v, want nil", tt.input, got)
-			}
-		case bool:
-			if got != expected {
-				t.Errorf("coerceCSVValue(%q) = %v, want %v", tt.input, got, expected)
-			}
-		case string:
-			if got != expected {
-				t.Errorf("coerceCSVValue(%q) = %v, want %v", tt.input, got, expected)
-			}
-		case float64:
-			if got != expected {
-				t.Errorf("coerceCSVValue(%q) = %v (%T), want %v", tt.input, got, got, expected)
-			}
-		default:
-			// For slices/maps, just check type.
-			if got == nil {
-				t.Errorf("coerceCSVValue(%q) = nil, want %v", tt.input, expected)
-			}
+		if !reflect.DeepEqual(got, tt.expected) {
+			t.Errorf("coerceCSVValue(%q) = %v (%T), want %v (%T)", tt.input, got, got, tt.expected, tt.expected)
 		}
 	}
 }

@@ -358,7 +358,7 @@ func TestCreateProjects_EmptyKeyOnCreate(t *testing.T) {
 	// No record should ever carry an empty cloud_project_key dressed up as
 	// a normal (non-failed) entry — downstream tasks key their lookups off
 	// this field.
-	if key := extractField(items[0], "cloud_project_key"); key == "" {
+	if extractField(items[0], "cloud_project_key") == "" {
 		t.Error("expected cloud_project_key to fall back to the originally-requested key, not be empty")
 	}
 	if status := extractField(items[0], "status"); status != "failed" {

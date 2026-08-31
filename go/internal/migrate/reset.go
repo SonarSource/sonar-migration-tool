@@ -105,24 +105,7 @@ func RunReset(ctx context.Context, cfg ResetConfig) error {
 	registry := BuildMigrateRegistry(allDefs)
 	registry = FilterByEdition(registry, edition)
 
-	// Target the delete* tasks plus the curated set of reset* tasks
-	// whose dependency chains do not pull migrate-only create*/set*
-	// work back into the plan. The other reset* tasks
-	// (resetDefaultProfiles, resetDefaultGates, resetPermissionTemplates)
-	// are pulled into the plan as dependencies of the corresponding
-	// delete* tasks (so they run first to clear the current default
-	// before the destroy call) and are intentionally NOT named here.
-	resetPrefixTargets := map[string]bool{
-		"resetGlobalSettings": true,
-	}
-	var targets []string
-	for name := range registry {
-		if strings.HasPrefix(name, "delete") || resetPrefixTargets[name] {
-			targets = append(targets, name)
-		}
-	}
-
-	taskSet := ResolveDependencies(targets, registry)
+	taskSet := ResolveDependencies(resetTargets(registry), registry)
 	if taskSet == nil {
 		return fmt.Errorf("cannot resolve dependencies for delete tasks")
 	}
@@ -168,10 +151,7 @@ func RunReset(ctx context.Context, cfg ResetConfig) error {
 		Logger:    logger,
 	}
 	if len(cfg.ConfirmedOrgs) > 0 {
-		executor.ResetConfirmedOrgs = make(map[string]bool, len(cfg.ConfirmedOrgs))
-		for _, o := range cfg.ConfirmedOrgs {
-			executor.ResetConfirmedOrgs[o] = true
-		}
+		executor.ResetConfirmedOrgs = toSet(cfg.ConfirmedOrgs)
 	}
 
 	for i, phase := range plan {
@@ -186,6 +166,35 @@ func RunReset(ctx context.Context, cfg ResetConfig) error {
 
 	fmt.Printf("%s v%s - Reset Complete: %s\n", version.ToolName, version.Version, runID)
 	return nil
+}
+
+// resetTargets selects the delete* tasks plus the curated set of reset*
+// tasks whose dependency chains do not pull migrate-only create*/set*
+// work back into the plan. The other reset* tasks
+// (resetDefaultProfiles, resetDefaultGates, resetPermissionTemplates)
+// are pulled into the plan as dependencies of the corresponding
+// delete* tasks (so they run first to clear the current default before
+// the destroy call) and are intentionally not named here.
+func resetTargets(registry map[string]*TaskDef) []string {
+	resetPrefixTargets := map[string]bool{
+		"resetGlobalSettings": true,
+	}
+	var targets []string
+	for name := range registry {
+		if strings.HasPrefix(name, "delete") || resetPrefixTargets[name] {
+			targets = append(targets, name)
+		}
+	}
+	return targets
+}
+
+// toSet returns items as a set for O(1) membership checks.
+func toSet(items []string) map[string]bool {
+	set := make(map[string]bool, len(items))
+	for _, item := range items {
+		set[item] = true
+	}
+	return set
 }
 
 // printResetDryRunPlan renders the reset plan for --dry-run (#550):

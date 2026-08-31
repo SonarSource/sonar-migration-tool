@@ -178,17 +178,10 @@ func confirmResetOrgs(exportDir string, autoYes bool, orgPattern string, presetO
 		return nil, err
 	}
 	if orgPattern != "" {
-		re, err := anchoredResetOrgPattern(orgPattern)
+		orgs, err = filterOrgsByPattern(orgs, orgPattern)
 		if err != nil {
-			return nil, fmt.Errorf("invalid --%s pattern %q: %w", flagResetOrganization, orgPattern, err)
+			return nil, err
 		}
-		var filtered []string
-		for _, o := range orgs {
-			if re.MatchString(o) {
-				filtered = append(filtered, o)
-			}
-		}
-		orgs = filtered
 		if len(orgs) == 0 {
 			return nil, fmt.Errorf("no SonarCloud organization key matches --%s %q in %s/organizations.csv", flagResetOrganization, orgPattern, exportDir)
 		}
@@ -203,35 +196,73 @@ func confirmResetOrgs(exportDir string, autoYes bool, orgPattern string, presetO
 		fmt.Fprintf(out, "  - %s (%d projects)\n", o, projCounts[o])
 	}
 
-	if autoYes {
-		if orgPattern == "" && len(presetOrgs) > 0 {
-			known := make(map[string]bool, len(orgs))
-			for _, o := range orgs {
-				known[o] = true
-			}
-			var confirmed, unknown []string
-			seen := make(map[string]bool, len(presetOrgs))
-			for _, p := range presetOrgs {
-				if seen[p] {
-					continue
-				}
-				seen[p] = true
-				if known[p] {
-					confirmed = append(confirmed, p)
-				} else {
-					unknown = append(unknown, p)
-				}
-			}
-			if len(unknown) > 0 {
-				return nil, fmt.Errorf("confirmed_orgs from config file contains unknown org key(s): %q — must be one of the listed orgs", strings.Join(unknown, ", "))
-			}
-			sort.Strings(confirmed)
-			fmt.Fprintf(out, "Using confirmed_orgs from config file: %s\n", strings.Join(confirmed, ", "))
-			return confirmed, nil
-		}
-		return orgs, nil
+	known := make(map[string]bool, len(orgs))
+	for _, o := range orgs {
+		known[o] = true
 	}
 
+	if autoYes {
+		return confirmResetOrgsAutoYes(orgs, orgPattern, presetOrgs, known, out)
+	}
+	return confirmResetOrgsInteractive(known, in, out)
+}
+
+// filterOrgsByPattern narrows orgs to those whose key fully matches the
+// anchored --organization regex pattern (#550).
+func filterOrgsByPattern(orgs []string, orgPattern string) ([]string, error) {
+	re, err := anchoredResetOrgPattern(orgPattern)
+	if err != nil {
+		return nil, fmt.Errorf("invalid --%s pattern %q: %w", flagResetOrganization, orgPattern, err)
+	}
+	var filtered []string
+	for _, o := range orgs {
+		if re.MatchString(o) {
+			filtered = append(filtered, o)
+		}
+	}
+	return filtered, nil
+}
+
+// resolveOrgSelection deduplicates candidates (first-seen order) and
+// splits them into those present in known vs. not. Shared by the
+// interactive-typed-input path and the config-file presetOrgs path,
+// which otherwise repeat the identical dedupe-and-classify logic.
+func resolveOrgSelection(candidates []string, known map[string]bool) (confirmed, unknown []string) {
+	seen := make(map[string]bool, len(candidates))
+	for _, c := range candidates {
+		if seen[c] {
+			continue
+		}
+		seen[c] = true
+		if known[c] {
+			confirmed = append(confirmed, c)
+		} else {
+			unknown = append(unknown, c)
+		}
+	}
+	return confirmed, unknown
+}
+
+// confirmResetOrgsAutoYes implements the --yes shortcut: honor a
+// config-file confirmed_orgs selection when present and --organization
+// didn't already narrow the list, else return every candidate org.
+func confirmResetOrgsAutoYes(orgs []string, orgPattern string, presetOrgs []string, known map[string]bool, out io.Writer) ([]string, error) {
+	if orgPattern == "" && len(presetOrgs) > 0 {
+		confirmed, unknown := resolveOrgSelection(presetOrgs, known)
+		if len(unknown) > 0 {
+			return nil, fmt.Errorf("confirmed_orgs from config file contains unknown org key(s): %q — must be one of the listed orgs", strings.Join(unknown, ", "))
+		}
+		sort.Strings(confirmed)
+		fmt.Fprintf(out, "Using confirmed_orgs from config file: %s\n", strings.Join(confirmed, ", "))
+		return confirmed, nil
+	}
+	return orgs, nil
+}
+
+// confirmResetOrgsInteractive prompts the operator to type the org keys
+// to reset, aborting cleanly on an empty line/EOF and erroring on any
+// unknown key.
+func confirmResetOrgsInteractive(known map[string]bool, in io.Reader, out io.Writer) ([]string, error) {
 	fmt.Fprint(out, "\nType the org keys to reset (whitespace-separated), or press [Enter] to abort: ")
 	reader := bufio.NewReader(in)
 	line, err := reader.ReadString('\n')
@@ -244,24 +275,7 @@ func confirmResetOrgs(exportDir string, autoYes bool, orgPattern string, presetO
 		return nil, nil
 	}
 
-	known := make(map[string]bool, len(orgs))
-	for _, o := range orgs {
-		known[o] = true
-	}
-
-	var confirmed, unknown []string
-	seen := make(map[string]bool, len(typed))
-	for _, t := range typed {
-		if seen[t] {
-			continue
-		}
-		seen[t] = true
-		if known[t] {
-			confirmed = append(confirmed, t)
-		} else {
-			unknown = append(unknown, t)
-		}
-	}
+	confirmed, unknown := resolveOrgSelection(typed, known)
 	if len(unknown) > 0 {
 		return nil, fmt.Errorf("unknown org key(s): %q — must be one of the listed orgs", strings.Join(unknown, ", "))
 	}
