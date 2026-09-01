@@ -180,17 +180,8 @@ func resolveSyncIssuesConfig(cmd *cobra.Command) (syncIssuesConfig, error) {
 	applyFlagString(cmd, flagProjectKeyPattern, &cfg.projectKeyPattern)
 	applyFlagString(cmd, flagEnterpriseKey, &cfg.enterpriseKey)
 	applyFlagString(cmd, flagExportDir, &cfg.exportDir)
-	// #528 — sync-issues talks to both source and target, so
-	// --concurrency / --timeout set both sides at once. The config
-	// file remains the only way to give the two sides different values.
-	if cmd.Flags().Changed(flagConcurrency) {
-		v, _ := cmd.Flags().GetInt(flagConcurrency)
-		cfg.sourceConcurrency, cfg.targetConcurrency = v, v
-	}
-	if cmd.Flags().Changed(flagTimeout) {
-		v, _ := cmd.Flags().GetInt(flagTimeout)
-		cfg.sourceTimeout, cfg.targetTimeout = v, v
-	}
+	applyFlagIntBothSides(cmd, flagConcurrency, &cfg.sourceConcurrency, &cfg.targetConcurrency)
+	applyFlagIntBothSides(cmd, flagTimeout, &cfg.sourceTimeout, &cfg.targetTimeout)
 	applyFlagString(cmd, flagPEMFilePath, &cfg.pemFilePath)
 	applyFlagString(cmd, flagKeyFilePath, &cfg.keyFilePath)
 	applyFlagString(cmd, flagCertPassword, &cfg.certPassword)

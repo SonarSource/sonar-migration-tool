@@ -239,6 +239,18 @@ func applyFlagInt(cmd *cobra.Command, name string, target *int) {
 	}
 }
 
+// applyFlagIntBothSides sets both source and target to the CLI flag's value
+// when it was passed — used by transfer/sync-issues for --concurrency and
+// --timeout, which apply to both sides at once since each command talks to
+// source and target in one invocation (#528). The config file remains the
+// only way to give the two sides different values.
+func applyFlagIntBothSides(cmd *cobra.Command, name string, source, target *int) {
+	if cmd.Flags().Changed(name) {
+		v, _ := cmd.Flags().GetInt(name)
+		*source, *target = v, v
+	}
+}
+
 func applyFlagBool(cmd *cobra.Command, name string, target *bool) {
 	if cmd.Flags().Changed(name) {
 		*target, _ = cmd.Flags().GetBool(name)
@@ -344,18 +356,8 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 	applyFlagString(cmd, flagEnterpriseKey, &cfg.enterpriseKey)
 	applyFlagString(cmd, flagEdition, &cfg.edition)
 	applyFlagString(cmd, flagExportDir, &cfg.exportDir)
-	// #528 — unlike extract/migrate (each inherently single-sided),
-	// transfer talks to both source and target, so --concurrency /
-	// --timeout set both sides at once. The config file remains the
-	// only way to give the two sides different values.
-	if cmd.Flags().Changed(flagConcurrency) {
-		v, _ := cmd.Flags().GetInt(flagConcurrency)
-		cfg.sourceConcurrency, cfg.targetConcurrency = v, v
-	}
-	if cmd.Flags().Changed(flagTimeout) {
-		v, _ := cmd.Flags().GetInt(flagTimeout)
-		cfg.sourceTimeout, cfg.targetTimeout = v, v
-	}
+	applyFlagIntBothSides(cmd, flagConcurrency, &cfg.sourceConcurrency, &cfg.targetConcurrency)
+	applyFlagIntBothSides(cmd, flagTimeout, &cfg.sourceTimeout, &cfg.targetTimeout)
 	applyFlagString(cmd, flagPEMFilePath, &cfg.pemFilePath)
 	applyFlagString(cmd, flagKeyFilePath, &cfg.keyFilePath)
 	applyFlagString(cmd, flagCertPassword, &cfg.certPassword)
