@@ -385,6 +385,9 @@ func distinctRuleKeys(hotspots []matchableHotspot) []string {
 func runSyncHotspotMetadata(ctx context.Context, e *Executor) error {
 	return forEachMigrateItem(ctx, e, "syncHotspotMetadata", "createProjects",
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
+			if isFailedMigrateRecord(item) {
+				return nil
+			}
 			cloudKey := extractField(item, "cloud_project_key")
 			orgKey := extractField(item, "sonarcloud_org_key")
 			serverURL := extractField(item, "server_url")

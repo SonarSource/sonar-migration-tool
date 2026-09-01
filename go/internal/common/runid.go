@@ -7,6 +7,7 @@ package common
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -77,4 +78,26 @@ func splitRunSuffix(id string) (prefix string, num int, ok bool) {
 		return "", 0, false
 	}
 	return id[:i], n, true
+}
+
+// runIDPattern matches the shape GenerateRunID produces today
+// ("YYYY-MM-DD-N", N unpadded past 9999 per the #542 fix) as well as
+// the historical "MM-DD-YYYY-N" naming used before issue #108, which
+// still exists in export directories on users' disks — see the
+// identical pattern in internal/gui/history.go and
+// internal/regtest/suite.go. A directory in either shape is a
+// legitimate candidate; anything else is not.
+var runIDPattern = regexp.MustCompile(`^(\d{2}-\d{2}-\d{4}|\d{4}-\d{2}-\d{2})-\d+$`)
+
+// IsValidRunID reports whether id has the shape GenerateRunID produces
+// today, or the legacy pre-#108 shape still found on disk (see
+// runIDPattern). Callers that treat directory names as candidate run
+// IDs (e.g. structure.buildURLMappings) should use this to reject
+// anything else before it ever reaches RunIDAfter: since every
+// legitimate run ID shape starts with a digit and any letter sorts
+// above any digit in ASCII, a non-conforming name (e.g. a directory an
+// attacker planted, like "zzz-evil") would otherwise win RunIDAfter's
+// plain-string-compare fallback over every legitimate dated run (#550).
+func IsValidRunID(id string) bool {
+	return runIDPattern.MatchString(id)
 }

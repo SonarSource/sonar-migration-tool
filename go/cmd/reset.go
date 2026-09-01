@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -18,6 +19,18 @@ import (
 )
 
 const flagResetYes = "yes"
+
+// flagResetOrganization narrows the candidate SonarCloud organizations
+// considered for reset to those whose key fully matches the given
+// pattern (#550). Applied before confirmResetOrgs's prompt / --yes
+// branch, mirroring --project_key's anchored-regex semantics on
+// transfer (see anchoredResetOrgPattern).
+const flagResetOrganization = "organization"
+
+// flagResetDryRun causes the reset command to build and print the
+// reset plan (organizations in scope, tasks that would run) without
+// making any destructive API call (#550).
+const flagResetDryRun = "dry-run"
 
 var resetCmd = &cobra.Command{
 	Use:   "reset [token] [enterprise_key]",
@@ -34,8 +47,23 @@ var resetCmd = &cobra.Command{
 		}
 
 		autoYes, _ := cmd.Flags().GetBool(flagResetYes)
-		fmt.Fprintln(os.Stdout, "WARNING: This will delete migrated entities from the listed SonarCloud organizations.")
-		confirmed, err := confirmResetOrgs(cfg.ExportDirectory, autoYes, os.Stdin, os.Stdout)
+		orgPattern, _ := cmd.Flags().GetString(flagResetOrganization)
+		dryRun, _ := cmd.Flags().GetBool(flagResetDryRun)
+
+		if dryRun {
+			fmt.Fprintln(os.Stdout, "Dry run: no organizations will be modified.")
+		} else {
+			fmt.Fprintln(os.Stdout, "WARNING: This will delete migrated entities from the listed SonarCloud organizations.")
+		}
+		// cfg.ConfirmedOrgs may already carry a config-file-supplied
+		// confirmed_orgs list (#550) — pass it through as the preset so
+		// a --yes run without --organization can honor it instead of
+		// defaulting to "every mapped org". A dry run previews the plan
+		// without deleting anything, so it also skips the interactive
+		// "type the org keys to confirm" prompt — there's nothing to
+		// confirm — and takes the (possibly --organization-filtered)
+		// candidate list the same way --yes does.
+		confirmed, err := confirmResetOrgs(cfg.ExportDirectory, autoYes || dryRun, orgPattern, cfg.ConfirmedOrgs, os.Stdin, os.Stdout)
 		if err != nil {
 			return err
 		}
@@ -46,11 +74,14 @@ var resetCmd = &cobra.Command{
 			return nil
 		}
 		cfg.ConfirmedOrgs = confirmed
+		cfg.DryRun = dryRun
 
 		if err := migrate.RunReset(cmd.Context(), cfg); err != nil {
 			return err
 		}
-		printExportDirNotice(cfg.ExportDirectory)
+		if !dryRun {
+			printExportDirNotice(cfg.ExportDirectory)
+		}
 		return nil
 	},
 }
@@ -66,6 +97,8 @@ func init() {
 	f.Int("concurrency", 25, "Maximum number of concurrent requests")
 	f.String("export_directory", DefaultExportDirectory, "Directory to place all interim files")
 	f.Bool(flagResetYes, false, "Skip the interactive confirmation prompt and reset every listed organization (intended for non-interactive / scripted use). #381.")
+	f.String(flagResetOrganization, "", "Regexp (anchored full-match) narrowing the candidate organizations to reset to those whose sonarcloud_org_key matches, applied before the confirmation prompt / --yes. E.g. \"BANKING_.+\" matches every org key starting with BANKING_. #550.")
+	f.Bool(flagResetDryRun, false, "Print which organizations are in scope and which tasks would run, without deleting anything. #550.")
 }
 
 func buildResetConfig(cmd *cobra.Command, args []string) (migrate.ResetConfig, error) {
@@ -108,6 +141,16 @@ func buildResetConfig(cmd *cobra.Command, args []string) (migrate.ResetConfig, e
 	return cfg, nil
 }
 
+// anchoredResetOrgPattern compiles pattern as a full-match regex,
+// implicitly anchored with ^ and $ (#550, mirroring #529's
+// anchoredProjectKeyPattern on transfer) — "BANKING_.+" matches only
+// org keys starting with "BANKING_", never a key with that substring
+// somewhere in the middle. A plain literal org key with no regex
+// metacharacters matches only itself.
+func anchoredResetOrgPattern(pattern string) (*regexp.Regexp, error) {
+	return regexp.Compile("^(?:" + pattern + ")$")
+}
+
 // confirmResetOrgs gates the destructive reset behind an interactive
 // confirmation prompt (#381). It lists every mapped SonarCloud org
 // with its project count and asks the operator to type the subset
@@ -119,13 +162,37 @@ func buildResetConfig(cmd *cobra.Command, args []string) (migrate.ResetConfig, e
 //   - (nil, err) on a malformed selection (unknown org key, etc.)
 //     or an underlying read / CSV failure.
 //
-// When autoYes is true, the helper prints the same list but skips
-// the prompt and returns every org — for non-interactive callers
-// (CI, scripts) that have already taken responsibility for the wipe.
-func confirmResetOrgs(exportDir string, autoYes bool, in io.Reader, out io.Writer) ([]string, error) {
+// orgPattern, when non-empty, is compiled as an anchored full-match
+// regex (#550, see anchoredResetOrgPattern) and narrows the candidate
+// org list down to matching keys BEFORE anything else in this function
+// runs — the prompt, the --yes shortcut, and presetOrgs all only ever
+// see the filtered set.
+//
+// presetOrgs is an optional config-file-supplied confirmed_orgs list
+// (#550). When autoYes is true and orgPattern is empty, a non-empty
+// presetOrgs is validated against the candidate list and used directly
+// instead of "every candidate org" — letting a config-driven --yes run
+// honor a scoped selection instead of defaulting to the whole
+// enterprise. presetOrgs is ignored in every other case (interactive
+// prompt, or when --organization already narrowed the list).
+//
+// When autoYes is true and neither orgPattern nor presetOrgs apply,
+// the helper prints the candidate list but skips the prompt and
+// returns every candidate org — for non-interactive callers (CI,
+// scripts) that have already taken responsibility for the wipe.
+func confirmResetOrgs(exportDir string, autoYes bool, orgPattern string, presetOrgs []string, in io.Reader, out io.Writer) ([]string, error) {
 	orgs, err := loadResetTargetOrgs(exportDir)
 	if err != nil {
 		return nil, err
+	}
+	if orgPattern != "" {
+		orgs, err = filterOrgsByPattern(orgs, orgPattern)
+		if err != nil {
+			return nil, err
+		}
+		if len(orgs) == 0 {
+			return nil, fmt.Errorf("no SonarCloud organization key matches --%s %q in %s/organizations.csv", flagResetOrganization, orgPattern, exportDir)
+		}
 	}
 	if len(orgs) == 0 {
 		return nil, fmt.Errorf("no SonarCloud organizations found in %s/organizations.csv — nothing to reset", exportDir)
@@ -137,10 +204,73 @@ func confirmResetOrgs(exportDir string, autoYes bool, in io.Reader, out io.Write
 		fmt.Fprintf(out, "  - %s (%d projects)\n", o, projCounts[o])
 	}
 
-	if autoYes {
-		return orgs, nil
+	known := make(map[string]bool, len(orgs))
+	for _, o := range orgs {
+		known[o] = true
 	}
 
+	if autoYes {
+		return confirmResetOrgsAutoYes(orgs, orgPattern, presetOrgs, known, out)
+	}
+	return confirmResetOrgsInteractive(known, in, out)
+}
+
+// filterOrgsByPattern narrows orgs to those whose key fully matches the
+// anchored --organization regex pattern (#550).
+func filterOrgsByPattern(orgs []string, orgPattern string) ([]string, error) {
+	re, err := anchoredResetOrgPattern(orgPattern)
+	if err != nil {
+		return nil, fmt.Errorf("invalid --%s pattern %q: %w", flagResetOrganization, orgPattern, err)
+	}
+	var filtered []string
+	for _, o := range orgs {
+		if re.MatchString(o) {
+			filtered = append(filtered, o)
+		}
+	}
+	return filtered, nil
+}
+
+// resolveOrgSelection deduplicates candidates (first-seen order) and
+// splits them into those present in known vs. not. Shared by the
+// interactive-typed-input path and the config-file presetOrgs path,
+// which otherwise repeat the identical dedupe-and-classify logic.
+func resolveOrgSelection(candidates []string, known map[string]bool) (confirmed, unknown []string) {
+	seen := make(map[string]bool, len(candidates))
+	for _, c := range candidates {
+		if seen[c] {
+			continue
+		}
+		seen[c] = true
+		if known[c] {
+			confirmed = append(confirmed, c)
+		} else {
+			unknown = append(unknown, c)
+		}
+	}
+	return confirmed, unknown
+}
+
+// confirmResetOrgsAutoYes implements the --yes shortcut: honor a
+// config-file confirmed_orgs selection when present and --organization
+// didn't already narrow the list, else return every candidate org.
+func confirmResetOrgsAutoYes(orgs []string, orgPattern string, presetOrgs []string, known map[string]bool, out io.Writer) ([]string, error) {
+	if orgPattern == "" && len(presetOrgs) > 0 {
+		confirmed, unknown := resolveOrgSelection(presetOrgs, known)
+		if len(unknown) > 0 {
+			return nil, fmt.Errorf("confirmed_orgs from config file contains unknown org key(s): %q — must be one of the listed orgs", strings.Join(unknown, ", "))
+		}
+		sort.Strings(confirmed)
+		fmt.Fprintf(out, "Using confirmed_orgs from config file: %s\n", strings.Join(confirmed, ", "))
+		return confirmed, nil
+	}
+	return orgs, nil
+}
+
+// confirmResetOrgsInteractive prompts the operator to type the org keys
+// to reset, aborting cleanly on an empty line/EOF and erroring on any
+// unknown key.
+func confirmResetOrgsInteractive(known map[string]bool, in io.Reader, out io.Writer) ([]string, error) {
 	fmt.Fprint(out, "\nType the org keys to reset (whitespace-separated), or press [Enter] to abort: ")
 	reader := bufio.NewReader(in)
 	line, err := reader.ReadString('\n')
@@ -153,24 +283,7 @@ func confirmResetOrgs(exportDir string, autoYes bool, in io.Reader, out io.Write
 		return nil, nil
 	}
 
-	known := make(map[string]bool, len(orgs))
-	for _, o := range orgs {
-		known[o] = true
-	}
-
-	var confirmed, unknown []string
-	seen := make(map[string]bool, len(typed))
-	for _, t := range typed {
-		if seen[t] {
-			continue
-		}
-		seen[t] = true
-		if known[t] {
-			confirmed = append(confirmed, t)
-		} else {
-			unknown = append(unknown, t)
-		}
-	}
+	confirmed, unknown := resolveOrgSelection(typed, known)
 	if len(unknown) > 0 {
 		return nil, fmt.Errorf("unknown org key(s): %q — must be one of the listed orgs", strings.Join(unknown, ", "))
 	}

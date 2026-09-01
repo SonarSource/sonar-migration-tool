@@ -172,6 +172,32 @@ func testGenerateRunID_CrossesPast99(t *testing.T) {
 	}
 }
 
+// TestIsValidRunID exercises the format guard added for #550: a
+// directory name accepted as a run-ID candidate must be shaped exactly
+// like GenerateRunID's output, or it can hijack RunIDAfter's
+// plain-string-compare fallback (see IsValidRunID's doc).
+func TestIsValidRunID(t *testing.T) {
+	cases := []struct {
+		id   string
+		want bool
+	}{
+		{"2026-08-27-0001", true},
+		{"2026-08-27-101", true},
+		// Legacy pre-#108 MM-DD-YYYY-N naming still exists in export
+		// directories on users' disks and must still be accepted (#551
+		// follow-up — the ISO-only pattern silently dropped these).
+		{"08-27-2026-0001", true},
+		{"zzz-evil", false},
+		{"", false},
+		{"2026-08-27", false},
+	}
+	for _, c := range cases {
+		if got := IsValidRunID(c.id); got != c.want {
+			t.Errorf("IsValidRunID(%q) = %v, want %v", c.id, got, c.want)
+		}
+	}
+}
+
 // TestGenerateRunID_ISOFormatShape pins the overall shape produced for
 // a fresh directory: an ISO YYYY-MM-DD date prefix (not the historical
 // MM-DD-YYYY format), followed by a four-digit, zero-padded sequence

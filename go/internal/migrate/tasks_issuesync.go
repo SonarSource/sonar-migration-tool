@@ -15,9 +15,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	sqapi "github.com/sonar-solutions/sq-api-go"
 	sqtypes "github.com/sonar-solutions/sq-api-go/types"
-	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
 const resolutionFalsePositive = "FALSE-POSITIVE"
@@ -451,6 +451,9 @@ func runSyncIssueMetadata(ctx context.Context, e *Executor) error {
 	ruleDefaults := loadRuleTagDefaults(e)
 	err := forEachMigrateItem(ctx, e, "syncIssueMetadata", "createProjects",
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
+			if isFailedMigrateRecord(item) {
+				return nil
+			}
 			cloudKey := extractField(item, "cloud_project_key")
 			orgKey := extractField(item, "sonarcloud_org_key")
 			serverURL := extractField(item, "server_url")

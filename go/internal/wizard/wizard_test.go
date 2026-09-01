@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sonar-solutions/sonar-migration-tool/internal/extract"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/migrate"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 )
 
@@ -302,7 +304,10 @@ func TestRunPhaseHandlerValidate(t *testing.T) {
 	dir := t.TempDir()
 	writeMinimalCSVs(t, dir)
 
-	state := &WizardState{Phase: PhaseValidate}
+	// A legitimate resume always has ExtractID set (phaseExtract sets it
+	// before advancing past PhaseStructure) — verifyPhasePrerequisites
+	// (#550) requires it for any phase after Extract.
+	state := &WizardState{Phase: PhaseValidate, ExtractID: strPtr("test-extract-01")}
 	p := &MockPrompter{}
 
 	err := runPhaseHandler(context.Background(), p, state, dir, PhaseValidate)
@@ -316,7 +321,12 @@ func TestRunPhaseHandlerValidate(t *testing.T) {
 
 func TestRunPhaseHandlerMigrateCancel(t *testing.T) {
 	dir := t.TempDir()
-	state := &WizardState{Phase: PhaseMigrate, TargetURL: strPtr(testSQCloudURL)}
+	writeMinimalCSVs(t, dir)
+
+	// Real prerequisites present (ExtractID + the mapping CSVs) so this
+	// exercises the decline-to-retry path inside phaseMigrate itself,
+	// not verifyPhasePrerequisites (#550) rejecting the phase outright.
+	state := &WizardState{Phase: PhaseMigrate, TargetURL: strPtr(testSQCloudURL), ExtractID: strPtr("test-extract-01")}
 	p := &MockPrompter{ConfirmResponses: []bool{false}}
 
 	err := runPhaseHandler(context.Background(), p, state, dir, PhaseMigrate)
@@ -331,6 +341,149 @@ func TestRunPhaseHandlerUnknownPhase(t *testing.T) {
 	err := runPhaseHandler(context.Background(), p, state, t.TempDir(), WizardPhase("bogus"))
 	if err == nil {
 		t.Fatal("expected error for unknown phase")
+	}
+}
+
+// --- verifyPhasePrerequisites (#550): a .wizard_state.json claiming a
+// downstream phase — whether from tampering or ordinary corruption/a bad
+// manual edit — must not let runPhaseHandler dispatch into that phase
+// unless the artifacts earlier phases are supposed to have produced
+// genuinely exist on disk. ---
+
+func TestVerifyPhasePrerequisitesExtractIDMissing(t *testing.T) {
+	dir := t.TempDir()
+	writeMinimalCSVs(t, dir) // structure + mapping files present...
+
+	for _, phase := range []WizardPhase{PhaseOrgMapping, PhaseMappings, PhaseValidate, PhaseMigrate} {
+		state := &WizardState{Phase: phase} // ...but ExtractID is not set.
+		if err := verifyPhasePrerequisites(state, dir, phase); err == nil {
+			t.Errorf("phase %s: expected error when ExtractID is unset, got nil", phase)
+		}
+	}
+}
+
+func TestVerifyPhasePrerequisitesStructureOutputMissing(t *testing.T) {
+	dir := t.TempDir() // no organizations.csv / projects.csv at all
+
+	for _, phase := range []WizardPhase{PhaseOrgMapping, PhaseMappings, PhaseValidate, PhaseMigrate} {
+		state := &WizardState{Phase: phase, ExtractID: strPtr("fake-id")}
+		if err := verifyPhasePrerequisites(state, dir, phase); err == nil {
+			t.Errorf("phase %s: expected error when structure output is missing, got nil", phase)
+		}
+	}
+}
+
+func TestVerifyPhasePrerequisitesMappingFilesMissing(t *testing.T) {
+	dir := t.TempDir()
+	// Structure output present, but none of the mapping CSVs
+	// (templates/profiles/gates/groups) that phaseMappings produces.
+	orgHeaders := []string{"sonarqube_org_key", "sonarcloud_org_key"}
+	writeCSV(t, dir, fileOrganizations, orgHeaders, [][]string{{"org-1", "cloud-1"}})
+	writeCSV(t, dir, fileProjects, []string{"key"}, [][]string{{"p1"}})
+
+	for _, phase := range []WizardPhase{PhaseValidate, PhaseMigrate} {
+		state := &WizardState{Phase: phase, ExtractID: strPtr("fake-id")}
+		if err := verifyPhasePrerequisites(state, dir, phase); err == nil {
+			t.Errorf("phase %s: expected error when mapping files are missing, got nil", phase)
+		}
+	}
+
+	// OrgMapping only needs the structure output, not the mapping CSVs.
+	if err := verifyPhasePrerequisites(&WizardState{Phase: PhaseOrgMapping, ExtractID: strPtr("fake-id")}, dir, PhaseOrgMapping); err != nil {
+		t.Errorf("PhaseOrgMapping: unexpected error with structure output present: %v", err)
+	}
+}
+
+func TestVerifyPhasePrerequisitesLegitimateResumePasses(t *testing.T) {
+	dir := t.TempDir()
+	writeMinimalCSVs(t, dir)
+
+	for _, phase := range []WizardPhase{PhaseOrgMapping, PhaseMappings, PhaseValidate, PhaseMigrate} {
+		state := &WizardState{Phase: phase, ExtractID: strPtr("real-extract-01")}
+		if err := verifyPhasePrerequisites(state, dir, phase); err != nil {
+			t.Errorf("phase %s: unexpected error for legitimate resume: %v", phase, err)
+		}
+	}
+}
+
+func TestVerifyPhasePrerequisitesExtractHasNone(t *testing.T) {
+	// PhaseExtract is the entry point and is never passed to
+	// verifyPhasePrerequisites by runPhaseHandler, but the function
+	// itself must be a no-op for it regardless (defensive — no case
+	// matches PhaseExtract in either switch).
+	if err := verifyPhasePrerequisites(&WizardState{Phase: PhaseExtract}, t.TempDir(), PhaseExtract); err != nil {
+		t.Errorf("PhaseExtract: expected no prerequisites, got %v", err)
+	}
+}
+
+// TestRunRejectsFabricatedMigrateState reproduces the exact scenario
+// from issue #550: a .wizard_state.json claiming phase "migrate" against
+// an arbitrary target, with none of the real prerequisites (extraction,
+// structure, org mapping, generated mapping CSVs) ever having run. This
+// could arise from tampering or from ordinary file corruption / a bad
+// manual edit — either way, runPhaseHandler must refuse to dispatch into
+// phaseMigrate rather than proceeding to prompt for migrate credentials
+// or invoke runMigrateFn against the fabricated target.
+func TestRunRejectsFabricatedMigrateState(t *testing.T) {
+	dir := t.TempDir() // fresh export dir: no CSVs, no extract output
+
+	origMigrate := runMigrateFn
+	migrateCalled := false
+	runMigrateFn = func(_ context.Context, _ migrate.MigrateConfig) (string, error) {
+		migrateCalled = true
+		return "should-not-run", nil
+	}
+	defer func() { runMigrateFn = origMigrate }()
+
+	// Defense in depth: even though verifyPhasePrerequisites should stop
+	// the wizard before it ever reaches phaseExtract again, also stub
+	// out real extraction so a bug in the restart-offer plumbing can
+	// never make this test perform a live network call / retry loop.
+	origExtract := runExtractFn
+	extractCalled := false
+	runExtractFn = func(_ context.Context, _ extract.ExtractConfig) ([]string, error) {
+		extractCalled = true
+		return nil, fmt.Errorf("extraction must not run in this test")
+	}
+	defer func() { runExtractFn = origExtract }()
+
+	state := &WizardState{
+		Phase:     PhaseMigrate,
+		TargetURL: strPtr("https://evil.example.com"),
+		ExtractID: strPtr("fake-id"),
+	}
+	if err := state.Save(dir); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	p := &MockPrompter{
+		// resume=yes (so determineStartingPhase is reached at all);
+		// restart-from-earlier-phase=no (so runPhaseLoop reports the
+		// verifyPhasePrerequisites error instead of looping into
+		// offerPhaseRestart's default-choice fallback).
+		ConfirmResponses: []bool{true, false},
+	}
+
+	err := Run(context.Background(), p, dir)
+	if err == nil {
+		t.Fatal("expected Run to return an error instead of dispatching into phaseMigrate")
+	}
+	if migrateCalled {
+		t.Error("runMigrateFn must never be called against a fabricated/corrupted state")
+	}
+	if extractCalled {
+		t.Error("runExtractFn must never be called from this fabricated-migrate-state scenario")
+	}
+
+	// The persisted state's phase must not have been silently accepted
+	// and advanced past — it stays at PhaseMigrate (or is untouched)
+	// rather than reaching PhaseComplete.
+	loaded, loadErr := Load(dir)
+	if loadErr != nil {
+		t.Fatalf("Load: %v", loadErr)
+	}
+	if loaded.Phase == PhaseComplete {
+		t.Error("wizard must not reach PhaseComplete from a fabricated migrate state")
 	}
 }
 
@@ -493,6 +646,7 @@ func TestRunWithSeedReturnsStateOnSuccess(t *testing.T) {
 		Phase:         PhaseValidate,
 		TargetURL:     strPtr(testSQCloudURL),
 		EnterpriseKey: strPtr(testEntKey),
+		ExtractID:     strPtr("test-extract-01"),
 	}
 	state.Save(dir)
 
@@ -598,6 +752,7 @@ func TestRunWithSkippedProjects(t *testing.T) {
 		TargetURL:       strPtr(testSQCloudURL),
 		EnterpriseKey:   strPtr(testEntKey),
 		SkippedProjects: []string{"proj-a", "proj-b"},
+		ExtractID:       strPtr("test-extract-01"),
 	}
 	state.Save(dir)
 

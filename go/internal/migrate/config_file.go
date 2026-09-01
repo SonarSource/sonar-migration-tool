@@ -58,6 +58,14 @@ type configFileShape struct {
 	// and back-linked, current behavior). Same FlexibleBool semantics as
 	// skip_issue_sync.
 	FastSync *FlexibleBool `json:"fast_sync"`
+	// ConfirmedOrgs is reset-only: it additively pre-populates
+	// ResetConfig.ConfirmedOrgs (#550) for config-driven / programmatic
+	// callers that don't go through cmd/reset.go's interactive
+	// confirmation prompt or --organization flag. Ignored by
+	// toMigrateConfig / MigrateConfig. See toResetConfig for the
+	// outer-wins-else-nested-"migrate" resolution (mirrors
+	// skip_issue_sync's precedence).
+	ConfirmedOrgs []string `json:"confirmed_orgs"`
 
 	// Shape 2 (command-sectioned).
 	Migrate *configFileShape `json:"migrate"`
@@ -309,7 +317,7 @@ func (sc sonarCloudBlock) toMigrateConfig(settings *settingsBlock) MigrateConfig
 
 func (s configFileShape) toResetConfig() ResetConfig {
 	m := s.toMigrateConfig()
-	return ResetConfig{
+	cfg := ResetConfig{
 		Token:           m.Token,
 		EnterpriseKey:   m.EnterpriseKey,
 		Edition:         m.Edition,
@@ -318,6 +326,18 @@ func (s configFileShape) toResetConfig() ResetConfig {
 		ExportDirectory: m.ExportDirectory,
 		Debug:           m.Debug,
 	}
+	// #550 — confirmed_orgs is additive and reset-only (see the field's
+	// doc comment on configFileShape); it does not flow through
+	// MigrateConfig. Outer-level value wins when set, mirroring
+	// skip_issue_sync's outer-wins-else-inner semantics; otherwise fall
+	// back to a nested "migrate" section's value (shape 2).
+	switch {
+	case len(s.ConfirmedOrgs) > 0:
+		cfg.ConfirmedOrgs = s.ConfirmedOrgs
+	case s.Migrate != nil && len(s.Migrate.ConfirmedOrgs) > 0:
+		cfg.ConfirmedOrgs = s.Migrate.ConfirmedOrgs
+	}
+	return cfg
 }
 
 // LoadSonarCloudOrgsFromConfigFile returns the organizations list from a

@@ -25,7 +25,7 @@ func TestSynthesizeBranchSourcePurged(t *testing.T) {
 		"name,key,server_url,sonarqube_org_key\n"+
 			"App,com.example:app,"+testServerURL+",default\n")
 
-	extractDir := filepath.Join(exportDir, "extract-0001")
+	extractDir := filepath.Join(exportDir, "2026-08-20-0001")
 	writeFile(t, extractDir, "extract.json", `{"url":"`+testServerURL+`"}`)
 
 	// Two LONG branches: main (has source) and release-1.0 (purged).

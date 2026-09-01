@@ -58,6 +58,9 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 	g.SetLimit(cap(e.Sem))
 
 	for _, proj := range projects {
+		if isFailedMigrateRecord(proj) {
+			continue
+		}
 		cloudKey := extractField(proj, "cloud_project_key")
 		orgKey := extractField(proj, "sonarcloud_org_key")
 		serverURL := extractField(proj, "server_url")

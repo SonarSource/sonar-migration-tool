@@ -160,6 +160,49 @@ func determineStartingPhase(p Prompter, state *WizardState, exportDir string) (W
 	return state.Phase, true
 }
 
+// structureOutputFiles are the CSVs phaseStructure is responsible for
+// producing (see displayStructureSummary / phaseOrgMapping's
+// mapAllOrganizations, which both read them). Any phase reached after
+// Structure requires these to exist.
+var structureOutputFiles = []string{fileOrganizations, fileProjects}
+
+// verifyPhasePrerequisites checks that the real, on-disk artifacts an
+// earlier phase is supposed to have produced actually exist before
+// dispatching into the given phase. It does not re-derive trust from
+// state.Phase itself (that's the value under attack, whether by
+// tampering or corruption) — it independently verifies the filesystem.
+//
+// This is deliberately NOT a tamper-evidence / integrity-signing
+// mechanism for .wizard_state.json (no HMAC, no checksum): a local,
+// single-user CLI tool gains nothing from proving the JSON wasn't
+// hand-edited, since an attacker with write access to the export
+// directory could simply invoke `migrate` directly. The actual gap is
+// that runPhaseHandler previously trusted state.Phase to dispatch
+// straight into a phase's handler without confirming that phase's real
+// prerequisites — the files earlier phases actually produced — exist.
+// Checking those artifacts closes that gap for tampering AND ordinary
+// corruption/bad manual edits alike.
+func verifyPhasePrerequisites(state *WizardState, exportDir string, phase WizardPhase) error {
+	switch phase {
+	case PhaseOrgMapping, PhaseMappings, PhaseValidate, PhaseMigrate:
+		if ptrStr(state.ExtractID) == "" {
+			return fmt.Errorf("no extraction has been recorded (extract_id is empty) — run the Extract phase first")
+		}
+		if missing := checkRequiredFiles(exportDir, structureOutputFiles); len(missing) > 0 {
+			return fmt.Errorf("structure output missing: %v — run the Structure phase first", missing)
+		}
+	}
+
+	switch phase {
+	case PhaseValidate, PhaseMigrate:
+		if missing := checkRequiredFiles(exportDir, requiredMappingFiles); len(missing) > 0 {
+			return fmt.Errorf("missing required files: %v — run the Mappings phase first", missing)
+		}
+	}
+
+	return nil
+}
+
 // runPhaseLoop executes phases sequentially from startPhase to completion.
 func runPhaseLoop(ctx context.Context, p Prompter, state *WizardState, exportDir string, startPhase WizardPhase) error {
 	currentPhase := startPhase
@@ -200,7 +243,22 @@ func runPhaseLoop(ctx context.Context, p Prompter, state *WizardState, exportDir
 }
 
 // runPhaseHandler dispatches to the correct phase function.
+//
+// Before dispatching into any phase other than Extract (the entry point,
+// which has no prior-phase prerequisites), it calls verifyPhasePrerequisites
+// to make sure the artifacts earlier phases are supposed to have produced
+// genuinely exist on disk. state.Phase is trusted verbatim by
+// determineStartingPhase — a .wizard_state.json that claims phase "migrate"
+// (whether from tampering or ordinary corruption/a bad manual edit) would
+// otherwise dispatch straight into phaseMigrate against whatever TargetURL
+// happens to be set, skipping every real prerequisite check (issue #550).
 func runPhaseHandler(ctx context.Context, p Prompter, state *WizardState, exportDir string, phase WizardPhase) error {
+	if phase != PhaseExtract {
+		if err := verifyPhasePrerequisites(state, exportDir, phase); err != nil {
+			return fmt.Errorf("cannot enter phase %s: %w", phase, err)
+		}
+	}
+
 	switch phase {
 	case PhaseExtract:
 		return phaseExtract(ctx, p, state, exportDir)

@@ -89,7 +89,7 @@ func LoadCSV(directory, filename string) ([]map[string]any, error) {
 		m := make(map[string]any, len(headers))
 		for i, header := range headers {
 			if i < len(row) {
-				m[header] = coerceCSVValue(row[i])
+				m[header] = coerceCSVValue(header, row[i])
 			}
 		}
 		result = append(result, m)
@@ -167,10 +167,28 @@ func serializeAny(v any) string {
 	}
 }
 
+// isIdentifierColumn reports whether header names a column holding an
+// opaque identifier (e.g. sonarcloud_org_key, cloud_project_key) rather
+// than actual data. These columns must never be numeric-, bool-, or
+// JSON-coerced: a purely-numeric identifier like a SonarCloud org key
+// "12345" would otherwise silently become float64(12345), and downstream
+// code that does `val, _ := row[header].(string)` would then read back
+// "" (Go's zero value for string) instead of the real key — dropping the
+// organization/project from the migration with no error (issue #550).
+//
+// The rule is generic on purpose: any current or future column following
+// the "*_key" naming convention (or the bare "key" column) is covered
+// without needing to enumerate specific column names here.
+func isIdentifierColumn(header string) bool {
+	return header == "key" || strings.HasSuffix(header, "_key")
+}
+
 // coerceCSVValue attempts to parse a CSV string value back into a typed value,
 // JSON arrays/objects/booleans/numbers are parsed back into typed values.
-func coerceCSVValue(s string) any {
-	if s == "" {
+// header is the column name the value came from; identifier columns (see
+// isIdentifierColumn) are always returned as the raw, uncoerced string.
+func coerceCSVValue(header, s string) any {
+	if s == "" || isIdentifierColumn(header) {
 		return s
 	}
 

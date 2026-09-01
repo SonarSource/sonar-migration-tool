@@ -266,8 +266,17 @@ func TestRunResetDefaultProfilesNoBuiltIn(t *testing.T) {
 	}
 }
 
-// resetPermissionTemplates: no built-in "Default Template" present hits the
-// "no built-in found" warn+fail branch.
+// resetPermissionTemplates: no built-in "Default Template" present must now
+// hard-fail the task (#550) rather than warn-and-continue. Silently
+// proceeding let deleteTemplates run against an org whose built-in was
+// renamed (so it never got promoted to default), risking deletion of
+// whatever template legitimately IS the current default.
+// #551: a renamed built-in must fail only the affected org, not the
+// whole reset run — forEachMigrateItem fans out over an errgroup, and
+// this task is a dependency of deleteTemplates, so an error here would
+// have cancelled every other confirmed org's reset too.
+// deleteTemplates' isCurrentDefaultTemplate net independently protects
+// against destroying the real current default regardless of name.
 func TestRunResetPermissionTemplatesNoBuiltIn(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/permissions/search_templates", func(w http.ResponseWriter, _ *http.Request) {
@@ -281,7 +290,62 @@ func TestRunResetPermissionTemplatesNoBuiltIn(t *testing.T) {
 		})
 	})
 	e := newDeleteTest(t, mux)
+	err := runResetPermissionTemplates(context.Background(), e)
+	if err != nil {
+		t.Fatalf("runResetPermissionTemplates: expected nil (fail the org, not the run) when no built-in \"Default Template\" is found, got %v", err)
+	}
+}
+
+// #551 (Gitar round 2): when resetPermissionTemplates can't find the
+// built-in "Default Template" for an org, it now writes a "failed"
+// record instead of just logging. deleteTemplates (its dependent) must
+// read that record and skip template deletion entirely for that org —
+// isCurrentDefaultTemplate alone only protects whatever template is
+// CURRENTLY the org's default, which does not cover a renamed built-in
+// that migration already demoted in favor of a promoted custom
+// template. Without the propagated skip, "Custom Only" below (renamed
+// from "Default Template" and no longer any qualifier's default) would
+// be deleted.
+func TestRunDeleteTemplatesSkipsOrgWhereResetCouldNotFindBuiltIn(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		deleted []string
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/permissions/search_templates", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"permissionTemplates": []map[string]any{
+				// Renamed built-in: no template here is named "Default
+				// Template", and none is any qualifier's current default
+				// (a custom template, not modeled here, holds that) — so
+				// neither isBuiltInPermissionTemplate nor
+				// isCurrentDefaultTemplate protects it.
+				{"id": "tpl-renamed-builtin", "name": "Custom Only"},
+			},
+			"defaultTemplates": []map[string]any{
+				{"templateId": "tpl-some-other-custom", "qualifier": "TRK"},
+			},
+		})
+	})
+	mux.HandleFunc("POST /api/permissions/delete_template", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		mu.Lock()
+		deleted = append(deleted, r.FormValue("templateId"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	e := newDeleteTest(t, mux)
+
 	if err := runResetPermissionTemplates(context.Background(), e); err != nil {
 		t.Fatalf("runResetPermissionTemplates: %v", err)
+	}
+	if err := runDeleteTemplates(context.Background(), e); err != nil {
+		t.Fatalf("runDeleteTemplates: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(deleted) != 0 {
+		t.Errorf("expected no template deletions for an org whose built-in reset failed, got %v", deleted)
 	}
 }

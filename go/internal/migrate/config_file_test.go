@@ -511,6 +511,78 @@ func TestLoadResetConfigFileUnifiedShape(t *testing.T) {
 	}
 }
 
+// #550: toResetConfig must populate ResetConfig.ConfirmedOrgs from a
+// flat config file's top-level confirmed_orgs field — an additive path
+// for config-driven / programmatic callers that don't go through
+// cmd/reset.go's interactive confirmation prompt.
+func TestLoadResetConfigFile_ConfirmedOrgsFlatShape(t *testing.T) {
+	content := `{
+  "token": "tok",
+  "enterprise_key": "ent",
+  "confirmed_orgs": ["cloud-a", "cloud-b"]
+}`
+	cfg, err := LoadResetConfigFile(writeConfigFixture(t, content))
+	if err != nil {
+		t.Fatalf("LoadResetConfigFile: %v", err)
+	}
+	want := []string{"cloud-a", "cloud-b"}
+	if !reflect.DeepEqual(cfg.ConfirmedOrgs, want) {
+		t.Errorf("ConfirmedOrgs: got %+v, want %+v", cfg.ConfirmedOrgs, want)
+	}
+}
+
+// confirmed_orgs is also honored inside a shape-2 "migrate" section.
+func TestLoadResetConfigFile_ConfirmedOrgsFromNestedMigrateSection(t *testing.T) {
+	content := `{
+  "migrate": {
+    "token": "tok",
+    "enterprise_key": "ent",
+    "confirmed_orgs": ["inner-org"]
+  }
+}`
+	cfg, err := LoadResetConfigFile(writeConfigFixture(t, content))
+	if err != nil {
+		t.Fatalf("LoadResetConfigFile: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.ConfirmedOrgs, []string{"inner-org"}) {
+		t.Errorf("ConfirmedOrgs: got %+v, want [inner-org]", cfg.ConfirmedOrgs)
+	}
+}
+
+// An outer-level confirmed_orgs wins over a nested "migrate" section's
+// value, mirroring skip_issue_sync's outer-wins-else-inner precedence.
+func TestLoadResetConfigFile_ConfirmedOrgsOuterWinsOverNestedMigrate(t *testing.T) {
+	content := `{
+  "confirmed_orgs": ["outer-org"],
+  "migrate": {
+    "token": "tok",
+    "enterprise_key": "ent",
+    "confirmed_orgs": ["inner-org"]
+  }
+}`
+	cfg, err := LoadResetConfigFile(writeConfigFixture(t, content))
+	if err != nil {
+		t.Fatalf("LoadResetConfigFile: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.ConfirmedOrgs, []string{"outer-org"}) {
+		t.Errorf("ConfirmedOrgs: got %+v, want [outer-org]", cfg.ConfirmedOrgs)
+	}
+}
+
+// Absent confirmed_orgs leaves ResetConfig.ConfirmedOrgs nil — RunReset
+// fails closed on that (#550), which this parser-level test does not
+// itself exercise, but the zero value must round-trip as nil, not an
+// empty-but-non-nil slice, so callers can distinguish "unset" cleanly.
+func TestLoadResetConfigFile_ConfirmedOrgsAbsentIsNil(t *testing.T) {
+	cfg, err := LoadResetConfigFile(writeConfigFixture(t, flatShapeJSON))
+	if err != nil {
+		t.Fatalf("LoadResetConfigFile: %v", err)
+	}
+	if cfg.ConfirmedOrgs != nil {
+		t.Errorf("ConfirmedOrgs: got %+v, want nil", cfg.ConfirmedOrgs)
+	}
+}
+
 // Issue #303: top-level `skip_project_data_migration` parses into
 // MigrateConfig.SkipProjectDataMigration one-for-one (no inversion).
 // Defaults to false (data is migrated). Every FlexibleBool alias is

@@ -71,6 +71,24 @@ func isBuiltInPermissionTemplate(name string) bool {
 	return strings.EqualFold(strings.TrimSpace(name), defaultPermissionTemplateName)
 }
 
+// isCurrentDefaultTemplate reports whether templateID is the org's
+// current default for any qualifier, per the defaultTemplates map
+// returned by searchPermissionTemplates (qualifier -> templateId). This
+// is a second, independent safety net alongside isBuiltInPermissionTemplate
+// (#550): permission templates carry no isBuiltIn API flag, so an admin
+// who renames the org's built-in "Default Template" would otherwise make
+// it indistinguishable from a custom template by name alone. Checking
+// current-default status catches that case even when the name check
+// doesn't.
+func isCurrentDefaultTemplate(templateID string, defaults map[string]string) bool {
+	for _, id := range defaults {
+		if id == templateID {
+			return true
+		}
+	}
+	return false
+}
+
 // deleteTasks returns tasks for deleting/resetting entities in Cloud.
 func deleteTasks() []TaskDef {
 	entEditions := []common.Edition{common.EditionEnterprise, common.EditionDatacenter}
@@ -343,13 +361,33 @@ func runDeleteGroups(ctx context.Context, e *Executor) error {
 // qualifier and any previously-default custom template is deletable.
 func runDeleteTemplates(ctx context.Context, e *Executor) error {
 	counter := TaskCounterFromContext(ctx)
+	// #551: resetPermissionTemplates (this task's dependency) writes a
+	// "failed" record for any org where the built-in "Default Template"
+	// couldn't be found and promoted. isCurrentDefaultTemplate below only
+	// protects whatever IS currently the org's default — it can't tell a
+	// renamed built-in apart from any other non-default custom template
+	// once resetPermissionTemplates has been skipped for that org — so
+	// skip template deletion entirely there rather than risk destroying
+	// the renamed built-in.
+	unresetOrgs := make(map[string]bool)
+	resetResults, _ := e.Store.ReadAll("resetPermissionTemplates")
+	for _, r := range resetResults {
+		if isFailedMigrateRecord(r) {
+			unresetOrgs[extractField(r, "sonarcloud_org_key")] = true
+		}
+	}
 	err := forEachMigrateItem(ctx, e, "deleteTemplates", "generateOrganizationMappings",
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
 			orgKey := extractField(item, "sonarcloud_org_key")
 			if shouldSkipOrg(orgKey) {
 				return nil
 			}
-			templates, _, err := searchPermissionTemplates(ctx, e, orgKey)
+			if unresetOrgs[orgKey] {
+				e.Logger.Warn("deleteTemplates: skipping template deletion — resetPermissionTemplates could not confirm the built-in default for this org",
+					"org", orgKey)
+				return nil
+			}
+			templates, defaults, err := searchPermissionTemplates(ctx, e, orgKey)
 			if err != nil {
 				failAPI(counter, e.Logger, "deleteTemplates: listing templates failed", err, "org", orgKey)
 				return nil
@@ -360,6 +398,19 @@ func runDeleteTemplates(ctx context.Context, e *Executor) error {
 				if isBuiltInPermissionTemplate(tpl.Name) {
 					e.Logger.Debug("deleteTemplates: keeping built-in template",
 						"org", orgKey, "template", tpl.Name)
+					continue
+				}
+				// Second, independent safety net (#550): even when a
+				// renamed built-in fails the name check above, never
+				// delete a template that is still the org's current
+				// default for some qualifier — SQC would reject the
+				// delete_template call anyway, but more importantly a
+				// template institutionally treated as "the default" must
+				// not be destroyed just because it lost its canonical
+				// name.
+				if isCurrentDefaultTemplate(tpl.ID, defaults) {
+					e.Logger.Debug("deleteTemplates: keeping current-default template",
+						"org", orgKey, "template", tpl.Name, "template_id", tpl.ID)
 					continue
 				}
 				e.Logger.Info("deleteTemplates: deleting template",
@@ -624,10 +675,28 @@ func runResetPermissionTemplates(ctx context.Context, e *Executor) error {
 				}
 			}
 			if builtIn == nil {
-				e.Logger.Warn("resetPermissionTemplates: no built-in \"Default Template\" found; deleteTemplates may fail to delete the current default",
+				// Fail this org, not the whole run: forEachMigrateItem fans
+				// out over an errgroup, so returning an error here would
+				// cancel every other confirmed org's reset too — one
+				// renamed built-in shouldn't block the rest.
+				//
+				// isCurrentDefaultTemplate only protects whichever template
+				// is *currently* the org's default for some qualifier — a
+				// renamed built-in that migration already demoted (because
+				// a custom template was promoted to default) matches
+				// neither that check nor isBuiltInPermissionTemplate, so it
+				// is NOT safe against deleteTemplates on its own (#551).
+				// Write an explicit failed record so runDeleteTemplates can
+				// skip template deletion entirely for this org instead.
+				e.Logger.Error("resetPermissionTemplates: no built-in \"Default Template\" found; skipping template-default reset for this org",
 					"org", orgKey, "templates_returned", summarisePermissionTemplates(templates))
 				counter.Fail()
-				return nil
+				result, _ := json.Marshal(map[string]any{
+					"sonarcloud_org_key": orgKey,
+					"status":             "failed",
+					"error":              "no built-in \"Default Template\" found",
+				})
+				return w.WriteOne(result)
 			}
 
 			for _, q := range resetPermissionTemplateQualifiers {

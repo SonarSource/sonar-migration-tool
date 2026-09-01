@@ -28,7 +28,17 @@ const (
 	testSonarUsers = "sonar-users"
 )
 
-// newMockCloudServer creates a mock SonarQube Cloud server for testing.
+// newMockCloudServer creates a mock SonarQube Cloud server for testing —
+// the "happy path" server: creates/updates succeed, searches return
+// realistic-but-generic fixtures. Used by newFlowTest/newTestExecutor
+// and most of this package's tests.
+//
+// newAlreadyExistsCloudServer (below) is a SEPARATE, deliberately
+// NOT-shared mock for the different "everything already exists"
+// scenario. The two are not DRY on purpose — before editing a handler
+// in one, check whether the same concern needs the same fix in the
+// other (issue #550 found exactly this: a template-name fixture was
+// only correct in one of the two).
 func newMockCloudServer() *httptest.Server {
 	mux := http.NewServeMux()
 
@@ -293,6 +303,20 @@ func newMockCloudServer() *httptest.Server {
 		json.NewEncoder(w).Encode(map[string]any{"organizations": orgs})
 	})
 
+	// #550: reset's resetPermissionTemplates hard-fails when no template
+	// matches defaultPermissionTemplateName by name (no isBuiltIn flag
+	// exists for permission templates in the real API) — reference the
+	// production constant directly, not a hand-typed copy of the
+	// string, so this fixture can never silently drift out of sync with
+	// what tasks_delete.go actually checks against.
+	mux.HandleFunc("GET /api/permissions/search_templates", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"permissionTemplates": []map[string]any{
+				{"id": "existing-tpl-id", "name": defaultPermissionTemplateName},
+			},
+		})
+	})
+
 	// Catch-all.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{})
@@ -303,7 +327,9 @@ func newMockCloudServer() *httptest.Server {
 
 // newAlreadyExistsCloudServer creates a mock Cloud server where all POST create
 // endpoints return 400 "already exists", and GET search endpoints return
-// matching resources for lookup.
+// matching resources for lookup. This is a SEPARATE mux from
+// newMockCloudServer (above), not a variant built on top of it — see
+// that function's comment before editing a handler here.
 func newAlreadyExistsCloudServer() *httptest.Server {
 	existsBody := func(name string) string {
 		return fmt.Sprintf(`{"errors":[{"msg":"%s already exists"}]}`, name)
@@ -368,6 +394,11 @@ func newAlreadyExistsCloudServer() *httptest.Server {
 			},
 		})
 	})
+	// NOT the reset built-in — this "Default" is an arbitrary CUSTOM
+	// template name for TestCreatePermissionTemplates_AlreadyExists'
+	// already-exists/lookup scenario. Do not "fix" it to
+	// defaultPermissionTemplateName; that's a different mock
+	// (newMockCloudServer, above) testing a different concern.
 	mux.HandleFunc("GET /api/permissions/search_templates", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"permissionTemplates": []map[string]any{

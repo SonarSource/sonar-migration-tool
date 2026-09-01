@@ -178,16 +178,24 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 	base := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})
 	logger := slog.New(newEventHandler(base, collector))
 
-	appliedDefault, err := validateMigrateConfig(cfg, logger)
-	if err != nil {
-		return "", err
-	}
-
 	// Installed on the HTTP clients now and pointed at the run directory
 	// once it exists; entries are buffered until then.
 	reqLog := newRequestLogWriter()
 	defer reqLog.Close()
 	clients := newMigrateClients(cfg, logger, reqLog)
+
+	// Built ahead of validateMigrateConfig (issue #550) so
+	// --default_organization can be checked against the live SonarQube
+	// Cloud API BEFORE applyOrgMapping ever writes it to
+	// organizations.csv. Previously the value was persisted first and
+	// only validated afterwards by validateMigrateOrgs below, so a wrong
+	// --default_organization on a failed run got written to disk; a
+	// retry with a corrected value then found organizations.csv already
+	// "mapped" and silently ignored the correction.
+	appliedDefault, err := validateMigrateConfig(ctx, clients.Cloud, cfg, logger)
+	if err != nil {
+		return "", err
+	}
 
 	// Verify every SQC organization the migration will touch exists and
 	// is visible to the token, and that the project-key pattern doesn't
@@ -274,13 +282,14 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 
 // validateMigrateConfig validates the project-key renaming pattern syntax
 // and the SQC org mapping, applying the --default_organization fallback if
-// requested (issues #138, #279, #281). Both checks run before any API
-// client setup so a config error surfaces immediately.
-func validateMigrateConfig(cfg MigrateConfig, logger *slog.Logger) (appliedDefault bool, err error) {
+// requested (issues #138, #279, #281). cc is used by applyOrgMapping to
+// validate --default_organization against the live SonarQube Cloud API
+// before it is ever persisted to organizations.csv (issue #550).
+func validateMigrateConfig(ctx context.Context, cc *cloud.Client, cfg MigrateConfig, logger *slog.Logger) (appliedDefault bool, err error) {
 	if err := ValidateProjectKeyPattern(cfg.ProjectKeyPattern); err != nil {
 		return false, common.NewExitError(2, fmt.Errorf("invalid project_key_pattern: %w", err))
 	}
-	return applyOrgMapping(cfg.ExportDirectory, cfg.DefaultOrganization, logger)
+	return applyOrgMapping(ctx, cc.Organizations, cfg.ExportDirectory, cfg.DefaultOrganization, cfg.EnterpriseKey, logger)
 }
 
 // validateMigrateOrgs verifies every SQC organization the migration will

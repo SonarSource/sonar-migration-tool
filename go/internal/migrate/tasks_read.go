@@ -61,6 +61,9 @@ func readTasks() []TaskDef {
 func runGetProjectIds(ctx context.Context, e *Executor) error {
 	return forEachMigrateItem(ctx, e, "getProjectIds", "createProjects",
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
+			if isFailedMigrateRecord(item) {
+				return nil
+			}
 			orgKey := extractField(item, "sonarcloud_org_key")
 			projectKey := extractField(item, "cloud_project_key")
 			if shouldSkipOrg(orgKey) || projectKey == "" {
@@ -273,6 +276,9 @@ func runGetCreatedProjects(ctx context.Context, e *Executor) error {
 			continue
 		}
 		for _, item := range items {
+			if isFailedMigrateRecord(item) {
+				continue
+			}
 			cloudKey := extractField(item, "cloud_project_key")
 			if cloudKey == "" || seen[cloudKey] {
 				continue
@@ -331,6 +337,9 @@ func MigrateCreatedProjectCounts(exportDir string) (map[string]int, error) {
 			continue
 		}
 		for _, item := range items {
+			if isFailedMigrateRecord(item) {
+				continue
+			}
 			cloudKey := extractField(item, "cloud_project_key")
 			if cloudKey == "" || seen[cloudKey] {
 				continue
