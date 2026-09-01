@@ -121,17 +121,5 @@ var migrateObjectTasks = map[string][]string{
 // createProjects as a dependency must not force it to run when
 // "projects" is excluded.
 func excludedMigrateTasks(selected map[string]bool) map[string]bool {
-	if selected == nil {
-		return nil
-	}
-	excluded := make(map[string]bool)
-	for category, tasks := range migrateObjectTasks {
-		if selected[category] {
-			continue
-		}
-		for _, t := range tasks {
-			excluded[t] = true
-		}
-	}
-	return excluded
+	return common.ExcludedTasks(migrateObjectTasks, selected)
 }

@@ -103,3 +103,25 @@ func ParseObjects(values []string) (map[string]bool, error) {
 	}
 	return out, nil
 }
+
+// ExcludedTasks returns every task name belonging to a category NOT
+// present in selected (nil selected == everything selected == no
+// exclusions), given a category -> task-names table. Shared by
+// extract's excludedExtractTasks and migrate's excludedMigrateTasks,
+// whose bodies were otherwise identical aside from which package-local
+// table they iterated (#536).
+func ExcludedTasks(categoryTasks map[string][]string, selected map[string]bool) map[string]bool {
+	if selected == nil {
+		return nil
+	}
+	excluded := make(map[string]bool)
+	for category, tasks := range categoryTasks {
+		if selected[category] {
+			continue
+		}
+		for _, t := range tasks {
+			excluded[t] = true
+		}
+	}
+	return excluded
+}

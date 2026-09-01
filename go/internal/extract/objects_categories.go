@@ -134,17 +134,5 @@ func projectObjectCategoryTasks() []string {
 // exclusions). Used both to prune the default "get"-prefixed task set
 // and to exclude cross-category dependency edges (#536).
 func excludedExtractTasks(selected map[string]bool) map[string]bool {
-	if selected == nil {
-		return nil
-	}
-	excluded := make(map[string]bool)
-	for category, tasks := range extractObjectTasks {
-		if selected[category] {
-			continue
-		}
-		for _, t := range tasks {
-			excluded[t] = true
-		}
-	}
-	return excluded
+	return common.ExcludedTasks(extractObjectTasks, selected)
 }

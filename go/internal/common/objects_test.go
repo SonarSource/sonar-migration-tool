@@ -118,3 +118,33 @@ func TestParseObjects(t *testing.T) {
 		}
 	})
 }
+
+func TestExcludedTasks(t *testing.T) {
+	categoryTasks := map[string][]string{
+		ObjectSettings:        {"setGlobalSettings"},
+		ObjectQualityProfiles: {"createProfiles", "restoreProfiles"},
+	}
+
+	t.Run("nil selected means no exclusions", func(t *testing.T) {
+		if got := ExcludedTasks(categoryTasks, nil); got != nil {
+			t.Errorf("expected nil, got %v", got)
+		}
+	})
+
+	t.Run("excludes every task of an unselected category", func(t *testing.T) {
+		selected := map[string]bool{ObjectSettings: true}
+		got := ExcludedTasks(categoryTasks, selected)
+		want := map[string]bool{"createProfiles": true, "restoreProfiles": true}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("empty selected excludes everything", func(t *testing.T) {
+		got := ExcludedTasks(categoryTasks, map[string]bool{})
+		want := map[string]bool{"setGlobalSettings": true, "createProfiles": true, "restoreProfiles": true}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+}
