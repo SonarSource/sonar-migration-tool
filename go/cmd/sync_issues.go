@@ -81,8 +81,8 @@ func init() {
 	f.String(flagProjectKeyPattern, "", "Template used to resolve each project's already-migrated target key, built from <ORIGINAL_PROJECT_KEY> and <ORGANIZATION_KEY> (maps to target.project_key_pattern; default: <ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>) — must match the pattern used when the projects were created")
 	f.String(flagEnterpriseKey, "", scCloudName+" enterprise key (maps to target.enterprise_key, defaults to --"+flagDefaultOrg+")")
 	f.String(flagExportDir, "./migration-files/", "Working directory for intermediate files (maps to export_directory)")
-	f.Int(flagConcurrency, 0, "Max concurrent requests (default: 25) (maps to concurrency)")
-	f.Int(flagTimeout, 0, "HTTP request timeout in seconds (maps to timeout; default: 60)")
+	f.Int(flagConcurrency, 0, "Max concurrent requests, applied to both source and target (default: 25). Use source.concurrency / target.concurrency in the config file to set them independently.")
+	f.Int(flagTimeout, 0, "HTTP request timeout in seconds, applied to both source and target (default: 60). Use source.timeout / target.timeout in the config file to set them independently.")
 	f.String(flagPEMFilePath, "", "Path to client mTLS PEM file for the source server (maps to source.pem_file_path)")
 	f.String(flagKeyFilePath, "", "Path to client mTLS key file for the source server (maps to source.key_file_path)")
 	f.String(flagCertPassword, "", "Password for the source server mTLS client certificate (maps to source.cert_password)")
@@ -142,24 +142,15 @@ func loadSyncIssuesFileDefaults(path string) (syncIssuesConfig, error) {
 	}
 
 	// #528 — assign source/target straight through rather than
-	// collapsing to one shared value; see the identical comment in
-	// cmd/transfer.go's loadTransferFileDefaults.
+	// collapsing to one shared value, then let a value set on only one
+	// side reach both; see the identical comment in cmd/transfer.go's
+	// loadTransferFileDefaults.
 	cfg.sourceConcurrency = extractCfg.Concurrency
 	cfg.targetConcurrency = migrateCfg.Concurrency
-	if cfg.sourceConcurrency == 0 {
-		cfg.sourceConcurrency = cfg.targetConcurrency
-	}
-	if cfg.targetConcurrency == 0 {
-		cfg.targetConcurrency = cfg.sourceConcurrency
-	}
+	fallbackToOtherSide(&cfg.sourceConcurrency, &cfg.targetConcurrency)
 	cfg.sourceTimeout = extractCfg.Timeout
 	cfg.targetTimeout = migrateCfg.Timeout
-	if cfg.sourceTimeout == 0 {
-		cfg.sourceTimeout = cfg.targetTimeout
-	}
-	if cfg.targetTimeout == 0 {
-		cfg.targetTimeout = cfg.sourceTimeout
-	}
+	fallbackToOtherSide(&cfg.sourceTimeout, &cfg.targetTimeout)
 	cfg.pemFilePath = extractCfg.PEMFilePath
 	cfg.keyFilePath = extractCfg.KeyFilePath
 	cfg.certPassword = extractCfg.CertPassword

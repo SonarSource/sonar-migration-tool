@@ -251,6 +251,22 @@ func applyFlagIntBothSides(cmd *cobra.Command, name string, source, target *int)
 	}
 }
 
+// fallbackToOtherSide sets *a to *b when *a is zero, and *b to *a when *b is
+// zero — used by transfer/sync-issues after resolving concurrency/timeout
+// from the config file so that a value set on only one side (e.g. only
+// target.concurrency, no source.concurrency and no top-level default) still
+// reaches both sides instead of falling through to the hardcoded package
+// default on the unset side (#528). Has no effect once both are already
+// non-zero, so two genuinely different explicit values are left alone.
+func fallbackToOtherSide(a, b *int) {
+	if *a == 0 {
+		*a = *b
+	}
+	if *b == 0 {
+		*b = *a
+	}
+}
+
 func applyFlagBool(cmd *cobra.Command, name string, target *bool) {
 	if cmd.Flags().Changed(name) {
 		*target, _ = cmd.Flags().GetBool(name)
@@ -316,23 +332,16 @@ func loadTransferFileDefaults(path string) (transferConfig, error) {
 	// straight through rather than collapsing to one shared value: that
 	// used to silently drop target.timeout entirely and pick an
 	// arbitrary side for concurrency whenever the two config-file
-	// blocks genuinely differed.
+	// blocks genuinely differed. fallbackToOtherSide then lets a value
+	// set on only one side (no top-level default, nothing on the other
+	// side) still reach both, instead of the unset side falling through
+	// to the hardcoded package default.
 	cfg.sourceConcurrency = extractCfg.Concurrency
 	cfg.targetConcurrency = migrateCfg.Concurrency
-	if cfg.sourceConcurrency == 0 {
-		cfg.sourceConcurrency = cfg.targetConcurrency
-	}
-	if cfg.targetConcurrency == 0 {
-		cfg.targetConcurrency = cfg.sourceConcurrency
-	}
+	fallbackToOtherSide(&cfg.sourceConcurrency, &cfg.targetConcurrency)
 	cfg.sourceTimeout = extractCfg.Timeout
 	cfg.targetTimeout = migrateCfg.Timeout
-	if cfg.sourceTimeout == 0 {
-		cfg.sourceTimeout = cfg.targetTimeout
-	}
-	if cfg.targetTimeout == 0 {
-		cfg.targetTimeout = cfg.sourceTimeout
-	}
+	fallbackToOtherSide(&cfg.sourceTimeout, &cfg.targetTimeout)
 	cfg.pemFilePath = extractCfg.PEMFilePath
 	cfg.keyFilePath = extractCfg.KeyFilePath
 	cfg.certPassword = extractCfg.CertPassword

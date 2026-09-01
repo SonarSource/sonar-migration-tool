@@ -277,6 +277,45 @@ func TestResolveTransferConfig_SourceAndTargetConcurrencyTimeoutDiffer(t *testin
 	}
 }
 
+// Issue #528 follow-up: when only ONE side sets concurrency/timeout in the
+// config file (no top-level default, nothing on the other side), the unset
+// side must borrow the explicitly-set side's value rather than falling
+// through to the hardcoded package default (25 / 60) — preserving the
+// pre-#528 behavior for this single-side case while still letting the two
+// sides genuinely differ when both are set explicitly.
+func TestResolveTransferConfig_SingleSideConcurrencyTimeoutFallsBackToOtherSide(t *testing.T) {
+	path := writeTransferConfig(t, `{
+		"source": {
+			"url": "https://sq.example.com",
+			"token": "sq-token"
+		},
+		"target": {
+			"url": "https://sonarcloud.io/",
+			"token": "sc-token",
+			"default_organization": "my-org",
+			"concurrency": 5,
+			"timeout": 30
+		}
+	}`)
+
+	cmd := newTransferTestCmd()
+	if err := cmd.ParseFlags([]string{"-c", path}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := resolveTransferConfig(cmd)
+	if err != nil {
+		t.Fatalf("resolveTransferConfig: %v", err)
+	}
+
+	if cfg.sourceConcurrency != 5 {
+		t.Errorf("sourceConcurrency: got %d, want 5 (borrowed from target)", cfg.sourceConcurrency)
+	}
+	if cfg.sourceTimeout != 30 {
+		t.Errorf("sourceTimeout: got %d, want 30 (borrowed from target)", cfg.sourceTimeout)
+	}
+}
+
 // Issue #527: --fast_sync loads from the config file when the CLI flag
 // is absent, and defaults to false when neither is set.
 func TestResolveTransferConfig_FastSync(t *testing.T) {

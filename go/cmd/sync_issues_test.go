@@ -205,6 +205,39 @@ func TestResolveSyncIssuesConfig_SourceAndTargetConcurrencyTimeoutDiffer(t *test
 	}
 }
 
+// Issue #528 follow-up: when only ONE side sets concurrency/timeout, the
+// unset side must borrow the explicitly-set side's value rather than
+// falling through to the hardcoded package default — see the identical
+// test in transfer_test.go.
+func TestResolveSyncIssuesConfig_SingleSideConcurrencyTimeoutFallsBackToOtherSide(t *testing.T) {
+	path := writeSyncIssuesConfig(t, `{
+		"source": {"url": "https://sq.example.com", "token": "sq-token"},
+		"target": {
+			"token": "sc-token",
+			"default_organization": "my-org",
+			"concurrency": 5,
+			"timeout": 30
+		}
+	}`)
+
+	cmd := newSyncIssuesTestCmd()
+	if err := cmd.ParseFlags([]string{"-c", path}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := resolveSyncIssuesConfig(cmd)
+	if err != nil {
+		t.Fatalf("resolveSyncIssuesConfig: %v", err)
+	}
+
+	if cfg.sourceConcurrency != 5 {
+		t.Errorf("sourceConcurrency: got %d, want 5 (borrowed from target)", cfg.sourceConcurrency)
+	}
+	if cfg.sourceTimeout != 30 {
+		t.Errorf("sourceTimeout: got %d, want 30 (borrowed from target)", cfg.sourceTimeout)
+	}
+}
+
 // Issue #527: --fast_sync overrides the config file; the config file
 // value is used when the flag is absent; defaults to false otherwise.
 func TestResolveSyncIssuesConfig_FastSync(t *testing.T) {
