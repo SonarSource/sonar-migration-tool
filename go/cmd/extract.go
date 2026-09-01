@@ -6,8 +6,11 @@ package cmd
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
+	"strings"
 
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/extract"
 	"github.com/spf13/cobra"
 )
@@ -24,6 +27,19 @@ var extractCmd = &cobra.Command{
 		}
 		if cfg.URL == "" || cfg.Token == "" {
 			return fmt.Errorf("URL and TOKEN are required (--source_url/--source_token flags or in config file)")
+		}
+		// #536: resolve --project_key (or the config file's top-level
+		// "project_key") into concrete ProjectKeys now that URL/Token are
+		// known to be set. Skipped entirely when an active --objects
+		// filter excludes the "projects" category — the pattern is
+		// harmless but unused in that combination, matching the issue's
+		// checklist (no error, just a no-op).
+		if cfg.ProjectKey != "" && (cfg.Objects == nil || cfg.Objects[common.ObjectProjects]) {
+			keys, err := extract.ResolveProjectKeys(cmd.Context(), cfg, cfg.ProjectKey)
+			if err != nil {
+				return err
+			}
+			cfg.ProjectKeys = keys
 		}
 		skipped, err := extract.RunExtract(cmd.Context(), cfg)
 		if err != nil {
@@ -62,6 +78,8 @@ func init() {
 	f.String("target_task", "", "Target task to complete; all dependent tasks will be included")
 	f.Bool(flagSkipProjectDataMigration, false, "Skip extracting project data (issues, hotspots, source code, SCM blame). Defaults to false — project data is extracted by default. #303.")
 	f.Bool(flagSkipIssueSync, false, "Skip extracting per-issue and per-hotspot sync metadata (comments, changelog, hotspot detail). Pair with migrate-side --skip_issue_sync. Defaults to false. #398.")
+	f.String("objects", "", "Comma-separated list of object categories to extract: "+strings.Join(common.AllObjects, ", ")+" (aliases: qp, qg, pt, lp). Omit to extract everything (default).")
+	f.String("project_key", "", "Regexp pattern of project keys to extract (only applies when the projects category is selected). A plain key matches only itself.")
 }
 
 func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfig, error) {
@@ -118,6 +136,24 @@ func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfi
 	if cmd.Flags().Changed("debug") {
 		cfg.Debug, _ = cmd.Flags().GetBool("debug")
 	}
+
+	// --objects overrides whatever the config file resolved (#536).
+	if cmd.Flags().Changed("objects") {
+		raw, _ := cmd.Flags().GetString("objects")
+		objects, err := common.ParseObjects(common.SplitObjectsCSV(raw))
+		if err != nil {
+			return cfg, err
+		}
+		cfg.Objects = objects
+	}
+	if cfg.Objects != nil && cfg.Objects[common.ObjectLicenseProfiles] {
+		slog.Default().Warn("license_profiles migration is not yet supported; ignoring")
+	}
+	// --project_key is resolved into cfg.ProjectKeys by the caller (RunE),
+	// once URL/Token are known to be valid — see extractCmd.RunE. Just
+	// capture the pattern here, same precedence as every other flag
+	// (CLI overrides config file).
+	overrideString(cmd, "project_key", &cfg.ProjectKey)
 
 	// Default the export directory when neither config nor flag supplied
 	// one (issue #247).

@@ -62,6 +62,13 @@ func runCreateProjects(ctx context.Context, e *Executor) error {
 				return nil
 			}
 			key := extractField(item, "key")
+			// #536: --project_key restricts createProjects to source keys
+			// matching the pattern. Every other project-scoped task scopes
+			// off createProjects's own output, so filtering here is
+			// sufficient — no other task needs to know about the filter.
+			if e.ProjectKeyRe != nil && !e.ProjectKeyRe.MatchString(key) {
+				return nil
+			}
 			name := extractField(item, "name")
 			ncdType := extractField(item, "new_code_definition_type")
 			ncdValue := extractAnyStr(item, "new_code_definition_value")

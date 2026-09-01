@@ -18,9 +18,9 @@ import (
 	"testing"
 	"time"
 
-	sqapi "github.com/sonar-solutions/sq-api-go"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
+	sqapi "github.com/sonar-solutions/sq-api-go"
 )
 
 func TestLoadCSVToJSONL(t *testing.T) {
@@ -444,6 +444,7 @@ func TestTaskCounterEmptySummary(t *testing.T) {
 		t.Errorf("empty counter should not emit succeeded/failed attrs, got: %s", output)
 	}
 }
+
 // #300: runProjectSyncLoop applies fn to every item concurrently and
 // emits a "<label>: N/M - X%" progress line every `interval`
 // completions, including a final 100% line at the end of the batch.
@@ -536,6 +537,7 @@ func TestRunProjectSyncLoop(t *testing.T) {
 			func(_ context.Context, _ int) { t.Fatal("apply should not be called") })
 	})
 }
+
 // #326: sortMigrateItems orders items by (orgField, sortField) for tasks
 // in the registry, and is a no-op for tasks not in the registry.
 func TestSortMigrateItems(t *testing.T) {

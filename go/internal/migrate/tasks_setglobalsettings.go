@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	sqapi "github.com/sonar-solutions/sq-api-go"
 	"github.com/sonar-solutions/sq-api-go/types"
 	"golang.org/x/sync/errgroup"
@@ -393,6 +394,20 @@ func consolidateSonarAuthNotes(notes []globalSettingResult) []globalSettingResul
 // migrate -> report dependency direction reversal.
 const skipReasonSQSOnlyValue = "sqs-only"
 
+// skipReasonProjectsNotSelected and detailProjectsNotSelected mark a
+// global-setting outcome that would otherwise have been evaluated for a
+// project-scope fallback (either because the key doesn't exist at org
+// scope and might exist at project scope, or because SQC rejected the
+// org-scope write and normally falls back to a per-project fan-out),
+// but the "projects" --objects category wasn't selected for this run
+// (#536) — there is nothing to fall back to, and per the config-driven
+// gate in runSetGlobalSettings this holds even if projects already
+// exist on disk from an earlier phased run.
+const (
+	skipReasonProjectsNotSelected = "projects-not-selected"
+	detailProjectsNotSelected     = "Setting requires project-scope application; projects not selected via --objects"
+)
+
 var globalExclusionPairs = []exclusionPair{
 	{SQSGlobalKey: "sonar.global.exclusions", SQSLocalKey: "sonar.exclusions"},
 	{SQSGlobalKey: "sonar.global.test.exclusions", SQSLocalKey: "sonar.test.exclusions"},
@@ -534,25 +549,40 @@ func runSetGlobalSettings(ctx context.Context, e *Executor) error {
 	// One list_definitions fetch per target org (org scope).
 	defsByOrg := loadSettingDefinitionsForOrgs(ctx, e, orgs, "setGlobalSettings")
 
+	// #536: when the "projects" --objects category isn't selected, no
+	// project will exist to fall back to — createProjects itself is
+	// excluded from this run's plan. This is a config-driven gate (checked
+	// against e.Objects), not something that just happens to work because
+	// projectKeyMap is empty: it must hold even if projects already exist
+	// from an earlier phased run. applyOneGlobalSetting consults it to
+	// turn what would otherwise be a silent per-project write into an
+	// explicit Skipped outcome.
+	projectsExcluded := e.Objects != nil && !e.Objects[common.ObjectProjects]
+
 	// Project-scope defs cover the superset of keys visible to a
 	// project (language settings, external-analyzer settings, etc.).
 	// Used below to distinguish "truly not on SQC" (warn) from "exists
 	// at project scope only — handled by setProjectSettings" (info).
-	// Issues #189 / #191.
-	projects, _ := e.Store.ReadAll("createProjects")
-	projectKeyMap := make(map[string]projectMapping, len(projects))
-	for _, p := range projects {
-		if isFailedMigrateRecord(p) {
-			continue
+	// Issues #189 / #191. Skipped entirely when projects are excluded —
+	// nothing will use them.
+	var projectKeyMap map[string]projectMapping
+	var projectDefsByOrg map[string]map[string]types.SettingDefinition
+	if !projectsExcluded {
+		projects, _ := e.Store.ReadAll("createProjects")
+		projectKeyMap = make(map[string]projectMapping, len(projects))
+		for _, p := range projects {
+			if isFailedMigrateRecord(p) {
+				continue
+			}
+			serverURL := extractField(p, "server_url")
+			key := extractField(p, "key")
+			projectKeyMap[serverURL+key] = projectMapping{
+				CloudKey: extractField(p, "cloud_project_key"),
+				OrgKey:   extractField(p, "sonarcloud_org_key"),
+			}
 		}
-		serverURL := extractField(p, "server_url")
-		key := extractField(p, "key")
-		projectKeyMap[serverURL+key] = projectMapping{
-			CloudKey: extractField(p, "cloud_project_key"),
-			OrgKey:   extractField(p, "sonarcloud_org_key"),
-		}
+		projectDefsByOrg = loadProjectScopedSettingDefinitionsForOrgs(ctx, e, projectKeyMap, "setGlobalSettings")
 	}
-	projectDefsByOrg := loadProjectScopedSettingDefinitionsForOrgs(ctx, e, projectKeyMap, "setGlobalSettings")
 
 	// Read getProjectSettings extract so the fan-out (below) knows
 	// which (project, key) pairs already have a per-project SQS
@@ -575,7 +605,7 @@ func runSetGlobalSettings(ctx context.Context, e *Executor) error {
 			if gctx.Err() != nil {
 				return gctx.Err()
 			}
-			rec := applyOneGlobalSetting(gctx, e, raw, orgList, defsByOrg, projectDefsByOrg, projectKeyMap, overrideCovered, counter)
+			rec := applyOneGlobalSetting(gctx, e, raw, orgList, defsByOrg, projectDefsByOrg, projectKeyMap, overrideCovered, counter, projectsExcluded)
 			b, _ := json.Marshal(rec)
 			mu.Lock()
 			defer mu.Unlock()
@@ -686,7 +716,7 @@ func applyOneGlobalSetting(ctx context.Context, e *Executor, raw json.RawMessage
 	defsByOrg, projectDefsByOrg map[string]map[string]types.SettingDefinition,
 	projectKeyMap map[string]projectMapping,
 	overrideCovered map[string]map[string]bool,
-	counter *TaskCounter) globalSettingResult {
+	counter *TaskCounter, projectsExcluded bool) globalSettingResult {
 
 	key := extractField(raw, "key")
 	rec := globalSettingResult{Key: key}
@@ -715,6 +745,22 @@ func applyOneGlobalSetting(ctx context.Context, e *Executor, raw json.RawMessage
 	for _, org := range orgs {
 		def, hasDef := defsByOrg[org][key]
 		if !hasDef {
+			// #536: when "projects" isn't selected, projectDefsByOrg is
+			// never built (see runSetGlobalSettings), so there is no way
+			// to tell "truly not on SQC" apart from "project-scope only"
+			// without the very API calls the objects filter is meant to
+			// avoid. Rather than guess, report the honest reason: this
+			// setting's applicability could not be determined without
+			// project-scope data, and projects weren't selected.
+			if projectsExcluded {
+				rec.Outcomes = append(rec.Outcomes, orgOutcome{
+					Org:    org,
+					Status: outcomeSkipped,
+					Reason: skipReasonProjectsNotSelected,
+					Detail: detailProjectsNotSelected + mergeSuffix,
+				})
+				continue
+			}
 			// Distinguish two cases here (issues #189 / #191):
 			//   - key NOT in org-scope and NOT in project-scope → truly
 			//     unknown to SQC; keep the existing Warn.
@@ -748,6 +794,15 @@ func applyOneGlobalSetting(ctx context.Context, e *Executor, raw json.RawMessage
 		// straight to the project fan-out. Saves one wasted 400 per
 		// extra org.
 		if orgRejected {
+			if projectsExcluded {
+				rec.Outcomes = append(rec.Outcomes, orgOutcome{
+					Org:    org,
+					Status: outcomeSkipped,
+					Reason: skipReasonProjectsNotSelected,
+					Detail: detailProjectsNotSelected + mergeSuffix,
+				})
+				continue
+			}
 			rec.Outcomes = append(rec.Outcomes,
 				fanOutOutcome(ctx, e, raw, key, org, valueSummary, mergeSuffix, projectDefsByOrg, projectKeyMap, overrideCovered, counter /*alreadyKnown=*/, true))
 			continue
@@ -768,6 +823,20 @@ func applyOneGlobalSetting(ctx context.Context, e *Executor, raw json.RawMessage
 			// the remaining orgs in the loop skip the failing org-
 			// scope POST altogether.
 			orgRejected = true
+			// #536: "projects" not selected — there is nothing to fan
+			// out to (and, per the config-driven gate in
+			// runSetGlobalSettings, we must not fan out even if a
+			// project happens to already exist from an earlier phased
+			// run). Report explicitly instead of calling fanOutOutcome.
+			if projectsExcluded {
+				rec.Outcomes = append(rec.Outcomes, orgOutcome{
+					Org:    org,
+					Status: outcomeSkipped,
+					Reason: skipReasonProjectsNotSelected,
+					Detail: detailProjectsNotSelected + mergeSuffix,
+				})
+				break
+			}
 			rec.Outcomes = append(rec.Outcomes,
 				fanOutOutcome(ctx, e, raw, key, org, valueSummary, mergeSuffix, projectDefsByOrg, projectKeyMap, overrideCovered, counter /*alreadyKnown=*/, false))
 		case err != nil:

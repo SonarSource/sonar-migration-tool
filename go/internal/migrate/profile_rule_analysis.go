@@ -234,10 +234,10 @@ var standardRuleRepos = map[string]bool{
 	// Recent additions to the Sonar-shipped language set (post-2024).
 	"dart": true, "common-dart": true,
 	"rust": true, "common-rust": true,
-	"ipynb": true,
-	"jcl": true,
-	"shell": true,
-	"ansible": true,
+	"ipynb":     true,
+	"jcl":       true,
+	"shell":     true,
+	"ansible":   true,
 	"dotnetcli": true,
 }
 

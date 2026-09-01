@@ -60,6 +60,54 @@ func resolveGeneric[T TaskMeta](task string, reg map[string]T, seen map[string]b
 	return true
 }
 
+// ResolveDependenciesExcludingGeneric is like ResolveDependenciesGeneric,
+// except any task name present in excluded is treated as vacuously
+// satisfied: it is never added to the result and its own dependencies
+// are never walked. Used by --objects (#536) so a task whose category
+// was excluded from the run doesn't get pulled back in — and forced to
+// run — just because another, selected task happens to declare it as a
+// dependency (e.g. setGlobalSettings declares createProjects as a
+// dependency for its project-scope fallback path; that must not force
+// project creation when --objects=settings excludes the "projects"
+// category). Returns nil if a non-excluded dependency is missing from
+// reg, same contract as ResolveDependenciesGeneric.
+func ResolveDependenciesExcludingGeneric[T TaskMeta](targets []string, reg map[string]T, excluded map[string]bool) map[string]bool {
+	result := make(map[string]bool)
+	for _, t := range targets {
+		if excluded[t] {
+			continue
+		}
+		if !resolveGenericExcluding(t, reg, excluded, result) {
+			return nil
+		}
+	}
+	return result
+}
+
+func resolveGenericExcluding[T TaskMeta](task string, reg map[string]T, excluded, seen map[string]bool) bool {
+	if seen[task] {
+		return true
+	}
+	if excluded[task] {
+		return true
+	}
+	def, ok := reg[task]
+	if !ok {
+		return false
+	}
+	seen[task] = true
+	for _, dep := range def.TaskDeps() {
+		if excluded[dep] {
+			continue
+		}
+		if !resolveGenericExcluding(dep, reg, excluded, seen) {
+			delete(seen, task)
+			return false
+		}
+	}
+	return true
+}
+
 // PlanPhasesGeneric computes ordered execution phases via topological sort.
 func PlanPhasesGeneric[T TaskMeta](tasks map[string]bool, reg map[string]T) ([][]string, error) {
 	completed := make(map[string]bool)

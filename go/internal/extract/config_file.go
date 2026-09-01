@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
 // configFileShape is the union of the four documented config-file
@@ -28,19 +30,29 @@ import (
 //   - else                     -> shape 1 (flat)
 type configFileShape struct {
 	// Shape 1 (flat) fields. Reused inside Shape 2's "extract" object.
-	URL                string `json:"url"`
-	Token              string `json:"token"`
-	ExportDirectory    string `json:"export_directory"`
-	ExtractType        string `json:"extract_type"`
-	PEMFilePath        string `json:"pem_file_path"`
-	KeyFilePath        string `json:"key_file_path"`
-	CertPassword       string `json:"cert_password"`
-	Concurrency        int    `json:"concurrency"`
-	Timeout            int    `json:"timeout"`
+	URL                      string `json:"url"`
+	Token                    string `json:"token"`
+	ExportDirectory          string `json:"export_directory"`
+	ExtractType              string `json:"extract_type"`
+	PEMFilePath              string `json:"pem_file_path"`
+	KeyFilePath              string `json:"key_file_path"`
+	CertPassword             string `json:"cert_password"`
+	Concurrency              int    `json:"concurrency"`
+	Timeout                  int    `json:"timeout"`
 	ExtractID                string `json:"extract_id"`
 	TargetTask               string `json:"target_task"`
 	SkipProjectDataMigration bool   `json:"skip_project_data_migration"`
 	SkipIssueSync            bool   `json:"skip_issue_sync"` // #398
+	// Objects and ProjectKey are always read from the top level of the
+	// config file regardless of shape (#536: the issue documents "objects"
+	// as settable "at global level"). For shape 2 (command-sectioned),
+	// toExtractConfig recurses into s.Extract.toExtractConfig() for
+	// everything else, which would only see a NESTED "extract.objects" /
+	// "extract.project_key" (same struct type, reused) — so that branch
+	// explicitly re-applies the outer-level values afterward, letting the
+	// global value win but still falling back to the command-scoped one.
+	Objects    []string `json:"objects"`
+	ProjectKey string   `json:"project_key"`
 
 	// Shape 2 (command-sectioned).
 	Extract *configFileShape `json:"extract"`
@@ -153,6 +165,8 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		// the extract pulls issue / source / SCM-blame data.
 		cfg.SkipProjectDataMigration = s.SkipProjectDataMigration
 		cfg.SkipIssueSync = s.SkipIssueSync
+		cfg.objectsRaw = s.Objects
+		cfg.ProjectKey = s.ProjectKey
 	case s.SonarQube != nil:
 		cfg.URL = s.SonarQube.URL
 		cfg.Token = s.SonarQube.Token
@@ -163,8 +177,21 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		}
 		cfg.SkipProjectDataMigration = s.SkipProjectDataMigration
 		cfg.SkipIssueSync = s.SkipIssueSync
+		cfg.objectsRaw = s.Objects
+		cfg.ProjectKey = s.ProjectKey
 	case s.Extract != nil:
-		return s.Extract.toExtractConfig()
+		cfg = s.Extract.toExtractConfig()
+		// #536: "objects" / "project_key" set at the outermost (global)
+		// level of a command-sectioned config win over the same fields
+		// nested inside "extract" — but fall back to the nested value
+		// (already captured above by the recursive call) when the outer
+		// level didn't set them.
+		if len(s.Objects) > 0 {
+			cfg.objectsRaw = s.Objects
+		}
+		if s.ProjectKey != "" {
+			cfg.ProjectKey = s.ProjectKey
+		}
 	default:
 		cfg.URL = s.URL
 		cfg.Token = s.Token
@@ -179,16 +206,29 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		cfg.TargetTask = s.TargetTask
 		cfg.SkipProjectDataMigration = s.SkipProjectDataMigration
 		cfg.SkipIssueSync = s.SkipIssueSync
+		cfg.objectsRaw = s.Objects
+		cfg.ProjectKey = s.ProjectKey
 	}
 	return cfg
 }
 
-// LoadExtractConfigFile parses a JSON config file in any of the three
-// documented shapes and returns the populated ExtractConfig.
+// LoadExtractConfigFile parses a JSON config file in any of the four
+// documented shapes and returns the populated ExtractConfig. The
+// config-file "objects" array (any shape) is validated and resolved into
+// ExtractConfig.Objects here — the single place --objects values get
+// parsed, whether they come from this file or, via cmd/extract.go, the
+// --objects CLI flag (#536).
 func LoadExtractConfigFile(path string) (ExtractConfig, error) {
 	shape, err := parseConfigFile(path)
 	if err != nil {
 		return ExtractConfig{}, err
 	}
-	return shape.toExtractConfig(), nil
+	cfg := shape.toExtractConfig()
+	objects, err := common.ParseObjects(cfg.objectsRaw)
+	if err != nil {
+		return ExtractConfig{}, fmt.Errorf("config file %s: %w", path, err)
+	}
+	cfg.Objects = objects
+	cfg.objectsRaw = nil
+	return cfg, nil
 }

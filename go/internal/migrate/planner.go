@@ -48,9 +48,75 @@ func ResolveDependencies(targets []string, reg map[string]*TaskDef) map[string]b
 	return common.ResolveDependenciesGeneric(targets, reg)
 }
 
+// ResolveDependenciesExcluding is like ResolveDependencies, except any task
+// name present in excluded is treated as vacuously satisfied: it is never
+// added to the result and its own dependencies are never walked. Used when
+// an --objects filter is active (#536) so a task whose category was
+// excluded from the run doesn't get pulled back in just because another,
+// selected task happens to declare it as a dependency.
+func ResolveDependenciesExcluding(targets []string, reg map[string]*TaskDef, excluded map[string]bool) map[string]bool {
+	return common.ResolveDependenciesExcludingGeneric(targets, reg, excluded)
+}
+
 // PlanPhases computes topologically sorted execution phases.
 func PlanPhases(tasks map[string]bool, reg map[string]*TaskDef) ([][]string, error) {
 	return common.PlanPhasesGeneric(tasks, reg)
+}
+
+// PlanPhasesExcluding is like PlanPhases, but first strips any excluded
+// task name out of every TaskDef's Dependencies before computing phases.
+//
+// common.PlanPhasesGeneric's readiness check (allDepsCompleted) has no
+// notion of "excluded" — a task only becomes ready once every name in
+// its Dependencies has been scheduled and marked complete. When an
+// --objects filter is active, ResolveDependenciesExcluding deliberately
+// leaves an excluded task OUT of tasks (it's vacuously satisfied, never
+// added, never walked) — so a task with a cross-category dependency on
+// an excluded one (e.g. setGlobalSettings declares createProjects as a
+// dependency for its project-scope probe; createProjects is excluded
+// when --objects=settings) would otherwise wait forever for a
+// dependency that will never run, surfacing as a false "cycle detected
+// in task dependency graph" error instead of a valid plan (#536).
+// extract has the identical bug for the same reason (e.g.
+// getProjectPluginIssues/getProjectTemplateIssues, category
+// "projects", depend on getPluginRules/getTemplateRules, category
+// "quality_profiles") — see extract.PlanPhasesExcluding, an
+// independent copy of this same fix. Kept as two package-local copies
+// rather than promoted to shared common.PlanPhasesGeneric since
+// TaskDef is a distinct type per package and there's no shared
+// interface for the copy-with-filtered-Dependencies step.
+//
+// The returned plan is computed against the filtered dependency view;
+// the registry returned to callers for task execution is unaffected —
+// Dependencies is only consulted during planning, never by runPhase.
+func PlanPhasesExcluding(tasks map[string]bool, reg map[string]*TaskDef, excluded map[string]bool) ([][]string, error) {
+	if len(excluded) == 0 {
+		return PlanPhases(tasks, reg)
+	}
+	filtered := make(map[string]*TaskDef, len(reg))
+	for name, def := range reg {
+		hasExcludedDep := false
+		for _, dep := range def.Dependencies {
+			if excluded[dep] {
+				hasExcludedDep = true
+				break
+			}
+		}
+		if !hasExcludedDep {
+			filtered[name] = def
+			continue
+		}
+		deps := make([]string, 0, len(def.Dependencies))
+		for _, dep := range def.Dependencies {
+			if !excluded[dep] {
+				deps = append(deps, dep)
+			}
+		}
+		cp := *def
+		cp.Dependencies = deps
+		filtered[name] = &cp
+	}
+	return PlanPhases(tasks, filtered)
 }
 
 // RegisterAll returns every migrate task definition.
@@ -103,7 +169,13 @@ var migrateIssueSyncTasks = map[string]bool{
 // sync tasks from the default set while keeping importProjectData itself.
 // skipProjectDataMigration (#303) is the wider opt-out: it drops
 // importProjectData AND the two trailing sync tasks together.
-func MigrateTargetTasks(reg map[string]*TaskDef, targetTask string, skipProfiles, includeProjectData, skipIssueSync, skipProjectDataMigration bool, targetTasks []string) []string {
+//
+// objects (#536), when non-nil, additionally drops any default task whose
+// category isn't selected — composed with the skip gates above via
+// isExcludedTask. objects filtering does NOT apply when targetTasks or
+// targetTask (explicit overrides) are used, matching the precedence
+// documented above.
+func MigrateTargetTasks(reg map[string]*TaskDef, targetTask string, skipProfiles, includeProjectData, skipIssueSync, skipProjectDataMigration bool, targetTasks []string, objects map[string]bool) []string {
 	if len(targetTasks) > 0 {
 		// Filter the explicit list against the skip gates so transfer's
 		// project-scoped target list still honors --skip_project_data_migration
@@ -129,9 +201,13 @@ func MigrateTargetTasks(reg map[string]*TaskDef, targetTask string, skipProfiles
 	if targetTask != "" {
 		return []string{targetTask}
 	}
+	excluded := excludedMigrateTasks(objects)
 	var tasks []string
 	for name := range reg {
 		if isExcludedTask(name, skipProfiles, includeProjectData, skipIssueSync, skipProjectDataMigration) {
+			continue
+		}
+		if excluded[name] {
 			continue
 		}
 		tasks = append(tasks, name)

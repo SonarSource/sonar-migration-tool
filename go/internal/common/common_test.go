@@ -236,7 +236,7 @@ type testTaskDef struct {
 	deps []string
 }
 
-func (t *testTaskDef) TaskName() string      { return t.name }
+func (t *testTaskDef) TaskName() string        { return t.name }
 func (t *testTaskDef) TaskEditions() []Edition { return t.eds }
 func (t *testTaskDef) TaskDeps() []string      { return t.deps }
 
@@ -316,6 +316,86 @@ func TestResolveDependenciesGenericMissing(t *testing.T) {
 	result := ResolveDependenciesGeneric([]string{"a"}, reg)
 	if result != nil {
 		t.Error("expected nil for unresolvable")
+	}
+}
+
+// #536: a target's dependency on an excluded task must not pull that
+// task (or its own dependencies) into the result — reproduces
+// setGlobalSettings depending on createProjects, which must not force
+// project creation when --objects excludes "projects".
+func TestResolveDependenciesExcludingGeneric(t *testing.T) {
+	reg := map[string]*testTaskDef{
+		"generateOrgMappings": {name: "generateOrgMappings"},
+		"createProjects":      {name: "createProjects", deps: []string{"generateOrgMappings"}},
+		"setGlobalSettings":   {name: "setGlobalSettings", deps: []string{"generateOrgMappings", "createProjects"}},
+	}
+	excluded := map[string]bool{"createProjects": true}
+
+	result := ResolveDependenciesExcludingGeneric([]string{"setGlobalSettings"}, reg, excluded)
+	if result == nil {
+		t.Fatal("expected non-nil")
+	}
+	if result["createProjects"] {
+		t.Error("excluded task createProjects must not be in the result")
+	}
+	if !result["setGlobalSettings"] || !result["generateOrgMappings"] {
+		t.Errorf("expected setGlobalSettings and its non-excluded dependency, got %v", result)
+	}
+}
+
+// An excluded task passed directly as a target is also dropped, not
+// just when reached transitively.
+func TestResolveDependenciesExcludingGeneric_ExcludedTarget(t *testing.T) {
+	reg := map[string]*testTaskDef{
+		"a": {name: "a"},
+		"b": {name: "b"},
+	}
+	result := ResolveDependenciesExcludingGeneric([]string{"a", "b"}, reg, map[string]bool{"a": true})
+	if result == nil {
+		t.Fatal("expected non-nil")
+	}
+	if result["a"] {
+		t.Error("excluded target must not be in the result")
+	}
+	if !result["b"] {
+		t.Error("expected non-excluded target b in the result")
+	}
+}
+
+// A dependency that's excluded doesn't need to exist in the registry —
+// exclusion is checked before the registry lookup that would otherwise
+// report it missing.
+func TestResolveDependenciesExcludingGeneric_ExcludedDepNotInRegistry(t *testing.T) {
+	reg := map[string]*testTaskDef{
+		"a": {name: "a", deps: []string{"neverRegistered"}},
+	}
+	result := ResolveDependenciesExcludingGeneric([]string{"a"}, reg, map[string]bool{"neverRegistered": true})
+	if result == nil {
+		t.Fatal("expected non-nil — excluded dep should not trigger the missing-dependency error path")
+	}
+	if !result["a"] {
+		t.Error("expected a in the result")
+	}
+}
+
+// Non-excluded dependencies still resolve normally alongside excluded
+// ones — exclusion only vacuously satisfies the excluded names, it
+// doesn't disable resolution of the rest of the graph.
+func TestResolveDependenciesExcludingGeneric_MixedGraph(t *testing.T) {
+	reg := map[string]*testTaskDef{
+		"a": {name: "a"},
+		"b": {name: "b", deps: []string{"a"}},
+		"c": {name: "c", deps: []string{"a", "excludedDep"}},
+	}
+	result := ResolveDependenciesExcludingGeneric([]string{"b", "c"}, reg, map[string]bool{"excludedDep": true})
+	if result == nil {
+		t.Fatal("expected non-nil")
+	}
+	if !result["a"] || !result["b"] || !result["c"] {
+		t.Errorf("expected a, b, c in the result, got %v", result)
+	}
+	if result["excludedDep"] {
+		t.Error("excludedDep must not be in the result")
 	}
 }
 

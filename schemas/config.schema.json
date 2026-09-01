@@ -47,6 +47,22 @@
       "default": false,
       "description": "When true (or on / yes / 1), skip the entire project-data migration: the project-data import AND the trailing issue + hotspot sync. Implies skip_issue_sync. Defaults to false so the data is migrated. Issue #303."
     },
+    "objects": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "settings", "permission_templates", "quality_profiles", "quality_gates",
+          "projects", "portfolios", "groups", "license_profiles",
+          "qp", "qg", "pt", "lp"
+        ]
+      },
+      "description": "Object categories to extract / migrate — extract and migrate only. Omit (or leave empty) to process every category, the default. When set without \"projects\", no project is created/extracted/migrated. Aliases: qp=quality_profiles, qg=quality_gates, pt=permission_templates, lp=license_profiles. license_profiles is accepted but not yet implemented (logs a warning and is otherwise ignored). Issue #536."
+    },
+    "project_key": {
+      "type": ["string", "null"],
+      "description": "Regexp pattern of source project keys to extract / migrate — extract and migrate only; only applies when \"projects\" is selected via objects (or objects is unset). Implicitly anchored (^...$); a plain key with no regex metacharacters matches only itself. Issue #536."
+    },
     "source": {
       "$ref": "#/$defs/sourceBlock",
       "description": "SonarQube Server connection + extract-time options. Consumed by `extract` (and ignored by `migrate` / `reset`)."

@@ -12,9 +12,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/sonar-solutions/sq-api-go/types"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
+	"github.com/sonar-solutions/sq-api-go/types"
 )
 
 // AI Code Fix migration (issue #251).
@@ -38,7 +38,7 @@ import (
 // (extracting the SQS records) and at row-emission time (the Name
 // column in the report).
 const (
-	AiCodeFixHiddenSetting    = "sonar.ai.codefix.hidden"
+	AiCodeFixHiddenSetting      = "sonar.ai.codefix.hidden"
 	AiCodeFixSuggestionsSetting = "sonar.ai.suggestions.enabled"
 )
 

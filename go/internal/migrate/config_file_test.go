@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
 // The legacy config shapes no longer ship as example files (the examples/
@@ -625,4 +627,132 @@ func TestLoadMigrateConfigFile_SkipProjectDataMigration(t *testing.T) {
 			}
 		})
 	}
+}
+
+// #536: "objects" and "project_key" are top-level-only fields, present in
+// every documented shape (mirrors extract's TestLoadExtractConfigFileObjectsAndProjectKey).
+// These tests round-trip them through LoadMigrateConfigFile into
+// MigrateConfig.Objects (validated + alias-resolved via common.ParseObjects)
+// and MigrateConfig.ProjectKeyFilter, following the same
+// TestLoadMigrateConfigFileUnifiedShape_TargetOverridesGlobals-style
+// per-shape coverage used elsewhere in this file.
+func TestLoadMigrateConfigFileObjectsAndProjectKey(t *testing.T) {
+	t.Run("flat shape", func(t *testing.T) {
+		body := `{
+  "token": "tok",
+  "url": "https://sonarcloud.io/",
+  "enterprise_key": "ent",
+  "objects": ["quality_gates", "qp"],
+  "project_key": "BANKING_.+"
+}`
+		cfg, err := LoadMigrateConfigFile(writeConfigFixture(t, body))
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if !cfg.Objects[common.ObjectQualityGates] || !cfg.Objects[common.ObjectQualityProfiles] {
+			t.Errorf("expected quality_gates + quality_profiles (via qp alias), got %+v", cfg.Objects)
+		}
+		if len(cfg.Objects) != 2 {
+			t.Errorf("expected exactly 2 categories, got %+v", cfg.Objects)
+		}
+		if cfg.ProjectKeyFilter != "BANKING_.+" {
+			t.Errorf("ProjectKeyFilter: got %q", cfg.ProjectKeyFilter)
+		}
+	})
+
+	t.Run("unified shape (top-level, sibling of target)", func(t *testing.T) {
+		body := `{
+  "objects": ["groups"],
+  "project_key": "my-project",
+  "target": { "url": "u", "token": "t" }
+}`
+		cfg, err := LoadMigrateConfigFile(writeConfigFixture(t, body))
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if !cfg.Objects[common.ObjectGroups] || len(cfg.Objects) != 1 {
+			t.Errorf("Objects: got %+v", cfg.Objects)
+		}
+		if cfg.ProjectKeyFilter != "my-project" {
+			t.Errorf("ProjectKeyFilter: got %q", cfg.ProjectKeyFilter)
+		}
+	})
+
+	t.Run("command-sectioned shape: outer wins over nested migrate", func(t *testing.T) {
+		body := `{
+  "objects": ["portfolios"],
+  "project_key": "outer-pattern",
+  "migrate": {
+    "token": "tok", "url": "https://sonarcloud.io/", "enterprise_key": "ent",
+    "objects": ["groups"],
+    "project_key": "inner-pattern"
+  }
+}`
+		cfg, err := LoadMigrateConfigFile(writeConfigFixture(t, body))
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if !cfg.Objects[common.ObjectPortfolios] || len(cfg.Objects) != 1 {
+			t.Errorf("expected outer objects to win, got %+v", cfg.Objects)
+		}
+		if cfg.ProjectKeyFilter != "outer-pattern" {
+			t.Errorf("expected outer project_key to win, got %q", cfg.ProjectKeyFilter)
+		}
+	})
+
+	t.Run("command-sectioned shape: falls back to nested migrate when outer absent", func(t *testing.T) {
+		body := `{
+  "migrate": {
+    "token": "tok", "url": "https://sonarcloud.io/", "enterprise_key": "ent",
+    "objects": ["groups"],
+    "project_key": "inner-pattern"
+  }
+}`
+		cfg, err := LoadMigrateConfigFile(writeConfigFixture(t, body))
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if !cfg.Objects[common.ObjectGroups] || len(cfg.Objects) != 1 {
+			t.Errorf("expected nested objects to be used, got %+v", cfg.Objects)
+		}
+		if cfg.ProjectKeyFilter != "inner-pattern" {
+			t.Errorf("expected nested project_key to be used, got %q", cfg.ProjectKeyFilter)
+		}
+	})
+
+	t.Run("side-sectioned shape", func(t *testing.T) {
+		body := `{
+  "sonarcloud": { "url": "https://sonarcloud.io/", "token": "tok", "enterprise_key": "ent" },
+  "objects": ["license_profiles"],
+  "project_key": "sc-pattern"
+}`
+		cfg, err := LoadMigrateConfigFile(writeConfigFixture(t, body))
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if !cfg.Objects[common.ObjectLicenseProfiles] || len(cfg.Objects) != 1 {
+			t.Errorf("Objects: got %+v", cfg.Objects)
+		}
+		if cfg.ProjectKeyFilter != "sc-pattern" {
+			t.Errorf("ProjectKeyFilter: got %q", cfg.ProjectKeyFilter)
+		}
+	})
+
+	t.Run("invalid objects value errors", func(t *testing.T) {
+		body := `{"token":"tok","url":"https://sonarcloud.io/","enterprise_key":"ent","objects":["bogus"]}`
+		if _, err := LoadMigrateConfigFile(writeConfigFixture(t, body)); err == nil {
+			t.Error("expected an error for an unrecognized objects value")
+		}
+	})
+
+	t.Run("absent objects means nil (everything)", func(t *testing.T) {
+		body := `{"token":"tok","url":"https://sonarcloud.io/","enterprise_key":"ent"}`
+		cfg, err := LoadMigrateConfigFile(writeConfigFixture(t, body))
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if cfg.Objects != nil {
+			t.Errorf("expected nil Objects (everything) when absent, got %+v", cfg.Objects)
+		}
+	})
 }
