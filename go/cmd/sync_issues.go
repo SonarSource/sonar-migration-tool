@@ -81,8 +81,8 @@ func init() {
 	f.String(flagProjectKeyPattern, "", "Template used to resolve each project's already-migrated target key, built from <ORIGINAL_PROJECT_KEY> and <ORGANIZATION_KEY> (maps to target.project_key_pattern; default: <ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>) — must match the pattern used when the projects were created")
 	f.String(flagEnterpriseKey, "", scCloudName+" enterprise key (maps to target.enterprise_key, defaults to --"+flagDefaultOrg+")")
 	f.String(flagExportDir, "./migration-files/", "Working directory for intermediate files (maps to export_directory)")
-	f.Int(flagConcurrency, 0, "Max concurrent requests (default: 25) (maps to concurrency)")
-	f.Int(flagTimeout, 0, "HTTP request timeout in seconds (maps to timeout; default: 60)")
+	f.Int(flagConcurrency, 0, "Max concurrent requests, applied to both source and target (default: 25). Use source.concurrency / target.concurrency in the config file to set them independently.")
+	f.Int(flagTimeout, 0, "HTTP request timeout in seconds, applied to both source and target (default: 60). Use source.timeout / target.timeout in the config file to set them independently.")
 	f.String(flagPEMFilePath, "", "Path to client mTLS PEM file for the source server (maps to source.pem_file_path)")
 	f.String(flagKeyFilePath, "", "Path to client mTLS key file for the source server (maps to source.key_file_path)")
 	f.String(flagCertPassword, "", "Password for the source server mTLS client certificate (maps to source.cert_password)")
@@ -103,8 +103,10 @@ type syncIssuesConfig struct {
 	projectKeyPattern   string
 	enterpriseKey       string
 	exportDir           string
-	concurrency         int
-	timeout             int
+	sourceConcurrency   int
+	targetConcurrency   int
+	sourceTimeout       int
+	targetTimeout       int
 	pemFilePath         string
 	keyFilePath         string
 	certPassword        string
@@ -139,14 +141,9 @@ func loadSyncIssuesFileDefaults(path string) (syncIssuesConfig, error) {
 		cfg.exportDir = migrateCfg.ExportDirectory
 	}
 
-	switch {
-	case extractCfg.Concurrency != 0:
-		cfg.concurrency = extractCfg.Concurrency
-	case migrateCfg.Concurrency != 0:
-		cfg.concurrency = migrateCfg.Concurrency
-	}
-
-	cfg.timeout = extractCfg.Timeout
+	// #528 — see resolveSourceTargetRates's doc in cmd/transfer.go.
+	cfg.sourceConcurrency, cfg.targetConcurrency, cfg.sourceTimeout, cfg.targetTimeout =
+		resolveSourceTargetRates(extractCfg, migrateCfg)
 	cfg.pemFilePath = extractCfg.PEMFilePath
 	cfg.keyFilePath = extractCfg.KeyFilePath
 	cfg.certPassword = extractCfg.CertPassword
@@ -179,8 +176,8 @@ func resolveSyncIssuesConfig(cmd *cobra.Command) (syncIssuesConfig, error) {
 	applyFlagString(cmd, flagProjectKeyPattern, &cfg.projectKeyPattern)
 	applyFlagString(cmd, flagEnterpriseKey, &cfg.enterpriseKey)
 	applyFlagString(cmd, flagExportDir, &cfg.exportDir)
-	applyFlagInt(cmd, flagConcurrency, &cfg.concurrency)
-	applyFlagInt(cmd, flagTimeout, &cfg.timeout)
+	applyFlagIntBothSides(cmd, flagConcurrency, &cfg.sourceConcurrency, &cfg.targetConcurrency)
+	applyFlagIntBothSides(cmd, flagTimeout, &cfg.sourceTimeout, &cfg.targetTimeout)
 	applyFlagString(cmd, flagPEMFilePath, &cfg.pemFilePath)
 	applyFlagString(cmd, flagKeyFilePath, &cfg.keyFilePath)
 	applyFlagString(cmd, flagCertPassword, &cfg.certPassword)
@@ -226,8 +223,8 @@ func runSyncIssuesCmd(cmd *cobra.Command, _ []string) error {
 		Token:              cfg.sourceToken,
 		ExportDirectory:    cfg.exportDir,
 		ProjectKeys:        cfg.projectKeys,
-		Concurrency:        cfg.concurrency,
-		Timeout:            cfg.timeout,
+		Concurrency:        cfg.sourceConcurrency,
+		Timeout:            cfg.sourceTimeout,
 		PEMFilePath:        cfg.pemFilePath,
 		KeyFilePath:        cfg.keyFilePath,
 		CertPassword:       cfg.certPassword,
@@ -250,8 +247,8 @@ func runSyncIssuesCmd(cmd *cobra.Command, _ []string) error {
 		Token:               cfg.targetToken,
 		EnterpriseKey:       cfg.enterpriseKey,
 		ExportDirectory:     cfg.exportDir,
-		Concurrency:         cfg.concurrency,
-		Timeout:             cfg.timeout,
+		Concurrency:         cfg.targetConcurrency,
+		Timeout:             cfg.targetTimeout,
 		ProjectKeyPattern:   cfg.projectKeyPattern,
 		DefaultOrganization: cfg.defaultOrganization,
 		ProjectKeys:         cfg.projectKeys,

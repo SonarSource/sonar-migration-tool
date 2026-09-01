@@ -187,8 +187,8 @@ func init() {
 	f.Bool(flagSkipIssueSync, false, "Skip the final per-issue and per-hotspot metadata sync (#299). Same semantics as the skip_issue_sync config-file field — defaults to false (sync happens); pass the flag to skip.")
 	f.Bool(flagSkipProjectDataMigration, false, "Skip the entire project-data migration: importProjectData and the trailing per-issue/per-hotspot sync (#303). Defaults to false (data is migrated); pass the flag to skip.")
 	f.Bool(flagFastSync, false, "Skip tagging and back-linking hotspots/issues with zero user changes on the source (original state, no comments, no custom tags). Defaults to false (every hotspot is tagged and back-linked). #527.")
-	f.Int(flagConcurrency, 0, "Max concurrent requests (default: 25) (maps to concurrency)")
-	f.Int(flagTimeout, 0, "HTTP request timeout in seconds (maps to timeout; default: 60)")
+	f.Int(flagConcurrency, 0, "Max concurrent requests, applied to both source and target (default: 25). Use source.concurrency / target.concurrency in the config file to set them independently.")
+	f.Int(flagTimeout, 0, "HTTP request timeout in seconds, applied to both source and target (default: 60). Use source.timeout / target.timeout in the config file to set them independently.")
 	f.String(flagPEMFilePath, "", "Path to client mTLS PEM file for the source server (maps to source.pem_file_path)")
 	f.String(flagKeyFilePath, "", "Path to client mTLS key file for the source server (maps to source.key_file_path)")
 	f.String(flagCertPassword, "", "Password for the source server mTLS client certificate (maps to source.cert_password)")
@@ -212,8 +212,10 @@ type transferConfig struct {
 	enterpriseKey            string
 	edition                  string
 	exportDir                string
-	concurrency              int
-	timeout                  int
+	sourceConcurrency        int
+	targetConcurrency        int
+	sourceTimeout            int
+	targetTimeout            int
 	pemFilePath              string
 	keyFilePath              string
 	certPassword             string
@@ -235,6 +237,50 @@ func applyFlagInt(cmd *cobra.Command, name string, target *int) {
 	if cmd.Flags().Changed(name) {
 		*target, _ = cmd.Flags().GetInt(name)
 	}
+}
+
+// applyFlagIntBothSides sets both source and target to the CLI flag's value
+// when it was passed — used by transfer/sync-issues for --concurrency and
+// --timeout, which apply to both sides at once since each command talks to
+// source and target in one invocation (#528). The config file remains the
+// only way to give the two sides different values.
+func applyFlagIntBothSides(cmd *cobra.Command, name string, source, target *int) {
+	if cmd.Flags().Changed(name) {
+		v, _ := cmd.Flags().GetInt(name)
+		*source, *target = v, v
+	}
+}
+
+// fallbackToOtherSide sets *a to *b when *a is zero, and *b to *a when *b is
+// zero — used by transfer/sync-issues after resolving concurrency/timeout
+// from the config file so that a value set on only one side (e.g. only
+// target.concurrency, no source.concurrency and no top-level default) still
+// reaches both sides instead of falling through to the hardcoded package
+// default on the unset side (#528). Has no effect once both are already
+// non-zero, so two genuinely different explicit values are left alone.
+func fallbackToOtherSide(a, b *int) {
+	if *a == 0 {
+		*a = *b
+	}
+	if *b == 0 {
+		*b = *a
+	}
+}
+
+// resolveSourceTargetRates resolves concurrency and timeout for both
+// source and target from their independently-loaded configs (each
+// already applies its own "nested block overrides top-level default"
+// rule), then applies the single-side fallback so a value set on only
+// one side still reaches both instead of the unset side falling
+// through to the hardcoded package default. Shared by transfer and
+// sync-issues, which both talk to source and target in one invocation
+// (#528).
+func resolveSourceTargetRates(extractCfg extract.ExtractConfig, migrateCfg migrate.MigrateConfig) (sourceConcurrency, targetConcurrency, sourceTimeout, targetTimeout int) {
+	sourceConcurrency, targetConcurrency = extractCfg.Concurrency, migrateCfg.Concurrency
+	fallbackToOtherSide(&sourceConcurrency, &targetConcurrency)
+	sourceTimeout, targetTimeout = extractCfg.Timeout, migrateCfg.Timeout
+	fallbackToOtherSide(&sourceTimeout, &targetTimeout)
+	return
 }
 
 func applyFlagBool(cmd *cobra.Command, name string, target *bool) {
@@ -296,14 +342,8 @@ func loadTransferFileDefaults(path string) (transferConfig, error) {
 		cfg.exportDir = migrateCfg.ExportDirectory
 	}
 
-	switch {
-	case extractCfg.Concurrency != 0:
-		cfg.concurrency = extractCfg.Concurrency
-	case migrateCfg.Concurrency != 0:
-		cfg.concurrency = migrateCfg.Concurrency
-	}
-
-	cfg.timeout = extractCfg.Timeout
+	cfg.sourceConcurrency, cfg.targetConcurrency, cfg.sourceTimeout, cfg.targetTimeout =
+		resolveSourceTargetRates(extractCfg, migrateCfg)
 	cfg.pemFilePath = extractCfg.PEMFilePath
 	cfg.keyFilePath = extractCfg.KeyFilePath
 	cfg.certPassword = extractCfg.CertPassword
@@ -339,8 +379,8 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 	applyFlagString(cmd, flagEnterpriseKey, &cfg.enterpriseKey)
 	applyFlagString(cmd, flagEdition, &cfg.edition)
 	applyFlagString(cmd, flagExportDir, &cfg.exportDir)
-	applyFlagInt(cmd, flagConcurrency, &cfg.concurrency)
-	applyFlagInt(cmd, flagTimeout, &cfg.timeout)
+	applyFlagIntBothSides(cmd, flagConcurrency, &cfg.sourceConcurrency, &cfg.targetConcurrency)
+	applyFlagIntBothSides(cmd, flagTimeout, &cfg.sourceTimeout, &cfg.targetTimeout)
 	applyFlagString(cmd, flagPEMFilePath, &cfg.pemFilePath)
 	applyFlagString(cmd, flagKeyFilePath, &cfg.keyFilePath)
 	applyFlagString(cmd, flagCertPassword, &cfg.certPassword)
@@ -493,7 +533,7 @@ func resolveTransferProjectKeys(ctx context.Context, cfg transferConfig) ([]stri
 	allKeys, err := extract.ListAllProjectKeys(ctx, extract.ExtractConfig{
 		URL:          cfg.sourceURL,
 		Token:        cfg.sourceToken,
-		Timeout:      cfg.timeout,
+		Timeout:      cfg.sourceTimeout,
 		PEMFilePath:  cfg.pemFilePath,
 		KeyFilePath:  cfg.keyFilePath,
 		CertPassword: cfg.certPassword,
@@ -530,8 +570,8 @@ func runTransferExtract(ctx context.Context, cfg transferConfig) ([]string, erro
 		Token:           cfg.sourceToken,
 		ExportDirectory: cfg.exportDir,
 		ProjectKeys:     projectKeys,
-		Concurrency:     cfg.concurrency,
-		Timeout:         cfg.timeout,
+		Concurrency:     cfg.sourceConcurrency,
+		Timeout:         cfg.sourceTimeout,
 		PEMFilePath:     cfg.pemFilePath,
 		KeyFilePath:     cfg.keyFilePath,
 		CertPassword:    cfg.certPassword,
@@ -623,8 +663,8 @@ func runTransferMigrate(ctx context.Context, cfg transferConfig) (string, error)
 		EnterpriseKey:   cfg.enterpriseKey,
 		Edition:         cfg.edition,
 		ExportDirectory: cfg.exportDir,
-		Concurrency:     cfg.concurrency,
-		Timeout:         cfg.timeout,
+		Concurrency:     cfg.targetConcurrency,
+		Timeout:         cfg.targetTimeout,
 		// Project-scoped migration: run only the leaf tasks for the project,
 		// its quality gate/profiles, permissions, and issue/hotspot history.
 		// Their dependencies are resolved automatically.
