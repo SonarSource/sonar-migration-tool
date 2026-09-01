@@ -6,6 +6,7 @@ package migrate
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
@@ -31,7 +32,7 @@ func TestRegisterAllCountsAndDependencies(t *testing.T) {
 func TestMigrateTargetTasks(t *testing.T) {
 	reg := BuildMigrateRegistry(RegisterAll())
 
-	targets := MigrateTargetTasks(reg, "", false, false, false, false, nil, nil)
+	targets := MigrateTargetTasks(reg, "", MigrateTargetTasksFlags{SkipProfiles: false, IncludeProjectData: false, SkipIssueSync: false, SkipProjectDataMigration: false}, nil, nil)
 	// Should exclude get*, delete*, reset* tasks.
 	for _, name := range targets {
 		if name[:3] == "get" || name[:6] == "delete" || name[:5] == "reset" {
@@ -45,7 +46,7 @@ func TestMigrateTargetTasks(t *testing.T) {
 
 func TestMigrateTargetTasksSingle(t *testing.T) {
 	reg := BuildMigrateRegistry(RegisterAll())
-	targets := MigrateTargetTasks(reg, "createProjects", false, false, false, false, nil, nil)
+	targets := MigrateTargetTasks(reg, "createProjects", MigrateTargetTasksFlags{SkipProfiles: false, IncludeProjectData: false, SkipIssueSync: false, SkipProjectDataMigration: false}, nil, nil)
 	if len(targets) != 1 || targets[0] != "createProjects" {
 		t.Errorf("expected [createProjects], got %v", targets)
 	}
@@ -58,7 +59,7 @@ func TestMigrateTargetTasksExplicitList(t *testing.T) {
 	// resolved later by ResolveDependencies). This is how the transfer
 	// command requests a project-scoped migration.
 	explicit := []string{"setProjectGates", "importProjectData", "syncIssueMetadata"}
-	targets := MigrateTargetTasks(reg, "createProjects", false, false, false, false, explicit, nil)
+	targets := MigrateTargetTasks(reg, "createProjects", MigrateTargetTasksFlags{SkipProfiles: false, IncludeProjectData: false, SkipIssueSync: false, SkipProjectDataMigration: false}, explicit, nil)
 	if len(targets) != len(explicit) {
 		t.Fatalf("expected %d explicit targets, got %v", len(explicit), targets)
 	}
@@ -80,7 +81,7 @@ func TestMigrateTargetTasksExplicitList(t *testing.T) {
 
 func TestMigrateTargetTasksSkipProfiles(t *testing.T) {
 	reg := BuildMigrateRegistry(RegisterAll())
-	targets := MigrateTargetTasks(reg, "", true, false, false, false, nil, nil)
+	targets := MigrateTargetTasks(reg, "", MigrateTargetTasksFlags{SkipProfiles: true, IncludeProjectData: false, SkipIssueSync: false, SkipProjectDataMigration: false}, nil, nil)
 	for _, name := range targets {
 		if name == "createProfiles" || name == "setProfileParent" || name == "restoreProfiles" ||
 			name == "setDefaultProfiles" || name == "setProjectProfiles" || name == "setProfileGroupPermissions" {
@@ -95,7 +96,7 @@ func TestMigrateTargetTasksSkipProfiles(t *testing.T) {
 // touch-up. #299.
 func TestMigrateTargetTasksSkipIssueSync(t *testing.T) {
 	reg := BuildMigrateRegistry(RegisterAll())
-	targets := MigrateTargetTasks(reg, "", false, true /*includeProjectData*/, true /*skipIssueSync*/, false /*skipProjectDataMigration*/, nil, nil)
+	targets := MigrateTargetTasks(reg, "", MigrateTargetTasksFlags{SkipProfiles: false, IncludeProjectData: true /*includeProjectData*/, SkipIssueSync: true /*skipIssueSync*/, SkipProjectDataMigration: false /*skipProjectDataMigration*/}, nil, nil)
 
 	var sawImport, sawIssue, sawHotspot bool
 	for _, name := range targets {
@@ -124,7 +125,7 @@ func TestMigrateTargetTasksSkipIssueSync(t *testing.T) {
 // The flag must not accidentally let them through.
 func TestMigrateTargetTasksSkipIssueSyncWithoutProjectData(t *testing.T) {
 	reg := BuildMigrateRegistry(RegisterAll())
-	targets := MigrateTargetTasks(reg, "", false, false, true, false, nil, nil)
+	targets := MigrateTargetTasks(reg, "", MigrateTargetTasksFlags{SkipProfiles: false, IncludeProjectData: false, SkipIssueSync: true, SkipProjectDataMigration: false}, nil, nil)
 	for _, name := range targets {
 		if name == "syncIssueMetadata" || name == "syncHotspotMetadata" {
 			t.Errorf("project-data-gated task %q must stay excluded when project data is off", name)
@@ -144,7 +145,7 @@ func TestMigrateTargetTasksWithObjectsFilter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseObjects: %v", err)
 	}
-	targets := MigrateTargetTasks(reg, "", false, false, false, false, nil, objects)
+	targets := MigrateTargetTasks(reg, "", MigrateTargetTasksFlags{SkipProfiles: false, IncludeProjectData: false, SkipIssueSync: false, SkipProjectDataMigration: false}, nil, objects)
 
 	want := map[string]bool{"setGlobalSettings": true, "setGlobalWebhooks": true, "setGlobalNewCodePeriod": true}
 	got := make(map[string]bool, len(targets))
@@ -165,14 +166,14 @@ func TestMigrateTargetTasksWithObjectsFilter(t *testing.T) {
 
 	// An explicit targetTask override always wins — objects filtering
 	// does not apply (matches the documented precedence).
-	single := MigrateTargetTasks(reg, "createProjects", false, false, false, false, nil, objects)
+	single := MigrateTargetTasks(reg, "createProjects", MigrateTargetTasksFlags{SkipProfiles: false, IncludeProjectData: false, SkipIssueSync: false, SkipProjectDataMigration: false}, nil, objects)
 	if len(single) != 1 || single[0] != "createProjects" {
 		t.Errorf("expected explicit targetTask override to win over objects filter, got %v", single)
 	}
 
 	// An explicit targetTasks list override also wins over objects filtering.
 	explicit := []string{"createProjects"}
-	explicitOut := MigrateTargetTasks(reg, "", false, false, false, false, explicit, objects)
+	explicitOut := MigrateTargetTasks(reg, "", MigrateTargetTasksFlags{SkipProfiles: false, IncludeProjectData: false, SkipIssueSync: false, SkipProjectDataMigration: false}, explicit, objects)
 	if len(explicitOut) != 1 || explicitOut[0] != "createProjects" {
 		t.Errorf("expected explicit targetTasks override to win over objects filter, got %v", explicitOut)
 	}
@@ -248,7 +249,7 @@ func TestPlanPhasesObjectsSettingsOnlyNeverSchedulesCreateProjects(t *testing.T)
 	if err != nil {
 		t.Fatalf("ParseObjects: %v", err)
 	}
-	targets := MigrateTargetTasks(reg, "", false, false, false, false, nil, objects)
+	targets := MigrateTargetTasks(reg, "", MigrateTargetTasksFlags{SkipProfiles: false, IncludeProjectData: false, SkipIssueSync: false, SkipProjectDataMigration: false}, nil, objects)
 	taskSet := ResolveDependenciesExcluding(targets, reg, excludedMigrateTasks(objects))
 	if taskSet == nil {
 		t.Fatal("cannot resolve dependencies")
@@ -265,24 +266,48 @@ func TestPlanPhasesObjectsSettingsOnlyNeverSchedulesCreateProjects(t *testing.T)
 	if err != nil {
 		t.Fatalf("PlanPhasesExcluding failed: %v", err)
 	}
-	for _, phase := range plan {
-		for _, name := range phase {
-			if name == "createProjects" {
-				t.Fatalf("createProjects must never appear in the phase plan when --objects=settings, got phase %v", phase)
-			}
-		}
+	if planContainsTask(plan, "createProjects") {
+		t.Fatalf("createProjects must never appear in the phase plan when --objects=settings, got plan %v", plan)
 	}
-	// setGlobalSettings must still be scheduled.
-	var sawSetGlobalSettings bool
-	for _, phase := range plan {
-		for _, name := range phase {
-			if name == "setGlobalSettings" {
-				sawSetGlobalSettings = true
-			}
-		}
-	}
-	if !sawSetGlobalSettings {
+	if !planContainsTask(plan, "setGlobalSettings") {
 		t.Error("expected setGlobalSettings to be scheduled when --objects=settings")
+	}
+}
+
+// planContainsTask reports whether name appears in any phase of plan.
+func planContainsTask(plan [][]string, name string) bool {
+	for _, phase := range plan {
+		if slices.Contains(phase, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// #536 (Gitar review on PR #555): importProjectData/syncIssueMetadata/
+// syncHotspotMetadata must be excluded by --objects=settings too, not
+// just createProjects — otherwise `migrate --run_id=<earlier full run>
+// --objects=settings` would replay scanner reports and issue/hotspot
+// sync for exactly the projects the operator deselected, since
+// runImportProjectData reads createProjects from the run store
+// regardless of whether createProjects ran THIS invocation. Uses
+// IncludeProjectData: true — the actual CLI default
+// (cfg.IncludeProjectData = !cfg.SkipProjectDataMigration,
+// cmd/migrate.go) — because the sibling test above used false, which
+// masked this exact bug: isExcludedTask's own !includeProjectData gate
+// already excludes these three regardless of the --objects fix, so
+// that test could never have caught a regression here.
+func TestPlanPhasesObjectsSettingsOnlyExcludesProjectDataTasks(t *testing.T) {
+	reg := BuildMigrateRegistry(RegisterAll())
+	objects, err := common.ParseObjects([]string{"settings"})
+	if err != nil {
+		t.Fatalf("ParseObjects: %v", err)
+	}
+	targets := MigrateTargetTasks(reg, "", MigrateTargetTasksFlags{IncludeProjectData: true}, nil, objects)
+	for _, name := range []string{"importProjectData", "syncIssueMetadata", "syncHotspotMetadata"} {
+		if slices.Contains(targets, name) {
+			t.Errorf("%s must not be scheduled when --objects=settings (with the CLI-default IncludeProjectData=true), got targets %v", name, targets)
+		}
 	}
 }
 
@@ -302,7 +327,7 @@ func TestPlanPhasesEveryObjectsCombinationProducesAValidPlan(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParseObjects(%s): %v", cat, err)
 		}
-		targets := MigrateTargetTasks(reg, "", false, true, false, false, nil, objects)
+		targets := MigrateTargetTasks(reg, "", MigrateTargetTasksFlags{SkipProfiles: false, IncludeProjectData: true, SkipIssueSync: false, SkipProjectDataMigration: false}, nil, objects)
 		excluded := excludedMigrateTasks(objects)
 		taskSet := ResolveDependenciesExcluding(targets, reg, excluded)
 		if taskSet == nil {
@@ -319,7 +344,7 @@ func TestPlanPhasesEveryObjectsCombinationProducesAValidPlan(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseObjects(%s,%s): %v", a, b, err)
 			}
-			targets := MigrateTargetTasks(reg, "", false, true, false, false, nil, objects)
+			targets := MigrateTargetTasks(reg, "", MigrateTargetTasksFlags{SkipProfiles: false, IncludeProjectData: true, SkipIssueSync: false, SkipProjectDataMigration: false}, nil, objects)
 			excluded := excludedMigrateTasks(objects)
 			taskSet := ResolveDependenciesExcluding(targets, reg, excluded)
 			if taskSet == nil {
@@ -336,7 +361,7 @@ func TestPlanPhasesEveryObjectsCombinationProducesAValidPlan(t *testing.T) {
 func TestPlanPhasesNoCycles(t *testing.T) {
 	all := RegisterAll()
 	reg := BuildMigrateRegistry(all)
-	targets := MigrateTargetTasks(reg, "", false, false, false, false, nil, nil)
+	targets := MigrateTargetTasks(reg, "", MigrateTargetTasksFlags{SkipProfiles: false, IncludeProjectData: false, SkipIssueSync: false, SkipProjectDataMigration: false}, nil, nil)
 	taskSet := ResolveDependencies(targets, reg)
 	if taskSet == nil {
 		t.Fatal("cannot resolve dependencies")
@@ -568,7 +593,7 @@ func TestExtractAnyStr(t *testing.T) {
 // with the two trailing sync tasks. #303.
 func TestMigrateTargetTasksSkipProjectDataMigration(t *testing.T) {
 	reg := BuildMigrateRegistry(RegisterAll())
-	targets := MigrateTargetTasks(reg, "", false, true /*includeProjectData*/, false /*skipIssueSync*/, true /*skipProjectDataMigration*/, nil, nil)
+	targets := MigrateTargetTasks(reg, "", MigrateTargetTasksFlags{SkipProfiles: false, IncludeProjectData: true /*includeProjectData*/, SkipIssueSync: false /*skipIssueSync*/, SkipProjectDataMigration: true /*skipProjectDataMigration*/}, nil, nil)
 	for _, name := range targets {
 		switch name {
 		case "importProjectData", "syncIssueMetadata", "syncHotspotMetadata":
@@ -582,7 +607,7 @@ func TestMigrateTargetTasksSkipProjectDataMigration(t *testing.T) {
 // accidentally always exclude.
 func TestMigrateTargetTasksProjectDataMigrationEnabledByDefault(t *testing.T) {
 	reg := BuildMigrateRegistry(RegisterAll())
-	targets := MigrateTargetTasks(reg, "", false, true /*includeProjectData*/, false /*skipIssueSync*/, false /*skipProjectDataMigration*/, nil, nil)
+	targets := MigrateTargetTasks(reg, "", MigrateTargetTasksFlags{SkipProfiles: false, IncludeProjectData: true /*includeProjectData*/, SkipIssueSync: false /*skipIssueSync*/, SkipProjectDataMigration: false /*skipProjectDataMigration*/}, nil, nil)
 	got := map[string]bool{}
 	for _, name := range targets {
 		got[name] = true
@@ -605,7 +630,7 @@ func TestMigrateTargetTasksExplicitListHonorsSkipProjectDataMigration(t *testing
 		"syncIssueMetadata",
 		"syncHotspotMetadata",
 	}
-	got := MigrateTargetTasks(reg, "", false, true, false, true /*skipProjectDataMigration*/, explicit, nil)
+	got := MigrateTargetTasks(reg, "", MigrateTargetTasksFlags{SkipProfiles: false, IncludeProjectData: true, SkipIssueSync: false, SkipProjectDataMigration: true /*skipProjectDataMigration*/}, explicit, nil)
 	// setProjectGates is kept; the three project-data tasks are dropped.
 	if len(got) != 1 || got[0] != "setProjectGates" {
 		t.Errorf("expected only setProjectGates to survive, got %v", got)
@@ -622,7 +647,7 @@ func TestMigrateTargetTasksExplicitListHonorsSkipIssueSync(t *testing.T) {
 		"syncIssueMetadata",
 		"syncHotspotMetadata",
 	}
-	got := MigrateTargetTasks(reg, "", false, true, true /*skipIssueSync*/, false, explicit, nil)
+	got := MigrateTargetTasks(reg, "", MigrateTargetTasksFlags{SkipProfiles: false, IncludeProjectData: true, SkipIssueSync: true /*skipIssueSync*/, SkipProjectDataMigration: false}, explicit, nil)
 	want := map[string]bool{"setProjectGates": true, "importProjectData": true}
 	if len(got) != len(want) {
 		t.Fatalf("expected %d tasks, got %v", len(want), got)

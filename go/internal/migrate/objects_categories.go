@@ -49,17 +49,6 @@ import "github.com/sonar-solutions/sonar-migration-tool/internal/common"
 //     edge from ever being walked (ResolveDependenciesExcluding
 //     short-circuits at the excluded consumer without recursing into
 //     its dependencies), so these three needed no explicit entry.
-//   - importProjectData, syncHotspotMetadata, syncIssueMetadata: project
-//     DATA sync already has its own dedicated opt-out
-//     (--skip_project_data_migration / --skip_issue_sync /
-//     IncludeProjectData) and is a materially different concern from the
-//     object-category entities --objects targets (settings /
-//     permission_templates / quality_profiles / quality_gates /
-//     projects / portfolios / groups / license_profiles). Left
-//     unclassified deliberately rather than folded into "projects" —
-//     flagged here for review since cmd/transfer.go's transferTargetTasks
-//     (the reference list this mapping was checked against) does include
-//     them for its own project-scoped purposes.
 var migrateObjectTasks = map[string][]string{
 	common.ObjectSettings: {
 		"setGlobalSettings",
@@ -99,6 +88,15 @@ var migrateObjectTasks = map[string][]string{
 		"setProjectSettings", "setProjectTags", "setProjectLinks", "setProjectSourceLink",
 		"setProjectWebhooks", "setNewCodePeriods", "setProjectBinding",
 		"getProjectIds", "getCreatedProjects", "matchProjectRepos", "getOrgBinding", "getOrgRepos",
+		// Project DATA is still project scope: without these, a resumed
+		// run (--run_id pointing at an earlier full run) whose
+		// createProjects output already exists on disk would replay
+		// scanner reports and issue/hotspot sync for exactly the
+		// projects --objects excluded, violating the documented "no
+		// project is created/extracted/migrated" guarantee. Their own
+		// --skip_project_data_migration / --skip_issue_sync gates still
+		// apply on top via isExcludedTask.
+		"importProjectData", "syncIssueMetadata", "syncHotspotMetadata",
 	},
 	common.ObjectPortfolios: {
 		"createPortfolios",

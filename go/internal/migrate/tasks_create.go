@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"sync/atomic"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	sqapi "github.com/sonar-solutions/sq-api-go"
@@ -55,6 +56,7 @@ func createTasks() []TaskDef {
 
 func runCreateProjects(ctx context.Context, e *Executor) error {
 	counter := TaskCounterFromContext(ctx)
+	var matched atomic.Int64
 	err := forEachMigrateItem(ctx, e, "createProjects", "generateProjectMappings",
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
 			orgKey := extractField(item, "sonarcloud_org_key")
@@ -69,6 +71,7 @@ func runCreateProjects(ctx context.Context, e *Executor) error {
 			if e.ProjectKeyRe != nil && !e.ProjectKeyRe.MatchString(key) {
 				return nil
 			}
+			matched.Add(1)
 			name := extractField(item, "name")
 			ncdType := extractField(item, "new_code_definition_type")
 			ncdValue := extractAnyStr(item, "new_code_definition_value")
@@ -94,6 +97,15 @@ func runCreateProjects(ctx context.Context, e *Executor) error {
 			}
 			return handleFreshProject(e, counter, w, item, key, cloudKey, name, orgKey, proj)
 		})
+	// #536: an explicitly configured --project_key that matches no
+	// source project would otherwise be a silent no-op — every
+	// downstream project-scoped task no-ops on the empty createProjects
+	// output and the run exits 0 as if it had succeeded. Fail loudly
+	// instead, matching extract.ResolveProjectKeys' behavior for the
+	// same flag.
+	if err == nil && e.ProjectKeyRe != nil && matched.Load() == 0 {
+		return fmt.Errorf("createProjects: no source project matches --project_key pattern %q", e.ProjectKeyRe)
+	}
 	return err
 }
 

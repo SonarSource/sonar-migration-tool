@@ -116,20 +116,10 @@ func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfi
 	// SkipProjectDataMigration (CLI --skip_project_data_migration or
 	// config "skip_project_data_migration": true). CLI flag wins over
 	// config; one-way (passing the flag forces opt-out).
-	if cmd.Flags().Changed(flagSkipProjectDataMigration) {
-		v, _ := cmd.Flags().GetBool(flagSkipProjectDataMigration)
-		if v {
-			cfg.SkipProjectDataMigration = true
-		}
-	}
+	applyOneWayBoolFlag(cmd, flagSkipProjectDataMigration, &cfg.SkipProjectDataMigration)
 	// --skip_issue_sync is one-way: passing the flag forces opt-out,
 	// CLI false does NOT undo a config-file skip_issue_sync: true. #398.
-	if cmd.Flags().Changed(flagSkipIssueSync) {
-		v, _ := cmd.Flags().GetBool(flagSkipIssueSync)
-		if v {
-			cfg.SkipIssueSync = true
-		}
-	}
+	applyOneWayBoolFlag(cmd, flagSkipIssueSync, &cfg.SkipIssueSync)
 	cfg.IncludeProjectData = !cfg.SkipProjectDataMigration
 	// --debug is a persistent flag on rootCmd; pick it up here so the
 	// SDK can install the HTTP request/response logger.
@@ -137,18 +127,10 @@ func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfi
 		cfg.Debug, _ = cmd.Flags().GetBool("debug")
 	}
 
-	// --objects overrides whatever the config file resolved (#536).
-	if cmd.Flags().Changed("objects") {
-		raw, _ := cmd.Flags().GetString("objects")
-		objects, err := common.ParseObjects(common.SplitObjectsCSV(raw))
-		if err != nil {
-			return cfg, err
-		}
-		cfg.Objects = objects
+	if err := applyObjectsFlag(cmd, &cfg.Objects); err != nil {
+		return cfg, err
 	}
-	if cfg.Objects != nil && cfg.Objects[common.ObjectLicenseProfiles] {
-		slog.Default().Warn("license_profiles migration is not yet supported; ignoring")
-	}
+	warnIfLicenseProfilesSelected(cfg.Objects)
 	// --project_key is resolved into cfg.ProjectKeys by the caller (RunE),
 	// once URL/Token are known to be valid — see extractCmd.RunE. Just
 	// capture the pattern here, same precedence as every other flag
@@ -175,5 +157,45 @@ func overrideInt(cmd *cobra.Command, flag string, target *int) {
 	if cmd.Flags().Changed(flag) {
 		val, _ := cmd.Flags().GetInt(flag)
 		*target = val
+	}
+}
+
+// applyOneWayBoolFlag sets *target true when flag was passed with value
+// true. Passing the flag with a false value, or not passing it at all,
+// never turns an already-true *target back off — this backs one-way
+// CLI opt-outs like --skip_project_data_migration/--skip_issue_sync,
+// shared by cmd/extract.go and cmd/migrate.go.
+func applyOneWayBoolFlag(cmd *cobra.Command, flag string, target *bool) {
+	if cmd.Flags().Changed(flag) {
+		v, _ := cmd.Flags().GetBool(flag)
+		if v {
+			*target = true
+		}
+	}
+}
+
+// applyObjectsFlag parses --objects into *objects when the flag was
+// passed, overriding whatever the config file resolved (CLI wins).
+// Shared by cmd/extract.go and cmd/migrate.go (#536).
+func applyObjectsFlag(cmd *cobra.Command, objects *map[string]bool) error {
+	if !cmd.Flags().Changed("objects") {
+		return nil
+	}
+	raw, _ := cmd.Flags().GetString("objects")
+	parsed, err := common.ParseObjects(common.SplitObjectsCSV(raw))
+	if err != nil {
+		return err
+	}
+	*objects = parsed
+	return nil
+}
+
+// warnIfLicenseProfilesSelected logs a one-time warning when the
+// resolved objects selection includes license_profiles — accepted as a
+// valid --objects value but not yet implemented on either extract or
+// migrate (#536).
+func warnIfLicenseProfilesSelected(objects map[string]bool) {
+	if objects != nil && objects[common.ObjectLicenseProfiles] {
+		slog.Default().Warn("license_profiles migration is not yet supported; ignoring")
 	}
 }

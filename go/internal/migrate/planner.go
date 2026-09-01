@@ -64,59 +64,13 @@ func PlanPhases(tasks map[string]bool, reg map[string]*TaskDef) ([][]string, err
 }
 
 // PlanPhasesExcluding is like PlanPhases, but first strips any excluded
-// task name out of every TaskDef's Dependencies before computing phases.
-//
-// common.PlanPhasesGeneric's readiness check (allDepsCompleted) has no
-// notion of "excluded" — a task only becomes ready once every name in
-// its Dependencies has been scheduled and marked complete. When an
-// --objects filter is active, ResolveDependenciesExcluding deliberately
-// leaves an excluded task OUT of tasks (it's vacuously satisfied, never
-// added, never walked) — so a task with a cross-category dependency on
-// an excluded one (e.g. setGlobalSettings declares createProjects as a
-// dependency for its project-scope probe; createProjects is excluded
-// when --objects=settings) would otherwise wait forever for a
-// dependency that will never run, surfacing as a false "cycle detected
-// in task dependency graph" error instead of a valid plan (#536).
-// extract has the identical bug for the same reason (e.g.
-// getProjectPluginIssues/getProjectTemplateIssues, category
-// "projects", depend on getPluginRules/getTemplateRules, category
-// "quality_profiles") — see extract.PlanPhasesExcluding, an
-// independent copy of this same fix. Kept as two package-local copies
-// rather than promoted to shared common.PlanPhasesGeneric since
-// TaskDef is a distinct type per package and there's no shared
-// interface for the copy-with-filtered-Dependencies step.
-//
-// The returned plan is computed against the filtered dependency view;
-// the registry returned to callers for task execution is unaffected —
-// Dependencies is only consulted during planning, never by runPhase.
+// task name out of every TaskDef's Dependencies before computing
+// phases — see common.PlanPhasesExcludingGeneric's doc for why this is
+// needed (#536: a false "cycle detected" error otherwise, when a
+// selected task like setGlobalSettings declares an excluded one like
+// createProjects as a dependency).
 func PlanPhasesExcluding(tasks map[string]bool, reg map[string]*TaskDef, excluded map[string]bool) ([][]string, error) {
-	if len(excluded) == 0 {
-		return PlanPhases(tasks, reg)
-	}
-	filtered := make(map[string]*TaskDef, len(reg))
-	for name, def := range reg {
-		hasExcludedDep := false
-		for _, dep := range def.Dependencies {
-			if excluded[dep] {
-				hasExcludedDep = true
-				break
-			}
-		}
-		if !hasExcludedDep {
-			filtered[name] = def
-			continue
-		}
-		deps := make([]string, 0, len(def.Dependencies))
-		for _, dep := range def.Dependencies {
-			if !excluded[dep] {
-				deps = append(deps, dep)
-			}
-		}
-		cp := *def
-		cp.Dependencies = deps
-		filtered[name] = &cp
-	}
-	return PlanPhases(tasks, filtered)
+	return common.PlanPhasesExcludingGeneric(tasks, reg, excluded)
 }
 
 // RegisterAll returns every migrate task definition.
@@ -158,6 +112,17 @@ var migrateIssueSyncTasks = map[string]bool{
 	"syncIssueMetadata":   true,
 }
 
+// MigrateTargetTasksFlags bundles the skip/include gates MigrateTargetTasks
+// composes — grouped into one value since the individual booleans pushed
+// the function's parameter count past Sonar's limit (same rationale as
+// the existing migrateItemLoop bundling in helpers.go).
+type MigrateTargetTasksFlags struct {
+	SkipProfiles             bool
+	IncludeProjectData       bool
+	SkipIssueSync            bool
+	SkipProjectDataMigration bool
+}
+
 // MigrateTargetTasks determines which tasks to run. Precedence:
 //  1. targetTasks — an explicit leaf list (used by the transfer command for
 //     project-scoped migration); returned as-is, dependencies are resolved
@@ -165,46 +130,57 @@ var migrateIssueSyncTasks = map[string]bool{
 //  2. targetTask — a single named task.
 //  3. Default: all tasks NOT starting with "get", "delete", or "reset".
 //
-// skipIssueSync (#299) drops the trailing per-issue / per-hotspot metadata
-// sync tasks from the default set while keeping importProjectData itself.
-// skipProjectDataMigration (#303) is the wider opt-out: it drops
-// importProjectData AND the two trailing sync tasks together.
+// flags.SkipIssueSync (#299) drops the trailing per-issue / per-hotspot
+// metadata sync tasks from the default set while keeping importProjectData
+// itself. flags.SkipProjectDataMigration (#303) is the wider opt-out: it
+// drops importProjectData AND the two trailing sync tasks together.
 //
 // objects (#536), when non-nil, additionally drops any default task whose
 // category isn't selected — composed with the skip gates above via
 // isExcludedTask. objects filtering does NOT apply when targetTasks or
 // targetTask (explicit overrides) are used, matching the precedence
 // documented above.
-func MigrateTargetTasks(reg map[string]*TaskDef, targetTask string, skipProfiles, includeProjectData, skipIssueSync, skipProjectDataMigration bool, targetTasks []string, objects map[string]bool) []string {
+func MigrateTargetTasks(reg map[string]*TaskDef, targetTask string, flags MigrateTargetTasksFlags, targetTasks []string, objects map[string]bool) []string {
 	if len(targetTasks) > 0 {
-		// Filter the explicit list against the skip gates so transfer's
-		// project-scoped target list still honors --skip_project_data_migration
-		// / --skip_issue_sync. Without this the transfer
-		// command would always run importProjectData + the syncs even
-		// when the operator opted out, because the explicit list
-		// bypassed isExcludedTask. The other gates (--skip_profiles,
-		// project-data-without-flag) don't apply to transfer's curated
-		// list, so we restrict the filter to the project-data and
-		// issue-sync membership maps.
-		out := make([]string, 0, len(targetTasks))
-		for _, name := range targetTasks {
-			if skipProjectDataMigration && migrateProjectDataTasks[name] {
-				continue
-			}
-			if skipIssueSync && migrateIssueSyncTasks[name] {
-				continue
-			}
-			out = append(out, name)
-		}
-		return out
+		return filterExplicitTargetTasks(targetTasks, flags)
 	}
 	if targetTask != "" {
 		return []string{targetTask}
 	}
+	return defaultMigrateTargetTasks(reg, flags, objects)
+}
+
+// filterExplicitTargetTasks filters an explicit leaf list against the
+// project-data / issue-sync skip gates, so transfer's project-scoped
+// target list still honors --skip_project_data_migration /
+// --skip_issue_sync. Without this, transfer would always run
+// importProjectData + the syncs even when the operator opted out,
+// because the explicit list bypassed isExcludedTask. The other gates
+// (--skip_profiles, project-data-without-flag) don't apply to
+// transfer's curated list, so only the project-data and issue-sync
+// membership maps are consulted here.
+func filterExplicitTargetTasks(targetTasks []string, flags MigrateTargetTasksFlags) []string {
+	out := make([]string, 0, len(targetTasks))
+	for _, name := range targetTasks {
+		if flags.SkipProjectDataMigration && migrateProjectDataTasks[name] {
+			continue
+		}
+		if flags.SkipIssueSync && migrateIssueSyncTasks[name] {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
+}
+
+// defaultMigrateTargetTasks computes MigrateTargetTasks' default (no
+// explicit override) task set: every registered task not excluded by
+// isExcludedTask's skip gates or by the --objects category filter.
+func defaultMigrateTargetTasks(reg map[string]*TaskDef, flags MigrateTargetTasksFlags, objects map[string]bool) []string {
 	excluded := excludedMigrateTasks(objects)
 	var tasks []string
 	for name := range reg {
-		if isExcludedTask(name, skipProfiles, includeProjectData, skipIssueSync, skipProjectDataMigration) {
+		if isExcludedTask(name, flags.SkipProfiles, flags.IncludeProjectData, flags.SkipIssueSync, flags.SkipProjectDataMigration) {
 			continue
 		}
 		if excluded[name] {

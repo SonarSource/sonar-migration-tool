@@ -482,7 +482,7 @@ func prepareMigratePlan(cfg MigrateConfig, logger *slog.Logger) (*migratePlan, e
 		logger.Info("issue-sync disabled: skipping syncHotspotMetadata")
 	}
 
-	targets := MigrateTargetTasks(registry, cfg.TargetTask, cfg.SkipProfiles, cfg.IncludeProjectData, cfg.SkipIssueSync, cfg.SkipProjectDataMigration, cfg.TargetTasks, cfg.Objects)
+	targets := MigrateTargetTasks(registry, cfg.TargetTask, MigrateTargetTasksFlags{SkipProfiles: cfg.SkipProfiles, IncludeProjectData: cfg.IncludeProjectData, SkipIssueSync: cfg.SkipIssueSync, SkipProjectDataMigration: cfg.SkipProjectDataMigration}, cfg.TargetTasks, cfg.Objects)
 	var taskSet map[string]bool
 	if cfg.Objects != nil {
 		// #536: exclude cross-category dependency edges too — e.g.

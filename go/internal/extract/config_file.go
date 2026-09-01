@@ -5,9 +5,7 @@
 package extract
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
@@ -119,18 +117,7 @@ type settingsBlock struct {
 }
 
 func parseConfigFile(path string) (configFileShape, error) {
-	var shape configFileShape
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return shape, fmt.Errorf("reading config file: %w", err)
-	}
-	if len(data) == 0 {
-		return shape, fmt.Errorf("config file %s is empty", path)
-	}
-	if err := json.Unmarshal(data, &shape); err != nil {
-		return shape, fmt.Errorf("parsing config file: %w", err)
-	}
-	return shape, nil
+	return common.ParseJSONConfigFile[configFileShape](path)
 }
 
 func (s configFileShape) toExtractConfig() ExtractConfig {

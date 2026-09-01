@@ -342,7 +342,7 @@ func TestPlanPhasesObjectsPortfoliosOnlySchedulesPortfolioTasksWithoutCreateProj
 	if err != nil {
 		t.Fatalf("ParseObjects: %v", err)
 	}
-	targets := MigrateTargetTasks(reg, "", false, false, false, false, nil, objects)
+	targets := MigrateTargetTasks(reg, "", MigrateTargetTasksFlags{SkipProfiles: false, IncludeProjectData: false, SkipIssueSync: false, SkipProjectDataMigration: false}, nil, objects)
 	excluded := excludedMigrateTasks(objects)
 	if !excluded["createProjects"] {
 		t.Fatal("expected createProjects to be excluded when objects=portfolios")

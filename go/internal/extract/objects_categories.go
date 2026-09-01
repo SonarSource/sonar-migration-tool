@@ -32,11 +32,6 @@ import (
 // because they don't fit any of the issue's object categories:
 //   - getUsers, getUserPermissions, getUserTokens (tasks_users.go): user
 //     identity/token data has no dedicated --objects category.
-//   - getPluginIssues (tasks_issues.go): the global (non-project-scoped)
-//     plugin-rule issue list. Its per-project sibling
-//     getProjectPluginIssues IS gated (via the "projects" category,
-//     below), but getPluginIssues itself isn't project-scoped and isn't
-//     part of the rule family in tasks_rules.go, so it stays unconditional.
 var extractObjectTasks = map[string][]string{
 	common.ObjectSettings: {
 		"getServerInfo",
@@ -75,6 +70,13 @@ var extractObjectTasks = map[string][]string{
 		"getTemplateRules",
 		"getActiveProfileRules",
 		"getDeactivatedProfileRules",
+		// getPluginIssues' only dependency is getPluginRules, just
+		// above — excluding one without the other leaves getPluginIssues
+		// scheduled with its dependency's edge stripped by
+		// PlanPhasesExcluding, so it silently writes an empty
+		// plugin-issues dataset (indistinguishable from "no plugin-rule
+		// issues exist") instead of not running at all.
+		"getPluginIssues",
 	},
 	common.ObjectQualityGates: {
 		"getGates",

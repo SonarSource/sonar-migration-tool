@@ -6,7 +6,6 @@ package cmd
 
 import (
 	"fmt"
-	"log/slog"
 	"path/filepath"
 	"strings"
 
@@ -118,21 +117,11 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	// flag always wins over the config-file skip_issue_sync field.
 	// One-way: --skip_issue_sync=false on the CLI does NOT undo a
 	// config-file skip_issue_sync: true.
-	if cmd.Flags().Changed(flagSkipIssueSync) {
-		v, _ := cmd.Flags().GetBool(flagSkipIssueSync)
-		if v {
-			cfg.SkipIssueSync = true
-		}
-	}
+	applyOneWayBoolFlag(cmd, flagSkipIssueSync, &cfg.SkipIssueSync)
 	// --skip_project_data_migration is the wider opt-out: it covers
 	// importProjectData AND the trailing sync pair. Same one-way
 	// override semantics. #303.
-	if cmd.Flags().Changed(flagSkipProjectDataMigration) {
-		v, _ := cmd.Flags().GetBool(flagSkipProjectDataMigration)
-		if v {
-			cfg.SkipProjectDataMigration = true
-		}
-	}
+	applyOneWayBoolFlag(cmd, flagSkipProjectDataMigration, &cfg.SkipProjectDataMigration)
 	if cmd.Flags().Changed("debug") {
 		cfg.Debug, _ = cmd.Flags().GetBool("debug")
 	}
@@ -141,37 +130,12 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	}
 	applyFlagBool(cmd, flagFastSync, &cfg.FastSync)
 
-	// --objects overrides whatever the config file resolved (#536).
-	if cmd.Flags().Changed("objects") {
-		raw, _ := cmd.Flags().GetString("objects")
-		objects, err := common.ParseObjects(common.SplitObjectsCSV(raw))
-		if err != nil {
-			return cfg, err
-		}
-		cfg.Objects = objects
+	if err := applyObjectsFlag(cmd, &cfg.Objects); err != nil {
+		return cfg, err
 	}
-	if cfg.Objects != nil && cfg.Objects[common.ObjectLicenseProfiles] {
-		slog.Default().Warn("license_profiles migration is not yet supported; ignoring")
-	}
-	// --project_key restricts migration to source project keys matching
-	// the pattern (#536, mirrors #529's transfer-side flag and NOT to be
-	// confused with --project_key_pattern, the target-key rendering
-	// template). Unlike extract, migrate never calls the source API to
-	// resolve it — createProjects filters the records it already read
-	// locally from generateProjectMappings — so validate the pattern
-	// compiles here (aborting before any API call) and pass it straight
-	// through as ProjectKeyFilter.
-	if cmd.Flags().Changed(flagProjectKey) {
-		raw, _ := cmd.Flags().GetString(flagProjectKey)
-		if _, err := extract.CompileProjectKeyPattern(raw); err != nil {
-			return cfg, fmt.Errorf("invalid --%s pattern %q: %w", flagProjectKey, raw, err)
-		}
-		if cfg.Objects == nil || cfg.Objects[common.ObjectProjects] {
-			cfg.ProjectKeyFilter = raw
-		}
-		// else: an active --objects selection excludes "projects" — the
-		// pattern is harmless but unused in that combination, matching
-		// the issue's checklist (no error, just a no-op).
+	warnIfLicenseProfilesSelected(cfg.Objects)
+	if err := applyMigrateProjectKeyFlag(cmd, &cfg); err != nil {
+		return cfg, err
 	}
 
 	// Default the export directory when neither config nor flag supplied
@@ -187,4 +151,29 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	cfg.IncludeProjectData = !cfg.SkipProjectDataMigration
 
 	return cfg, nil
+}
+
+// applyMigrateProjectKeyFlag validates and applies --project_key for
+// migrate: unlike extract, migrate never calls the source API to
+// resolve it — createProjects filters the records it already read
+// locally from generateProjectMappings — so this only validates the
+// pattern compiles (aborting before any API call) and passes it
+// straight through as cfg.ProjectKeyFilter. Only takes effect when the
+// "projects" category is selected (or objects is unset); otherwise the
+// pattern is harmless but unused, matching the issue's checklist for
+// --objects+--project_key (#536, mirrors #529's transfer-side flag —
+// not to be confused with --project_key_pattern, the target-key
+// rendering template).
+func applyMigrateProjectKeyFlag(cmd *cobra.Command, cfg *migrate.MigrateConfig) error {
+	if !cmd.Flags().Changed(flagProjectKey) {
+		return nil
+	}
+	raw, _ := cmd.Flags().GetString(flagProjectKey)
+	if _, err := extract.CompileProjectKeyPattern(raw); err != nil {
+		return fmt.Errorf("invalid --%s pattern %q: %w", flagProjectKey, raw, err)
+	}
+	if cfg.Objects == nil || cfg.Objects[common.ObjectProjects] {
+		cfg.ProjectKeyFilter = raw
+	}
+	return nil
 }

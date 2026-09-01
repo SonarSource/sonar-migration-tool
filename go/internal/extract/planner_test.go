@@ -6,6 +6,7 @@ package extract
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
@@ -179,6 +180,39 @@ func TestTargetTasksWithObjectsFilter(t *testing.T) {
 	explicit := TargetTasks(reg, "getProjects", "all", objects)
 	if len(explicit) != 1 || explicit[0] != "getProjects" {
 		t.Errorf("expected explicit target_task override to win, got %v", explicit)
+	}
+}
+
+// #536 (Gitar review on PR #555): getPluginIssues' only dependency is
+// getPluginRules, which lives in the quality_profiles category.
+// getPluginIssues was originally left unclassified ("always run"), so
+// excluding quality_profiles stripped its dependency edge via
+// PlanPhasesExcluding but left getPluginIssues itself scheduled,
+// silently writing an empty plugin-issues dataset indistinguishable
+// from "this instance genuinely has no plugin-rule issues" — instead
+// of not running at all. getPluginIssues must be gated alongside its
+// dependency.
+func TestTargetTasksExcludingQualityProfilesAlsoExcludesGetPluginIssues(t *testing.T) {
+	objects, err := common.ParseObjects([]string{"projects"})
+	if err != nil {
+		t.Fatalf("ParseObjects: %v", err)
+	}
+	registry := BuildRegistry(RegisterAll())
+	targets := TargetTasks(registry, "", "all", objects)
+	if slices.Contains(targets, "getPluginIssues") {
+		t.Error("getPluginIssues must not be scheduled when quality_profiles (its only dependency's category) is excluded")
+	}
+	if slices.Contains(targets, "getPluginRules") {
+		t.Error("sanity check: getPluginRules should indeed be excluded here")
+	}
+
+	allObjects, err := common.ParseObjects([]string{"projects", "quality_profiles"})
+	if err != nil {
+		t.Fatalf("ParseObjects: %v", err)
+	}
+	targetsWithProfiles := TargetTasks(registry, "", "all", allObjects)
+	if !slices.Contains(targetsWithProfiles, "getPluginIssues") {
+		t.Error("getPluginIssues should still be scheduled when quality_profiles IS selected")
 	}
 }
 

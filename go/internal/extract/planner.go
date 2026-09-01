@@ -85,50 +85,14 @@ func PlanPhases(tasks map[string]bool, reg map[string]*TaskDef) ([][]string, err
 }
 
 // PlanPhasesExcluding is like PlanPhases, but first strips any excluded
-// task name out of every TaskDef's Dependencies before computing phases.
-//
-// common.PlanPhasesGeneric's readiness check has no notion of
-// "excluded" — a task only becomes ready once every name in its
-// Dependencies has been scheduled and marked complete. When an
-// --objects filter is active, ResolveDependenciesExcluding deliberately
-// leaves an excluded task OUT of tasks (vacuously satisfied, never
-// added, never walked) — so a task with a cross-category dependency on
-// an excluded one (e.g. getProjectPluginIssues/getProjectTemplateIssues,
-// category "projects", declare getPluginRules/getTemplateRules,
-// category "quality_profiles", as dependencies — excluded when
-// --objects=projects) would otherwise wait forever for a dependency
-// that will never run, surfacing as a false "cycle detected in task
-// dependency graph" error instead of a valid plan (#536). Confirmed by
-// reproduction: extract DOES have cross-category dependency edges,
-// unlike an earlier assumption in migrate's identical helper.
+// task name out of every TaskDef's Dependencies before computing
+// phases — see common.PlanPhasesExcludingGeneric's doc for why this is
+// needed (#536: a false "cycle detected" error otherwise, when a
+// selected task like getProjectPluginIssues declares an excluded one
+// like getPluginRules as a dependency). Confirmed by direct
+// reproduction that extract needs this exactly as much as migrate does.
 func PlanPhasesExcluding(tasks map[string]bool, reg map[string]*TaskDef, excluded map[string]bool) ([][]string, error) {
-	if len(excluded) == 0 {
-		return PlanPhases(tasks, reg)
-	}
-	filtered := make(map[string]*TaskDef, len(reg))
-	for name, def := range reg {
-		hasExcludedDep := false
-		for _, dep := range def.Dependencies {
-			if excluded[dep] {
-				hasExcludedDep = true
-				break
-			}
-		}
-		if !hasExcludedDep {
-			filtered[name] = def
-			continue
-		}
-		deps := make([]string, 0, len(def.Dependencies))
-		for _, dep := range def.Dependencies {
-			if !excluded[dep] {
-				deps = append(deps, dep)
-			}
-		}
-		cp := *def
-		cp.Dependencies = deps
-		filtered[name] = &cp
-	}
-	return PlanPhases(tasks, filtered)
+	return common.PlanPhasesExcludingGeneric(tasks, reg, excluded)
 }
 
 // RegisterAll returns every extract task definition.

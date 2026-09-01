@@ -150,3 +150,60 @@ func allDepsCompleted[T TaskMeta](def T, completed map[string]bool) bool {
 	}
 	return true
 }
+
+// PlanPhasesExcludingGeneric is like PlanPhasesGeneric, but first strips
+// any excluded task name out of every entry's declared dependencies
+// before computing phases.
+//
+// PlanPhasesGeneric's readiness check (allDepsCompleted) has no notion
+// of "excluded" — an entry only becomes ready once every name in
+// TaskDeps() has been scheduled and marked complete. When an --objects
+// filter is active, ResolveDependenciesExcludingGeneric deliberately
+// leaves an excluded task OUT of tasks (vacuously satisfied, never
+// added, never walked) — so an entry with a cross-category dependency
+// on an excluded one (e.g. migrate's setGlobalSettings declares
+// createProjects as a dependency for its project-scope fallback path;
+// createProjects is excluded when --objects=settings; extract has the
+// analogous getProjectPluginIssues -> getPluginRules case) would
+// otherwise wait forever for a dependency that will never run,
+// surfacing as a false "cycle detected in task dependency graph" error
+// instead of a valid plan (#536).
+//
+// Implemented via a thin excludingTaskMeta wrapper rather than
+// constructing a filtered copy of T, since TaskMeta only exposes read
+// methods — there is no generic way to build a modified T with
+// different TaskDeps(). The returned plan is computed against this
+// filtered dependency view; reg itself is never mutated.
+func PlanPhasesExcludingGeneric[T TaskMeta](tasks map[string]bool, reg map[string]T, excluded map[string]bool) ([][]string, error) {
+	if len(excluded) == 0 {
+		return PlanPhasesGeneric(tasks, reg)
+	}
+	filtered := make(map[string]excludingTaskMeta[T], len(reg))
+	for name, def := range reg {
+		filtered[name] = excludingTaskMeta[T]{inner: def, excluded: excluded}
+	}
+	return PlanPhasesGeneric(tasks, filtered)
+}
+
+// excludingTaskMeta wraps a TaskMeta, filtering excluded names out of
+// TaskDeps() while forwarding TaskName()/TaskEditions() unchanged.
+type excludingTaskMeta[T TaskMeta] struct {
+	inner    T
+	excluded map[string]bool
+}
+
+func (e excludingTaskMeta[T]) TaskName() string        { return e.inner.TaskName() }
+func (e excludingTaskMeta[T]) TaskEditions() []Edition { return e.inner.TaskEditions() }
+func (e excludingTaskMeta[T]) TaskDeps() []string {
+	deps := e.inner.TaskDeps()
+	if len(deps) == 0 {
+		return deps
+	}
+	out := make([]string, 0, len(deps))
+	for _, dep := range deps {
+		if !e.excluded[dep] {
+			out = append(out, dep)
+		}
+	}
+	return out
+}
