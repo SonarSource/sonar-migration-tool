@@ -146,8 +146,20 @@ func loadSyncIssuesFileDefaults(path string) (syncIssuesConfig, error) {
 	// cmd/transfer.go's loadTransferFileDefaults.
 	cfg.sourceConcurrency = extractCfg.Concurrency
 	cfg.targetConcurrency = migrateCfg.Concurrency
+	if cfg.sourceConcurrency == 0 {
+		cfg.sourceConcurrency = cfg.targetConcurrency
+	}
+	if cfg.targetConcurrency == 0 {
+		cfg.targetConcurrency = cfg.sourceConcurrency
+	}
 	cfg.sourceTimeout = extractCfg.Timeout
 	cfg.targetTimeout = migrateCfg.Timeout
+	if cfg.sourceTimeout == 0 {
+		cfg.sourceTimeout = cfg.targetTimeout
+	}
+	if cfg.targetTimeout == 0 {
+		cfg.targetTimeout = cfg.sourceTimeout
+	}
 	cfg.pemFilePath = extractCfg.PEMFilePath
 	cfg.keyFilePath = extractCfg.KeyFilePath
 	cfg.certPassword = extractCfg.CertPassword

@@ -187,8 +187,8 @@ func init() {
 	f.Bool(flagSkipIssueSync, false, "Skip the final per-issue and per-hotspot metadata sync (#299). Same semantics as the skip_issue_sync config-file field — defaults to false (sync happens); pass the flag to skip.")
 	f.Bool(flagSkipProjectDataMigration, false, "Skip the entire project-data migration: importProjectData and the trailing per-issue/per-hotspot sync (#303). Defaults to false (data is migrated); pass the flag to skip.")
 	f.Bool(flagFastSync, false, "Skip tagging and back-linking hotspots/issues with zero user changes on the source (original state, no comments, no custom tags). Defaults to false (every hotspot is tagged and back-linked). #527.")
-	f.Int(flagConcurrency, 0, "Max concurrent requests (default: 25) (maps to concurrency)")
-	f.Int(flagTimeout, 0, "HTTP request timeout in seconds (maps to timeout; default: 60)")
+	f.Int(flagConcurrency, 0, "Max concurrent requests, applied to both source and target (default: 25). Use source.concurrency / target.concurrency in the config file to set them independently.")
+	f.Int(flagTimeout, 0, "HTTP request timeout in seconds, applied to both source and target (default: 60). Use source.timeout / target.timeout in the config file to set them independently.")
 	f.String(flagPEMFilePath, "", "Path to client mTLS PEM file for the source server (maps to source.pem_file_path)")
 	f.String(flagKeyFilePath, "", "Path to client mTLS key file for the source server (maps to source.key_file_path)")
 	f.String(flagCertPassword, "", "Password for the source server mTLS client certificate (maps to source.cert_password)")
@@ -319,8 +319,20 @@ func loadTransferFileDefaults(path string) (transferConfig, error) {
 	// blocks genuinely differed.
 	cfg.sourceConcurrency = extractCfg.Concurrency
 	cfg.targetConcurrency = migrateCfg.Concurrency
+	if cfg.sourceConcurrency == 0 {
+		cfg.sourceConcurrency = cfg.targetConcurrency
+	}
+	if cfg.targetConcurrency == 0 {
+		cfg.targetConcurrency = cfg.sourceConcurrency
+	}
 	cfg.sourceTimeout = extractCfg.Timeout
 	cfg.targetTimeout = migrateCfg.Timeout
+	if cfg.sourceTimeout == 0 {
+		cfg.sourceTimeout = cfg.targetTimeout
+	}
+	if cfg.targetTimeout == 0 {
+		cfg.targetTimeout = cfg.sourceTimeout
+	}
 	cfg.pemFilePath = extractCfg.PEMFilePath
 	cfg.keyFilePath = extractCfg.KeyFilePath
 	cfg.certPassword = extractCfg.CertPassword
