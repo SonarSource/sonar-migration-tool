@@ -141,16 +141,9 @@ func loadSyncIssuesFileDefaults(path string) (syncIssuesConfig, error) {
 		cfg.exportDir = migrateCfg.ExportDirectory
 	}
 
-	// #528 — assign source/target straight through rather than
-	// collapsing to one shared value, then let a value set on only one
-	// side reach both; see the identical comment in cmd/transfer.go's
-	// loadTransferFileDefaults.
-	cfg.sourceConcurrency = extractCfg.Concurrency
-	cfg.targetConcurrency = migrateCfg.Concurrency
-	fallbackToOtherSide(&cfg.sourceConcurrency, &cfg.targetConcurrency)
-	cfg.sourceTimeout = extractCfg.Timeout
-	cfg.targetTimeout = migrateCfg.Timeout
-	fallbackToOtherSide(&cfg.sourceTimeout, &cfg.targetTimeout)
+	// #528 — see resolveSourceTargetRates's doc in cmd/transfer.go.
+	cfg.sourceConcurrency, cfg.targetConcurrency, cfg.sourceTimeout, cfg.targetTimeout =
+		resolveSourceTargetRates(extractCfg, migrateCfg)
 	cfg.pemFilePath = extractCfg.PEMFilePath
 	cfg.keyFilePath = extractCfg.KeyFilePath
 	cfg.certPassword = extractCfg.CertPassword

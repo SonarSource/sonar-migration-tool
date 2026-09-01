@@ -267,6 +267,22 @@ func fallbackToOtherSide(a, b *int) {
 	}
 }
 
+// resolveSourceTargetRates resolves concurrency and timeout for both
+// source and target from their independently-loaded configs (each
+// already applies its own "nested block overrides top-level default"
+// rule), then applies the single-side fallback so a value set on only
+// one side still reaches both instead of the unset side falling
+// through to the hardcoded package default. Shared by transfer and
+// sync-issues, which both talk to source and target in one invocation
+// (#528).
+func resolveSourceTargetRates(extractCfg extract.ExtractConfig, migrateCfg migrate.MigrateConfig) (sourceConcurrency, targetConcurrency, sourceTimeout, targetTimeout int) {
+	sourceConcurrency, targetConcurrency = extractCfg.Concurrency, migrateCfg.Concurrency
+	fallbackToOtherSide(&sourceConcurrency, &targetConcurrency)
+	sourceTimeout, targetTimeout = extractCfg.Timeout, migrateCfg.Timeout
+	fallbackToOtherSide(&sourceTimeout, &targetTimeout)
+	return
+}
+
 func applyFlagBool(cmd *cobra.Command, name string, target *bool) {
 	if cmd.Flags().Changed(name) {
 		*target, _ = cmd.Flags().GetBool(name)
@@ -326,22 +342,8 @@ func loadTransferFileDefaults(path string) (transferConfig, error) {
 		cfg.exportDir = migrateCfg.ExportDirectory
 	}
 
-	// #528 — source and target are resolved independently by their own
-	// loaders (each already applies the "nested block overrides
-	// top-level default" rule for its own side), so assign them
-	// straight through rather than collapsing to one shared value: that
-	// used to silently drop target.timeout entirely and pick an
-	// arbitrary side for concurrency whenever the two config-file
-	// blocks genuinely differed. fallbackToOtherSide then lets a value
-	// set on only one side (no top-level default, nothing on the other
-	// side) still reach both, instead of the unset side falling through
-	// to the hardcoded package default.
-	cfg.sourceConcurrency = extractCfg.Concurrency
-	cfg.targetConcurrency = migrateCfg.Concurrency
-	fallbackToOtherSide(&cfg.sourceConcurrency, &cfg.targetConcurrency)
-	cfg.sourceTimeout = extractCfg.Timeout
-	cfg.targetTimeout = migrateCfg.Timeout
-	fallbackToOtherSide(&cfg.sourceTimeout, &cfg.targetTimeout)
+	cfg.sourceConcurrency, cfg.targetConcurrency, cfg.sourceTimeout, cfg.targetTimeout =
+		resolveSourceTargetRates(extractCfg, migrateCfg)
 	cfg.pemFilePath = extractCfg.PEMFilePath
 	cfg.keyFilePath = extractCfg.KeyFilePath
 	cfg.certPassword = extractCfg.CertPassword
