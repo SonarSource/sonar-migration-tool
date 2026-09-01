@@ -49,7 +49,7 @@ organization keys to organizations.csv.`,
 
 func init() {
 	f := migrateCmd.Flags()
-	f.String("config", "", "Path to JSON configuration file")
+	f.StringP("config", "c", "", "Path to JSON configuration file")
 	f.String(flagTargetToken, "", "SonarQube Cloud authentication token")
 	f.String("enterprise_key", "", "SonarQube Cloud enterprise key")
 	f.String("edition", "", "SonarQube Cloud license edition")
