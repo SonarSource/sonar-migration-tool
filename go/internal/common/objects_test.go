@@ -148,3 +148,32 @@ func TestExcludedTasks(t *testing.T) {
 		}
 	})
 }
+
+// #536: extract's and migrate's own objects_categories.go project
+// their half of objectCategoryTaskNames via these two accessors — a
+// sanity check here that every category resolves to a non-nil slice
+// (ObjectProjects.Extract and ObjectLicenseProfiles are the two
+// deliberate all-nil exceptions, documented on objectCategoryTaskNames).
+func TestCategoryTasksAccessors(t *testing.T) {
+	if got := ExtractCategoryTasks(ObjectSettings); len(got) == 0 {
+		t.Errorf("expected non-empty extract tasks for settings, got %v", got)
+	}
+	if got := MigrateCategoryTasks(ObjectSettings); len(got) == 0 {
+		t.Errorf("expected non-empty migrate tasks for settings, got %v", got)
+	}
+	if got := ExtractCategoryTasks(ObjectProjects); got != nil {
+		t.Errorf("expected nil extract tasks for projects (computed dynamically by the extract package instead), got %v", got)
+	}
+	if got := MigrateCategoryTasks(ObjectProjects); len(got) == 0 {
+		t.Error("expected non-empty migrate tasks for projects")
+	}
+	if got := ExtractCategoryTasks(ObjectLicenseProfiles); got != nil {
+		t.Errorf("expected nil extract tasks for license_profiles (not implemented), got %v", got)
+	}
+	if got := MigrateCategoryTasks(ObjectLicenseProfiles); got != nil {
+		t.Errorf("expected nil migrate tasks for license_profiles (not implemented), got %v", got)
+	}
+	if got := ExtractCategoryTasks("not_a_real_category"); got != nil {
+		t.Errorf("expected nil for an unknown category, got %v", got)
+	}
+}
