@@ -103,8 +103,10 @@ type syncIssuesConfig struct {
 	projectKeyPattern   string
 	enterpriseKey       string
 	exportDir           string
-	concurrency         int
-	timeout             int
+	sourceConcurrency   int
+	targetConcurrency   int
+	sourceTimeout       int
+	targetTimeout       int
 	pemFilePath         string
 	keyFilePath         string
 	certPassword        string
@@ -139,14 +141,13 @@ func loadSyncIssuesFileDefaults(path string) (syncIssuesConfig, error) {
 		cfg.exportDir = migrateCfg.ExportDirectory
 	}
 
-	switch {
-	case extractCfg.Concurrency != 0:
-		cfg.concurrency = extractCfg.Concurrency
-	case migrateCfg.Concurrency != 0:
-		cfg.concurrency = migrateCfg.Concurrency
-	}
-
-	cfg.timeout = extractCfg.Timeout
+	// #528 — assign source/target straight through rather than
+	// collapsing to one shared value; see the identical comment in
+	// cmd/transfer.go's loadTransferFileDefaults.
+	cfg.sourceConcurrency = extractCfg.Concurrency
+	cfg.targetConcurrency = migrateCfg.Concurrency
+	cfg.sourceTimeout = extractCfg.Timeout
+	cfg.targetTimeout = migrateCfg.Timeout
 	cfg.pemFilePath = extractCfg.PEMFilePath
 	cfg.keyFilePath = extractCfg.KeyFilePath
 	cfg.certPassword = extractCfg.CertPassword
@@ -179,8 +180,17 @@ func resolveSyncIssuesConfig(cmd *cobra.Command) (syncIssuesConfig, error) {
 	applyFlagString(cmd, flagProjectKeyPattern, &cfg.projectKeyPattern)
 	applyFlagString(cmd, flagEnterpriseKey, &cfg.enterpriseKey)
 	applyFlagString(cmd, flagExportDir, &cfg.exportDir)
-	applyFlagInt(cmd, flagConcurrency, &cfg.concurrency)
-	applyFlagInt(cmd, flagTimeout, &cfg.timeout)
+	// #528 — sync-issues talks to both source and target, so
+	// --concurrency / --timeout set both sides at once. The config
+	// file remains the only way to give the two sides different values.
+	if cmd.Flags().Changed(flagConcurrency) {
+		v, _ := cmd.Flags().GetInt(flagConcurrency)
+		cfg.sourceConcurrency, cfg.targetConcurrency = v, v
+	}
+	if cmd.Flags().Changed(flagTimeout) {
+		v, _ := cmd.Flags().GetInt(flagTimeout)
+		cfg.sourceTimeout, cfg.targetTimeout = v, v
+	}
 	applyFlagString(cmd, flagPEMFilePath, &cfg.pemFilePath)
 	applyFlagString(cmd, flagKeyFilePath, &cfg.keyFilePath)
 	applyFlagString(cmd, flagCertPassword, &cfg.certPassword)
@@ -226,8 +236,8 @@ func runSyncIssuesCmd(cmd *cobra.Command, _ []string) error {
 		Token:              cfg.sourceToken,
 		ExportDirectory:    cfg.exportDir,
 		ProjectKeys:        cfg.projectKeys,
-		Concurrency:        cfg.concurrency,
-		Timeout:            cfg.timeout,
+		Concurrency:        cfg.sourceConcurrency,
+		Timeout:            cfg.sourceTimeout,
 		PEMFilePath:        cfg.pemFilePath,
 		KeyFilePath:        cfg.keyFilePath,
 		CertPassword:       cfg.certPassword,
@@ -250,8 +260,8 @@ func runSyncIssuesCmd(cmd *cobra.Command, _ []string) error {
 		Token:               cfg.targetToken,
 		EnterpriseKey:       cfg.enterpriseKey,
 		ExportDirectory:     cfg.exportDir,
-		Concurrency:         cfg.concurrency,
-		Timeout:             cfg.timeout,
+		Concurrency:         cfg.targetConcurrency,
+		Timeout:             cfg.targetTimeout,
 		ProjectKeyPattern:   cfg.projectKeyPattern,
 		DefaultOrganization: cfg.defaultOrganization,
 		ProjectKeys:         cfg.projectKeys,

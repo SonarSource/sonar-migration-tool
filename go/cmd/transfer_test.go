@@ -124,8 +124,10 @@ func TestResolveTransferConfig_UnifiedConfigShape(t *testing.T) {
 		enterpriseKey:       "ent-key",
 		edition:             "developer",
 		exportDir:           "/tmp/from-cfg",
-		concurrency:         7,
-		timeout:             42,
+		sourceConcurrency:   7,
+		targetConcurrency:   7,
+		sourceTimeout:       42,
+		targetTimeout:       42,
 		pemFilePath:         "/cert/pem",
 		keyFilePath:         "/cert/key",
 		certPassword:        "p4ss",
@@ -201,8 +203,12 @@ func TestResolveTransferConfig_CLIOverridesConfig(t *testing.T) {
 		{"enterpriseKey", cfg.enterpriseKey, "cli-ent"},
 		{"edition", cfg.edition, "community"},
 		{"exportDir", cfg.exportDir, "/tmp/cli"},
-		{"concurrency", cfg.concurrency, 11},
-		{"timeout", cfg.timeout, 99},
+		// #528 — transfer's --concurrency/--timeout set both source and
+		// target at once (config file is the only way to differ them).
+		{"sourceConcurrency", cfg.sourceConcurrency, 11},
+		{"targetConcurrency", cfg.targetConcurrency, 11},
+		{"sourceTimeout", cfg.sourceTimeout, 99},
+		{"targetTimeout", cfg.targetTimeout, 99},
 		{"pemFilePath", cfg.pemFilePath, "/cli/pem"},
 		{"keyFilePath", cfg.keyFilePath, "/cli/key"},
 		{"certPassword", cfg.certPassword, "cli-pass"},
@@ -212,6 +218,61 @@ func TestResolveTransferConfig_CLIOverridesConfig(t *testing.T) {
 	for _, c := range checks {
 		if c.got != c.want {
 			t.Errorf("%s: got %v, want %v", c.name, c.got, c.want)
+		}
+	}
+}
+
+// Issue #528: source and target must be able to carry genuinely
+// different concurrency/timeout values from the config file — before
+// this fix, transfer's loadTransferFileDefaults collapsed the two
+// independently-resolved values into one shared field, so target's
+// timeout was always silently discarded in favor of source's, and
+// concurrency arbitrarily preferred whichever side's block was
+// non-zero. The network path to the source SonarQube Server and to
+// the target SonarQube Cloud can have very different characteristics,
+// which is the whole motivation for this issue.
+func TestResolveTransferConfig_SourceAndTargetConcurrencyTimeoutDiffer(t *testing.T) {
+	path := writeTransferConfig(t, `{
+		"concurrency": 10,
+		"timeout": 60,
+		"source": {
+			"url": "https://sq.example.com",
+			"token": "sq-token",
+			"concurrency": 10,
+			"timeout": 10
+		},
+		"target": {
+			"url": "https://sonarcloud.io/",
+			"token": "sc-token",
+			"default_organization": "my-org",
+			"concurrency": 5,
+			"timeout": 30
+		}
+	}`)
+
+	cmd := newTransferTestCmd()
+	if err := cmd.ParseFlags([]string{"-c", path}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := resolveTransferConfig(cmd)
+	if err != nil {
+		t.Fatalf("resolveTransferConfig: %v", err)
+	}
+
+	checks := []struct {
+		name string
+		got  int
+		want int
+	}{
+		{"sourceConcurrency", cfg.sourceConcurrency, 10},
+		{"targetConcurrency", cfg.targetConcurrency, 5},
+		{"sourceTimeout", cfg.sourceTimeout, 10},
+		{"targetTimeout", cfg.targetTimeout, 30},
+	}
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("%s: got %d, want %d", c.name, c.got, c.want)
 		}
 	}
 }

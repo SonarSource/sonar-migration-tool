@@ -89,8 +89,10 @@ func TestResolveSyncIssuesConfig_UnifiedConfigShape(t *testing.T) {
 		projectKeyPattern:   "acme_<ORIGINAL_PROJECT_KEY>",
 		enterpriseKey:       "ent-key",
 		exportDir:           "/tmp/from-cfg",
-		concurrency:         7,
-		timeout:             42,
+		sourceConcurrency:   7,
+		targetConcurrency:   7,
+		sourceTimeout:       42,
+		targetTimeout:       42,
 		pemFilePath:         "/cert/pem",
 		keyFilePath:         "/cert/key",
 		certPassword:        "p4ss",
@@ -116,6 +118,8 @@ func TestResolveSyncIssuesConfig_CLIOverridesConfig(t *testing.T) {
 		"--default_organization", "flag-org",
 		"--project_key", "proj-a",
 		"--project_key", "proj-b",
+		"--concurrency", "11",
+		"--timeout", "99",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -139,6 +143,65 @@ func TestResolveSyncIssuesConfig_CLIOverridesConfig(t *testing.T) {
 	}
 	if want := []string{"proj-a", "proj-b"}; !reflect.DeepEqual(cfg.projectKeys, want) {
 		t.Errorf("projectKeys: got %v, want %v", cfg.projectKeys, want)
+	}
+	// #528 — sync-issues's --concurrency/--timeout set both source and
+	// target at once (config file is the only way to differ them).
+	if cfg.sourceConcurrency != 11 || cfg.targetConcurrency != 11 {
+		t.Errorf("concurrency: got source=%d target=%d, want both 11", cfg.sourceConcurrency, cfg.targetConcurrency)
+	}
+	if cfg.sourceTimeout != 99 || cfg.targetTimeout != 99 {
+		t.Errorf("timeout: got source=%d target=%d, want both 99", cfg.sourceTimeout, cfg.targetTimeout)
+	}
+}
+
+// Issue #528: source and target must be able to carry genuinely
+// different concurrency/timeout values from the config file — before
+// this fix, loadSyncIssuesFileDefaults collapsed the two
+// independently-resolved values into one shared field, always
+// discarding target's timeout and arbitrarily preferring one side for
+// concurrency.
+func TestResolveSyncIssuesConfig_SourceAndTargetConcurrencyTimeoutDiffer(t *testing.T) {
+	path := writeSyncIssuesConfig(t, `{
+		"concurrency": 10,
+		"timeout": 60,
+		"source": {
+			"url": "https://sq.example.com",
+			"token": "sq-token",
+			"concurrency": 10,
+			"timeout": 10
+		},
+		"target": {
+			"token": "sc-token",
+			"default_organization": "my-org",
+			"concurrency": 5,
+			"timeout": 30
+		}
+	}`)
+
+	cmd := newSyncIssuesTestCmd()
+	if err := cmd.ParseFlags([]string{"-c", path}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := resolveSyncIssuesConfig(cmd)
+	if err != nil {
+		t.Fatalf("resolveSyncIssuesConfig: %v", err)
+	}
+
+	checks := []struct {
+		name string
+		got  int
+		want int
+	}{
+		{"sourceConcurrency", cfg.sourceConcurrency, 10},
+		{"targetConcurrency", cfg.targetConcurrency, 5},
+		{"sourceTimeout", cfg.sourceTimeout, 10},
+		{"targetTimeout", cfg.targetTimeout, 30},
+	}
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("%s: got %d, want %d", c.name, c.got, c.want)
+		}
 	}
 }
 

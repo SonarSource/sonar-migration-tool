@@ -212,8 +212,10 @@ type transferConfig struct {
 	enterpriseKey            string
 	edition                  string
 	exportDir                string
-	concurrency              int
-	timeout                  int
+	sourceConcurrency        int
+	targetConcurrency        int
+	sourceTimeout            int
+	targetTimeout            int
 	pemFilePath              string
 	keyFilePath              string
 	certPassword             string
@@ -296,14 +298,17 @@ func loadTransferFileDefaults(path string) (transferConfig, error) {
 		cfg.exportDir = migrateCfg.ExportDirectory
 	}
 
-	switch {
-	case extractCfg.Concurrency != 0:
-		cfg.concurrency = extractCfg.Concurrency
-	case migrateCfg.Concurrency != 0:
-		cfg.concurrency = migrateCfg.Concurrency
-	}
-
-	cfg.timeout = extractCfg.Timeout
+	// #528 — source and target are resolved independently by their own
+	// loaders (each already applies the "nested block overrides
+	// top-level default" rule for its own side), so assign them
+	// straight through rather than collapsing to one shared value: that
+	// used to silently drop target.timeout entirely and pick an
+	// arbitrary side for concurrency whenever the two config-file
+	// blocks genuinely differed.
+	cfg.sourceConcurrency = extractCfg.Concurrency
+	cfg.targetConcurrency = migrateCfg.Concurrency
+	cfg.sourceTimeout = extractCfg.Timeout
+	cfg.targetTimeout = migrateCfg.Timeout
 	cfg.pemFilePath = extractCfg.PEMFilePath
 	cfg.keyFilePath = extractCfg.KeyFilePath
 	cfg.certPassword = extractCfg.CertPassword
@@ -339,8 +344,18 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 	applyFlagString(cmd, flagEnterpriseKey, &cfg.enterpriseKey)
 	applyFlagString(cmd, flagEdition, &cfg.edition)
 	applyFlagString(cmd, flagExportDir, &cfg.exportDir)
-	applyFlagInt(cmd, flagConcurrency, &cfg.concurrency)
-	applyFlagInt(cmd, flagTimeout, &cfg.timeout)
+	// #528 — unlike extract/migrate (each inherently single-sided),
+	// transfer talks to both source and target, so --concurrency /
+	// --timeout set both sides at once. The config file remains the
+	// only way to give the two sides different values.
+	if cmd.Flags().Changed(flagConcurrency) {
+		v, _ := cmd.Flags().GetInt(flagConcurrency)
+		cfg.sourceConcurrency, cfg.targetConcurrency = v, v
+	}
+	if cmd.Flags().Changed(flagTimeout) {
+		v, _ := cmd.Flags().GetInt(flagTimeout)
+		cfg.sourceTimeout, cfg.targetTimeout = v, v
+	}
 	applyFlagString(cmd, flagPEMFilePath, &cfg.pemFilePath)
 	applyFlagString(cmd, flagKeyFilePath, &cfg.keyFilePath)
 	applyFlagString(cmd, flagCertPassword, &cfg.certPassword)
@@ -493,7 +508,7 @@ func resolveTransferProjectKeys(ctx context.Context, cfg transferConfig) ([]stri
 	allKeys, err := extract.ListAllProjectKeys(ctx, extract.ExtractConfig{
 		URL:          cfg.sourceURL,
 		Token:        cfg.sourceToken,
-		Timeout:      cfg.timeout,
+		Timeout:      cfg.sourceTimeout,
 		PEMFilePath:  cfg.pemFilePath,
 		KeyFilePath:  cfg.keyFilePath,
 		CertPassword: cfg.certPassword,
@@ -530,8 +545,8 @@ func runTransferExtract(ctx context.Context, cfg transferConfig) ([]string, erro
 		Token:           cfg.sourceToken,
 		ExportDirectory: cfg.exportDir,
 		ProjectKeys:     projectKeys,
-		Concurrency:     cfg.concurrency,
-		Timeout:         cfg.timeout,
+		Concurrency:     cfg.sourceConcurrency,
+		Timeout:         cfg.sourceTimeout,
 		PEMFilePath:     cfg.pemFilePath,
 		KeyFilePath:     cfg.keyFilePath,
 		CertPassword:    cfg.certPassword,
@@ -623,8 +638,8 @@ func runTransferMigrate(ctx context.Context, cfg transferConfig) (string, error)
 		EnterpriseKey:   cfg.enterpriseKey,
 		Edition:         cfg.edition,
 		ExportDirectory: cfg.exportDir,
-		Concurrency:     cfg.concurrency,
-		Timeout:         cfg.timeout,
+		Concurrency:     cfg.targetConcurrency,
+		Timeout:         cfg.targetTimeout,
 		// Project-scoped migration: run only the leaf tasks for the project,
 		// its quality gate/profiles, permissions, and issue/hotspot history.
 		// Their dependencies are resolved automatically.
