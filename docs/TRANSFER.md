@@ -277,7 +277,7 @@ detection entirely rather than treating every language as unsupported, so a
 transient API error can never drop a project's files.
 
 ### Project history migration (`--migrate_history`) — PoC
-<!-- updated: 2026-09-02_12:28:13 -->
+<!-- updated: 2026-09-02_22:00:00 -->
 
 **This is a proof-of-concept.** By default, `transfer` (and `migrate`) submit a
 single scanner report per branch, dated "now" — the target's analysis history
@@ -335,6 +335,21 @@ sonar-migration-tool transfer -c config.json --project_key my-project \
   for a project resubmits the same historical points again (duplicate history
   entries on the target), since completed history points aren't tracked the
   way branch completion is. Safe to run once per target project.
+- **The target's own retention still applies.** A point older than SonarQube
+  Cloud's housekeeping window is accepted by the Compute Engine and then
+  pruned by the target, so it never appears on the Activity page. Observed
+  live: a 2021 point reported a successful Compute Engine task but was absent
+  from `/api/project_analyses/search` afterwards, while every later point
+  persisted. Nothing the migration can do about it — set
+  `--history_min_interval_days` / `--history_max_points` with the target's
+  retention in mind rather than expecting very old points to survive.
+- **Each historical entry carries one placeholder file.** A report holding a
+  lone project component with a raw measure is rejected by the Compute Engine,
+  so every historical analysis includes a single empty
+  `__history_snapshot__.<ext>` component for the measures to attach to. Its
+  language is chosen from the ones the *target organization* actually has a
+  quality profile for. The file is never meant to be read, but it is part of
+  the analysis.
 - Requires both `extract` and `migrate` to have `--migrate_history` (or the
   `migrate_history` config key) set — `transfer` sets both automatically;
   running the two commands separately needs the flag on each.
