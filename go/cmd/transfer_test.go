@@ -77,7 +77,8 @@ func newTransferTestCmd() *cobra.Command {
 	// branches would be unreachable from any test.
 	f.Bool(flagMigrateHistory, false, "")
 	f.Int(flagHistoryMaxPoints, 0, "")
-	f.Int(flagHistoryMinIntervalDays, 0, "")
+	// Mirrors transferCmd's real default: the sentinel, not 0.
+	f.Int(flagHistoryMinIntervalDays, extract.HistoryUnset, "")
 	return cmd
 }
 

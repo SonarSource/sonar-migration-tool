@@ -25,7 +25,8 @@ func newExtractHistoryTestCmd() *cobra.Command {
 	f.Bool(flagSkipIssueSync, false, "")
 	f.Bool(flagMigrateHistory, false, "")
 	f.Int(flagHistoryMaxPoints, 0, "")
-	f.Int(flagHistoryMinIntervalDays, 0, "")
+	// Mirrors extractCmd's real default: the sentinel, not 0.
+	f.Int(flagHistoryMinIntervalDays, extract.HistoryUnset, "")
 	return cmd
 }
 
