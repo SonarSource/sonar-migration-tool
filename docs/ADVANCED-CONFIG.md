@@ -50,8 +50,8 @@ Only `source.url` / `source.token` (for `extract`) and `target.url` / `target.to
 | `skip_issue_sync` | `--skip_issue_sync` | extract, migrate, transfer | `false` | No | Skip the final per-issue / per-hotspot metadata sync (#299). Accepts `true`/`on`/`yes`/`1` (case-insensitive). CLI flag is a one-way override. |
 | `skip_project_data_migration` | `--skip_project_data_migration` | extract, migrate, transfer | `false` | No | Skip the entire project-data migration (import + trailing sync). Implies `skip_issue_sync` (#303). |
 | `migrate_history` | `--migrate_history` | extract, migrate, transfer | `false` | No | **PoC.** Also migrate a bounded set of historical analysis snapshots (date + project-level measures only) per project's main branch, backdated on SonarQube Cloud (#554). Accepts `true`/`on`/`yes`/`1` (case-insensitive). Overridable via `target.migrate_history`. CLI flag is a one-way override. |
-| `history_max_points` | `--history_max_points` | extract, migrate, transfer | `10` | No | Max historical snapshots migrated per project when `migrate_history` is set (#554). |
-| `history_min_interval_days` | `--history_min_interval_days` | extract, migrate, transfer | `30` | No | Minimum spacing, in days, enforced between two migrated historical snapshots when `migrate_history` is set (#554). |
+| `history_max_points` | `--history_max_points` | extract, transfer | `10` | No | Max historical snapshots migrated per project when `migrate_history` is set (#554). Applied at extract time; `migrate` replays whatever was extracted, so the flag does not exist there. |
+| `history_min_interval_days` | `--history_min_interval_days` | extract, transfer | `30` | No | Minimum spacing, in days, enforced between two migrated historical snapshots when `migrate_history` is set (#554). Pass `0` for no spacing rule. Applied at extract time; `migrate` replays whatever was extracted, so the flag does not exist there. |
 
 ### `source` block — SonarQube Server side (`extract`, `transfer`)
 
@@ -117,7 +117,7 @@ All optional.
 | `skip_project_data_migration` | `false` | When `true` (or `"on"` / `"yes"` / `1`), skip the entire project-data migration: the project-data import AND the trailing issue + hotspot sync. Useful when customers cut over to SonarQube Cloud by re-scanning rather than importing historical state. Implies `skip_issue_sync` — there's nothing to sync against. Same FlexibleBool aliases. Issue #303. |
 | `migrate_history` | `false` | **Proof of concept.** When `true` (or `"on"` / `"yes"` / `1`), replay a bounded set of the source project's historical analyses of its main branch as separate, backdated points in the target's analysis history, on top of the regular current-snapshot import. Each historical point carries the project-level measures only — no files, no issues. Same FlexibleBool aliases. Can be overridden per command by `target.migrate_history`. See [TRANSFER.md](TRANSFER.md#project-history-migration---migrate_history--poc). Issue #554. |
 | `history_max_points` | `10` | Max historical snapshots migrated per project when `migrate_history` is set. When the source has more candidates than this after interval bounding, they are evenly resampled across the whole history span. Issue #554. |
-| `history_min_interval_days` | `30` | Minimum spacing, in days, enforced between two migrated historical snapshots when `migrate_history` is set. Issue #554. |
+| `history_min_interval_days` | `30` | Minimum spacing, in days, enforced between two migrated historical snapshots when `migrate_history` is set. `0` is a real value meaning "no spacing rule" and is distinct from leaving the key out. Issue #554. |
 
 `concurrency` and `timeout` can also be set inside `source` / `target` — those values override the top-level default for that command only.
 

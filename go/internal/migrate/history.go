@@ -155,20 +155,24 @@ func migrateBranchHistory(ctx context.Context, e *Executor, bctx branchImportCon
 	}
 }
 
-// historyPlaceholderLangPreference lists the languages tried first for the
-// placeholder file, most-preferred first. They are ordinary, universally
-// shipped languages with a simple file extension and a stock "Sonar way"
-// profile in every organization; any of them keeps the placeholder as
-// unremarkable as possible. If none is present in the org, any other
-// language with a profile will do — the file is never meant to be read.
-var historyPlaceholderLangPreference = []string{"js", "py", "java", "ts", "go", "xml"}
-
-// historyPlaceholderExt maps a language to the file extension the placeholder
-// must carry: SonarQube Cloud assigns a file's language from its extension,
-// and a mismatch between that and the declared quality profile is exactly the
-// #474 "file with language X but no matching quality profile" rejection.
-var historyPlaceholderExt = map[string]string{
-	"js": "js", "py": "py", "java": "java", "ts": "ts", "go": "go", "xml": "xml",
+// historyPlaceholderLangs are the languages the placeholder file may be
+// stamped with, most-preferred first, each paired with the file extension it
+// must carry.
+//
+// The extension is not decoration and is not derivable from the language key:
+// SonarQube Cloud assigns a file's language from its extension, and a
+// mismatch between that and the declared quality profile is exactly the #474
+// "file with language X but no matching quality profile" rejection. Several
+// language keys are not their own extension (apex→.cls, cobol→.cbl,
+// web→.html), so the pairing is explicit and a language may only be used as
+// a placeholder if it appears here.
+//
+// All six are ordinary, universally shipped languages with a stock "Sonar
+// way" profile in every organization, which keeps the placeholder as
+// unremarkable as possible. The file is never meant to be read.
+var historyPlaceholderLangs = []struct{ Lang, Ext string }{
+	{"js", "js"}, {"py", "py"}, {"java", "java"},
+	{"ts", "ts"}, {"go", "go"}, {"xml", "xml"},
 }
 
 // historyPlaceholder is the resolved, target-org-specific identity of the
@@ -194,23 +198,17 @@ func resolveHistoryPlaceholderProfile(ctx context.Context, e *Executor, orgKey s
 // resolveHistoryPlaceholderProfile, split out so the choice can be tested
 // without a live organization.
 func pickHistoryPlaceholder(byLang map[string]scanreport.QProfileInfo) (historyPlaceholder, bool) {
-	if len(byLang) == 0 {
-		return historyPlaceholder{}, false
-	}
-	for _, lang := range historyPlaceholderLangPreference {
-		if p, ok := byLang[lang]; ok {
-			return historyPlaceholder{Language: lang, Ext: historyPlaceholderExt[lang], QProfile: p}, true
+	for _, c := range historyPlaceholderLangs {
+		if p, ok := byLang[c.Lang]; ok {
+			return historyPlaceholder{Language: c.Lang, Ext: c.Ext, QProfile: p}, true
 		}
 	}
-	// Fall back to any language the org does have a profile for. Map order is
-	// random, so sort for a deterministic, reproducible choice across runs.
-	langs := make([]string, 0, len(byLang))
-	for lang := range byLang {
-		langs = append(langs, lang)
-	}
-	sort.Strings(langs)
-	lang := langs[0]
-	return historyPlaceholder{Language: lang, Ext: lang, QProfile: byLang[lang]}, true
+	// The organization has profiles, but none for a language we can safely
+	// name a placeholder file after. Refusing here is deliberate: guessing an
+	// extension from an unknown language key is what produces the #474
+	// whole-report rejection, and skipping history is far better than
+	// submitting reports the Compute Engine will refuse.
+	return historyPlaceholder{}, false
 }
 
 // retargetMeasures returns a copy of measures with every entry's Component

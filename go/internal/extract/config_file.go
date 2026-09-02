@@ -130,6 +130,19 @@ func parseConfigFile(path string) (configFileShape, error) {
 	return shape, nil
 }
 
+// applyHistoryTo copies the three #554 history settings onto cfg. Extracted
+// from toExtractConfig because every shape branch needs the identical block,
+// and the nil check for HistoryMinIntervalDays — absent must stay
+// distinguishable from an explicit 0 — is easy to get subtly wrong three
+// times over.
+func (s configFileShape) applyHistoryTo(cfg *ExtractConfig) {
+	cfg.MigrateHistory = s.MigrateHistory
+	cfg.HistoryMaxPoints = s.HistoryMaxPoints
+	if s.HistoryMinIntervalDays != nil {
+		cfg.HistoryMinIntervalDays = *s.HistoryMinIntervalDays
+	}
+}
+
 func (s configFileShape) toExtractConfig() ExtractConfig {
 	var cfg ExtractConfig
 	// Start the spacing at the "caller said nothing" sentinel so an absent
@@ -167,11 +180,7 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		// the extract pulls issue / source / SCM-blame data.
 		cfg.SkipProjectDataMigration = s.SkipProjectDataMigration
 		cfg.SkipIssueSync = s.SkipIssueSync
-		cfg.MigrateHistory = s.MigrateHistory
-		cfg.HistoryMaxPoints = s.HistoryMaxPoints
-		if s.HistoryMinIntervalDays != nil {
-			cfg.HistoryMinIntervalDays = *s.HistoryMinIntervalDays
-		}
+		s.applyHistoryTo(&cfg)
 	case s.SonarQube != nil:
 		cfg.URL = s.SonarQube.URL
 		cfg.Token = s.SonarQube.Token
@@ -182,11 +191,7 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		}
 		cfg.SkipProjectDataMigration = s.SkipProjectDataMigration
 		cfg.SkipIssueSync = s.SkipIssueSync
-		cfg.MigrateHistory = s.MigrateHistory
-		cfg.HistoryMaxPoints = s.HistoryMaxPoints
-		if s.HistoryMinIntervalDays != nil {
-			cfg.HistoryMinIntervalDays = *s.HistoryMinIntervalDays
-		}
+		s.applyHistoryTo(&cfg)
 	case s.Extract != nil:
 		return s.Extract.toExtractConfig()
 	default:
@@ -203,11 +208,7 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		cfg.TargetTask = s.TargetTask
 		cfg.SkipProjectDataMigration = s.SkipProjectDataMigration
 		cfg.SkipIssueSync = s.SkipIssueSync
-		cfg.MigrateHistory = s.MigrateHistory
-		cfg.HistoryMaxPoints = s.HistoryMaxPoints
-		if s.HistoryMinIntervalDays != nil {
-			cfg.HistoryMinIntervalDays = *s.HistoryMinIntervalDays
-		}
+		s.applyHistoryTo(&cfg)
 	}
 	return cfg
 }

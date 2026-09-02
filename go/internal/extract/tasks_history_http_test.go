@@ -47,10 +47,18 @@ func hhRecordDate(dayOffset int) string {
 	return hhBase.AddDate(0, 0, dayOffset).Format(time.RFC3339)
 }
 
-// hhDay renders the UTC calendar day of an analysis date — the value the
-// measures call must use for both from and to.
+// hhDay renders the calendar day of an analysis date, in the date's own
+// location.
 func hhDay(dayOffset int) string {
 	return hhBase.AddDate(0, 0, dayOffset).Format("2006-01-02")
+}
+
+// hhWindow returns the (from, to) pair fetchHistoricalMeasures must send for
+// the analysis at dayOffset: the day in the timestamp's OWN location, widened
+// by one day on each side. matchHistoricalMeasures narrows the response back
+// to the exact timestamp, so the widening only guards the boundary.
+func hhWindow(dayOffset int) (string, string) {
+	return hhDay(dayOffset - 1), hhDay(dayOffset + 1)
 }
 
 // hhRange returns n consecutive day offsets starting at start.
@@ -81,20 +89,43 @@ func hhAnalysesPage(dayOffsets []int, total int) map[string]any {
 	}
 }
 
-// hhMeasuresBody builds an /api/measures/search_history response for one
-// calendar day, echoing that day back as the metric value so a written
-// record identifies which point its measures were fetched for.
-func hhMeasuresBody(from string) map[string]any {
-	return map[string]any{
-		"measures": []map[string]any{
-			{
-				"metric": hhMetric,
-				"history": []map[string]any{
-					{"date": from + "T10:00:00+0000", "value": from},
-				},
-			},
-		},
+// hhMeasuresBody builds an /api/measures/search_history response covering the
+// whole requested [from, to] window, one entry per day, echoing each day back
+// as its own metric value. The real endpoint behaves this way — its bounds are
+// date-only and it returns every analysis inside them — and since
+// fetchHistoricalMeasures now widens the window by a day on each side, a fake
+// that returned a single entry would not exercise matchHistoricalMeasures'
+// narrowing at all. A record ending up with the wrong day's value is therefore
+// a real failure this fake can surface.
+func hhMeasuresBody(from, to string) map[string]any {
+	start, err := time.Parse("2006-01-02", from)
+	if err != nil {
+		return map[string]any{"measures": []map[string]any{}}
 	}
+	end, err := time.Parse("2006-01-02", to)
+	if err != nil {
+		end = start
+	}
+	history := make([]map[string]any, 0, 3)
+	for d := start; !d.After(end); d = d.AddDate(0, 0, 1) {
+		day := d.Format("2006-01-02")
+		history = append(history, map[string]any{"date": day + "T10:00:00+0000", "value": day})
+	}
+	return map[string]any{
+		"measures": []map[string]any{{"metric": hhMetric, "history": history}},
+	}
+}
+
+// hhTargetDay recovers the analysis day a measures call was made FOR from the
+// window it requested: fetchHistoricalMeasures asks for the day before through
+// the day after, so the middle day is the point itself. Keeps the assertions
+// in these tests phrased in terms of points rather than window edges.
+func hhTargetDay(from string) string {
+	d, err := time.Parse("2006-01-02", from)
+	if err != nil {
+		return from
+	}
+	return d.AddDate(0, 0, 1).Format("2006-01-02")
 }
 
 // hhCalls records what the fake history server was asked for.
@@ -140,15 +171,16 @@ func hhServeHistory(calls *hhCalls, dayOffsets []int, measureStatus func(from st
 			calls.recordAnalyses(r.URL.Query())
 			_ = json.NewEncoder(w).Encode(hhAnalysesPage(dayOffsets, len(dayOffsets)))
 		case hhMeasuresPath:
-			from := r.URL.Query().Get("from")
-			calls.recordMeasures(from)
+			from, to := r.URL.Query().Get("from"), r.URL.Query().Get("to")
+			target := hhTargetDay(from)
+			calls.recordMeasures(target)
 			if measureStatus != nil {
-				if code := measureStatus(from); code != 0 {
+				if code := measureStatus(target); code != 0 {
 					w.WriteHeader(code)
 					return
 				}
 			}
-			_ = json.NewEncoder(w).Encode(hhMeasuresBody(from))
+			_ = json.NewEncoder(w).Encode(hhMeasuresBody(from, to))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -422,11 +454,15 @@ func TestExtractProjectAnalysisHistoryMeasuresFatal(t *testing.T) {
 	}
 }
 
-// search_history's from/to are date-only and must be the UTC calendar day
-// of the analysis: an offset timestamp late in the day UTC-wise belongs to
-// the previous calendar day, so dropping the .UTC() would query the wrong
-// day and find nothing.
-func TestFetchHistoricalMeasuresUsesUTCCalendarDay(t *testing.T) {
+// search_history's from/to are date-only and the SERVER interprets them in
+// its own timezone, so the day must be formatted in the analysis timestamp's
+// own location — never in UTC. An analysis at 2024-05-15T01:00:00+03:00 is
+// UTC day 2024-05-14; querying that UTC day asks for the wrong calendar date
+// and either finds nothing (the point migrates with no measures) or
+// attributes a neighbouring analysis's values to it. This pins the local day
+// 2024-05-15, widened to 05-14..05-16; the UTC reading would produce
+// 05-13..05-15 and fail here.
+func TestFetchHistoricalMeasuresUsesServerLocalCalendarDay(t *testing.T) {
 	var (
 		mu    sync.Mutex
 		query url.Values
@@ -439,7 +475,7 @@ func TestFetchHistoricalMeasuresUsesUTCCalendarDay(t *testing.T) {
 		mu.Lock()
 		query = r.URL.Query()
 		mu.Unlock()
-		_ = json.NewEncoder(w).Encode(hhMeasuresBody(r.URL.Query().Get("from")))
+		_ = json.NewEncoder(w).Encode(hhMeasuresBody(r.URL.Query().Get("from"), r.URL.Query().Get("to")))
 	})
 	defer srv.Close()
 
@@ -459,7 +495,7 @@ func TestFetchHistoricalMeasuresUsesUTCCalendarDay(t *testing.T) {
 		"component": "my-project",
 		"metrics":   historyMetricKeys,
 		"from":      "2024-05-14",
-		"to":        "2024-05-14",
+		"to":        "2024-05-16",
 		"ps":        "1000",
 		"branch":    "develop",
 	}
@@ -485,7 +521,7 @@ func TestFetchHistoricalMeasuresOmitsBranchWhenEmpty(t *testing.T) {
 		mu.Lock()
 		query = r.URL.Query()
 		mu.Unlock()
-		_ = json.NewEncoder(w).Encode(hhMeasuresBody(r.URL.Query().Get("from")))
+		_ = json.NewEncoder(w).Encode(hhMeasuresBody(r.URL.Query().Get("from"), r.URL.Query().Get("to")))
 	})
 	defer srv.Close()
 
@@ -498,8 +534,12 @@ func TestFetchHistoricalMeasuresOmitsBranchWhenEmpty(t *testing.T) {
 	if _, ok := query["branch"]; ok {
 		t.Errorf("expected no branch param for an empty branch, got %v", query["branch"])
 	}
-	if got := query.Get("from"); got != hhDay(0) {
-		t.Errorf("expected from=%s, got %s", hhDay(0), got)
+	wantFrom, wantTo := hhWindow(0)
+	if got := query.Get("from"); got != wantFrom {
+		t.Errorf("expected from=%s, got %s", wantFrom, got)
+	}
+	if got := query.Get("to"); got != wantTo {
+		t.Errorf("expected to=%s, got %s", wantTo, got)
 	}
 }
 
