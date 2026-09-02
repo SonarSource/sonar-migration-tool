@@ -129,6 +129,19 @@ func parseConfigFile(path string) (configFileShape, error) {
 	return common.ParseJSONConfigFile[configFileShape](path)
 }
 
+// applyHistoryTo copies the three #554 history settings onto cfg. Extracted
+// from toExtractConfig because every shape branch needs the identical block,
+// and the nil check for HistoryMinIntervalDays — absent must stay
+// distinguishable from an explicit 0 — is easy to get subtly wrong three
+// times over.
+func (s configFileShape) applyHistoryTo(cfg *ExtractConfig) {
+	cfg.MigrateHistory = s.MigrateHistory
+	cfg.HistoryMaxPoints = s.HistoryMaxPoints
+	if s.HistoryMinIntervalDays != nil {
+		cfg.HistoryMinIntervalDays = *s.HistoryMinIntervalDays
+	}
+}
+
 func (s configFileShape) toExtractConfig() ExtractConfig {
 	var cfg ExtractConfig
 	// Start the spacing at the "caller said nothing" sentinel so an absent
@@ -168,11 +181,7 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		cfg.SkipIssueSync = s.SkipIssueSync
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKey = s.ProjectKey
-		cfg.MigrateHistory = s.MigrateHistory
-		cfg.HistoryMaxPoints = s.HistoryMaxPoints
-		if s.HistoryMinIntervalDays != nil {
-			cfg.HistoryMinIntervalDays = *s.HistoryMinIntervalDays
-		}
+		s.applyHistoryTo(&cfg)
 	case s.SonarQube != nil:
 		cfg.URL = s.SonarQube.URL
 		cfg.Token = s.SonarQube.Token
@@ -185,11 +194,7 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		cfg.SkipIssueSync = s.SkipIssueSync
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKey = s.ProjectKey
-		cfg.MigrateHistory = s.MigrateHistory
-		cfg.HistoryMaxPoints = s.HistoryMaxPoints
-		if s.HistoryMinIntervalDays != nil {
-			cfg.HistoryMinIntervalDays = *s.HistoryMinIntervalDays
-		}
+		s.applyHistoryTo(&cfg)
 	case s.Extract != nil:
 		cfg = s.Extract.toExtractConfig()
 		// #536: "objects" / "project_key" set at the outermost (global)
@@ -219,11 +224,7 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		cfg.SkipIssueSync = s.SkipIssueSync
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKey = s.ProjectKey
-		cfg.MigrateHistory = s.MigrateHistory
-		cfg.HistoryMaxPoints = s.HistoryMaxPoints
-		if s.HistoryMinIntervalDays != nil {
-			cfg.HistoryMinIntervalDays = *s.HistoryMinIntervalDays
-		}
+		s.applyHistoryTo(&cfg)
 	}
 	return cfg
 }

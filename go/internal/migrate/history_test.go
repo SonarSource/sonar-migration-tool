@@ -174,12 +174,27 @@ func TestResolveHistoryPlaceholderProfilePrefersCommonLanguage(t *testing.T) {
 			wantLang: "py", wantOK: true,
 		},
 		{
-			name: "falls back deterministically when no preferred language exists",
+			// Refusing is deliberate. A language key is not reliably its own
+			// file extension (apex->.cls, cobol->.cbl, web->.html), and Cloud
+			// derives a file's language from its extension — guessing one
+			// recreates the #474 whole-report rejection. Skipping history
+			// beats submitting reports the CE will refuse.
+			name: "refuses when the org has profiles but none we can name a file for",
 			byLang: map[string]scanreport.QProfileInfo{
 				"cobol": {Key: "k-cobol", Language: "cobol"},
 				"abap":  {Key: "k-abap", Language: "abap"},
 			},
-			wantLang: "abap", wantOK: true,
+			wantOK: false,
+		},
+		{
+			// Every supported placeholder language must carry an extension
+			// the target maps back to that same language.
+			name: "picks a supported language even when unsupported ones sort first",
+			byLang: map[string]scanreport.QProfileInfo{
+				"abap": {Key: "k-abap", Language: "abap"},
+				"xml":  {Key: "k-xml", Language: "xml"},
+			},
+			wantLang: "xml", wantOK: true,
 		},
 	}
 	for _, tc := range tests {

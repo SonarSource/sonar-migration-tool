@@ -365,11 +365,16 @@ func loadTransferFileDefaults(path string) (transferConfig, error) {
 	cfg.excludeBranches = migrateCfg.ExcludeBranches
 	cfg.unsupportedLanguages = migrateCfg.UnsupportedLanguages
 	cfg.fastSync = migrateCfg.FastSync
-	// #554 — sourced from the extract config since history_max_points /
-	// history_min_interval_days only exist there (they bound the source-side
-	// API calls extract makes); migrate_history itself is read from the
-	// same top-level config field on both loaders, so either would agree.
-	cfg.migrateHistory = extractCfg.MigrateHistory
+	// #554 — the two bounds exist only on the extract side (they bound the
+	// source-side API calls extract makes). migrate_history, though, can be
+	// set in two places: the top-level plain bool the extract loader reads,
+	// or under "target", which only the migrate loader resolves (its
+	// tri-state gives the target block precedence). Taking the extract value
+	// alone would make a config that sets only target.migrate_history — which
+	// the schema and ADVANCED-CONFIG both advertise — silently do nothing on
+	// transfer: no history extracted, none replayed, no warning. Accept
+	// either.
+	cfg.migrateHistory = extractCfg.MigrateHistory || migrateCfg.MigrateHistory
 	cfg.historyMaxPoints = extractCfg.HistoryMaxPoints
 	cfg.historyMinIntervalDays = extractCfg.HistoryMinIntervalDays
 	return cfg, nil

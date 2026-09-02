@@ -198,13 +198,25 @@ func selectBoundedHistoryPoints(points []historyPoint, maxPoints, minIntervalDay
 // fetchHistoricalMeasures queries /api/measures/search_history for the
 // calendar day containing date and returns the project-level metric values
 // recorded at that exact analysis timestamp.
+//
+// The from/to bounds are date-only and the server reads them in ITS OWN
+// timezone, so the day must be formatted in the timestamp's own location
+// rather than in UTC. parseHistoryDate preserves the server's offset for
+// exactly this reason: on a source server at, say, +10:00, an analysis at
+// 2024-05-14T09:00:00+10:00 is UTC day 2024-05-13, and asking for the UTC day
+// queries the wrong calendar date entirely — matchHistoricalMeasures then
+// either finds nothing (the point is migrated with no measures at all) or
+// silently attributes a neighbouring analysis's values to it.
+//
+// The window is widened by a day on each side to absorb any residual boundary
+// skew; matchHistoricalMeasures narrows back to this exact timestamp, so the
+// extra days cost one slightly larger response and change nothing else.
 func fetchHistoricalMeasures(ctx context.Context, e *Executor, projectKey, branch string, date time.Time) ([]map[string]string, error) {
-	day := date.UTC().Format("2006-01-02")
 	params := url.Values{
 		"component": {projectKey},
 		"metrics":   {historyMetricKeys},
-		"from":      {day},
-		"to":        {day},
+		"from":      {date.AddDate(0, 0, -1).Format("2006-01-02")},
+		"to":        {date.AddDate(0, 0, 1).Format("2006-01-02")},
 		"ps":        {"1000"},
 	}
 	if branch != "" {
