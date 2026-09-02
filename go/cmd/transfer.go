@@ -204,7 +204,7 @@ func init() {
 		"\"warn\" submits the report unchanged and lets "+scCloudName+" reject it. (maps to unsupported_languages)")
 	f.Bool(flagMigrateHistory, false, "PoC: also migrate a bounded set of historical analysis snapshots (date + project-level measures) per project's main branch, backdated on "+scCloudName+" (#554). Defaults to false — no change to existing single-snapshot behavior unless set. (maps to migrate_history)")
 	f.Int(flagHistoryMaxPoints, 0, "Max historical snapshots migrated per project when --"+flagMigrateHistory+" is set (default 10). (maps to history_max_points)")
-	f.Int(flagHistoryMinIntervalDays, 0, "Minimum spacing, in days, enforced between two migrated historical snapshots when --"+flagMigrateHistory+" is set (default 30). (maps to history_min_interval_days)")
+	f.Int(flagHistoryMinIntervalDays, extract.HistoryUnset, "Minimum spacing, in days, enforced between two migrated historical snapshots when --"+flagMigrateHistory+" is set (default 30). Pass 0 for no spacing rule at all — every analysis in the source history becomes a candidate. (maps to history_min_interval_days)")
 }
 
 // transferConfig holds the resolved configuration after merging file and flag values.
