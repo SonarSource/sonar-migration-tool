@@ -388,6 +388,11 @@ func LoadMigrateConfigFile(path string) (MigrateConfig, error) {
 	}
 	cfg.Objects = objects
 	cfg.objectsRaw = nil
+	// Mirror cmd/migrate.go's applyMigrateProjectKeyFlag: the filter
+	// only applies when the "projects" category is selected (#536).
+	if cfg.Objects != nil && !cfg.Objects[common.ObjectProjects] {
+		cfg.ProjectKeyFilter = ""
+	}
 	return cfg, nil
 }
 

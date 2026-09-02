@@ -60,9 +60,6 @@ func runCreateProjects(ctx context.Context, e *Executor) error {
 	err := forEachMigrateItem(ctx, e, "createProjects", "generateProjectMappings",
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
 			orgKey := extractField(item, "sonarcloud_org_key")
-			if shouldSkipOrg(orgKey) {
-				return nil
-			}
 			key := extractField(item, "key")
 			// #536: --project_key restricts createProjects to source keys
 			// matching the pattern. Every other project-scoped task scopes
@@ -72,6 +69,9 @@ func runCreateProjects(ctx context.Context, e *Executor) error {
 				return nil
 			}
 			matched.Add(1)
+			if shouldSkipOrg(orgKey) {
+				return nil
+			}
 			name := extractField(item, "name")
 			ncdType := extractField(item, "new_code_definition_type")
 			ncdValue := extractAnyStr(item, "new_code_definition_value")
