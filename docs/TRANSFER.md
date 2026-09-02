@@ -307,7 +307,23 @@ list, oldest to newest, always dropping the single most recent analysis
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--history_max_points` | `10` | At most this many historical snapshots per project. When the source has more candidates than this after interval bounding, they are evenly resampled across the *whole* history span, not just the oldest end. |
-| `--history_min_interval_days` | `30` | Two selected snapshots are never closer together than this. |
+| `--history_min_interval_days` | `30` | Two selected snapshots are never closer together than this. Pass `0` for no spacing rule at all — every analysis in the source history becomes a candidate, including several on the same day at different times. |
+
+> `0` is a real value here, distinct from "not set". A config file cannot tell
+> an absent integer from an explicit `0`, so the spacing is carried as a
+> tri-state: absent resolves to the default of 30, while an explicit `0`
+> survives and disables spacing entirely. On a source project with 134
+> analyses spanning 2021→2026, the selection scales as:
+>
+> | `--history_min_interval_days` | Points selected |
+> |---|---|
+> | `0` | 133 (every analysis but the newest) |
+> | `1` | 105 |
+> | `7` | 71 |
+> | `30` (default) | 31 |
+>
+> Bear in mind each point is a separate report submission plus a Compute
+> Engine poll — roughly 6.5s — so `0` on a busy project is a long migration.
 
 ```bash
 # Migrate the current snapshot as usual, plus up to 10 historical points

@@ -64,11 +64,16 @@ func init() {
 	f.Bool(flagSkipIssueSync, false, "Skip extracting per-issue and per-hotspot sync metadata (comments, changelog, hotspot detail). Pair with migrate-side --skip_issue_sync. Defaults to false. #398.")
 	f.Bool(flagMigrateHistory, false, "PoC: also extract a bounded set of historical analysis snapshots (date + project-level measures) per project+branch, for --migrate_history on the migrate/transfer side (#554). Defaults to false — no extra API calls unless set.")
 	f.Int(flagHistoryMaxPoints, 0, "Max historical snapshots selected per project+branch when --migrate_history is set (default 10).")
-	f.Int(flagHistoryMinIntervalDays, 0, "Minimum spacing, in days, enforced between two selected historical snapshots when --migrate_history is set (default 30).")
+	f.Int(flagHistoryMinIntervalDays, extract.HistoryUnset, "Minimum spacing, in days, enforced between two selected historical snapshots when --migrate_history is set (default 30). Pass 0 for no spacing rule at all — every analysis in the source history becomes a candidate.")
 }
 
 func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfig, error) {
 	var cfg extract.ExtractConfig
+	// #554 — "caller said nothing" for the history spacing, so that an
+	// explicit 0 ("no spacing rule") is distinguishable from an unset value
+	// and survives applyDefaults. LoadExtractConfigFile sets the same
+	// sentinel, so this only matters on the no-config-file path.
+	cfg.HistoryMinIntervalDays = extract.HistoryUnset
 
 	// Load config file if specified. Supports flat, command-sectioned,
 	// and side-sectioned shapes — issue #158.

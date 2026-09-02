@@ -64,9 +64,9 @@
     },
     "history_min_interval_days": {
       "type": "integer",
-      "minimum": 0,
+      "minimum": 1,
       "default": 30,
-      "description": "PoC (issue #554): minimum spacing, in days, enforced between two migrated historical snapshots when migrate_history is set."
+      "description": "PoC (issue #554): minimum spacing, in days, enforced between two migrated historical snapshots when migrate_history is set. The smallest effective value is 1 (one point per day at most); 0 is indistinguishable from 'not set' in a config file and falls back to the default of 30."
     },
     "source": {
       "$ref": "#/$defs/sourceBlock",

@@ -68,8 +68,9 @@ type ExtractConfig struct {
 	// default (10) in applyDefaults.
 	HistoryMaxPoints int
 	// HistoryMinIntervalDays is the minimum spacing, in days, enforced
-	// between two selected historical snapshots. <=0 resolves to the
-	// default (30) in applyDefaults.
+	// between two selected historical snapshots. HistoryUnset (or any
+	// negative value) resolves to the default (30) in applyDefaults; 0 is
+	// a real value meaning "no spacing rule — take every analysis".
 	HistoryMinIntervalDays int
 }
 
@@ -341,7 +342,12 @@ func (cfg *ExtractConfig) applyDefaults() {
 		if cfg.HistoryMaxPoints <= 0 {
 			cfg.HistoryMaxPoints = DefaultHistoryMaxPoints
 		}
-		if cfg.HistoryMinIntervalDays <= 0 {
+		// Unset is HistoryUnset (a negative sentinel), NOT 0: zero is a
+		// meaningful, explicitly-requestable value here — "no spacing rule,
+		// take every analysis" — so it must survive defaulting. Treating
+		// <=0 as unset silently turned an explicit 0 into 30, which made
+		// "give me everything" quietly mean "give me one point a month".
+		if cfg.HistoryMinIntervalDays < 0 {
 			cfg.HistoryMinIntervalDays = DefaultHistoryMinIntervalDays
 		}
 	}
@@ -359,6 +365,13 @@ const (
 	DefaultHistoryMaxPoints       = 10
 	DefaultHistoryMinIntervalDays = 30
 )
+
+// HistoryUnset marks HistoryMinIntervalDays as "caller said nothing", so
+// applyDefaults can substitute DefaultHistoryMinIntervalDays. It has to be a
+// negative sentinel rather than 0 because 0 is itself a legal request ("no
+// spacing rule"), and a JSON config file cannot distinguish an absent integer
+// from an explicit 0.
+const HistoryUnset = -1
 
 func detectVersion(ctx context.Context, cfg ExtractConfig) (common.Version, error) {
 	// Temporary client with version 10 (bearer auth) to fetch the raw
