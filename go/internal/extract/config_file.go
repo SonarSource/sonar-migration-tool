@@ -51,6 +51,13 @@ type configFileShape struct {
 	// global value win but still falling back to the command-scoped one.
 	Objects    []string `json:"objects"`
 	ProjectKey string   `json:"project_key"`
+	// MigrateHistory / HistoryMaxPoints / HistoryMinIntervalDays — see
+	// ExtractConfig doc comments. #554. Top-level only: like
+	// skip_project_data_migration / skip_issue_sync, this is a plain bool
+	// with no per-shape nesting.
+	MigrateHistory         bool `json:"migrate_history"`
+	HistoryMaxPoints       int  `json:"history_max_points"`
+	HistoryMinIntervalDays int  `json:"history_min_interval_days"`
 
 	// Shape 2 (command-sectioned).
 	Extract *configFileShape `json:"extract"`
@@ -154,6 +161,9 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		cfg.SkipIssueSync = s.SkipIssueSync
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKey = s.ProjectKey
+		cfg.MigrateHistory = s.MigrateHistory
+		cfg.HistoryMaxPoints = s.HistoryMaxPoints
+		cfg.HistoryMinIntervalDays = s.HistoryMinIntervalDays
 	case s.SonarQube != nil:
 		cfg.URL = s.SonarQube.URL
 		cfg.Token = s.SonarQube.Token
@@ -166,6 +176,9 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		cfg.SkipIssueSync = s.SkipIssueSync
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKey = s.ProjectKey
+		cfg.MigrateHistory = s.MigrateHistory
+		cfg.HistoryMaxPoints = s.HistoryMaxPoints
+		cfg.HistoryMinIntervalDays = s.HistoryMinIntervalDays
 	case s.Extract != nil:
 		cfg = s.Extract.toExtractConfig()
 		// #536: "objects" / "project_key" set at the outermost (global)
@@ -195,6 +208,9 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		cfg.SkipIssueSync = s.SkipIssueSync
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKey = s.ProjectKey
+		cfg.MigrateHistory = s.MigrateHistory
+		cfg.HistoryMaxPoints = s.HistoryMaxPoints
+		cfg.HistoryMinIntervalDays = s.HistoryMinIntervalDays
 	}
 	return cfg
 }

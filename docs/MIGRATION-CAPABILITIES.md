@@ -496,7 +496,7 @@ Each version has a dedicated extraction/encoding pipeline to handle API differen
 <!-- updated: 2026-07-27_23:55:00 -->
 
 ### SonarQube Server (Source -- Read Only)
-<!-- updated: 2026-07-27_23:55:00 -->
+<!-- updated: 2026-09-02_12:28:13 -->
 
 | Endpoint | Purpose |
 |----------|---------|
@@ -508,7 +508,8 @@ Each version has a dedicated extraction/encoding pipeline to handle API differen
 | `/api/sources/lines` | Extract syntax highlighting (and source-text fallback) |
 | `/api/sources/scm` | Extract SCM blame data |
 | `/api/measures/component` | Extract project measures |
-| `/api/measures/search_history` | Extract measure history |
+| `/api/project_analyses/search` | List a project's full historical analysis dates for `--migrate_history` (PoC, issue #554; `getProjectAnalysisHistory`, opt-in only) |
+| `/api/measures/search_history` | Extract a project's measures as of one historical analysis date for `--migrate_history` (PoC, issue #554; `getProjectAnalysisHistory`, opt-in only — this endpoint was listed here as aspirational documentation before #554 implemented it) |
 | `/api/rules/search` | Extract rule definitions |
 | `/api/qualityprofiles/search` | Extract quality profiles |
 | `/api/qualitygates/list` | Extract quality gates |

@@ -1,5 +1,13 @@
 # What's New
 
+# v1.2 - unreleased
+
+Changes introduced in `sonar-migration-tool` **1.2**, since the **1.1** release. Issue numbers refer to [GitHub issues](https://github.com/SonarSource/sonar-migration-tool/issues).
+
+## New features
+
+- Added **`--migrate_history` option** (proof of concept) to `extract`, `migrate` and `transfer` — a migrated project's analysis history no longer has to start on the day it was migrated. When set, a bounded set of the source project's earlier main-branch analyses is replayed as separate, backdated points in the target's analysis history, alongside the unchanged current-snapshot import. Each historical point carries the project-level measures recorded at that analysis (no files, no issues, main branch only); `--history_max_points` (default `10`) and `--history_min_interval_days` (default `30`) bound how much history is walked. Off by default — nothing changes unless the option is set. ([#554](https://github.com/SonarSource/sonar-migration-tool/issues/554))
+
 # v1.1 - 2026-08-26
 
 Changes introduced in `sonar-migration-tool` **1.1**, since the **1.0** release. Issue numbers refer to [GitHub issues](https://github.com/SonarSource/sonar-migration-tool/issues).
