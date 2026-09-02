@@ -54,6 +54,23 @@ type ExtractConfig struct {
 	// more at completion. Nil for CLI callers (go/cmd/extract.go); the
 	// GUI wizard sets it to drive a progress bar (#519).
 	ProgressCallback func(percent float64, eta time.Duration, known bool)
+
+	// MigrateHistory opts into the project-history migration PoC (#554):
+	// walk each project+branch's SonarQube Server analysis history and
+	// extract a bounded set of historical (date, project-level measures)
+	// snapshots, so the migrate phase can replay them as separate,
+	// backdated analyses on the target. Defaults to false — when unset,
+	// getProjectAnalysisHistory makes zero extra API calls and behavior is
+	// unchanged from before this feature existed.
+	MigrateHistory bool
+	// HistoryMaxPoints bounds how many historical snapshots are selected
+	// per project+branch when MigrateHistory is set. <=0 resolves to the
+	// default (10) in applyDefaults.
+	HistoryMaxPoints int
+	// HistoryMinIntervalDays is the minimum spacing, in days, enforced
+	// between two selected historical snapshots. <=0 resolves to the
+	// default (30) in applyDefaults.
+	HistoryMinIntervalDays int
 }
 
 // Executor is the runtime context passed to every task function.
@@ -68,6 +85,12 @@ type Executor struct {
 	ProjectKeys   []string        // non-empty → limit extraction to these project keys
 	SkipIssueSync bool            // drop additionalFields=_all + hotspot detail enrichment. #398.
 	Progress      *common.Tracker // run-wide progress/ETA estimator (#520)
+
+	// MigrateHistory / HistoryMaxPoints / HistoryMinIntervalDays — see
+	// ExtractConfig. #554.
+	MigrateHistory         bool
+	HistoryMaxPoints       int
+	HistoryMinIntervalDays int
 
 	mu              sync.Mutex
 	skippedProjects map[string]bool
@@ -142,6 +165,9 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 	executor := newExecutor(raw, store, client.BaseURL(), edition, version, cfg.Concurrency)
 	executor.ProjectKeys = cfg.ProjectKeys
 	executor.SkipIssueSync = cfg.SkipIssueSync
+	executor.MigrateHistory = cfg.MigrateHistory
+	executor.HistoryMaxPoints = cfg.HistoryMaxPoints
+	executor.HistoryMinIntervalDays = cfg.HistoryMinIntervalDays
 
 	// Overall progress/ETA logging (#520) — every 10s for the duration of
 	// the run, stopped once phases finish (success or error).
@@ -309,11 +335,30 @@ func (cfg *ExtractConfig) applyDefaults() {
 	if cfg.ExtractType == "" {
 		cfg.ExtractType = "all"
 	}
+	// #554 — only default the history bounds when the feature is actually
+	// requested; an unused MigrateHistory=false run never touches these.
+	if cfg.MigrateHistory {
+		if cfg.HistoryMaxPoints <= 0 {
+			cfg.HistoryMaxPoints = DefaultHistoryMaxPoints
+		}
+		if cfg.HistoryMinIntervalDays <= 0 {
+			cfg.HistoryMinIntervalDays = DefaultHistoryMinIntervalDays
+		}
+	}
 	// Ensure trailing slash on URL.
 	if cfg.URL != "" && cfg.URL[len(cfg.URL)-1] != '/' {
 		cfg.URL += "/"
 	}
 }
+
+// DefaultHistoryMaxPoints / DefaultHistoryMinIntervalDays are the PoC
+// history-migration bounds (#554) applied when --migrate_history is set but
+// --history_max_points / --history_min_interval_days are not: at most 10
+// historical snapshots per project+branch, spaced at least 30 days apart.
+const (
+	DefaultHistoryMaxPoints       = 10
+	DefaultHistoryMinIntervalDays = 30
+)
 
 func detectVersion(ctx context.Context, cfg ExtractConfig) (common.Version, error) {
 	// Temporary client with version 10 (bearer auth) to fetch the raw

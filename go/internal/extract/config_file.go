@@ -28,19 +28,26 @@ import (
 //   - else                     -> shape 1 (flat)
 type configFileShape struct {
 	// Shape 1 (flat) fields. Reused inside Shape 2's "extract" object.
-	URL                string `json:"url"`
-	Token              string `json:"token"`
-	ExportDirectory    string `json:"export_directory"`
-	ExtractType        string `json:"extract_type"`
-	PEMFilePath        string `json:"pem_file_path"`
-	KeyFilePath        string `json:"key_file_path"`
-	CertPassword       string `json:"cert_password"`
-	Concurrency        int    `json:"concurrency"`
-	Timeout            int    `json:"timeout"`
+	URL                      string `json:"url"`
+	Token                    string `json:"token"`
+	ExportDirectory          string `json:"export_directory"`
+	ExtractType              string `json:"extract_type"`
+	PEMFilePath              string `json:"pem_file_path"`
+	KeyFilePath              string `json:"key_file_path"`
+	CertPassword             string `json:"cert_password"`
+	Concurrency              int    `json:"concurrency"`
+	Timeout                  int    `json:"timeout"`
 	ExtractID                string `json:"extract_id"`
 	TargetTask               string `json:"target_task"`
 	SkipProjectDataMigration bool   `json:"skip_project_data_migration"`
 	SkipIssueSync            bool   `json:"skip_issue_sync"` // #398
+	// MigrateHistory / HistoryMaxPoints / HistoryMinIntervalDays — see
+	// ExtractConfig doc comments. #554. Top-level only: like
+	// skip_project_data_migration / skip_issue_sync, this is a plain bool
+	// with no per-shape nesting.
+	MigrateHistory         bool `json:"migrate_history"`
+	HistoryMaxPoints       int  `json:"history_max_points"`
+	HistoryMinIntervalDays int  `json:"history_min_interval_days"`
 
 	// Shape 2 (command-sectioned).
 	Extract *configFileShape `json:"extract"`
@@ -153,6 +160,9 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		// the extract pulls issue / source / SCM-blame data.
 		cfg.SkipProjectDataMigration = s.SkipProjectDataMigration
 		cfg.SkipIssueSync = s.SkipIssueSync
+		cfg.MigrateHistory = s.MigrateHistory
+		cfg.HistoryMaxPoints = s.HistoryMaxPoints
+		cfg.HistoryMinIntervalDays = s.HistoryMinIntervalDays
 	case s.SonarQube != nil:
 		cfg.URL = s.SonarQube.URL
 		cfg.Token = s.SonarQube.Token
@@ -163,6 +173,9 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		}
 		cfg.SkipProjectDataMigration = s.SkipProjectDataMigration
 		cfg.SkipIssueSync = s.SkipIssueSync
+		cfg.MigrateHistory = s.MigrateHistory
+		cfg.HistoryMaxPoints = s.HistoryMaxPoints
+		cfg.HistoryMinIntervalDays = s.HistoryMinIntervalDays
 	case s.Extract != nil:
 		return s.Extract.toExtractConfig()
 	default:
@@ -179,6 +192,9 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		cfg.TargetTask = s.TargetTask
 		cfg.SkipProjectDataMigration = s.SkipProjectDataMigration
 		cfg.SkipIssueSync = s.SkipIssueSync
+		cfg.MigrateHistory = s.MigrateHistory
+		cfg.HistoryMaxPoints = s.HistoryMaxPoints
+		cfg.HistoryMinIntervalDays = s.HistoryMinIntervalDays
 	}
 	return cfg
 }

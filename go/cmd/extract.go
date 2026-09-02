@@ -62,6 +62,9 @@ func init() {
 	f.String("target_task", "", "Target task to complete; all dependent tasks will be included")
 	f.Bool(flagSkipProjectDataMigration, false, "Skip extracting project data (issues, hotspots, source code, SCM blame). Defaults to false — project data is extracted by default. #303.")
 	f.Bool(flagSkipIssueSync, false, "Skip extracting per-issue and per-hotspot sync metadata (comments, changelog, hotspot detail). Pair with migrate-side --skip_issue_sync. Defaults to false. #398.")
+	f.Bool(flagMigrateHistory, false, "PoC: also extract a bounded set of historical analysis snapshots (date + project-level measures) per project+branch, for --migrate_history on the migrate/transfer side (#554). Defaults to false — no extra API calls unless set.")
+	f.Int(flagHistoryMaxPoints, 0, "Max historical snapshots selected per project+branch when --migrate_history is set (default 10).")
+	f.Int(flagHistoryMinIntervalDays, 0, "Minimum spacing, in days, enforced between two selected historical snapshots when --migrate_history is set (default 30).")
 }
 
 func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfig, error) {
@@ -112,6 +115,15 @@ func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfi
 			cfg.SkipIssueSync = true
 		}
 	}
+	// --migrate_history is one-way, same semantics as --skip_issue_sync. #554.
+	if cmd.Flags().Changed(flagMigrateHistory) {
+		v, _ := cmd.Flags().GetBool(flagMigrateHistory)
+		if v {
+			cfg.MigrateHistory = true
+		}
+	}
+	overrideInt(cmd, flagHistoryMaxPoints, &cfg.HistoryMaxPoints)
+	overrideInt(cmd, flagHistoryMinIntervalDays, &cfg.HistoryMinIntervalDays)
 	cfg.IncludeProjectData = !cfg.SkipProjectDataMigration
 	// --debug is a persistent flag on rootCmd; pick it up here so the
 	// SDK can install the HTTP request/response logger.

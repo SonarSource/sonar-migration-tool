@@ -249,6 +249,12 @@ func importAndRecordBranch(ctx context.Context, e *Executor, bctx branchImportCo
 	if branch.IsMain && bctx.SCMainBranch != "" {
 		targetBranch = bctx.SCMainBranch
 	}
+
+	// #554 (PoC) — replay bounded project history before the regular
+	// current-snapshot import below. See migrateBranchHistory for why this
+	// must run first and why its errors are non-fatal.
+	migrateBranchHistory(ctx, e, bctx, branch, targetBranch)
+
 	// Non-main branches reference the main branch; the main branch references
 	// nothing (BuildMetadata falls back to its own name, preserving the working
 	// main-branch behavior).
