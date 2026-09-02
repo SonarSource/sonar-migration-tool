@@ -351,14 +351,41 @@ sonar-migration-tool transfer -c config.json --project_key my-project \
   for a project resubmits the same historical points again (duplicate history
   entries on the target), since completed history points aren't tracked the
   way branch completion is. Safe to run once per target project.
-- **The target's own retention still applies.** A point older than SonarQube
-  Cloud's housekeeping window is accepted by the Compute Engine and then
-  pruned by the target, so it never appears on the Activity page. Observed
-  live: a 2021 point reported a successful Compute Engine task but was absent
-  from `/api/project_analyses/search` afterwards, while every later point
-  persisted. Nothing the migration can do about it — set
-  `--history_min_interval_days` / `--history_max_points` with the target's
-  retention in mind rather than expecting very old points to survive.
+- **Not every migrated point stays on the target.** The Compute Engine accepts
+  and writes every point the migration submits, but SonarQube Cloud then
+  removes some of them. Expect the Activity page to hold fewer analyses than
+  were migrated — on a 134-analysis source project, 133 points were submitted,
+  all 133 were accepted, and 61 remain.
+
+  This is target-side behaviour, not a migration failure, and it was confirmed
+  by direct observation rather than inferred. A throwaway project was seeded
+  with exactly one point dated 2021-06-13 and polled sub-second:
+
+  ```
+  15:24:14Z      CE task → SUCCESS
+  15:24:14.437Z  ┐ 12 consecutive HTTP-200 polls of
+                 │ /api/project_analyses/search list the analysis, and
+  15:24:29.659Z  ┘ /api/qualitygates/project_status?analysisId=… returns 200
+  15:24:31Z      the next CE task (the regular current-snapshot import) runs
+  15:24:31.203Z  same endpoint, same query → the analysis is gone,
+                 and its analysisId returns 404 permanently
+  ```
+
+  A control run, killed before any subsequent analysis could succeed, still
+  holds its 2021-06-13 analysis. So the row is created and readable, then
+  deleted — it is not rejected at ingestion, and it is not merely hidden by
+  the API.
+
+  What decides *which* points are removed is **not established**. The oldest
+  points go first, which is consistent with the documented housekeeping
+  retention window, but the source used for testing has an 87-day gap around
+  the apparent boundary, so the data cannot distinguish 260 weeks from 5
+  calendar years — or from any other value in between. Removals were also
+  observed well inside any retention window. Treat the surviving count as
+  something to measure on your own target, not to predict.
+
+  Practically: migrating more points always costs proportional wall clock, and
+  past some point the target discards the extra. Start with the defaults.
 - **Each historical entry carries one placeholder file.** A report holding a
   lone project component with a raw measure is rejected by the Compute Engine,
   so every historical analysis includes a single empty
