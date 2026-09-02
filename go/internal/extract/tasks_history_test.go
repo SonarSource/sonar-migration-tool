@@ -116,6 +116,44 @@ func TestSelectBoundedHistoryPointsNoCapWhenUnderLimit(t *testing.T) {
 	}
 }
 
+// A negative --history_min_interval_days is clamped to 0 rather than
+// producing a negative minInterval. With a negative minInterval the
+// spacing test (p.Date.Sub(last) >= minInterval) would also accept a
+// point that is EARLIER than the one already selected, so the clamp is
+// what guarantees the returned slice is strictly advancing in time.
+func TestSelectBoundedHistoryPointsNegativeIntervalTreatedAsZero(t *testing.T) {
+	// Already-ordered input: a negative interval must behave exactly like
+	// 0 — every candidate survives once the newest is dropped.
+	ordered := []historyPoint{mkPoint(0), mkPoint(1), mkPoint(2), mkPoint(3)}
+	got := selectBoundedHistoryPoints(ordered, 0, -5)
+	want := selectBoundedHistoryPoints(ordered, 0, 0)
+	if len(got) != 3 || len(want) != 3 {
+		t.Fatalf("expected 3 points for both, got %d (negative) and %d (zero)", len(got), len(want))
+	}
+	for i := range got {
+		if !got[i].Date.Equal(want[i].Date) {
+			t.Errorf("point %d: negative interval gave %v, zero interval gave %v",
+				i, got[i].Date, want[i].Date)
+		}
+	}
+
+	// Out-of-order input is what actually distinguishes the clamp from its
+	// absence: day 5 comes after day 10, so Sub(last) is -5 days. Clamped to
+	// 0 it is rejected; unclamped (-5 days) it would slip through and the
+	// result would contain a point that goes backwards in time.
+	regressing := []historyPoint{mkPoint(0), mkPoint(10), mkPoint(5), mkPoint(100)}
+	out := selectBoundedHistoryPoints(regressing, 0, -5)
+	if len(out) != 2 {
+		t.Fatalf("expected the regressing point to be dropped (2 points), got %d: %v", len(out), out)
+	}
+	for i := 1; i < len(out); i++ {
+		if !out[i].Date.After(out[i-1].Date) {
+			t.Errorf("result is not strictly advancing: point %d (%v) does not follow point %d (%v)",
+				i, out[i].Date, i-1, out[i-1].Date)
+		}
+	}
+}
+
 func TestMatchHistoricalMeasuresExactTimestamp(t *testing.T) {
 	raw := json.RawMessage(`{
 		"measures": [
@@ -156,6 +194,40 @@ func TestMatchHistoricalMeasuresSkipsEmptyMetric(t *testing.T) {
 	got := matchHistoricalMeasures(raw, time.Now())
 	if len(got) != 0 {
 		t.Errorf("expected no measures for an empty history, got %v", got)
+	}
+}
+
+// A response body that does not decode must yield no measures at all —
+// never a half-decoded set. The second case is the one that actually
+// pins the `return nil` arm: encoding/json rejects the whole document up
+// front on a *syntax* error (so a truncated body decodes to nothing
+// either way), but on a *type* error it populates everything it managed
+// to read before failing. Without the error check, that partial first
+// measure would be reported as if it were a complete result.
+func TestMatchHistoricalMeasuresInvalidJSON(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"syntax error", `{"measures": [{"metric": "ncloc"`},
+		{"not an object", `[]`},
+		{
+			// First measure is well-formed and would decode; the second
+			// has a number where the schema wants a string.
+			"type error after a decodable measure",
+			`{"measures": [
+				{"metric": "ncloc", "history": [{"date": "2024-01-01T00:00:00+0000", "value": "100"}]},
+				{"metric": 123, "history": []}
+			]}`,
+		},
+	}
+	target := time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := matchHistoricalMeasures(json.RawMessage(c.raw), target); got != nil {
+				t.Errorf("expected nil for an undecodable response, got %v", got)
+			}
+		})
 	}
 }
 

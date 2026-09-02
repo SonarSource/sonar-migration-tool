@@ -56,6 +56,9 @@ func TestLoadExtractConfigFileShapes(t *testing.T) {
 				ExportDirectory: "./files",
 				Concurrency:     10,
 				Timeout:         60,
+				// #554: an absent history_min_interval_days loads as the
+				// "caller said nothing" sentinel, not 0 (0 means "no spacing").
+				HistoryMinIntervalDays: HistoryUnset,
 			},
 		},
 		{
@@ -68,6 +71,9 @@ func TestLoadExtractConfigFileShapes(t *testing.T) {
 				ExtractType:     "all",
 				Concurrency:     10,
 				Timeout:         60,
+				// #554: an absent history_min_interval_days loads as the
+				// "caller said nothing" sentinel, not 0 (0 means "no spacing").
+				HistoryMinIntervalDays: HistoryUnset,
 			},
 		},
 		{
@@ -79,6 +85,9 @@ func TestLoadExtractConfigFileShapes(t *testing.T) {
 				ExportDirectory: "./files",
 				Concurrency:     10,
 				Timeout:         60,
+				// #554: an absent history_min_interval_days loads as the
+				// "caller said nothing" sentinel, not 0 (0 means "no spacing").
+				HistoryMinIntervalDays: HistoryUnset,
 			},
 		},
 	}
@@ -147,6 +156,9 @@ func TestLoadExtractConfigFileSnakeCaseFields(t *testing.T) {
 		TargetTask:               "getRules",
 		SkipProjectDataMigration: true,
 		SkipIssueSync:            true,
+		// #554: an absent history_min_interval_days loads as the
+		// "caller said nothing" sentinel, not 0 (0 means "no spacing").
+		HistoryMinIntervalDays: HistoryUnset,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("snake_case round-trip mismatch\n got=%+v\nwant=%+v", got, want)
