@@ -666,6 +666,154 @@ func TestMigrateBranchHistoryStopsAtFirstFailure(t *testing.T) {
 }
 
 // --- submitHistoricalSnapshot --------------------------------------------
+//
+// The successful-submission test below inspects a whole report, so its
+// assertions are grouped into one helper per artefact (submit form, metadata,
+// placeholder component, measures, changesets, log). Each helper is scored on
+// its own and each names the failure mode it exists to catch.
+
+// histWantSubmitOnce pins that the snapshot reached the CE exactly once and
+// that the task it created was actually polled.
+func histWantSubmitOnce(t *testing.T, rec *histRecorder) {
+	t.Helper()
+	if n := rec.count("/api/ce/submit"); n != 1 {
+		t.Fatalf("expected exactly 1 submission, got %d", n)
+	}
+	if n := rec.count("/api/ce/task"); n < 1 {
+		t.Errorf("expected the CE task to be polled, got %d polls", n)
+	}
+}
+
+// histWantMainBranchSubmitForm pins the multipart fields of the upload.
+func histWantMainBranchSubmitForm(t *testing.T, rec *histRecorder) {
+	t.Helper()
+	// Main-branch-only by design: declaring the point as a named LONG branch
+	// makes the CE reject the report.
+	if chars := rec.formValues("characteristic"); len(chars) != 0 {
+		t.Errorf("expected no branch characteristic on a main-branch history point, got %v", chars)
+	}
+	if got := rec.formValue("projectKey"); got != histCloudKey {
+		t.Errorf("submitted projectKey = %q, want %q", got, histCloudKey)
+	}
+	if got := rec.formValue("organization"); got != testCloudOrg {
+		t.Errorf("submitted organization = %q, want %q", got, testCloudOrg)
+	}
+}
+
+// histWantBackdatedMetadata pins the part of metadata.pb that is the whole
+// point of #554: the report is stamped with the SOURCE analysis date and
+// version, on the main branch, rather than with "now".
+func histWantBackdatedMetadata(t *testing.T, md *pb.Metadata, snap historySnapshot) {
+	t.Helper()
+	if md.GetAnalysisDate() != snap.Date.UnixMilli() {
+		t.Errorf("analysisDate = %d, want the backdated snapshot date %d (a report stamped with 'now' defeats the whole feature)",
+			md.GetAnalysisDate(), snap.Date.UnixMilli())
+	}
+	if md.GetProjectVersion() != snap.ProjectVersion {
+		t.Errorf("projectVersion = %q, want %q", md.GetProjectVersion(), snap.ProjectVersion)
+	}
+	if md.GetBranchName() != branchMain {
+		t.Errorf("branchName = %q, want %q", md.GetBranchName(), branchMain)
+	}
+	if md.GetBranchType() != pb.Metadata_BRANCH {
+		t.Errorf("branchType = %v, want BRANCH", md.GetBranchType())
+	}
+}
+
+// histWantMetadataTargetIdentity pins that the report names the TARGET
+// project, organization and quality profile — the profile key being the #554
+// regression guard ("Quality profiles with following keys don't exist in
+// organization").
+func histWantMetadataTargetIdentity(t *testing.T, md *pb.Metadata) {
+	t.Helper()
+	if md.GetProjectKey() != histCloudKey {
+		t.Errorf("metadata projectKey = %q, want %q", md.GetProjectKey(), histCloudKey)
+	}
+	if md.GetOrganizationKey() != testCloudOrg {
+		t.Errorf("metadata organizationKey = %q, want %q", md.GetOrganizationKey(), testCloudOrg)
+	}
+	qp, ok := md.GetQprofilesPerLanguage()["js"]
+	if !ok {
+		t.Fatalf("expected a js qprofile in metadata, got %v", md.GetQprofilesPerLanguage())
+	}
+	if qp.GetKey() != histOrgProfKey {
+		t.Errorf("metadata qprofile key = %q, want the target organization's key %q", qp.GetKey(), histOrgProfKey)
+	}
+	if got := md.GetAnalyzedIndexedFileCountPerType()["js"]; got != 1 {
+		t.Errorf("expected 1 indexed file for language js, got %d", got)
+	}
+}
+
+// histWantPlaceholderComponent pins the synthetic file the history point hangs
+// off. The placeholder must be named and typed from the resolved language:
+// SonarQube Cloud derives a file's language from its extension, and a mismatch
+// against the declared profile is a hard CE rejection.
+func histWantPlaceholderComponent(t *testing.T, fc *pb.Component) {
+	t.Helper()
+	if fc.GetProjectRelativePath() != histFileName {
+		t.Errorf("placeholder path = %q, want %q", fc.GetProjectRelativePath(), histFileName)
+	}
+	if fc.GetLanguage() != "js" {
+		t.Errorf("placeholder language = %q, want %q", fc.GetLanguage(), "js")
+	}
+	if fc.GetLines() != 1 {
+		t.Errorf("placeholder lines = %d, want 1", fc.GetLines())
+	}
+}
+
+// histWantPlaceholderMeasures pins that the measures landed on the placeholder
+// FILE ref. Attaching them to the PROJECT ref instead is the shape the CE
+// rejected during the PoC's live verification.
+func histWantPlaceholderMeasures(t *testing.T, zipBytes []byte, fc *pb.Component, wantNcloc int32) {
+	t.Helper()
+	raw, found := histZipEntry(t, zipBytes, "measures-"+strconv.Itoa(int(fc.GetRef()))+".pb")
+	if !found {
+		t.Fatalf("expected measures on the placeholder file ref %d, zip entries: %v", fc.GetRef(), histZipNames(t, zipBytes))
+	}
+	measures := histDecodeMeasures(t, raw)
+	if len(measures) != 1 {
+		t.Fatalf("expected 1 measure on the placeholder file, got %d", len(measures))
+	}
+	if measures[0].GetMetricKey() != "ncloc" {
+		t.Errorf("measure metric = %q, want ncloc", measures[0].GetMetricKey())
+	}
+	if v := measures[0].GetIntValue().GetValue(); v != wantNcloc {
+		t.Errorf("measure value = %d, want %d", v, wantNcloc)
+	}
+}
+
+// histWantBackdatedChangesets pins that changesets are emitted too, so the CE
+// dates the placeholder's single line at the snapshot instead of at the
+// migration run.
+func histWantBackdatedChangesets(t *testing.T, zipBytes []byte, fc *pb.Component) {
+	t.Helper()
+	if _, found := histZipEntry(t, zipBytes, "changesets-"+strconv.Itoa(int(fc.GetRef()))+".pb"); !found {
+		t.Errorf("expected changesets for the placeholder file ref %d, zip entries: %v", fc.GetRef(), histZipNames(t, zipBytes))
+	}
+}
+
+// histWantNoActiveRules pins that no rules are declared: a history point
+// carries no issues, so nothing needs activating in the target org.
+func histWantNoActiveRules(t *testing.T, zipBytes []byte) {
+	t.Helper()
+	for _, name := range histZipNames(t, zipBytes) {
+		if name == "activerules.pb" {
+			t.Error("a history point carries no issues, so it must not declare active rules")
+		}
+	}
+}
+
+// histWantSuccessLog pins that a migrated point is reported, with the CE task
+// id, at info level.
+func histWantSuccessLog(t *testing.T, logged, wantTaskID string) {
+	t.Helper()
+	if !strings.Contains(logged, "historical analysis migrated") {
+		t.Errorf("expected a success log line, got: %s", logged)
+	}
+	if !strings.Contains(logged, wantTaskID) {
+		t.Errorf("expected the CE task id in the success log, got: %s", logged)
+	}
+}
 
 // TestSubmitHistoricalSnapshotBackdatedReport is the end-to-end assertion for
 // the whole point of #554: the report that reaches the CE must be stamped
@@ -708,109 +856,22 @@ func TestSubmitHistoricalSnapshotBackdatedReport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("submitHistoricalSnapshot: %v", err)
 	}
-	if n := rec.count("/api/ce/submit"); n != 1 {
-		t.Fatalf("expected exactly 1 submission, got %d", n)
-	}
-	if n := rec.count("/api/ce/task"); n < 1 {
-		t.Errorf("expected the CE task to be polled, got %d polls", n)
-	}
 
-	// Main-branch-only by design: declaring the point as a named LONG branch
-	// makes the CE reject the report.
-	if chars := rec.formValues("characteristic"); len(chars) != 0 {
-		t.Errorf("expected no branch characteristic on a main-branch history point, got %v", chars)
-	}
-	if got := rec.formValue("projectKey"); got != histCloudKey {
-		t.Errorf("submitted projectKey = %q, want %q", got, histCloudKey)
-	}
-	if got := rec.formValue("organization"); got != testCloudOrg {
-		t.Errorf("submitted organization = %q, want %q", got, testCloudOrg)
-	}
+	histWantSubmitOnce(t, rec)
+	histWantMainBranchSubmitForm(t, rec)
 
 	zipBytes := rec.reportBytes()
 	md := histMetadata(t, zipBytes)
+	histWantBackdatedMetadata(t, md, snap)
+	histWantMetadataTargetIdentity(t, md)
 
-	if md.GetAnalysisDate() != snapDate.UnixMilli() {
-		t.Errorf("analysisDate = %d, want the backdated snapshot date %d (a report stamped with 'now' defeats the whole feature)",
-			md.GetAnalysisDate(), snapDate.UnixMilli())
-	}
-	if md.GetProjectVersion() != "2.5" {
-		t.Errorf("projectVersion = %q, want %q", md.GetProjectVersion(), "2.5")
-	}
-	if md.GetBranchName() != branchMain {
-		t.Errorf("branchName = %q, want %q", md.GetBranchName(), branchMain)
-	}
-	if md.GetBranchType() != pb.Metadata_BRANCH {
-		t.Errorf("branchType = %v, want BRANCH", md.GetBranchType())
-	}
-	if md.GetProjectKey() != histCloudKey {
-		t.Errorf("metadata projectKey = %q, want %q", md.GetProjectKey(), histCloudKey)
-	}
-	if md.GetOrganizationKey() != testCloudOrg {
-		t.Errorf("metadata organizationKey = %q, want %q", md.GetOrganizationKey(), testCloudOrg)
-	}
-	qp, ok := md.GetQprofilesPerLanguage()["js"]
-	if !ok {
-		t.Fatalf("expected a js qprofile in metadata, got %v", md.GetQprofilesPerLanguage())
-	}
-	if qp.GetKey() != histOrgProfKey {
-		t.Errorf("metadata qprofile key = %q, want the target organization's key %q", qp.GetKey(), histOrgProfKey)
-	}
-	if got := md.GetAnalyzedIndexedFileCountPerType()["js"]; got != 1 {
-		t.Errorf("expected 1 indexed file for language js, got %d", got)
-	}
-
-	// The placeholder file must be named and typed from the resolved
-	// language: SonarQube Cloud derives a file's language from its extension,
-	// and a mismatch against the declared profile is a hard CE rejection.
 	fc := histFileComponent(t, zipBytes)
-	if fc.GetProjectRelativePath() != histFileName {
-		t.Errorf("placeholder path = %q, want %q", fc.GetProjectRelativePath(), histFileName)
-	}
-	if fc.GetLanguage() != "js" {
-		t.Errorf("placeholder language = %q, want %q", fc.GetLanguage(), "js")
-	}
-	if fc.GetLines() != 1 {
-		t.Errorf("placeholder lines = %d, want 1", fc.GetLines())
-	}
+	histWantPlaceholderComponent(t, fc)
+	histWantPlaceholderMeasures(t, zipBytes, fc, 500)
+	histWantBackdatedChangesets(t, zipBytes, fc)
+	histWantNoActiveRules(t, zipBytes)
 
-	// The measures must land on the placeholder FILE ref. Attaching them to
-	// the PROJECT ref instead is the shape the CE rejected during the PoC's
-	// live verification.
-	raw, found := histZipEntry(t, zipBytes, "measures-"+strconv.Itoa(int(fc.GetRef()))+".pb")
-	if !found {
-		t.Fatalf("expected measures on the placeholder file ref %d, zip entries: %v", fc.GetRef(), histZipNames(t, zipBytes))
-	}
-	measures := histDecodeMeasures(t, raw)
-	if len(measures) != 1 {
-		t.Fatalf("expected 1 measure on the placeholder file, got %d", len(measures))
-	}
-	if measures[0].GetMetricKey() != "ncloc" {
-		t.Errorf("measure metric = %q, want ncloc", measures[0].GetMetricKey())
-	}
-	if v := measures[0].GetIntValue().GetValue(); v != 500 {
-		t.Errorf("measure value = %d, want 500", v)
-	}
-
-	// Changesets are backdated too, so the CE dates the placeholder's single
-	// line at the snapshot instead of the migration run.
-	if _, found := histZipEntry(t, zipBytes, "changesets-"+strconv.Itoa(int(fc.GetRef()))+".pb"); !found {
-		t.Errorf("expected changesets for the placeholder file ref %d, zip entries: %v", fc.GetRef(), histZipNames(t, zipBytes))
-	}
-	// No issues means no rules need activating in the target org.
-	for _, name := range histZipNames(t, zipBytes) {
-		if name == "activerules.pb" {
-			t.Error("a history point carries no issues, so it must not declare active rules")
-		}
-	}
-
-	logged := buf.String()
-	if !strings.Contains(logged, "historical analysis migrated") {
-		t.Errorf("expected a success log line, got: %s", logged)
-	}
-	if !strings.Contains(logged, "AX-hist-1") {
-		t.Errorf("expected the CE task id in the success log, got: %s", logged)
-	}
+	histWantSuccessLog(t, buf.String(), "AX-hist-1")
 }
 
 // TestSubmitHistoricalSnapshotSubmitFailure pins that a rejected upload
