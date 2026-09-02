@@ -484,7 +484,11 @@ func prepareMigratePlan(cfg MigrateConfig, logger *slog.Logger) (*migratePlan, e
 
 	targets := MigrateTargetTasks(registry, cfg.TargetTask, MigrateTargetTasksFlags{SkipProfiles: cfg.SkipProfiles, IncludeProjectData: cfg.IncludeProjectData, SkipIssueSync: cfg.SkipIssueSync, SkipProjectDataMigration: cfg.SkipProjectDataMigration}, cfg.TargetTasks, cfg.Objects)
 	var taskSet map[string]bool
-	if cfg.Objects != nil {
+	// Explicit overrides win over the --objects filter (see
+	// MigrateTargetTasks' documented precedence): don't let the
+	// exclusion set drop the very task the operator asked for.
+	explicitOverride := cfg.TargetTask != "" || len(cfg.TargetTasks) > 0
+	if cfg.Objects != nil && !explicitOverride {
 		// #536: exclude cross-category dependency edges too — e.g.
 		// setGlobalSettings/createPortfolios declaring createProjects as a
 		// dependency must not force it to run when "projects" is excluded.
@@ -492,8 +496,8 @@ func prepareMigratePlan(cfg MigrateConfig, logger *slog.Logger) (*migratePlan, e
 	} else {
 		taskSet = ResolveDependencies(targets, registry)
 	}
-	if taskSet == nil {
-		return nil, fmt.Errorf("cannot resolve dependencies for target tasks")
+	if len(taskSet) == 0 {
+		return nil, fmt.Errorf("no task left to run for the requested target/objects combination")
 	}
 
 	// #536: PlanPhasesExcluding degrades to plain PlanPhases when there
