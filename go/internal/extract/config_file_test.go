@@ -8,7 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
 // The legacy config shapes are no longer shipped as example files (the
@@ -248,5 +251,165 @@ func TestLoadExtractConfigFileUnifiedShape_SourceOverridesGlobals(t *testing.T) 
 	cfg, _ := LoadExtractConfigFile(path)
 	if cfg.Concurrency != 25 || cfg.Timeout != 120 {
 		t.Errorf("override: concurrency=%d timeout=%d", cfg.Concurrency, cfg.Timeout)
+	}
+}
+
+// #536: "objects" and "project_key" are top-level-only fields, present in
+// every documented shape. These tests round-trip them the same way the
+// TestLoadExtractConfigFileUnifiedShape* tests above round-trip the rest
+// of the unified shape's fields, plus the flat and command-sectioned
+// shapes where the "global level" placement matters most.
+// The following TestLoadExtractConfigFileObjectsAndProjectKey_* functions
+// were originally one function with a t.Run per shape; split into
+// independent top-level tests to keep cognitive complexity low (each
+// covers exactly one config-file shape).
+
+func TestLoadExtractConfigFileObjectsAndProjectKey_FlatShape(t *testing.T) {
+	body := `{
+  "url": "http://sq.example.com",
+  "token": "tok",
+  "objects": ["quality_gates", "qp"],
+  "project_key": "BANKING_.+"
+}`
+	path := filepath.Join(t.TempDir(), "flat.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.Objects[common.ObjectQualityGates] || !cfg.Objects[common.ObjectQualityProfiles] {
+		t.Errorf("expected quality_gates + quality_profiles (via qp alias), got %+v", cfg.Objects)
+	}
+	if len(cfg.Objects) != 2 {
+		t.Errorf("expected exactly 2 categories, got %+v", cfg.Objects)
+	}
+	if cfg.ProjectKey != "BANKING_.+" {
+		t.Errorf("ProjectKey: got %q", cfg.ProjectKey)
+	}
+}
+
+func TestLoadExtractConfigFileObjectsAndProjectKey_UnifiedShape(t *testing.T) {
+	body := `{
+  "objects": ["groups"],
+  "project_key": "my-project",
+  "source": { "url": "u", "token": "t" }
+}`
+	path := filepath.Join(t.TempDir(), "unified.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.Objects[common.ObjectGroups] || len(cfg.Objects) != 1 {
+		t.Errorf("Objects: got %+v", cfg.Objects)
+	}
+	if cfg.ProjectKey != "my-project" {
+		t.Errorf("ProjectKey: got %q", cfg.ProjectKey)
+	}
+}
+
+func TestLoadExtractConfigFileObjectsAndProjectKey_SideSectionedShape(t *testing.T) {
+	body := `{
+  "sonarqube": { "url": "http://sq.example.com", "token": "tok" },
+  "objects": ["portfolios"],
+  "project_key": "PORTFOLIO_PROJ"
+}`
+	path := filepath.Join(t.TempDir(), "side.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.Objects[common.ObjectPortfolios] || len(cfg.Objects) != 1 {
+		t.Errorf("Objects: got %+v", cfg.Objects)
+	}
+	if cfg.ProjectKey != "PORTFOLIO_PROJ" {
+		t.Errorf("ProjectKey: got %q", cfg.ProjectKey)
+	}
+}
+
+func TestLoadExtractConfigFileObjectsAndProjectKey_CommandSectionedGlobalWins(t *testing.T) {
+	body := `{
+  "objects": ["settings"],
+  "project_key": "GLOBAL_PROJ",
+  "extract": {
+    "url": "http://sq.example.com",
+    "token": "tok",
+    "objects": ["projects"],
+    "project_key": "NESTED_PROJ"
+  }
+}`
+	path := filepath.Join(t.TempDir(), "sectioned.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.Objects[common.ObjectSettings] || len(cfg.Objects) != 1 {
+		t.Errorf("expected global-level objects (settings) to win, got %+v", cfg.Objects)
+	}
+	if cfg.ProjectKey != "GLOBAL_PROJ" {
+		t.Errorf("expected global-level project_key to win, got %q", cfg.ProjectKey)
+	}
+}
+
+func TestLoadExtractConfigFileObjectsAndProjectKey_CommandSectionedFallsBackToNested(t *testing.T) {
+	body := `{
+  "extract": {
+    "url": "http://sq.example.com",
+    "token": "tok",
+    "objects": ["projects"],
+    "project_key": "NESTED_PROJ"
+  }
+}`
+	path := filepath.Join(t.TempDir(), "sectioned-fallback.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.Objects[common.ObjectProjects] || len(cfg.Objects) != 1 {
+		t.Errorf("expected fallback to nested objects (projects), got %+v", cfg.Objects)
+	}
+	if cfg.ProjectKey != "NESTED_PROJ" {
+		t.Errorf("expected fallback to nested project_key, got %q", cfg.ProjectKey)
+	}
+}
+
+func TestLoadExtractConfigFileObjectsAndProjectKey_NoObjectsMeansEverything(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "no-objects.json")
+	if err := os.WriteFile(path, []byte(`{"url": "u", "token": "t"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Objects != nil {
+		t.Errorf("expected nil Objects, got %+v", cfg.Objects)
+	}
+}
+
+func TestLoadExtractConfigFileObjectsAndProjectKey_InvalidObjectsValueErrors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bad-objects.json")
+	if err := os.WriteFile(path, []byte(`{"url": "u", "token": "t", "objects": ["not_a_real_category"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadExtractConfigFile(path)
+	if err == nil {
+		t.Fatal("expected an error for an invalid objects value")
+	}
+	if !strings.Contains(err.Error(), "not_a_real_category") {
+		t.Errorf("expected error to name the invalid token, got: %v", err)
 	}
 }

@@ -5,9 +5,7 @@
 package migrate
 
 import (
-	"encoding/json"
-	"fmt"
-	"os"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
 // configFileShape is the union of the four documented config-file formats
@@ -66,6 +64,20 @@ type configFileShape struct {
 	// outer-wins-else-nested-"migrate" resolution (mirrors
 	// skip_issue_sync's precedence).
 	ConfirmedOrgs []string `json:"confirmed_orgs"`
+
+	// Objects and ProjectKey are top-level (global) fields regardless of
+	// shape — the issue documents "objects" as settable "at global
+	// level" (#536), mirroring extract's config_file.go. Objects, when
+	// present, limits migration to the selected object categories
+	// (settings, permission_templates, quality_profiles, quality_gates,
+	// projects, portfolios, groups, license_profiles — aliases
+	// qp/qg/pt/lp); validated and resolved into MigrateConfig.Objects by
+	// LoadMigrateConfigFile via common.ParseObjects. ProjectKey is the
+	// raw --project_key-equivalent regexp pattern, copied as-is into
+	// MigrateConfig.ProjectKeyFilter (migrate never resolves it to a
+	// concrete key list; createProjects filters locally).
+	Objects    []string `json:"objects"`
+	ProjectKey string   `json:"project_key"`
 
 	// Shape 2 (command-sectioned).
 	Migrate *configFileShape `json:"migrate"`
@@ -156,18 +168,7 @@ type settingsBlock struct {
 }
 
 func parseConfigFile(path string) (configFileShape, error) {
-	var shape configFileShape
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return shape, fmt.Errorf("reading config file: %w", err)
-	}
-	if len(data) == 0 {
-		return shape, fmt.Errorf("config file %s is empty", path)
-	}
-	if err := json.Unmarshal(data, &shape); err != nil {
-		return shape, fmt.Errorf("parsing config file: %w", err)
-	}
-	return shape, nil
+	return common.ParseJSONConfigFile[configFileShape](path)
 }
 
 func (s configFileShape) toMigrateConfig() MigrateConfig {
@@ -221,6 +222,8 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		if s.SkipProjectDataMigration != nil && s.SkipProjectDataMigration.Set {
 			cfg.SkipProjectDataMigration = s.SkipProjectDataMigration.Value
 		}
+		cfg.objectsRaw = s.Objects
+		cfg.ProjectKeyFilter = s.ProjectKey
 		return cfg
 	case s.SonarCloud != nil:
 		cfg := s.SonarCloud.toMigrateConfig(s.Settings)
@@ -235,6 +238,8 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		if s.FastSync != nil && s.FastSync.Set {
 			cfg.FastSync = s.FastSync.Value
 		}
+		cfg.objectsRaw = s.Objects
+		cfg.ProjectKeyFilter = s.ProjectKey
 		return cfg
 	case s.Migrate != nil:
 		cfg := s.Migrate.toMigrateConfig()
@@ -251,6 +256,16 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		// Same outer-wins-else-inner semantics for fast_sync (#527).
 		if s.FastSync != nil && s.FastSync.Set {
 			cfg.FastSync = s.FastSync.Value
+		}
+		// #536: outer-level "objects" / "project_key" win over the same
+		// fields nested inside "migrate" — but fall back to the nested
+		// value (already captured above by the recursive call) when the
+		// outer level didn't set them.
+		if len(s.Objects) > 0 {
+			cfg.objectsRaw = s.Objects
+		}
+		if s.ProjectKey != "" {
+			cfg.ProjectKeyFilter = s.ProjectKey
 		}
 		return cfg
 	default:
@@ -281,6 +296,8 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		if s.FastSync != nil && s.FastSync.Set {
 			cfg.FastSync = s.FastSync.Value
 		}
+		cfg.objectsRaw = s.Objects
+		cfg.ProjectKeyFilter = s.ProjectKey
 		return cfg
 	}
 }
@@ -355,13 +372,28 @@ func LoadSonarCloudOrgsFromConfigFile(path string) ([]OrgConfigEntry, error) {
 }
 
 // LoadMigrateConfigFile parses a JSON config file in any of the three
-// documented shapes and returns the populated MigrateConfig.
+// documented shapes and returns the populated MigrateConfig. The
+// config-file "objects" array (any shape) is validated and resolved into
+// MigrateConfig.Objects via common.ParseObjects (#536); an unrecognized
+// value aborts with an error before any API call is made.
 func LoadMigrateConfigFile(path string) (MigrateConfig, error) {
 	shape, err := parseConfigFile(path)
 	if err != nil {
 		return MigrateConfig{}, err
 	}
-	return shape.toMigrateConfig(), nil
+	cfg := shape.toMigrateConfig()
+	objects, err := common.ParseObjects(cfg.objectsRaw)
+	if err != nil {
+		return MigrateConfig{}, err
+	}
+	cfg.Objects = objects
+	cfg.objectsRaw = nil
+	// Mirror cmd/migrate.go's applyMigrateProjectKeyFlag: the filter
+	// only applies when the "projects" category is selected (#536).
+	if cfg.Objects != nil && !cfg.Objects[common.ObjectProjects] {
+		cfg.ProjectKeyFilter = ""
+	}
+	return cfg, nil
 }
 
 // LoadResetConfigFile parses a JSON config file in any of the three

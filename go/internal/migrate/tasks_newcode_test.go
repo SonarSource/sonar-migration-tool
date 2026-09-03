@@ -310,9 +310,9 @@ func TestRunSetNewCodePeriodsTranslatesAndSets(t *testing.T) {
 		keys    string
 	}
 	var (
-		mu          sync.Mutex
-		recorded    []call
-		resetCalls  []resetCall
+		mu         sync.Mutex
+		recorded   []call
+		resetCalls []resetCall
 	)
 	cloudMux := http.NewServeMux()
 	cloudMux.HandleFunc("POST /api/settings/set", func(w http.ResponseWriter, r *http.Request) {

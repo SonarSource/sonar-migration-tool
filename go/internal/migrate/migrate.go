@@ -11,10 +11,12 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/extract"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/version"
 	sqapi "github.com/sonar-solutions/sq-api-go"
@@ -92,6 +94,29 @@ type MigrateConfig struct {
 	// the enterprise key. Defaults to DefaultProjectKeyPattern. Issue #138.
 	ProjectKeyPattern string
 
+	// Objects, when non-nil, limits migration to the selected object
+	// categories (settings, permission_templates, quality_profiles,
+	// quality_gates, projects, portfolios, groups, license_profiles —
+	// aliases qp/qg/pt/lp). nil means "everything" — same semantics as
+	// common.ParseObjects's empty-input contract (#536).
+	Objects map[string]bool
+	// objectsRaw carries the raw --objects / config-file "objects" values
+	// from LoadMigrateConfigFile's parsing step through to the
+	// common.ParseObjects call that fills in Objects, so parsing logic
+	// lives in one place (config_file.go) instead of being duplicated
+	// between the config-file loader and cmd/migrate.go's CLI handling.
+	// Cleared once Objects is populated; not meant to be read afterward.
+	objectsRaw []string
+	// ProjectKeyFilter, when non-empty, is a regexp pattern (raw --project_key
+	// value, or the config file's top-level "project_key") restricting
+	// migration to source project keys that fully match it (#536, mirrors
+	// #529's transfer-side flag). Unlike extract, migrate never calls the
+	// source API to resolve keys — createProjects filters the records it
+	// already read locally from generateProjectMappings, so the pattern is
+	// stored as-is and only ever used when the "projects" category is
+	// selected (cmd/migrate.go no-ops the flag otherwise, per the issue).
+	ProjectKeyFilter string
+
 	// ProgressCallback, when set, is invoked with the same run-wide
 	// percent/ETA snapshot as the #520 log line, on every tick and once
 	// more at completion. Nil for CLI callers (go/cmd/migrate.go); the
@@ -153,6 +178,21 @@ type Executor struct {
 	// (createProjects, matchProjectRepos, permission templates, portfolios).
 	ProjectKeyPattern string
 
+	// Objects mirrors MigrateConfig.Objects (#536): nil means "everything
+	// selected". Most task exclusion happens at plan time (see
+	// excludedMigrateTasks / ResolveDependenciesExcluding), but
+	// runSetGlobalSettings additionally needs it at RUNTIME to decide
+	// whether its project-scope fallback path is allowed to assume
+	// projects exist — see the "projects" category gate in
+	// tasks_setglobalsettings.go.
+	Objects map[string]bool
+	// ProjectKeyRe is the compiled form of MigrateConfig.ProjectKeyFilter
+	// (#536), or nil when no filter was configured. runCreateProjects
+	// consults it to skip source projects whose key doesn't match; every
+	// other project-scoped task scopes off createProjects's own output,
+	// so filtering there is sufficient.
+	ProjectKeyRe *regexp.Regexp
+
 	// ResetConfirmedOrgs is populated only by RunReset after the
 	// operator has interactively confirmed which SonarCloud orgs to
 	// wipe (#381). When set (non-nil), loadCSVToJSONL rewrites the
@@ -167,6 +207,19 @@ type Executor struct {
 // Returns the run ID on success.
 func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr error) {
 	cfg.applyDefaults()
+
+	// #536: compile --project_key defensively even though cmd/migrate.go
+	// already validated it at build-config time — a config-file-only
+	// caller (e.g. the GUI wizard) may reach RunMigrate without going
+	// through that validation.
+	var projectKeyRe *regexp.Regexp
+	if cfg.ProjectKeyFilter != "" {
+		re, err := extract.CompileProjectKeyPattern(cfg.ProjectKeyFilter)
+		if err != nil {
+			return "", fmt.Errorf("invalid project_key pattern %q: %w", cfg.ProjectKeyFilter, err)
+		}
+		projectKeyRe = re
+	}
 
 	tm := &RunTimings{StartedAt: time.Now()}
 
@@ -254,6 +307,8 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 		UnsupportedLanguages: cfg.UnsupportedLanguages,
 		FastSync:             cfg.FastSync,
 		ProjectKeyPattern:    cfg.ProjectKeyPattern,
+		Objects:              cfg.Objects,
+		ProjectKeyRe:         projectKeyRe,
 		Logger:               logger,
 	}
 
@@ -427,13 +482,28 @@ func prepareMigratePlan(cfg MigrateConfig, logger *slog.Logger) (*migratePlan, e
 		logger.Info("issue-sync disabled: skipping syncHotspotMetadata")
 	}
 
-	targets := MigrateTargetTasks(registry, cfg.TargetTask, cfg.SkipProfiles, cfg.IncludeProjectData, cfg.SkipIssueSync, cfg.SkipProjectDataMigration, cfg.TargetTasks)
-	taskSet := ResolveDependencies(targets, registry)
-	if taskSet == nil {
-		return nil, fmt.Errorf("cannot resolve dependencies for target tasks")
+	targets := MigrateTargetTasks(registry, cfg.TargetTask, MigrateTargetTasksFlags{SkipProfiles: cfg.SkipProfiles, IncludeProjectData: cfg.IncludeProjectData, SkipIssueSync: cfg.SkipIssueSync, SkipProjectDataMigration: cfg.SkipProjectDataMigration}, cfg.TargetTasks, cfg.Objects)
+	var taskSet map[string]bool
+	// Explicit overrides win over the --objects filter (see
+	// MigrateTargetTasks' documented precedence): don't let the
+	// exclusion set drop the very task the operator asked for.
+	explicitOverride := cfg.TargetTask != "" || len(cfg.TargetTasks) > 0
+	if cfg.Objects != nil && !explicitOverride {
+		// #536: exclude cross-category dependency edges too — e.g.
+		// setGlobalSettings/createPortfolios declaring createProjects as a
+		// dependency must not force it to run when "projects" is excluded.
+		taskSet = ResolveDependenciesExcluding(targets, registry, excludedMigrateTasks(cfg.Objects))
+	} else {
+		taskSet = ResolveDependencies(targets, registry)
+	}
+	if len(taskSet) == 0 {
+		return nil, fmt.Errorf("no task left to run for the requested target/objects combination")
 	}
 
-	plan, err := PlanPhases(taskSet, registry)
+	// #536: PlanPhasesExcluding degrades to plain PlanPhases when there
+	// are no exclusions (cfg.Objects == nil), so it's safe to always
+	// call it here.
+	plan, err := PlanPhasesExcluding(taskSet, registry, excludedMigrateTasks(cfg.Objects))
 	if err != nil {
 		return nil, err
 	}

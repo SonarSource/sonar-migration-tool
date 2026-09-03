@@ -49,6 +49,8 @@ Only `source.url` / `source.token` (for `extract`) and `target.url` / `target.to
 | `export_directory` | `--export_directory` (`--export_dir` on `transfer`) | all | `./migration-files` | No | Root directory for extract / migrate output. |
 | `skip_issue_sync` | `--skip_issue_sync` | extract, migrate, transfer | `false` | No | Skip the final per-issue / per-hotspot metadata sync (#299). Accepts `true`/`on`/`yes`/`1` (case-insensitive). CLI flag is a one-way override. |
 | `skip_project_data_migration` | `--skip_project_data_migration` | extract, migrate, transfer | `false` | No | Skip the entire project-data migration (import + trailing sync). Implies `skip_issue_sync` (#303). |
+| `objects` | `--objects` | extract, migrate | every category | No | Comma-separated (CLI) or array (config file) list of object categories to process: `settings`, `permission_templates`, `quality_profiles` (`qp`), `quality_gates` (`qg`), `projects`, `portfolios`, `groups`, `license_profiles` (`lp`, accepted but not yet implemented). Omit to process everything. When set without `projects`, no project is created/extracted/migrated. #536. |
+| `project_key` | `--project_key` | extract, migrate, transfer | every project | Yes (transfer only) | Regexp pattern of project keys to process, implicitly anchored (`^...$`) — a plain key matches only itself. **Required on `transfer`** (project-scoped by design, #529); optional on `extract`/`migrate`, where it only applies when `projects` is selected (or `objects` is unset) (#536). |
 
 ### `source` block — SonarQube Server side (`extract`, `transfer`)
 
@@ -93,7 +95,6 @@ These have no config-file field.
 | Flag | Commands | Default | Role |
 |---|---|---|---|
 | `-c, --config <path>` | all | — | Path to the JSON configuration file. |
-| `--project_key <key>` | transfer | all projects | Project key to transfer; omit to transfer every project. |
 | `--debug` | all | off | Verbose request/response logging for troubleshooting. |
 | `-h, --help` | all | — | Help for the command. |
 | `-v, --version` | all | — | Print version and exit. |
@@ -112,6 +113,8 @@ All optional.
 | `export_directory` | `./migration-files` | Root directory for extract / migrate output. |
 | `skip_issue_sync` | `false` | When `true` (or `"on"` / `"yes"` / `1`), skip the final per-issue and per-hotspot metadata sync that runs after project data is replayed. Defaults to `false` so the sync happens. Accepted aliases are case-insensitive. Issue #299. |
 | `skip_project_data_migration` | `false` | When `true` (or `"on"` / `"yes"` / `1`), skip the entire project-data migration: the project-data import AND the trailing issue + hotspot sync. Useful when customers cut over to SonarQube Cloud by re-scanning rather than importing historical state. Implies `skip_issue_sync` — there's nothing to sync against. Same FlexibleBool aliases. Issue #303. |
+| `objects` | every category | Array of object categories to `extract`/`migrate`: `settings`, `permission_templates` (`pt`), `quality_profiles` (`qp`), `quality_gates` (`qg`), `projects`, `portfolios`, `groups`, `license_profiles` (`lp`, accepted but not yet implemented — logs a warning and is otherwise ignored). Omit or leave empty to process everything (today's behavior). When set without `projects`, no project is created, extracted, or migrated — a setting that would otherwise need project-scope data (e.g. one SonarQube Cloud falsely reports as org-settable) is instead reported `Skipped`. Issue #536. |
+| `project_key` | every project | Regexp pattern of project keys to `extract`/`migrate`, implicitly anchored (`^...$`) — a plain key matches only itself. Only applies when `projects` is selected via `objects` (or `objects` is unset). Mirrors `transfer`'s `--project_key` (#529), extended here to `extract`/`migrate` (#536). |
 
 `concurrency` and `timeout` can also be set inside `source` / `target` — those values override the top-level default for that command only.
 
@@ -242,6 +245,8 @@ sonar-migration-tool extract --source_url <url> --source_token <token> [flags]
 | `--timeout <s>` | Request timeout in seconds. |
 | `--skip_project_data_migration` | Skip the issue / source / SCM-blame extract (extracted by default). |
 | `--skip_issue_sync` | Drop the per-issue / per-hotspot sync metadata from the extract (no `additionalFields=_all`, no per-hotspot detail). Pair with migrate-side `--skip_issue_sync`. #398. |
+| `--objects <list>` | Comma-separated object categories to extract (`settings`, `permission_templates`/`pt`, `quality_profiles`/`qp`, `quality_gates`/`qg`, `projects`, `portfolios`, `groups`, `license_profiles`/`lp`). Omit to extract everything. #536. |
+| `--project_key <pattern>` | Regexp of project keys to extract; only applies when `projects` is selected. A plain key matches only itself. #536. |
 | `--exclude_branches <pattern>` | Glob pattern for non-main branches to skip during project data import. Repeatable (pass multiple times for multiple patterns). Main branch is never excluded. |
 | `--pem_file_path <path>` | mTLS PEM file. |
 | `--key_file_path <path>` | mTLS key file. |
@@ -284,6 +289,8 @@ sonar-migration-tool migrate --target_token <token> --enterprise_key <key> [flag
 | `--project_key_pattern <pattern>` | Template for target project keys (`<ORIGINAL_PROJECT_KEY>` / `<ORGANIZATION_KEY>`). Default `<ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>`. See [Project key renaming strategy](#project-key-renaming-strategy). |
 | `--concurrency <n>` | Max concurrent requests. |
 | `--project_data_build_concurrency <n>` | Max number of scanner reports built at once during project-data migration (default `4`). Lower it if the migration runs out of memory on a large instance; raise it toward `--concurrency` if report building is the bottleneck. |
+| `--objects <list>` | Comma-separated object categories to migrate (`settings`, `permission_templates`/`pt`, `quality_profiles`/`qp`, `quality_gates`/`qg`, `projects`, `portfolios`, `groups`, `license_profiles`/`lp`). Omit to migrate everything. When set without `projects`, no project is created or touched. #536. |
+| `--project_key <pattern>` | Regexp of source project keys to migrate; only applies when `projects` is selected. Not to be confused with `--project_key_pattern` (the target-key rendering template). #536. |
 
 ### `reset`
 

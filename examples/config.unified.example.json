@@ -4,6 +4,11 @@
   "export_directory": "./migration-files",
   "skip_issue_sync": false,
   "skip_project_data_migration": false,
+  "objects": [
+    "settings", "permission_templates", "quality_profiles", "quality_gates",
+    "projects", "portfolios", "groups"
+  ],
+  "project_key": null,
   "source": {
     "url": "https://sonarqube.example.com",
     "token": "squ_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
