@@ -274,6 +274,7 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		// Same outer-wins-else-inner semantics for migrate_history (#554).
 		if s.MigrateHistory != nil && s.MigrateHistory.Set {
 			cfg.MigrateHistory = s.MigrateHistory.Value
+		}
 		// #536: outer-level "objects" / "project_key" win over the same
 		// fields nested inside "migrate" — but fall back to the nested
 		// value (already captured above by the recursive call) when the
