@@ -7,6 +7,11 @@
   "migrate_history": false,
   "history_max_points": 10,
   "history_min_interval_days": 30,
+  "objects": [
+    "settings", "permission_templates", "quality_profiles", "quality_gates",
+    "projects", "portfolios", "groups"
+  ],
+  "project_key": null,
   "source": {
     "url": "https://sonarqube.example.com",
     "token": "squ_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",

@@ -67,6 +67,21 @@
       "minimum": 1,
       "default": 30,
       "description": "PoC (issue #554): minimum spacing, in days, enforced between two migrated historical snapshots when migrate_history is set. The smallest effective value is 1 (one point per day at most); 0 is indistinguishable from 'not set' in a config file and falls back to the default of 30."
+    "objects": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "settings", "permission_templates", "quality_profiles", "quality_gates",
+          "projects", "portfolios", "groups", "license_profiles",
+          "qp", "qg", "pt", "lp"
+        ]
+      },
+      "description": "Object categories to extract / migrate — extract and migrate only. Omit (or leave empty) to process every category, the default. When set without \"projects\", no project is created/extracted/migrated. Aliases: qp=quality_profiles, qg=quality_gates, pt=permission_templates, lp=license_profiles. license_profiles is accepted but not yet implemented (logs a warning and is otherwise ignored). Issue #536."
+    },
+    "project_key": {
+      "type": ["string", "null"],
+      "description": "Regexp pattern of source project keys to extract / migrate — extract and migrate only; only applies when \"projects\" is selected via objects (or objects is unset). Implicitly anchored (^...$); a plain key with no regex metacharacters matches only itself. Issue #536."
     },
     "source": {
       "$ref": "#/$defs/sourceBlock",

@@ -31,10 +31,10 @@ func TestDedupActiveRules(t *testing.T) {
 	// triples. The CE rejects a profile that activates the same rule twice, so
 	// dedup must keep exactly one per triple while preserving distinct rules.
 	in := []scanreport.ActiveRuleInput{
-		{RuleRepo: "python", RuleKey: "S100", QProfileKey: "qpPy", Language: "py"}, // from "Sonar way"
-		{RuleRepo: "python", RuleKey: "S100", QProfileKey: "qpPy", Language: "py"}, // dup from "Olivier Way"
-		{RuleRepo: "python", RuleKey: "S100", QProfileKey: "qpPy", Language: "py"}, // dup x3
-		{RuleRepo: "python", RuleKey: "S200", QProfileKey: "qpPy", Language: "py"}, // distinct rule
+		{RuleRepo: "python", RuleKey: "S100", QProfileKey: "qpPy", Language: "py"},     // from "Sonar way"
+		{RuleRepo: "python", RuleKey: "S100", QProfileKey: "qpPy", Language: "py"},     // dup from "Olivier Way"
+		{RuleRepo: "python", RuleKey: "S100", QProfileKey: "qpPy", Language: "py"},     // dup x3
+		{RuleRepo: "python", RuleKey: "S200", QProfileKey: "qpPy", Language: "py"},     // distinct rule
 		{RuleRepo: "docker", RuleKey: "S100", QProfileKey: "qpDk", Language: "docker"}, // distinct repo+profile
 	}
 	out := dedupActiveRules(in)
@@ -392,9 +392,9 @@ func setupProjectDataExtract(t *testing.T, dir string) {
 			"key": "issue-1", "rule": "java:S100", "message": "Rename method",
 			"severity": "MAJOR", "component": "proj1:src/Main.java",
 			"projectKey": "proj1", "branch": "main",
-			"textRange":  map[string]any{"startLine": 5, "endLine": 5, "startOffset": 0, "endOffset": 10},
+			"textRange":    map[string]any{"startLine": 5, "endLine": 5, "startOffset": 0, "endOffset": 10},
 			"creationDate": "2024-06-15T10:00:00+0000",
-			"serverUrl": testServerURL,
+			"serverUrl":    testServerURL,
 		},
 		{
 			"key": "issue-2", "rule": "java:S200", "message": "Other issue",
@@ -413,8 +413,8 @@ func setupProjectDataExtract(t *testing.T, dir string) {
 		},
 		{
 			"key": "proj1:src/Util.java", "name": "Util.java", "path": "src/Util.java",
-			"language": "java",
-			"measures": []map[string]any{{"metric": "ncloc", "value": "30"}},
+			"language":   "java",
+			"measures":   []map[string]any{{"metric": "ncloc", "value": "30"}},
 			"projectKey": "proj1", "branch": "main",
 			"serverUrl": testServerURL,
 		},
@@ -447,8 +447,8 @@ func setupProjectDataExtract(t *testing.T, dir string) {
 			"key": "hotspot-1", "ruleKey": "java:S2092", "message": "Make this cookie secure",
 			"component": "proj1:src/Main.java", "project": "proj1", "branch": "main",
 			"vulnerabilityProbability": "HIGH",
-			"creationDate": "2024-03-10T08:00:00+0000",
-			"serverUrl": testServerURL,
+			"creationDate":             "2024-03-10T08:00:00+0000",
+			"serverUrl":                testServerURL,
 		},
 	})
 }
@@ -997,7 +997,7 @@ func TestToExtractedIssues(t *testing.T) {
 			RuleKey:      "S100",
 			Component:    "proj1:src/Main.java",
 			StartLine:    5,
-			EndLine:       5,
+			EndLine:      5,
 		},
 	}
 
@@ -1763,8 +1763,8 @@ func TestStripNullBytes(t *testing.T) {
 // an issue references a column offset beyond the empty line length.
 func TestZeroOffsetsForPurgedComponents(t *testing.T) {
 	cr := scanreport.NewComponentRef()
-	cr.Get("purged-file:App.php")  // ref 1 — will be in purgedRefs
-	cr.Get("real-file:Foo.java")   // ref 2 — not purged
+	cr.Get("purged-file:App.php") // ref 1 — will be in purgedRefs
+	cr.Get("real-file:Foo.java")  // ref 2 — not purged
 
 	purgedRefs := map[int32]struct{}{1: {}}
 

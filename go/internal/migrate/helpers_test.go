@@ -18,9 +18,9 @@ import (
 	"testing"
 	"time"
 
-	sqapi "github.com/sonar-solutions/sq-api-go"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
+	sqapi "github.com/sonar-solutions/sq-api-go"
 )
 
 func TestLoadCSVToJSONL(t *testing.T) {
@@ -61,6 +61,50 @@ func TestLoadCSVToJSONL(t *testing.T) {
 	}
 }
 
+// runLoadCSVToJSONLResetConfirmedOrgsCase runs one case of
+// TestLoadCSVToJSONLResetConfirmedOrgsFilter — factored out of the
+// t.Run loop to keep that test's own cognitive complexity low.
+func runLoadCSVToJSONLResetConfirmedOrgsCase(t *testing.T, confirmed map[string]bool, wantOrgs []string) {
+	t.Helper()
+	dir := t.TempDir()
+	csvContent := "sonarqube_org_key,sonarcloud_org_key\norg1,cloud-a\norg2,cloud-b\norg3,cloud-c\n"
+	if err := os.WriteFile(filepath.Join(dir, "test.csv"), []byte(csvContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// loadCSVToJSONL also reads organizations.csv for the enrichment
+	// join — write a self-referential one that matches the test rows.
+	if err := os.WriteFile(filepath.Join(dir, "organizations.csv"), []byte(csvContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDir := filepath.Join(dir, "run-01")
+	os.MkdirAll(runDir, 0o755)
+	store := common.NewDataStore(runDir)
+
+	e := &Executor{
+		Store:              store,
+		ExportDir:          dir,
+		ResetConfirmedOrgs: confirmed,
+	}
+	if err := loadCSVToJSONL(e, "testTask", "test.csv"); err != nil {
+		t.Fatalf("loadCSVToJSONL: %v", err)
+	}
+	items, err := store.ReadAll("testTask")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != len(wantOrgs) {
+		t.Fatalf("expected %d items, got %d", len(wantOrgs), len(items))
+	}
+	for i, raw := range items {
+		var row map[string]any
+		_ = json.Unmarshal(raw, &row)
+		got, _ := row["sonarcloud_org_key"].(string)
+		if got != wantOrgs[i] {
+			t.Errorf("row %d: sonarcloud_org_key = %q, want %q", i, got, wantOrgs[i])
+		}
+	}
+}
+
 // #381: when Executor.ResetConfirmedOrgs is set, loadCSVToJSONL must
 // rewrite the sonarcloud_org_key of every un-confirmed row to the
 // SKIPPED sentinel so the existing shouldSkipOrg path naturally
@@ -91,44 +135,7 @@ func TestLoadCSVToJSONLResetConfirmedOrgsFilter(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			dir := t.TempDir()
-			csvContent := "sonarqube_org_key,sonarcloud_org_key\norg1,cloud-a\norg2,cloud-b\norg3,cloud-c\n"
-			if err := os.WriteFile(filepath.Join(dir, "test.csv"), []byte(csvContent), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			// loadCSVToJSONL also reads organizations.csv for the
-			// enrichment join — write a self-referential one that
-			// matches the test rows.
-			if err := os.WriteFile(filepath.Join(dir, "organizations.csv"), []byte(csvContent), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			runDir := filepath.Join(dir, "run-01")
-			os.MkdirAll(runDir, 0o755)
-			store := common.NewDataStore(runDir)
-
-			e := &Executor{
-				Store:              store,
-				ExportDir:          dir,
-				ResetConfirmedOrgs: c.confirmed,
-			}
-			if err := loadCSVToJSONL(e, "testTask", "test.csv"); err != nil {
-				t.Fatalf("loadCSVToJSONL: %v", err)
-			}
-			items, err := store.ReadAll("testTask")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(items) != len(c.wantOrgs) {
-				t.Fatalf("expected %d items, got %d", len(c.wantOrgs), len(items))
-			}
-			for i, raw := range items {
-				var row map[string]any
-				_ = json.Unmarshal(raw, &row)
-				got, _ := row["sonarcloud_org_key"].(string)
-				if got != c.wantOrgs[i] {
-					t.Errorf("row %d: sonarcloud_org_key = %q, want %q", i, got, c.wantOrgs[i])
-				}
-			}
+			runLoadCSVToJSONLResetConfirmedOrgsCase(t, c.confirmed, c.wantOrgs)
 		})
 	}
 }
@@ -444,6 +451,7 @@ func TestTaskCounterEmptySummary(t *testing.T) {
 		t.Errorf("empty counter should not emit succeeded/failed attrs, got: %s", output)
 	}
 }
+
 // #300: runProjectSyncLoop applies fn to every item concurrently and
 // emits a "<label>: N/M - X%" progress line every `interval`
 // completions, including a final 100% line at the end of the batch.
@@ -536,6 +544,7 @@ func TestRunProjectSyncLoop(t *testing.T) {
 			func(_ context.Context, _ int) { t.Fatal("apply should not be called") })
 	})
 }
+
 // #326: sortMigrateItems orders items by (orgField, sortField) for tasks
 // in the registry, and is a no-op for tasks not in the registry.
 func TestSortMigrateItems(t *testing.T) {

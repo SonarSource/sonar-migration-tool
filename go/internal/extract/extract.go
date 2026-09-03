@@ -49,6 +49,24 @@ type ExtractConfig struct {
 	// requested projects are fetched and all downstream per-project tasks
 	// naturally scope to the same set.
 	ProjectKeys []string
+	// ProjectKey is the raw --project_key regexp pattern (or config-file
+	// "project_key" value) before resolution. cmd/extract.go resolves it
+	// into ProjectKeys via ResolveProjectKeys before calling RunExtract
+	// (#536, mirrors #529's transfer-side flag).
+	ProjectKey string
+	// Objects, when non-nil, limits extraction to the selected object
+	// categories (settings, permission_templates, quality_profiles,
+	// quality_gates, projects, portfolios, groups, license_profiles —
+	// aliases qp/qg/pt/lp). nil means "everything" — same semantics as
+	// common.ParseObjects's empty-input contract (#536).
+	Objects map[string]bool
+	// objectsRaw carries the raw --objects / config-file "objects" values
+	// from LoadExtractConfigFile's parsing step through to the
+	// common.ParseObjects call that fills in Objects, so parsing logic
+	// lives in one place (config_file.go) instead of being duplicated
+	// between the config-file loader and cmd/extract.go's CLI handling.
+	// Cleared once Objects is populated; not meant to be read afterward.
+	objectsRaw []string
 	// ProgressCallback, when set, is invoked with the same run-wide
 	// percent/ETA snapshot as the #520 log line, on every tick and once
 	// more at completion. Nil for CLI callers (go/cmd/extract.go); the
@@ -256,16 +274,28 @@ func buildPlan(cfg ExtractConfig, edition Edition) (map[string]*TaskDef, [][]str
 
 	var targets []string
 	if cfg.IncludeProjectData {
-		targets = TargetTasksWithProjectData(registry, cfg.TargetTask, cfg.ExtractType)
+		targets = TargetTasksWithProjectData(registry, cfg.TargetTask, cfg.ExtractType, cfg.Objects)
 	} else {
-		targets = TargetTasks(registry, cfg.TargetTask, cfg.ExtractType)
+		targets = TargetTasks(registry, cfg.TargetTask, cfg.ExtractType, cfg.Objects)
 	}
-	taskSet := ResolveDependencies(targets, registry)
+
+	var taskSet map[string]bool
+	var excluded map[string]bool
+	if cfg.Objects != nil {
+		// An --objects filter is active: exclude cross-category
+		// dependency edges too, so an excluded category's task doesn't
+		// get pulled back in just because a selected task happens to
+		// declare it as a dependency (#536).
+		excluded = excludedExtractTasks(cfg.Objects)
+		taskSet = ResolveDependenciesExcluding(targets, registry, excluded)
+	} else {
+		taskSet = ResolveDependencies(targets, registry)
+	}
 	if taskSet == nil {
 		return nil, nil, nil, fmt.Errorf("cannot resolve dependencies for target tasks")
 	}
 
-	plan, err := PlanPhases(taskSet, registry)
+	plan, err := PlanPhasesExcluding(taskSet, registry, excluded)
 	if err != nil {
 		return nil, nil, nil, err
 	}

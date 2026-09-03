@@ -67,11 +67,32 @@ func ResolveDependencies(targets []string, reg map[string]*TaskDef) map[string]b
 	return common.ResolveDependenciesGeneric(targets, reg)
 }
 
+// ResolveDependenciesExcluding is like ResolveDependencies, except any task
+// name present in excluded is treated as vacuously satisfied: it is never
+// added to the result and its own dependencies are never walked. Used when
+// an --objects filter is active (#536) so a task whose category was
+// excluded from the run doesn't get pulled back in just because another,
+// selected task happens to declare it as a dependency.
+func ResolveDependenciesExcluding(targets []string, reg map[string]*TaskDef, excluded map[string]bool) map[string]bool {
+	return common.ResolveDependenciesExcludingGeneric(targets, reg, excluded)
+}
+
 // PlanPhases computes ordered execution phases via topological sort.
 // Tasks in the same phase have all dependencies satisfied and can run
 // concurrently. Returns an error if the graph contains a cycle.
 func PlanPhases(tasks map[string]bool, reg map[string]*TaskDef) ([][]string, error) {
 	return common.PlanPhasesGeneric(tasks, reg)
+}
+
+// PlanPhasesExcluding is like PlanPhases, but first strips any excluded
+// task name out of every TaskDef's Dependencies before computing
+// phases — see common.PlanPhasesExcludingGeneric's doc for why this is
+// needed (#536: a false "cycle detected" error otherwise, when a
+// selected task like getProjectPluginIssues declares an excluded one
+// like getPluginRules as a dependency). Confirmed by direct
+// reproduction that extract needs this exactly as much as migrate does.
+func PlanPhasesExcluding(tasks map[string]bool, reg map[string]*TaskDef, excluded map[string]bool) ([][]string, error) {
+	return common.PlanPhasesExcludingGeneric(tasks, reg, excluded)
 }
 
 // RegisterAll returns every extract task definition.
@@ -106,25 +127,33 @@ var projectDataTaskNames = map[string]bool{
 	"getProjectAnalysisHistory": true, // #554 — PoC project-history migration.
 }
 
-// TargetTasks determines which tasks to extract based on config.
-func TargetTasks(reg map[string]*TaskDef, targetTask, extractType string) []string {
-	return targetTasks(reg, targetTask, extractType, false)
+// TargetTasks determines which tasks to extract based on config. objects,
+// when non-nil, additionally drops any default task whose category isn't
+// selected (#536); pass nil for "everything" (no objects filter).
+func TargetTasks(reg map[string]*TaskDef, targetTask, extractType string, objects map[string]bool) []string {
+	return targetTasks(reg, targetTask, extractType, false, objects)
 }
 
 // TargetTasksWithProjectData is like TargetTasks but includes project data tasks.
-func TargetTasksWithProjectData(reg map[string]*TaskDef, targetTask, extractType string) []string {
-	return targetTasks(reg, targetTask, extractType, true)
+func TargetTasksWithProjectData(reg map[string]*TaskDef, targetTask, extractType string, objects map[string]bool) []string {
+	return targetTasks(reg, targetTask, extractType, true, objects)
 }
 
-func targetTasks(reg map[string]*TaskDef, targetTask, extractType string, includeProjectData bool) []string {
+func targetTasks(reg map[string]*TaskDef, targetTask, extractType string, includeProjectData bool, objects map[string]bool) []string {
 	if targetTask != "" {
+		// An explicit single-task override always wins: objects filtering
+		// does not apply here (#536).
 		return []string{targetTask}
 	}
+	excluded := excludedExtractTasks(objects)
 	// Default: all tasks starting with "get".
 	var tasks []string
 	for name := range reg {
 		if len(name) > 3 && name[:3] == "get" {
 			if projectDataTaskNames[name] && !includeProjectData {
+				continue
+			}
+			if excluded[name] {
 				continue
 			}
 			tasks = append(tasks, name)

@@ -69,17 +69,17 @@ func profileTasks() []TaskDef {
 						lang := extractField(item, "language")
 						profileKey := extractField(item, "key")
 						// /api/qualityprofiles/projects is keyed by the
-					// profile UUID, NOT by qualityProfile+language like
-					// search_groups / search_users. Using the wrong
-					// parameter shape produces an empty result set, which
-					// is what was happening when this fix first shipped.
-					items, err := e.Raw.GetPaginated(ctx, PaginatedOpts{
-						Path: "api/qualityprofiles/projects", ResultKey: "results",
-						Params: url.Values{
-							"key":      {profileKey},
-							"selected": {"selected"},
-						},
-					})
+						// profile UUID, NOT by qualityProfile+language like
+						// search_groups / search_users. Using the wrong
+						// parameter shape produces an empty result set, which
+						// is what was happening when this fix first shipped.
+						items, err := e.Raw.GetPaginated(ctx, PaginatedOpts{
+							Path: "api/qualityprofiles/projects", ResultKey: "results",
+							Params: url.Values{
+								"key":      {profileKey},
+								"selected": {"selected"},
+							},
+						})
 						if err != nil {
 							return err
 						}

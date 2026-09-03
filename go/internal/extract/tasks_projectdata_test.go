@@ -444,8 +444,8 @@ func TestProjectHotspotsFullTaskEnrichesToReviewHotspots(t *testing.T) {
 // must issue both queries explicitly and merge.
 func TestProjectHotspotsFullTaskQueriesBothStatuses(t *testing.T) {
 	var (
-		mu     sync.Mutex
-		seen   []string
+		mu   sync.Mutex
+		seen []string
 	)
 	srv, e := newSrvExecutor(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/hotspots/search" {
