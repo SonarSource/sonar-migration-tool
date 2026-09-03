@@ -47,6 +47,27 @@
       "default": false,
       "description": "When true (or on / yes / 1), skip the entire project-data migration: the project-data import AND the trailing issue + hotspot sync. Implies skip_issue_sync. Defaults to false so the data is migrated. Issue #303."
     },
+    "migrate_history": {
+      "oneOf": [
+        { "type": "boolean" },
+        { "type": "integer", "enum": [0, 1] },
+        { "type": "string", "pattern": "^(?i)(true|false|on|off|yes|no|0|1)$" }
+      ],
+      "default": false,
+      "description": "PoC (issue #554): when true (or on / yes / 1), also migrate a bounded set of historical analysis snapshots (date + project-level measures only) per project's main branch, backdated on SonarQube Cloud. Defaults to false — no change to existing behavior unless set."
+    },
+    "history_max_points": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 10,
+      "description": "PoC (issue #554): max historical snapshots migrated per project when migrate_history is set."
+    },
+    "history_min_interval_days": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 30,
+      "description": "PoC (issue #554): minimum spacing, in days, enforced between two migrated historical snapshots when migrate_history is set. The smallest effective value is 1 (one point per day at most); 0 is indistinguishable from 'not set' in a config file and falls back to the default of 30."
+    },
     "objects": {
       "type": "array",
       "items": {
@@ -208,6 +229,14 @@
           "type": ["string", "null"],
           "default": "<ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>",
           "description": "Template for target SonarQube Cloud project keys, built from the placeholders <ORIGINAL_PROJECT_KEY> (mandatory) and <ORGANIZATION_KEY>. Defaults to <ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>. A single <ORIGINAL_PROJECT_KEY> with a static prefix requires a prefix of at least 5 characters; a bare <ORIGINAL_PROJECT_KEY> keeps the key unchanged. CLI --project_key_pattern overrides this. Issue #138."
+        },
+        "migrate_history": {
+          "oneOf": [
+            { "type": "boolean" },
+            { "type": "integer", "enum": [0, 1] },
+            { "type": "string", "pattern": "^(?i)(true|false|on|off|yes|no|0|1)$" }
+          ],
+          "description": "PoC (issue #554): overrides the top-level migrate_history for migrate/reset. When true (or on / yes / 1), also migrate a bounded set of historical analysis snapshots (date + project-level measures only) per project's main branch, backdated on SonarQube Cloud. When absent, the top-level migrate_history applies (default false)."
         }
       }
     }

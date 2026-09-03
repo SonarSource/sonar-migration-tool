@@ -78,12 +78,20 @@ func init() {
 	f.String("target_task", "", "Target task to complete; all dependent tasks will be included")
 	f.Bool(flagSkipProjectDataMigration, false, "Skip extracting project data (issues, hotspots, source code, SCM blame). Defaults to false — project data is extracted by default. #303.")
 	f.Bool(flagSkipIssueSync, false, "Skip extracting per-issue and per-hotspot sync metadata (comments, changelog, hotspot detail). Pair with migrate-side --skip_issue_sync. Defaults to false. #398.")
+	f.Bool(flagMigrateHistory, false, "PoC: also extract a bounded set of historical analysis snapshots (date + project-level measures) per project+branch, for --migrate_history on the migrate/transfer side (#554). Defaults to false — no extra API calls unless set.")
+	f.Int(flagHistoryMaxPoints, 0, "Max historical snapshots selected per project+branch when --migrate_history is set (default 10).")
+	f.Int(flagHistoryMinIntervalDays, extract.HistoryUnset, "Minimum spacing, in days, enforced between two selected historical snapshots when --migrate_history is set (default 30). Pass 0 for no spacing rule at all — every analysis in the source history becomes a candidate.")
 	f.String("objects", "", "Comma-separated list of object categories to extract: "+strings.Join(common.AllObjects, ", ")+" (aliases: qp, qg, pt, lp). Omit to extract everything (default).")
 	f.String("project_key", "", "Regexp pattern of project keys to extract (only applies when the projects category is selected). A plain key matches only itself.")
 }
 
 func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfig, error) {
 	var cfg extract.ExtractConfig
+	// #554 — "caller said nothing" for the history spacing, so that an
+	// explicit 0 ("no spacing rule") is distinguishable from an unset value
+	// and survives applyDefaults. LoadExtractConfigFile sets the same
+	// sentinel, so this only matters on the no-config-file path.
+	cfg.HistoryMinIntervalDays = extract.HistoryUnset
 
 	// Load config file if specified. Supports flat, command-sectioned,
 	// and side-sectioned shapes — issue #158.
@@ -119,7 +127,16 @@ func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfi
 	applyOneWayBoolFlag(cmd, flagSkipProjectDataMigration, &cfg.SkipProjectDataMigration)
 	// --skip_issue_sync is one-way: passing the flag forces opt-out,
 	// CLI false does NOT undo a config-file skip_issue_sync: true. #398.
-	applyOneWayBoolFlag(cmd, flagSkipIssueSync, &cfg.SkipIssueSync)
+  applyOneWayBoolFlag(cmd, flagSkipIssueSync, &cfg.SkipIssueSync)
+	// --migrate_history is one-way, same semantics as --skip_issue_sync. #554.
+	if cmd.Flags().Changed(flagMigrateHistory) {
+		v, _ := cmd.Flags().GetBool(flagMigrateHistory)
+		if v {
+			cfg.MigrateHistory = true
+		}
+	}
+	overrideInt(cmd, flagHistoryMaxPoints, &cfg.HistoryMaxPoints)
+	overrideInt(cmd, flagHistoryMinIntervalDays, &cfg.HistoryMinIntervalDays)
 	cfg.IncludeProjectData = !cfg.SkipProjectDataMigration
 	// --debug is a persistent flag on rootCmd; pick it up here so the
 	// SDK can install the HTTP request/response logger.

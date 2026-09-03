@@ -122,6 +122,16 @@ type MigrateConfig struct {
 	// more at completion. Nil for CLI callers (go/cmd/migrate.go); the
 	// GUI wizard sets it to drive a progress bar (#519).
 	ProgressCallback func(percent float64, eta time.Duration, known bool)
+
+	// MigrateHistory opts into the project-history migration PoC (#554):
+	// replay each project's extracted historical (date, measures) snapshots
+	// (see internal/extract's getProjectAnalysisHistory) as separate,
+	// backdated analyses on the target's main branch, before the regular
+	// current-snapshot import. Defaults to false — when unset, migrate
+	// ignores any extracted history records and behaves exactly as before
+	// this feature existed, even if extract happened to capture history
+	// data for a different run.
+	MigrateHistory bool
 }
 
 // Executor is the runtime context passed to every migrate task function.
@@ -178,6 +188,8 @@ type Executor struct {
 	// (createProjects, matchProjectRepos, permission templates, portfolios).
 	ProjectKeyPattern string
 
+	// MigrateHistory — see MigrateConfig.MigrateHistory (#554).
+	MigrateHistory bool
 	// Objects mirrors MigrateConfig.Objects (#536): nil means "everything
 	// selected". Most task exclusion happens at plan time (see
 	// excludedMigrateTasks / ResolveDependenciesExcluding), but
@@ -307,6 +319,7 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 		UnsupportedLanguages: cfg.UnsupportedLanguages,
 		FastSync:             cfg.FastSync,
 		ProjectKeyPattern:    cfg.ProjectKeyPattern,
+		MigrateHistory:       cfg.MigrateHistory,
 		Objects:              cfg.Objects,
 		ProjectKeyRe:         projectKeyRe,
 		Logger:               logger,

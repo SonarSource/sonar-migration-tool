@@ -52,6 +52,10 @@ const (
 	flagDebug                    = "debug"
 	flagExcludeBranches          = "exclude_branches"
 	flagUnsupportedLanguages     = "unsupported_languages"
+	// #554 — PoC project-history migration flags.
+	flagMigrateHistory         = "migrate_history"
+	flagHistoryMaxPoints       = "history_max_points"
+	flagHistoryMinIntervalDays = "history_min_interval_days"
 )
 
 // transferTargetTasks is the explicit set of project-scoped "leaf" migrate
@@ -198,6 +202,9 @@ func init() {
 		"\"exclude\" (default) drops those files from the analysis report so the rest of the project still migrates; "+
 		"\"skip\" does not migrate the project's issues/branches at all; "+
 		"\"warn\" submits the report unchanged and lets "+scCloudName+" reject it. (maps to unsupported_languages)")
+	f.Bool(flagMigrateHistory, false, "PoC: also migrate a bounded set of historical analysis snapshots (date + project-level measures) per project's main branch, backdated on "+scCloudName+" (#554). Defaults to false — no change to existing single-snapshot behavior unless set. (maps to migrate_history)")
+	f.Int(flagHistoryMaxPoints, 0, "Max historical snapshots migrated per project when --"+flagMigrateHistory+" is set (default 10). (maps to history_max_points)")
+	f.Int(flagHistoryMinIntervalDays, extract.HistoryUnset, "Minimum spacing, in days, enforced between two migrated historical snapshots when --"+flagMigrateHistory+" is set (default 30). Pass 0 for no spacing rule at all — every analysis in the source history becomes a candidate. (maps to history_min_interval_days)")
 }
 
 // transferConfig holds the resolved configuration after merging file and flag values.
@@ -225,6 +232,10 @@ type transferConfig struct {
 	excludeBranches          []string
 	unsupportedLanguages     string
 	fastSync                 bool
+	// #554 — PoC project-history migration.
+	migrateHistory         bool
+	historyMaxPoints       int
+	historyMinIntervalDays int
 }
 
 func applyFlagString(cmd *cobra.Command, name string, target *string) {
@@ -354,6 +365,18 @@ func loadTransferFileDefaults(path string) (transferConfig, error) {
 	cfg.excludeBranches = migrateCfg.ExcludeBranches
 	cfg.unsupportedLanguages = migrateCfg.UnsupportedLanguages
 	cfg.fastSync = migrateCfg.FastSync
+	// #554 — the two bounds exist only on the extract side (they bound the
+	// source-side API calls extract makes). migrate_history, though, can be
+	// set in two places: the top-level plain bool the extract loader reads,
+	// or under "target", which only the migrate loader resolves (its
+	// tri-state gives the target block precedence). Taking the extract value
+	// alone would make a config that sets only target.migrate_history — which
+	// the schema and ADVANCED-CONFIG both advertise — silently do nothing on
+	// transfer: no history extracted, none replayed, no warning. Accept
+	// either.
+	cfg.migrateHistory = extractCfg.MigrateHistory || migrateCfg.MigrateHistory
+	cfg.historyMaxPoints = extractCfg.HistoryMaxPoints
+	cfg.historyMinIntervalDays = extractCfg.HistoryMinIntervalDays
 	return cfg, nil
 }
 
@@ -407,6 +430,15 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 	}
 	applyFlagString(cmd, flagUnsupportedLanguages, &cfg.unsupportedLanguages)
 	applyFlagBool(cmd, flagFastSync, &cfg.fastSync)
+	// --migrate_history is one-way, same semantics as --skip_project_data_migration. #554.
+	if cmd.Flags().Changed(flagMigrateHistory) {
+		v, _ := cmd.Flags().GetBool(flagMigrateHistory)
+		if v {
+			cfg.migrateHistory = true
+		}
+	}
+	applyFlagInt(cmd, flagHistoryMaxPoints, &cfg.historyMaxPoints)
+	applyFlagInt(cmd, flagHistoryMinIntervalDays, &cfg.historyMinIntervalDays)
 
 	if cfg.exportDir == "" {
 		cfg.exportDir = "./migration-files/"
@@ -581,6 +613,10 @@ func runTransferExtract(ctx context.Context, cfg transferConfig) ([]string, erro
 		// via --skip_project_data_migration.
 		IncludeProjectData: !cfg.skipProjectDataMigration,
 		Debug:              cfg.debug,
+		// #554 — PoC project-history migration; a no-op unless set.
+		MigrateHistory:         cfg.migrateHistory,
+		HistoryMaxPoints:       cfg.historyMaxPoints,
+		HistoryMinIntervalDays: cfg.historyMinIntervalDays,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("extract failed: %w", err)
@@ -677,6 +713,7 @@ func runTransferMigrate(ctx context.Context, cfg transferConfig) (string, error)
 		UnsupportedLanguages:     cfg.unsupportedLanguages,
 		FastSync:                 cfg.fastSync,
 		ProjectKeyPattern:        cfg.projectKeyPattern,
+		MigrateHistory:           cfg.migrateHistory,
 	})
 	if err != nil {
 		return "", fmt.Errorf("migrate failed: %w", err)

@@ -113,7 +113,7 @@ Both `extract` and `migrate` use a typed task engine with topological sort plann
 4. **Data flow** — Tasks read input from a `DataStore` (which loads JSONL files from previous tasks) and write output via a `ChunkWriter` (which produces JSONL files for downstream tasks).
 
 ### Extract Tasks (68 tasks)
-<!-- updated: 2026-07-27_23:55:00 -->
+<!-- updated: 2026-09-02_13:05:00 -->
 
 Organized by category in `go/internal/extract/tasks_*.go`:
 - **System** — Server version, edition, plugins
@@ -124,7 +124,7 @@ Organized by category in `go/internal/extract/tasks_*.go`:
 - **Templates** — Permission templates, associated groups/users
 - **Views** — Portfolios, applications (Enterprise+ only)
 - **Issues** — Accepted issues, safe hotspots
-- **Project Data** — `getProjectIssuesFull` (issues with comments/tags/flows), `getProjectHotspotsFull` (hotspots with review details — one query per review status, `TO_REVIEW` then `REVIEWED`, with the `REVIEWED` ones enriched via `/api/hotspots/show` for their comments and rule key; a non-fatal 403/404 on one status now `continue`s to the next instead of returning early, which used to discard the hotspots already collected for the other status and write no chunk at all), `getProjectVersions` (current project version per branch via `/api/navigation/component`), component trees (using `FIL,UTS` qualifiers for files and unit test source files), source code, SCM data. External issues (ruff, pylint, flake8, etc.) are extracted alongside native issues. Runs by default; skipped when `--skip_project_data_migration` is set.
+- **Project Data** — `getProjectIssuesFull` (issues with comments/tags/flows), `getProjectHotspotsFull` (hotspots with review details — one query per review status, `TO_REVIEW` then `REVIEWED`, with the `REVIEWED` ones enriched via `/api/hotspots/show` for their comments and rule key; a non-fatal 403/404 on one status now `continue`s to the next instead of returning early, which used to discard the hotspots already collected for the other status and write no chunk at all), `getProjectVersions` (current project version per branch via `/api/navigation/component`), `getProjectAnalysisHistory` (PoC #554 — per project+branch, the bounded set of historical analysis dates from `/api/project_analyses/search` plus each one's project-level measures from `/api/measures/search_history`; makes zero API calls unless `--migrate_history` is set), component trees (using `FIL,UTS` qualifiers for files and unit test source files), source code, SCM data. External issues (ruff, pylint, flake8, etc.) are extracted alongside native issues. Runs by default; skipped when `--skip_project_data_migration` is set.
 - **Webhooks** — Global and project-level webhooks
 
 ### Migrate Tasks (44+ tasks)

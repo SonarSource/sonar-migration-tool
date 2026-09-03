@@ -4,6 +4,9 @@
   "export_directory": "./migration-files",
   "skip_issue_sync": false,
   "skip_project_data_migration": false,
+  "migrate_history": false,
+  "history_max_points": 10,
+  "history_min_interval_days": 30,
   "objects": [
     "settings", "permission_templates", "quality_profiles", "quality_gates",
     "projects", "portfolios", "groups"

@@ -41,6 +41,15 @@ type configFileShape struct {
 	TargetTask               string `json:"target_task"`
 	SkipProjectDataMigration bool   `json:"skip_project_data_migration"`
 	SkipIssueSync            bool   `json:"skip_issue_sync"` // #398
+	// MigrateHistory / HistoryMaxPoints / HistoryMinIntervalDays — see
+	// ExtractConfig doc comments. #554. Top-level only: like
+	// skip_project_data_migration / skip_issue_sync, this is a plain bool
+	// with no per-shape nesting.
+	MigrateHistory   bool `json:"migrate_history"`
+	HistoryMaxPoints int  `json:"history_max_points"`
+	// Pointer, unlike HistoryMaxPoints: 0 is a legal explicit value here
+	// ("no spacing rule"), so absent and 0 must stay distinguishable.
+	HistoryMinIntervalDays *int `json:"history_min_interval_days"`
 	// Objects and ProjectKey are always read from the top level of the
 	// config file regardless of shape (#536: the issue documents "objects"
 	// as settable "at global level"). For shape 2 (command-sectioned),
@@ -120,8 +129,26 @@ func parseConfigFile(path string) (configFileShape, error) {
 	return common.ParseJSONConfigFile[configFileShape](path)
 }
 
+// applyHistoryTo copies the three #554 history settings onto cfg. Extracted
+// from toExtractConfig because every shape branch needs the identical block,
+// and the nil check for HistoryMinIntervalDays — absent must stay
+// distinguishable from an explicit 0 — is easy to get subtly wrong three
+// times over.
+func (s configFileShape) applyHistoryTo(cfg *ExtractConfig) {
+	cfg.MigrateHistory = s.MigrateHistory
+	cfg.HistoryMaxPoints = s.HistoryMaxPoints
+	if s.HistoryMinIntervalDays != nil {
+		cfg.HistoryMinIntervalDays = *s.HistoryMinIntervalDays
+	}
+}
+
 func (s configFileShape) toExtractConfig() ExtractConfig {
 	var cfg ExtractConfig
+	// Start the spacing at the "caller said nothing" sentinel so an absent
+	// history_min_interval_days defaults to 30 while an explicit 0 survives
+	// as 0. Every shape branch below overwrites it only when the key was
+	// actually present in the JSON.
+	cfg.HistoryMinIntervalDays = HistoryUnset
 	switch {
 	case s.Source != nil || s.Target != nil:
 		// #266 unified shape. Extract pulls from the "source"
@@ -152,6 +179,7 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		// the extract pulls issue / source / SCM-blame data.
 		cfg.SkipProjectDataMigration = s.SkipProjectDataMigration
 		cfg.SkipIssueSync = s.SkipIssueSync
+		s.applyHistoryTo(&cfg)
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKey = s.ProjectKey
 	case s.SonarQube != nil:
@@ -164,6 +192,7 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		}
 		cfg.SkipProjectDataMigration = s.SkipProjectDataMigration
 		cfg.SkipIssueSync = s.SkipIssueSync
+		s.applyHistoryTo(&cfg)
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKey = s.ProjectKey
 	case s.Extract != nil:
@@ -193,6 +222,7 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		cfg.TargetTask = s.TargetTask
 		cfg.SkipProjectDataMigration = s.SkipProjectDataMigration
 		cfg.SkipIssueSync = s.SkipIssueSync
+		s.applyHistoryTo(&cfg)
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKey = s.ProjectKey
 	}

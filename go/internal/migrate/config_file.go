@@ -56,6 +56,9 @@ type configFileShape struct {
 	// and back-linked, current behavior). Same FlexibleBool semantics as
 	// skip_issue_sync.
 	FastSync *FlexibleBool `json:"fast_sync"`
+	// MigrateHistory opts into the project-history migration PoC (#554).
+	// Defaults to false. Same FlexibleBool semantics as skip_issue_sync.
+	MigrateHistory *FlexibleBool `json:"migrate_history"`
 	// ConfirmedOrgs is reset-only: it additively pre-populates
 	// ResetConfig.ConfirmedOrgs (#550) for config-driven / programmatic
 	// callers that don't go through cmd/reset.go's interactive
@@ -134,6 +137,8 @@ type unifiedTargetBlock struct {
 	UnsupportedLanguages string `json:"unsupported_languages"`
 	// FastSync — see configFileShape.FastSync (#527).
 	FastSync *FlexibleBool `json:"fast_sync"`
+	// MigrateHistory — see configFileShape.MigrateHistory (#554).
+	MigrateHistory *FlexibleBool `json:"migrate_history"`
 }
 
 type sonarCloudBlock struct {
@@ -203,6 +208,12 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			targetFastSync = s.Target.FastSync
 		}
 		cfg.FastSync = resolveFastSync(targetFastSync, s.FastSync)
+		// #554 — target.migrate_history wins, else the top-level field, else false.
+		var targetMigrateHistory *FlexibleBool
+		if s.Target != nil {
+			targetMigrateHistory = s.Target.MigrateHistory
+		}
+		cfg.MigrateHistory = resolveMigrateHistory(targetMigrateHistory, s.MigrateHistory)
 		if cfg.Concurrency == 0 {
 			cfg.Concurrency = s.Concurrency
 		}
@@ -238,6 +249,9 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		if s.FastSync != nil && s.FastSync.Set {
 			cfg.FastSync = s.FastSync.Value
 		}
+		if s.MigrateHistory != nil && s.MigrateHistory.Set {
+			cfg.MigrateHistory = s.MigrateHistory.Value
+		}
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKeyFilter = s.ProjectKey
 		return cfg
@@ -256,6 +270,10 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		// Same outer-wins-else-inner semantics for fast_sync (#527).
 		if s.FastSync != nil && s.FastSync.Set {
 			cfg.FastSync = s.FastSync.Value
+		}
+		// Same outer-wins-else-inner semantics for migrate_history (#554).
+		if s.MigrateHistory != nil && s.MigrateHistory.Set {
+			cfg.MigrateHistory = s.MigrateHistory.Value
 		}
 		// #536: outer-level "objects" / "project_key" win over the same
 		// fields nested inside "migrate" — but fall back to the nested
@@ -295,6 +313,9 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		}
 		if s.FastSync != nil && s.FastSync.Set {
 			cfg.FastSync = s.FastSync.Value
+		}
+		if s.MigrateHistory != nil && s.MigrateHistory.Set {
+			cfg.MigrateHistory = s.MigrateHistory.Value
 		}
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKeyFilter = s.ProjectKey

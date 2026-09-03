@@ -65,6 +65,14 @@ func projectDataTasks() []TaskDef {
 			Dependencies: []string{"getProjects", "getBranches"},
 			Run:          projectVersionsTask(),
 		},
+		{
+			// #554 — PoC project-history migration. Opt-in via
+			// --migrate_history; a pure no-op (zero API calls) otherwise.
+			Name:         "getProjectAnalysisHistory",
+			Editions:     AllEditions,
+			Dependencies: []string{"getProjects", "getBranches"},
+			Run:          projectAnalysisHistoryTask(),
+		},
 	}
 }
 
