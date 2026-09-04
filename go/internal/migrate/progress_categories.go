@@ -8,8 +8,12 @@ import "github.com/sonar-solutions/sonar-migration-tool/internal/common"
 
 // migrateProjectDataOnlyTasks is the ProjectData bucket for progress
 // weighting (#520) — just importProjectData. migrateIssueSyncTasks
-// (planner.go) already lists exactly {syncHotspotMetadata,
-// syncIssueMetadata} and is reused directly as the IssueSync bucket.
+// (planner.go) lists exactly {syncHotspotMetadata, syncIssueMetadata}; for
+// progress weighting the two are split (#526) — syncHotspotMetadata gets
+// its own CategoryHotspotSync bucket, syncIssueMetadata stays IssueSync —
+// since they run as separate, sequential trailing tasks and lumping them
+// together made overall progress stick at ~100% while hotspot sync was
+// still running.
 var migrateProjectDataOnlyTasks = map[string]bool{
 	"importProjectData": true,
 }
@@ -47,6 +51,8 @@ func CategorizeTask(name string) common.TaskCategory {
 	switch {
 	case migrateProjectDataOnlyTasks[name]:
 		return common.CategoryProjectData
+	case name == "syncHotspotMetadata":
+		return common.CategoryHotspotSync
 	case migrateIssueSyncTasks[name]:
 		return common.CategoryIssueSync
 	case migrateProjectConfigTasks[name]:
