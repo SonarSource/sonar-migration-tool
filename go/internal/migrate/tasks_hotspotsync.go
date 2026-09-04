@@ -560,7 +560,7 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 
 	// 2. Wait for Cloud indexing — proves the CE task is done. Counted over
 	// issues, not hotspots: the imported findings are issues on the target.
-	_ = waitForCloudIndexing(ctx, func() (int, error) {
+	_ = waitForCloudIndexing(ctx, e.Logger, "syncHotspotMetadata", input.CloudKey, func() (int, error) {
 		params := url.Values{}
 		params.Set("componentKeys", input.CloudKey)
 		params.Set("organization", input.OrgKey)
