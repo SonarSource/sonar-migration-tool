@@ -331,7 +331,7 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 	}
 	executor.Progress.LogFinal()
 
-	fmt.Printf("%s v%s - Migration Complete: %s\n", version.ToolName, version.Version, runIDOut)
+	fmt.Printf("%s %s - Migration Complete: %s\n", version.ToolName, version.Version, runIDOut)
 	return runIDOut, nil
 }
 
