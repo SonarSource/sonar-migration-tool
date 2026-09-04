@@ -314,7 +314,7 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 
 	// Overall progress/ETA logging (#520) — every 10s for the duration of
 	// the run, stopped once phases finish (success or error).
-	executor.Progress = common.NewTracker(logger, phases, CategorizeTask, common.DefaultCategoryWeights)
+	executor.Progress = common.NewTracker(logger, phases, CategorizeTask, common.DefaultMigrateCategoryWeights)
 	executor.Progress.OnUpdate(cfg.ProgressCallback)
 	executor.Progress.Start(ctx, 10*time.Second)
 	defer executor.Progress.Stop()

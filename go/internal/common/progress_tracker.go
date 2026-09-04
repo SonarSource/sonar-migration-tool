@@ -23,6 +23,7 @@ const (
 	CategoryProjectConfig
 	CategoryProjectData
 	CategoryIssueSync
+	CategoryHotspotSync
 )
 
 // CategoryWeights are the percentage points (summing to 100) assigned to
@@ -37,14 +38,32 @@ type CategoryWeights struct {
 	ProjectConfig float64
 	ProjectData   float64
 	IssueSync     float64
+	HotspotSync   float64
 }
 
-// DefaultCategoryWeights is the split mandated by issue #520.
+// DefaultCategoryWeights is the split mandated by issue #520. Used as-is by
+// extract, which has no separate trailing hotspot-sync task (HotspotSync
+// stays 0 and CategoryHotspotSync is never emitted by extract's
+// CategorizeTask, so it simply drops out of Tracker.snapshot's denominator).
 var DefaultCategoryWeights = CategoryWeights{
 	General:       5,
 	ProjectConfig: 20,
 	ProjectData:   25,
 	IssueSync:     50,
+}
+
+// DefaultMigrateCategoryWeights is the migrate/transfer-only split mandated
+// by issue #526: syncHotspotMetadata and syncIssueMetadata are separate,
+// sequential trailing tasks, so hotspot sync gets its own 5-point weight
+// carved out of what was previously a single 50-point IssueSync bucket —
+// otherwise the overall percentage sticks at ~100% (and ETA collapses to
+// near-zero) once issue sync finishes while hotspot sync is still running.
+var DefaultMigrateCategoryWeights = CategoryWeights{
+	General:       5,
+	ProjectConfig: 20,
+	ProjectData:   25,
+	IssueSync:     45,
+	HotspotSync:   5,
 }
 
 func (w CategoryWeights) forCategory(cat TaskCategory) float64 {
@@ -55,6 +74,8 @@ func (w CategoryWeights) forCategory(cat TaskCategory) float64 {
 		return w.ProjectData
 	case CategoryIssueSync:
 		return w.IssueSync
+	case CategoryHotspotSync:
+		return w.HotspotSync
 	default:
 		return w.General
 	}

@@ -16,14 +16,16 @@ import (
 )
 
 // categorizeByPrefix buckets synthetic test task names by a "general-",
-// "config-", "data-", or "sync-" prefix — lets each example below spell
-// out task names that read like the issue's own bullet points.
+// "config-", "data-", "sync-", or "hotspot-" prefix — lets each example
+// below spell out task names that read like the issue's own bullet points.
 func categorizeByPrefix(name string) TaskCategory {
 	switch {
 	case len(name) >= 7 && name[:7] == "config-":
 		return CategoryProjectConfig
 	case len(name) >= 5 && name[:5] == "data-":
 		return CategoryProjectData
+	case len(name) >= 8 && name[:8] == "hotspot-":
+		return CategoryHotspotSync
 	case len(name) >= 5 && name[:5] == "sync-":
 		return CategoryIssueSync
 	default:
@@ -132,6 +134,60 @@ func TestTrackerSnapshotWorkedExamples(t *testing.T) {
 		percent, _, _ := tr.snapshot()
 		if !almostEqual(percent, 24.4, 0.1) {
 			t.Errorf("percent = %v, want ~24.4", percent)
+		}
+	})
+}
+
+// TestTrackerSnapshotHotspotSyncWeight pins the #526 fix: with
+// DefaultMigrateCategoryWeights, issue sync finishing no longer reports the
+// overall run as ~100% while hotspot sync (its own 5-point bucket) is still
+// in progress or hasn't started — previously the two shared one IssueSync
+// bucket, so completing syncIssueMetadata alone reported that whole 50%
+// share as done.
+func TestTrackerSnapshotHotspotSyncWeight(t *testing.T) {
+	t.Run("issue sync done, hotspot sync not started", func(t *testing.T) {
+		plan := [][]string{{"general-1", "config-1", "data-1", "sync-1", "hotspot-1"}}
+		tr := NewTracker(testLogger(), plan, categorizeByPrefix, DefaultMigrateCategoryWeights)
+		tr.MarkTaskComplete("general-1")
+		tr.MarkTaskComplete("config-1")
+		tr.MarkTaskComplete("data-1")
+		tr.MarkTaskComplete("sync-1")
+		// hotspot-1 stays unregistered — not started.
+
+		percent, _, _ := tr.snapshot()
+		if !almostEqual(percent, 95, 0.1) {
+			t.Errorf("percent = %v, want ~95 (100 - the unstarted 5%% hotspot-sync weight)", percent)
+		}
+	})
+
+	t.Run("issue sync done, hotspot sync in progress", func(t *testing.T) {
+		plan := [][]string{{"general-1", "config-1", "data-1", "sync-1", "hotspot-1"}}
+		tr := NewTracker(testLogger(), plan, categorizeByPrefix, DefaultMigrateCategoryWeights)
+		tr.MarkTaskComplete("general-1")
+		tr.MarkTaskComplete("config-1")
+		tr.MarkTaskComplete("data-1")
+		tr.MarkTaskComplete("sync-1")
+		registerPartial(tr, "hotspot-1", 50, 200)
+
+		percent, _, _ := tr.snapshot()
+		if !almostEqual(percent, 96.25, 0.1) {
+			t.Errorf("percent = %v, want ~96.25", percent)
+		}
+		if percent >= 100 {
+			t.Errorf("percent = %v, want < 100 while hotspot sync is still in progress", percent)
+		}
+	})
+
+	t.Run("issue sync and hotspot sync both done", func(t *testing.T) {
+		plan := [][]string{{"general-1", "config-1", "data-1", "sync-1", "hotspot-1"}}
+		tr := NewTracker(testLogger(), plan, categorizeByPrefix, DefaultMigrateCategoryWeights)
+		for _, n := range []string{"general-1", "config-1", "data-1", "sync-1", "hotspot-1"} {
+			tr.MarkTaskComplete(n)
+		}
+
+		percent, _, _ := tr.snapshot()
+		if !almostEqual(percent, 100, 0.01) {
+			t.Errorf("percent = %v, want 100", percent)
 		}
 	})
 }

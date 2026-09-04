@@ -15,9 +15,9 @@ func TestCategorizeTask(t *testing.T) {
 		task string
 		want common.TaskCategory
 	}{
-		// Project data / issue sync (#520).
+		// Project data / issue sync (#520); hotspot sync split out (#526).
 		{"importProjectData", common.CategoryProjectData},
-		{"syncHotspotMetadata", common.CategoryIssueSync},
+		{"syncHotspotMetadata", common.CategoryHotspotSync},
 		{"syncIssueMetadata", common.CategoryIssueSync},
 		// Project config: per-project provisioning/configuration.
 		{"createProjects", common.CategoryProjectConfig},
@@ -50,20 +50,23 @@ func TestCategorizeTask(t *testing.T) {
 }
 
 // migrateIssueSyncTasks (planner.go's gating map for --skip_issue_sync)
-// must map to CategoryIssueSync here, and migrateProjectDataTasks (the
-// wider --skip_project_data_migration gate) must map to ProjectData or
-// IssueSync — never General or ProjectConfig — since #520's weighting
-// relies on these categories dropping to 0 together with the gates.
+// must map to CategoryIssueSync or CategoryHotspotSync here (#526 splits
+// syncHotspotMetadata out of the IssueSync bucket), and
+// migrateProjectDataTasks (the wider --skip_project_data_migration gate)
+// must map to ProjectData, IssueSync, or HotspotSync — never General or
+// ProjectConfig — since #520's weighting relies on these categories
+// dropping to 0 together with the gates.
 func TestGatingMapsFullyCategorized(t *testing.T) {
 	for name := range migrateIssueSyncTasks {
-		if cat := CategorizeTask(name); cat != common.CategoryIssueSync {
-			t.Errorf("%s: gated by --skip_issue_sync but categorized as %v, want IssueSync", name, cat)
+		cat := CategorizeTask(name)
+		if cat != common.CategoryIssueSync && cat != common.CategoryHotspotSync {
+			t.Errorf("%s: gated by --skip_issue_sync but categorized as %v, want IssueSync or HotspotSync", name, cat)
 		}
 	}
 	for name := range migrateProjectDataTasks {
 		cat := CategorizeTask(name)
-		if cat != common.CategoryProjectData && cat != common.CategoryIssueSync {
-			t.Errorf("%s: gated by --skip_project_data_migration but categorized as %v, want ProjectData or IssueSync", name, cat)
+		if cat != common.CategoryProjectData && cat != common.CategoryIssueSync && cat != common.CategoryHotspotSync {
+			t.Errorf("%s: gated by --skip_project_data_migration but categorized as %v, want ProjectData, IssueSync, or HotspotSync", name, cat)
 		}
 	}
 }
