@@ -273,34 +273,56 @@ func snapshotLineCount(measures []scanreport.MeasureInput) int32 {
 // itself 0) since the CE only cares about the summed totals, not which line
 // carried which condition.
 func buildSyntheticLineCoverage(measures []scanreport.MeasureInput) []*pb.LineCoverage {
-	get := func(key string) int32 {
-		for _, m := range measures {
-			if m.MetricKey == key {
-				if v, err := strconv.ParseInt(m.Value, 10, 32); err == nil && v > 0 {
-					return int32(v)
-				}
-			}
-		}
-		return 0
-	}
-	linesToCover := get("lines_to_cover")
-	uncoveredLines := get("uncovered_lines")
-	conditionsToCover := get("conditions_to_cover")
-	uncoveredConditions := get("uncovered_conditions")
+	linesToCover := measureIntValue(measures, "lines_to_cover")
+	uncoveredLines := clamp(measureIntValue(measures, "uncovered_lines"), linesToCover)
+	conditionsToCover := measureIntValue(measures, "conditions_to_cover")
+	uncoveredConditions := clamp(measureIntValue(measures, "uncovered_conditions"), conditionsToCover)
 	if linesToCover == 0 && conditionsToCover == 0 {
 		return nil
-	}
-	if uncoveredLines > linesToCover {
-		uncoveredLines = linesToCover
-	}
-	if uncoveredConditions > conditionsToCover {
-		uncoveredConditions = conditionsToCover
 	}
 
 	n := linesToCover
 	if n == 0 {
 		n = 1 // no coverable lines, but there's condition data that still needs a line to live on
 	}
+	out := buildCoverageLines(n, linesToCover, uncoveredLines)
+	if conditionsToCover > 0 {
+		out[0].Conditions = conditionsToCover
+		out[0].HasCoveredConditions = &pb.LineCoverage_CoveredConditions{CoveredConditions: conditionsToCover - uncoveredConditions}
+	}
+	return out
+}
+
+// measureIntValue returns the positive integer value of the first measure
+// under key, or 0 if it's absent, unparseable, or not positive.
+func measureIntValue(measures []scanreport.MeasureInput, key string) int32 {
+	for _, m := range measures {
+		if m.MetricKey != key {
+			continue
+		}
+		if v, err := strconv.ParseInt(m.Value, 10, 32); err == nil && v > 0 {
+			return int32(v)
+		}
+	}
+	return 0
+}
+
+// clamp caps v at max, guarding against a source recording more "uncovered"
+// than "to cover" for a metric pair (shouldn't happen, but a report that
+// claims more uncovered lines/conditions than exist to cover is invalid).
+func clamp(v, max int32) int32 {
+	if v > max {
+		return max
+	}
+	return v
+}
+
+// buildCoverageLines builds n sequential LineCoverage records, lines 1..n:
+// the first linesToCover of them carry a Hits value (the first
+// uncoveredLines of those false, the rest true), and any remainder (present
+// only when linesToCover is 0 but the caller still needs a line to attach
+// condition data to) carries no Hits value at all.
+func buildCoverageLines(n, linesToCover, uncoveredLines int32) []*pb.LineCoverage {
 	out := make([]*pb.LineCoverage, n)
 	for i := int32(0); i < n; i++ {
 		lc := &pb.LineCoverage{Line: i + 1}
@@ -308,10 +330,6 @@ func buildSyntheticLineCoverage(measures []scanreport.MeasureInput) []*pb.LineCo
 			lc.HasHits = &pb.LineCoverage_Hits{Hits: i >= uncoveredLines}
 		}
 		out[i] = lc
-	}
-	if conditionsToCover > 0 {
-		out[0].Conditions = conditionsToCover
-		out[0].HasCoveredConditions = &pb.LineCoverage_CoveredConditions{CoveredConditions: conditionsToCover - uncoveredConditions}
 	}
 	return out
 }
