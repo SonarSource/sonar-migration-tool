@@ -164,7 +164,7 @@ func RunReset(ctx context.Context, cfg ResetConfig) error {
 		}
 	}
 
-	fmt.Printf("%s v%s - Reset Complete: %s\n", version.ToolName, version.Version, runID)
+	fmt.Printf("%s %s - Reset Complete: %s\n", version.ToolName, version.Version, runID)
 	return nil
 }
 

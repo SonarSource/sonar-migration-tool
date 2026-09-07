@@ -174,7 +174,7 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 	executor.Progress.Stop() // silence the ticker before the closing line
 	executor.Progress.LogFinal()
 
-	fmt.Printf("%s v%s - Extract Complete: %s\n", smtver.ToolName, smtver.Version, extractID)
+	fmt.Printf("%s %s - Extract Complete: %s\n", smtver.ToolName, smtver.Version, extractID)
 	return executor.SkippedProjectKeys(), nil
 }
 
