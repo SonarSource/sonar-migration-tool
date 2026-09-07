@@ -748,7 +748,13 @@ func histWantMetadataTargetIdentity(t *testing.T, md *pb.Metadata) {
 // off. The placeholder must be named and typed from the resolved language:
 // SonarQube Cloud derives a file's language from its extension, and a mismatch
 // against the declared profile is a hard CE rejection.
-func histWantPlaceholderComponent(t *testing.T, fc *pb.Component) {
+//
+// wantLines pins snapshotLineCount's derivation: the placeholder must declare
+// at least as many lines as this point's own "lines"/"ncloc" measure, not a
+// fixed 1 — a file with fewer lines than its own lines_to_cover/duplicated_lines
+// makes the CE silently drop the coverage/duplication measure it can't
+// reconcile (found live-verifying #557).
+func histWantPlaceholderComponent(t *testing.T, fc *pb.Component, wantLines int32) {
 	t.Helper()
 	if fc.GetProjectRelativePath() != histFileName {
 		t.Errorf("placeholder path = %q, want %q", fc.GetProjectRelativePath(), histFileName)
@@ -756,8 +762,8 @@ func histWantPlaceholderComponent(t *testing.T, fc *pb.Component) {
 	if fc.GetLanguage() != "js" {
 		t.Errorf("placeholder language = %q, want %q", fc.GetLanguage(), "js")
 	}
-	if fc.GetLines() != 1 {
-		t.Errorf("placeholder lines = %d, want 1", fc.GetLines())
+	if fc.GetLines() != wantLines {
+		t.Errorf("placeholder lines = %d, want %d", fc.GetLines(), wantLines)
 	}
 }
 
@@ -866,7 +872,7 @@ func TestSubmitHistoricalSnapshotBackdatedReport(t *testing.T) {
 	histWantMetadataTargetIdentity(t, md)
 
 	fc := histFileComponent(t, zipBytes)
-	histWantPlaceholderComponent(t, fc)
+	histWantPlaceholderComponent(t, fc, 500)
 	histWantPlaceholderMeasures(t, zipBytes, fc, 500)
 	histWantBackdatedChangesets(t, zipBytes, fc)
 	histWantNoActiveRules(t, zipBytes)

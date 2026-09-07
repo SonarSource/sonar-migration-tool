@@ -22,10 +22,17 @@ type ReportData struct {
 	Issues         map[int32][]*pb.Issue         // ref -> issues
 	ExternalIssues map[int32][]*pb.ExternalIssue // ref -> external issues
 	Measures       map[int32][]*pb.Measure       // ref -> measures
-	Changesets     map[int32]*pb.Changesets      // ref -> changesets
-	ActiveRules    []*pb.ActiveRule
-	AdHocRules     []*pb.AdHocRule
-	Sources        map[int32]string // ref -> source code text
+	// Coverage maps a component ref to its per-line coverage records,
+	// written as coverages-<ref>.pb. The Compute Engine derives every
+	// coverage-domain aggregate (lines_to_cover, uncovered_lines,
+	// conditions_to_cover, uncovered_conditions, and `coverage` itself)
+	// exclusively from this data — never from a pushed Measure under those
+	// same metric keys, confirmed live during #557.
+	Coverage    map[int32][]*pb.LineCoverage
+	Changesets  map[int32]*pb.Changesets // ref -> changesets
+	ActiveRules []*pb.ActiveRule
+	AdHocRules  []*pb.AdHocRule
+	Sources     map[int32]string // ref -> source code text
 	// SyntaxHighlighting maps a component ref to its ordered syntax-highlighting
 	// rules. Written as syntax-highlightings-<ref>.pb so the migrated Code view
 	// renders with colors instead of raw text (issue #420).
@@ -53,6 +60,9 @@ func PackageReport(data *ReportData) ([]byte, error) {
 		return nil, err
 	}
 	if err := addMeasures(zw, data.Measures); err != nil {
+		return nil, err
+	}
+	if err := addCoverage(zw, data.Coverage); err != nil {
 		return nil, err
 	}
 	if err := addChangesets(zw, data.Changesets); err != nil {
@@ -144,6 +154,29 @@ func addMeasures(zw *zip.Writer, measures map[int32][]*pb.Measure) error {
 			}
 		}
 		if err := addBytes(zw, fmt.Sprintf("measures-%d.pb", ref), buf.Bytes()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// addCoverage writes one coverages-<ref>.pb per component, each a
+// length-delimited stream of LineCoverage messages — the real scanner's
+// FileStructure.COVERAGES naming ("coverages-", Domain.PB), confirmed
+// against the SonarSource/sonar-scanner-engine source. Refs with no records
+// are skipped, matching addSyntaxHighlighting's treatment of an empty list.
+func addCoverage(zw *zip.Writer, coverage map[int32][]*pb.LineCoverage) error {
+	for ref, lines := range coverage {
+		if len(lines) == 0 {
+			continue
+		}
+		var buf bytes.Buffer
+		for _, lc := range lines {
+			if err := writeDelimited(&buf, lc); err != nil {
+				return err
+			}
+		}
+		if err := addBytes(zw, fmt.Sprintf("coverages-%d.pb", ref), buf.Bytes()); err != nil {
 			return err
 		}
 	}

@@ -276,13 +276,27 @@ A failure to read the target organization's quality profiles disables the
 detection entirely rather than treating every language as unsupported, so a
 transient API error can never drop a project's files.
 
+### Current-snapshot backdating
+<!-- updated: 2026-09-08_16:00:00 -->
+
+Since #557, every branch's regular current-snapshot import stamps its
+analysis with the source branch's real last-analysis date — read from
+`api/project_branches/list`'s `analysisDate` field — instead of the migration
+run's own wall-clock time. This is **unconditional**: it applies to every
+branch whether or not `--migrate_history` is set, unlike the historical
+points described below. Only the analysis's own stamped date changes; other
+fallback dates used elsewhere in the import are untouched.
+
 ### Project history migration (`--migrate_history`) — PoC
-<!-- updated: 2026-09-02_22:00:00 -->
+<!-- updated: 2026-09-08_01:30:00 -->
 
 **This is a proof-of-concept.** By default, `transfer` (and `migrate`) submit a
-single scanner report per branch, dated "now" — the target's analysis history
-starts the day it was migrated, even if the source project has years of prior
-analyses. Issue #554 asks for a way to carry some of that history over.
+single scanner report per branch. Since #557, that report is backdated to the
+source branch's real last-analysis date instead of "now" (see
+[Current-snapshot backdating](#current-snapshot-backdating) above) — but
+without `--migrate_history`, it is still only one point: the target's analysis
+history starts there, even if the source project has years of prior analyses.
+Issue #554 asks for a way to carry some of that history over.
 
 `--migrate_history` opts into replaying a bounded set of the source project's
 **main branch** historical analyses as separate, backdated entries on the
@@ -290,15 +304,25 @@ target, submitted before the regular current-snapshot import so each lands as
 its own point in SonarQube Cloud's analysis history (`/api/project_analyses/search`),
 not just a re-dated copy of the latest one.
 
-Each historical entry carries only the project's own measures (`ncloc`,
-`bugs`, `vulnerabilities`, `code_smells`, `coverage`,
-`duplicated_lines_density`, `complexity`, `cognitive_complexity`,
-`security_hotspots`, `comment_lines`, `classes`, `functions`) as recorded by
-the source server at that analysis — no files, no issues. Per the issue's own
-design, files/issues are only meaningful for the branch's *last* analysis
-(SonarQube only keeps issues attached to the most recent analysis of a
-branch), which is exactly what the existing, unchanged current-snapshot import
-already migrates in full.
+Each historical entry carries the project's own measures as recorded by the
+source server at that analysis: lines of code, complexity, comment density,
+duplication and — since #557 — `coverage` and `duplicated_lines_density`
+themselves, not just their raw inputs. The Compute Engine only ever computes
+those two from a component's real per-line coverage data, never from a
+pushed aggregate measure (confirmed live: pushing `lines_to_cover` etc. as
+plain measures, #557's first attempt, was silently ignored), so each
+historical point's placeholder file carries synthetic per-line coverage
+records — arbitrary which lines are marked covered, since the file is never
+viewed, but built so the totals match the source's real figures exactly.
+
+What still can't come across is anything issue-derived: `bugs`,
+`vulnerabilities`, ratings, and tech-debt figures. That's a **hard SonarQube
+API limitation, not a scope choice**: there is no API that returns "what
+issues existed as of a past analysis," so those measures cannot be
+reconstructed for a historical point without fabricating fake issues, which
+this PoC does not do. SonarQube also only keeps issues attached to a
+branch's *most recent* analysis anyway, which is exactly what the existing,
+unchanged current-snapshot import already migrates in full.
 
 To bound how much history is walked, two flags cap the source's full analysis
 list, oldest to newest, always dropping the single most recent analysis

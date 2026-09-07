@@ -263,14 +263,15 @@ func importAndRecordBranch(ctx context.Context, e *Executor, bctx branchImportCo
 		referenceBranch = bctx.MainTargetName
 	}
 	result, err := importBranch(ctx, e, importBranchInput{
-		CloudKey:        bctx.CloudKey,
-		OrgKey:          bctx.OrgKey,
-		ServerURL:       bctx.ServerURL,
-		ServerKey:       bctx.ServerKey,
-		Branch:          branch.Name,
-		TargetBranch:    targetBranch,
-		ReferenceBranch: referenceBranch,
-		IsMain:          branch.IsMain,
+		CloudKey:         bctx.CloudKey,
+		OrgKey:           bctx.OrgKey,
+		ServerURL:        bctx.ServerURL,
+		ServerKey:        bctx.ServerKey,
+		Branch:           branch.Name,
+		TargetBranch:     targetBranch,
+		ReferenceBranch:  referenceBranch,
+		IsMain:           branch.IsMain,
+		LastAnalysisDate: branch.LastAnalysisDate,
 	})
 	if err != nil {
 		logAPIWarn(e.Logger, "project data import failed", err, "project", bctx.CloudKey, "branch", branch.Name)
@@ -305,6 +306,11 @@ type importBranchInput struct {
 	TargetBranch    string // SC branch name — used in protobuf metadata and CE submit
 	ReferenceBranch string // reference/merge branch (metadata field 11); empty for main
 	IsMain          bool   // main/default branch — suppresses branch characteristics on submit
+	// LastAnalysisDate backdates the current-snapshot report to the source
+	// branch's real last analysis date instead of the migration run's own
+	// timestamp. Zero when the source branch was never analyzed, in which
+	// case buildBranchReport falls back to "now".
+	LastAnalysisDate time.Time
 }
 
 type importResult struct {
@@ -605,6 +611,20 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	issues = append(issues, hotspotIssues...)
 
 	now := time.Now()
+	// Backdate the analysis itself to the source branch's real last-analysis
+	// date instead of stamping it with the migration run's own timestamp
+	// (review feedback on #557/#554: the current snapshot showed "today" in
+	// the target's Activity even though every other timestamp on the branch
+	// was historical). Unconditional — unlike history replay this is not
+	// gated behind --migrate_history. Falls back to "now" when the source
+	// branch was never analyzed (LastAnalysisDate zero). Everything else
+	// below (changeset fallback dates, active-rule createdAt/updatedAt)
+	// intentionally keeps using the real wall-clock "now" — only the
+	// analysis's own date changes.
+	analysisDate := now
+	if !input.LastAnalysisDate.IsZero() {
+		analysisDate = input.LastAnalysisDate
+	}
 
 	root, fileComps, cr := scanreport.BuildComponents(input.CloudKey, components)
 	pbSources := buildProtoSources(sources, cr)
@@ -652,7 +672,7 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 
 	reportData := &scanreport.ReportData{
 		Metadata: scanreport.BuildMetadata(scanreport.MetadataInput{
-			AnalysisDate:        now,
+			AnalysisDate:        analysisDate,
 			OrgKey:              input.OrgKey,
 			ProjectKey:          input.CloudKey,
 			BranchName:          targetBranch,
@@ -784,6 +804,11 @@ func fixComponentLineCounts(components []scanreport.ComponentInput, sourceLinesB
 type branchInfo struct {
 	Name   string
 	IsMain bool
+	// LastAnalysisDate is the source branch's real last-analysis date (the
+	// api/project_branches/list "analysisDate" field), used to backdate the
+	// current-snapshot import instead of stamping it with the migration
+	// run's own timestamp. Zero when the source branch was never analyzed.
+	LastAnalysisDate time.Time
 }
 
 // collectBranchInfo reads extracted branch data for a project, returning
@@ -800,7 +825,8 @@ func collectBranchInfo(e *Executor, serverURL, serverKey string) []branchInfo {
 		name := extractField(item.Data, "name")
 		if name != "" {
 			isMain := common.ExtractBool(item.Data, "isMain")
-			branches = append(branches, branchInfo{Name: name, IsMain: isMain})
+			lastAnalysisDate := parseISODate(extractField(item.Data, "analysisDate"))
+			branches = append(branches, branchInfo{Name: name, IsMain: isMain, LastAnalysisDate: lastAnalysisDate})
 		}
 	}
 	return branches

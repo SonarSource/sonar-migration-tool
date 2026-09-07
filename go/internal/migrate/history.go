@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/scanreport"
@@ -107,11 +108,14 @@ func extractHistoryMeasures(data json.RawMessage, cloudProjectKey string) []scan
 //
 // Must run BEFORE the regular current-snapshot import for this branch: the
 // Compute Engine requires each new analysis to be dated after the branch's
-// most recent one, and the regular import always stamps its own submission
-// with "now" — later than any historical point. Best-effort: a failure here
-// is logged and does NOT fail or block the regular import that follows it,
-// so --migrate_history can never turn a transfer that used to succeed into
-// one that fails.
+// most recent one. The regular import now backdates its own submission to
+// the source's true last-analysis date (#557 review feedback) rather than
+// "now" — still guaranteed later than every historical point here, because
+// selectBoundedHistoryPoints drops that same most-recent analysis before
+// building this candidate list. Best-effort: a failure here is logged and
+// does NOT fail or block the regular import that follows it, so
+// --migrate_history can never turn a transfer that used to succeed into one
+// that fails.
 func migrateBranchHistory(ctx context.Context, e *Executor, bctx branchImportContext, branch branchInfo, targetBranch string) {
 	if !e.MigrateHistory || !branch.IsMain {
 		return
@@ -226,6 +230,92 @@ func retargetMeasures(measures []scanreport.MeasureInput, newComponent string) [
 	return out
 }
 
+// snapshotLineCount picks the placeholder file's declared Lines: the largest
+// of "lines" (total lines), "ncloc" and "lines_to_cover" seen in this point's
+// own measures, or 1 if none of them carry a positive value. Taking the max
+// across all three (rather than just preferring "lines" when present) keeps
+// the invariant buildSyntheticLineCoverage depends on — Lines must be >= the
+// highest line number any LineCoverage record names — true even on a point
+// whose "lines" measure is missing or, in principle, smaller than
+// lines_to_cover.
+func snapshotLineCount(measures []scanreport.MeasureInput) int32 {
+	var best int32
+	for _, m := range measures {
+		switch m.MetricKey {
+		case "lines", "ncloc", "lines_to_cover":
+			if v, err := strconv.ParseInt(m.Value, 10, 32); err == nil && int32(v) > best {
+				best = int32(v)
+			}
+		}
+	}
+	if best > 0 {
+		return best
+	}
+	return 1
+}
+
+// buildSyntheticLineCoverage synthesizes per-line LineCoverage records that
+// reproduce this point's lines_to_cover/uncovered_lines/conditions_to_cover/
+// uncovered_conditions as an aggregate, live-verified necessary during #557:
+// pushing those four as plain project-level Measures (fix 1's first attempt)
+// is silently inert — the Compute Engine computes every coverage-domain
+// figure (including `coverage` itself) exclusively from each file's real
+// per-line coverage data, never from a pushed aggregate, no matter how that
+// aggregate is framed. `statements`, pushed through the identical code path
+// in the same report, persists; `lines_to_cover` does not — that asymmetry
+// is what exposed this.
+//
+// The placeholder file is never meant to be viewed, so which specific lines
+// are marked covered/uncovered is arbitrary; only the totals matter. Lines
+// 1..linesToCover each get a Hits record (the first uncoveredLines of them
+// false, the rest true); if there is any condition coverage to report at
+// all, it is attributed entirely to line 1 (creating one if linesToCover is
+// itself 0) since the CE only cares about the summed totals, not which line
+// carried which condition.
+func buildSyntheticLineCoverage(measures []scanreport.MeasureInput) []*pb.LineCoverage {
+	get := func(key string) int32 {
+		for _, m := range measures {
+			if m.MetricKey == key {
+				if v, err := strconv.ParseInt(m.Value, 10, 32); err == nil && v > 0 {
+					return int32(v)
+				}
+			}
+		}
+		return 0
+	}
+	linesToCover := get("lines_to_cover")
+	uncoveredLines := get("uncovered_lines")
+	conditionsToCover := get("conditions_to_cover")
+	uncoveredConditions := get("uncovered_conditions")
+	if linesToCover == 0 && conditionsToCover == 0 {
+		return nil
+	}
+	if uncoveredLines > linesToCover {
+		uncoveredLines = linesToCover
+	}
+	if uncoveredConditions > conditionsToCover {
+		uncoveredConditions = conditionsToCover
+	}
+
+	n := linesToCover
+	if n == 0 {
+		n = 1 // no coverable lines, but there's condition data that still needs a line to live on
+	}
+	out := make([]*pb.LineCoverage, n)
+	for i := int32(0); i < n; i++ {
+		lc := &pb.LineCoverage{Line: i + 1}
+		if i < linesToCover {
+			lc.HasHits = &pb.LineCoverage_Hits{Hits: i >= uncoveredLines}
+		}
+		out[i] = lc
+	}
+	if conditionsToCover > 0 {
+		out[0].Conditions = conditionsToCover
+		out[0].HasCoveredConditions = &pb.LineCoverage_CoveredConditions{CoveredConditions: conditionsToCover - uncoveredConditions}
+	}
+	return out
+}
+
 // submitHistoricalSnapshot builds and submits one minimal, backdated scanner
 // report for a single historical point: just the project root component and
 // its measures — no files, no issues, no quality profiles (there are no
@@ -243,8 +333,17 @@ func submitHistoricalSnapshot(ctx context.Context, e *Executor, bctx branchImpor
 	// the report"), its content is never meant to be seen.
 	placeholderName := "__history_snapshot__." + placeholder.Ext
 	placeholderKey := bctx.CloudKey + ":" + placeholderName
+	// The placeholder's declared Lines must cover the largest coverage/size
+	// input this point pushes (lines_to_cover, statements, etc.): a file
+	// cannot have more lines-to-cover than it has lines. A hardcoded Lines: 1
+	// was live-verified to make the CE silently drop the coverage measure
+	// entirely — but raising Lines alone was NOT sufficient to make coverage
+	// appear: it took real per-line data (buildSyntheticLineCoverage below)
+	// for the CE to compute it at all. Kept as a guard regardless, since an
+	// undersized Lines is still a real (if secondary) way for a file's
+	// coverage data to be rejected as inconsistent.
 	root, fileComps, cr := scanreport.BuildComponents(bctx.CloudKey, []scanreport.ComponentInput{
-		{Key: placeholderKey, Name: placeholderName, Path: placeholderName, Language: placeholder.Language, Lines: 1},
+		{Key: placeholderKey, Name: placeholderName, Path: placeholderName, Language: placeholder.Language, Lines: snapshotLineCount(snap.Measures)},
 	})
 	if len(fileComps) == 0 {
 		return fmt.Errorf("building historical report: placeholder component was not created")
@@ -267,6 +366,7 @@ func submitHistoricalSnapshot(ctx context.Context, e *Executor, bctx branchImpor
 		RootComponent:  root,
 		FileComponents: fileComps,
 		Measures:       scanreport.BuildMeasures(retargetMeasures(snap.Measures, placeholderKey), cr),
+		Coverage:       map[int32][]*pb.LineCoverage{fileRef: buildSyntheticLineCoverage(snap.Measures)},
 		Sources:        map[int32]string{fileRef: ""},
 		Changesets: map[int32]*pb.Changesets{
 			fileRef: scanreport.BuildDefaultChangesets(fileRef, 1, snap.Date),

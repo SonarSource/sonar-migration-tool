@@ -18,9 +18,35 @@ import (
 // history points, just the project's measures — so this mirrors a typical
 // SonarQube "overview" dashboard rather than the full per-file metric set
 // getProjectComponentTree pulls for the live snapshot.
-const historyMetricKeys = "ncloc,bugs,vulnerabilities,code_smells,coverage," +
-	"duplicated_lines_density,complexity,cognitive_complexity,security_hotspots," +
-	"comment_lines,classes,functions"
+//
+// Deliberately excludes bugs, vulnerabilities, code_smells, security_hotspots,
+// violations, and every rating/debt metric (reliability_rating,
+// security_rating, sqale_rating, security_review_rating, sqale_index,
+// sqale_debt_ratio): the SonarQube Cloud Compute Engine computes every one of
+// these FROM the analysis's actual Issues (open bug/vulnerability/code-smell
+// counts, their severities, their remediation effort) and unconditionally
+// overwrites whatever raw value a report pushes under those metric keys — so
+// submitting them here is not just missing a nice-to-have, it is inert. A
+// synthetic historical snapshot carries no issues (per the PoC design, and
+// there is no SonarQube API that returns "what issues existed as of a past
+// analysis" to synthesize them from even if it didn't), so those metrics have
+// nothing to compute from and always land as zero regardless of what this
+// tool sends. This is what previously made LOC look like the only metric
+// that "worked": ncloc has no formula, so it was the one raw value the CE
+// never recomputed away.
+//
+// What CAN be made to show real history without issues: `coverage` and
+// `duplicated_lines_density` are themselves formulas over OTHER raw metrics
+// (coverage over lines_to_cover/uncovered_lines/conditions_to_cover/
+// uncovered_conditions; duplicated_lines_density over duplicated_lines/lines)
+// — pushing those raw inputs instead of the pre-computed percentage lets the
+// CE compute the correct percentage itself, the same way it already does for
+// ncloc/complexity. Hence the set below: every metric that is either raw
+// (sensor-summed, stored as-is) or a raw input some other formula depends on.
+const historyMetricKeys = "ncloc,lines,statements,files,classes,functions," +
+	"comment_lines,complexity,cognitive_complexity," +
+	"duplicated_lines,duplicated_blocks,duplicated_files," +
+	"lines_to_cover,uncovered_lines,conditions_to_cover,uncovered_conditions"
 
 // historyPoint is one candidate historical analysis: its date and the
 // project version recorded at that analysis.
@@ -141,11 +167,11 @@ func listHistoricalAnalyses(ctx context.Context, e *Executor, projectKey, branch
 //
 //  1. Drop the single most recent analysis. It is already covered by the
 //     existing "current snapshot" migration (importProjectData), which
-//     carries the real, full-content report for the project's latest
-//     state — just stamped with the migration run's own timestamp rather
-//     than the source's true last-analysis date. Re-adding it here as a
-//     second, measures-only synthetic entry for the same instant would be
-//     a redundant near-duplicate immediately next to the real one.
+//     carries the real, full-content report for the project's latest state
+//     and (#557 review feedback) is itself now backdated to that same
+//     source true last-analysis date. Re-adding it here as a second,
+//     measures-only synthetic entry for the same instant would be a
+//     redundant near-duplicate immediately next to the real one.
 //  2. Enforce minIntervalDays between consecutive selected points, walking
 //     oldest to newest (greedy).
 //  3. If more than maxPoints points remain, evenly subsample down to

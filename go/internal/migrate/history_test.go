@@ -74,6 +74,127 @@ func TestExtractHistoryMeasuresNoMeasuresField(t *testing.T) {
 	}
 }
 
+// TestSnapshotLineCount pins the placeholder file's declared size: it must
+// cover the largest size input this point carries (lines_to_cover,
+// duplicated_lines, etc.), not a fixed 1 — a file that has fewer lines than
+// its own lines_to_cover made the CE silently drop the coverage measure with
+// no error, found live-verifying #557.
+func TestSnapshotLineCount(t *testing.T) {
+	m := func(metric, value string) scanreport.MeasureInput {
+		return scanreport.MeasureInput{MetricKey: metric, Value: value}
+	}
+
+	cases := []struct {
+		name     string
+		measures []scanreport.MeasureInput
+		want     int32
+	}{
+		{"lines present, preferred over ncloc", []scanreport.MeasureInput{m("lines", "1000"), m("ncloc", "500")}, 1000},
+		{"no lines, falls back to ncloc", []scanreport.MeasureInput{m("ncloc", "500")}, 500},
+		{"neither present, falls back to 1", []scanreport.MeasureInput{m("bugs", "3")}, 1},
+		{"no measures at all", nil, 1},
+		{"unparseable lines value ignored, falls back to ncloc", []scanreport.MeasureInput{m("lines", "not-a-number"), m("ncloc", "42")}, 42},
+		{"zero lines ignored, falls back to ncloc", []scanreport.MeasureInput{m("lines", "0"), m("ncloc", "42")}, 42},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := snapshotLineCount(c.measures); got != c.want {
+				t.Errorf("snapshotLineCount(%v) = %d, want %d", c.measures, got, c.want)
+			}
+		})
+	}
+}
+
+// TestBuildSyntheticLineCoverage pins the per-line coverage records that let
+// the Compute Engine actually compute lines_to_cover/uncovered_lines/
+// conditions_to_cover/uncovered_conditions/coverage for a historical point —
+// pushing those four as plain Measures (fix 1's first attempt) turned out to
+// be silently inert, live-verified during #557: the CE derives every
+// coverage-domain aggregate exclusively from real per-line data like this.
+func TestBuildSyntheticLineCoverage(t *testing.T) {
+	m := func(metric, value string) scanreport.MeasureInput {
+		return scanreport.MeasureInput{MetricKey: metric, Value: value}
+	}
+
+	t.Run("no coverage measures at all yields nothing", func(t *testing.T) {
+		got := buildSyntheticLineCoverage([]scanreport.MeasureInput{m("ncloc", "500")})
+		if got != nil {
+			t.Fatalf("got %d records, want nil", len(got))
+		}
+	})
+
+	t.Run("lines and conditions both present", func(t *testing.T) {
+		got := buildSyntheticLineCoverage([]scanreport.MeasureInput{
+			m("lines_to_cover", "10"), m("uncovered_lines", "3"),
+			m("conditions_to_cover", "4"), m("uncovered_conditions", "1"),
+		})
+		if len(got) != 10 {
+			t.Fatalf("got %d records, want 10", len(got))
+		}
+		var covered, uncovered int32
+		for i, lc := range got {
+			if lc.GetLine() != int32(i+1) {
+				t.Errorf("record %d: line = %d, want %d", i, lc.GetLine(), i+1)
+			}
+			if lc.HasHits == nil {
+				t.Fatalf("record %d: expected a Hits value, got none", i)
+			}
+			if lc.GetHits() {
+				covered++
+			} else {
+				uncovered++
+			}
+		}
+		if covered != 7 || uncovered != 3 {
+			t.Errorf("covered=%d uncovered=%d, want 7/3", covered, uncovered)
+		}
+		if got[0].GetConditions() != 4 {
+			t.Errorf("record 0 conditions = %d, want 4", got[0].GetConditions())
+		}
+		if got[0].HasCoveredConditions == nil || got[0].GetCoveredConditions() != 3 {
+			t.Errorf("record 0 covered_conditions = %d, want 3", got[0].GetCoveredConditions())
+		}
+		for i := 1; i < len(got); i++ {
+			if got[i].GetConditions() != 0 || got[i].HasCoveredConditions != nil {
+				t.Errorf("record %d: expected no condition data, got conditions=%d covered=%v", i, got[i].GetConditions(), got[i].HasCoveredConditions)
+			}
+		}
+	})
+
+	t.Run("conditions with no coverable lines still gets one carrier record", func(t *testing.T) {
+		got := buildSyntheticLineCoverage([]scanreport.MeasureInput{
+			m("conditions_to_cover", "5"), m("uncovered_conditions", "2"),
+		})
+		if len(got) != 1 {
+			t.Fatalf("got %d records, want 1", len(got))
+		}
+		if got[0].HasHits != nil {
+			t.Errorf("expected no Hits value on a line with no coverable-lines input, got %v", got[0].GetHits())
+		}
+		if got[0].GetConditions() != 5 || got[0].GetCoveredConditions() != 3 {
+			t.Errorf("conditions=%d covered=%d, want 5/3", got[0].GetConditions(), got[0].GetCoveredConditions())
+		}
+	})
+
+	t.Run("uncovered counts clamp to their cover totals", func(t *testing.T) {
+		got := buildSyntheticLineCoverage([]scanreport.MeasureInput{
+			m("lines_to_cover", "2"), m("uncovered_lines", "9999"),
+			m("conditions_to_cover", "2"), m("uncovered_conditions", "9999"),
+		})
+		if len(got) != 2 {
+			t.Fatalf("got %d records, want 2", len(got))
+		}
+		for i, lc := range got {
+			if lc.GetHits() {
+				t.Errorf("record %d: expected uncovered (clamped), got hits=true", i)
+			}
+		}
+		if got[0].GetCoveredConditions() != 0 {
+			t.Errorf("covered_conditions = %d, want 0 (clamped)", got[0].GetCoveredConditions())
+		}
+	})
+}
+
 // TestHistoricalReportShape builds the same protobuf pieces
 // submitHistoricalSnapshot assembles (without actually submitting over the
 // network — that's covered by the live end-to-end verification) and asserts
