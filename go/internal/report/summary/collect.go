@@ -888,7 +888,12 @@ func dropFailuresAlreadySucceeded(failed, succeeded []EntityItem) []EntityItem {
 	}
 	out := failed[:0:0]
 	for _, f := range failed {
-		if ok[f.Name+"\x00"+f.Organization] {
+		// Only a create that recovered from an "already exists" 400 is safe
+		// to drop. Any other error is a genuine failure that may belong to a
+		// different entity sharing the name (requests.log rows carry no
+		// language, so "All rules"/java collides with "All rules"/php).
+		if ok[f.Name+"\x00"+f.Organization] &&
+			strings.Contains(strings.ToLower(f.ErrorMessage), "already exists") {
 			continue
 		}
 		out = append(out, f)
