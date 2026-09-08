@@ -117,6 +117,7 @@ var objectCategoryTaskNames = map[string]struct {
 			"createProfiles", "setProfileParent", "restoreProfiles", "analyzeProfileRules",
 			"setDefaultProfiles", "setProfileGroupPermissions",
 			"updateRuleTags", "updateRuleDescriptions",
+			"compareBuiltInProfiles",
 		},
 	},
 	ObjectQualityGates: {

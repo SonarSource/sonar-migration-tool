@@ -591,6 +591,7 @@ func collectSection(store *common.DataStore, def sectionDef,
 	succeeded := collectSucceeded(store, def)
 	skipped := collectSkipped(store, def)
 	failed := collectFailed(failuresByType, def)
+	failed = dropFailuresAlreadySucceeded(failed, succeeded)
 	attachFailedSourceKeys(failed, store, def)
 
 	// #525: createProjects can diagnose some failures precisely (a target
@@ -773,6 +774,11 @@ func collectExtractSkipped(def sectionDef, exportDir string,
 	}
 
 	mappedKeys := buildMappedKeys(def, store)
+	// Only ever populated for the Quality Profiles section, and only by a
+	// real migrate run — the predictive report's synthetic run directory
+	// never writes this sidecar (#309), so builtInDiffs is nil there and
+	// every built-in row keeps the static text below.
+	builtInDiffs := readBuiltInProfileDiffs(store)
 
 	var result []EntityItem
 	seen := make(map[string]bool)
@@ -790,10 +796,14 @@ func collectExtractSkipped(def sectionDef, exportDir string,
 		seen[key] = true
 
 		if isBuiltIn {
+			detail := "Built-in, not migrated"
+			if d, ok := builtInDiffs[item.ServerURL+"|"+name+"|"+language]; ok {
+				detail = formatBuiltInProfileDiff(d.RulesAdded, d.RulesRemoved)
+			}
 			result = append(result, EntityItem{
 				Name:       name,
 				Language:   language,
-				Detail:     "Built-in, not migrated",
+				Detail:     detail,
 				SkipReason: SkipReasonBuiltIn,
 			})
 			continue
@@ -857,6 +867,33 @@ func collectFailed(failuresByType map[string][]analysis.ReportRow, def sectionDe
 		})
 	}
 	return result
+}
+
+// dropFailuresAlreadySucceeded removes requests.log-derived failure rows
+// for an entity (matched by Name+Organization) that also has a row in
+// Succeeded. The generic requests.log scan (collectFailed) has no idea a
+// create task recovered from a 400 — either via its own lookup-and-reuse
+// fallback (createProfiles' "already exists" handling) or because #165's
+// fan-in de-dup already collapsed several source-org attempts targeting
+// the same cloud entity onto one successful row — so without this it
+// reports one Failed row per recovered attempt for an entity that is, in
+// the end, correctly migrated and already listed as Succeeded.
+func dropFailuresAlreadySucceeded(failed, succeeded []EntityItem) []EntityItem {
+	if len(failed) == 0 || len(succeeded) == 0 {
+		return failed
+	}
+	ok := make(map[string]bool, len(succeeded))
+	for _, s := range succeeded {
+		ok[s.Name+"\x00"+s.Organization] = true
+	}
+	out := failed[:0:0]
+	for _, f := range failed {
+		if ok[f.Name+"\x00"+f.Organization] {
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
 }
 
 // collectExplicitFailures reads def.OutputTask for records the task itself
