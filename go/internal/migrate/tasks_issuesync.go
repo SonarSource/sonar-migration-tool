@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"slices"
 	"strings"
@@ -387,7 +388,13 @@ func countDistinctBranches(issues []matchableIssue) int {
 // exhausted without results the function returns nil (non-fatal) so the
 // sync proceeds with zero matches — the alternative would be a hard
 // failure that blocks later projects unnecessarily.
-func waitForCloudIndexing(ctx context.Context, fetchFn func() (int, error)) error {
+//
+// Retries are logged (task/project-scoped) because the backoff can run up
+// to ~8 minutes (10+20+40+60*7s) with no other activity for this project:
+// without a log line here, that wait is indistinguishable from a hang —
+// the run-wide progress percentage can't move either, since it only
+// advances once this project's whole sync completes.
+func waitForCloudIndexing(ctx context.Context, logger *slog.Logger, task, projectKey string, fetchFn func() (int, error)) error {
 	const (
 		initialDelay = 10 * time.Second
 		maxDelay     = 60 * time.Second
@@ -403,6 +410,8 @@ func waitForCloudIndexing(ctx context.Context, fetchFn func() (int, error)) erro
 		if total > 0 {
 			return nil
 		}
+		logger.Info(fmt.Sprintf("%s: waiting for Cloud indexing to catch up", task),
+			"project", projectKey, "attempt", attempt+1, "max_attempts", maxRetries, "retry_in", delay)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -538,7 +547,7 @@ func syncProjectIssues(ctx context.Context, e *Executor, cloudKey, orgKey, serve
 
 	// 2. Wait for Cloud indexing — proves the CE task is done so per-
 	// issue searches return real data.
-	if err := waitForCloudIndexing(ctx, func() (int, error) {
+	if err := waitForCloudIndexing(ctx, e.Logger, "syncIssueMetadata", cloudKey, func() (int, error) {
 		params := url.Values{}
 		params.Set("componentKeys", cloudKey)
 		params.Set("organization", orgKey)
