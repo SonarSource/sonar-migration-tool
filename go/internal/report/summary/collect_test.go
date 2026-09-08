@@ -129,6 +129,73 @@ func TestCollectSummaryDedupesDuplicateCreates(t *testing.T) {
 	}
 }
 
+// TestCollectSummaryDropsFailuresAlreadySucceeded reproduces the report
+// bug found alongside #309: a source server fanning three source orgs
+// into one target org ("latest-others") makes createProfiles attempt the
+// same (org, name, language) create three times. The first POST succeeds;
+// the other two get a 400 "already exists", which createProfiles recovers
+// from via lookup-and-reuse — all three end up as ONE deduped Succeeded
+// row (#165). But requests.log's generic HTTP-status scan has no idea
+// that happened, so without a fix it renders 2 spurious duplicate Failed
+// rows for an entity that is, in fact, migrated and already listed as
+// Succeeded.
+func TestCollectSummaryDropsFailuresAlreadySucceeded(t *testing.T) {
+	dir := t.TempDir()
+
+	writeTaskJSONL(t, dir, "createProfiles", []map[string]any{
+		{"name": "All rules", "language": "php", "sonarcloud_org_key": "latest-others", "cloud_profile_key": "cp-1"},
+	})
+
+	logLine := func(status int, respFailure bool) map[string]any {
+		entry := map[string]any{
+			"process_type": "request_completed",
+			"payload": map[string]any{
+				"method": "POST",
+				"url":    "/api/qualityprofiles/create",
+				"status": float64(status),
+				"data": map[string]any{
+					"name": "All rules", "language": "php", "organization": "latest-others",
+				},
+			},
+		}
+		if respFailure {
+			entry["status"] = "failure"
+			entry["payload"].(map[string]any)["response"] = `{"errors":[{"msg":"Quality profile already exists: php/All rules"}]}`
+		} else {
+			entry["status"] = "success"
+		}
+		return entry
+	}
+
+	var lines []string
+	for _, e := range []map[string]any{
+		logLine(200, false),
+		logLine(400, true),
+		logLine(400, true),
+	} {
+		b, _ := json.Marshal(e)
+		lines = append(lines, string(b))
+	}
+	if err := os.WriteFile(filepath.Join(dir, "requests.log"), []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		t.Fatalf("write requests.log: %v", err)
+	}
+
+	summary, err := CollectSummary(dir, "")
+	if err != nil {
+		t.Fatalf("CollectSummary: %v", err)
+	}
+	profiles := findSection(summary, "Quality Profiles")
+	if profiles == nil {
+		t.Fatal("missing Quality Profiles section")
+	}
+	if len(profiles.Succeeded) != 1 {
+		t.Errorf("expected 1 succeeded profile, got %d: %+v", len(profiles.Succeeded), profiles.Succeeded)
+	}
+	if len(profiles.Failed) != 0 {
+		t.Errorf("expected 0 failed rows once the entity is confirmed Succeeded, got %d: %+v", len(profiles.Failed), profiles.Failed)
+	}
+}
+
 func TestCollectSummaryWithProjectData(t *testing.T) {
 	dir := t.TempDir()
 
@@ -327,6 +394,89 @@ func TestCollectSummaryProfileBuiltInAndUnused(t *testing.T) {
 	// Custom/js and Unused/java are both unused.
 	if counts[SkipReasonUnused] != 2 {
 		t.Errorf("expected 2 unused profiles skipped, got %d", counts[SkipReasonUnused])
+	}
+	for _, item := range profiles.Skipped {
+		if item.SkipReason == SkipReasonBuiltIn && item.Detail != "Built-in, not migrated" {
+			t.Errorf("expected default built-in text with no compareBuiltInProfiles sidecar, got %q", item.Detail)
+		}
+	}
+}
+
+// TestCollectSummaryProfileBuiltInRuleDiff covers issue #309: when a real
+// migrate run's compareBuiltInProfiles sidecar reports a rule delta for a
+// built-in profile, the skipped row's Detail carries the human-readable
+// added/removed counts instead of the static default text.
+func TestCollectSummaryProfileBuiltInRuleDiff(t *testing.T) {
+	dir := t.TempDir()
+	runID := "run-01"
+	runDir := filepath.Join(dir, runID)
+	os.MkdirAll(runDir, 0o755)
+
+	serverURL := "https://sq.example.com"
+	extractDir := filepath.Join(dir, "2026-08-20-0001")
+	writeExtractMeta(t, extractDir, serverURL)
+	writeTaskJSONL(t, extractDir, "getProfiles", []map[string]any{
+		{"name": "Sonar way", "language": "java", "isBuiltIn": true},
+	})
+	writeTaskJSONL(t, runDir, "compareBuiltInProfiles", []map[string]any{
+		{"server_url": serverURL, "name": "Sonar way", "language": "java",
+			"rules_added": 3, "rules_removed": 0},
+	})
+
+	summary, err := CollectSummary(runDir, dir)
+	if err != nil {
+		t.Fatalf("CollectSummary: %v", err)
+	}
+
+	profiles := findSection(summary, "Quality Profiles")
+	if profiles == nil {
+		t.Fatal("missing Quality Profiles section")
+	}
+	if len(profiles.Skipped) != 1 {
+		t.Fatalf("expected 1 skipped row, got %d: %+v", len(profiles.Skipped), profiles.Skipped)
+	}
+	// Added-only must never mention "0 removed".
+	if want := "3 rule(s) added"; profiles.Skipped[0].Detail != want {
+		t.Errorf("Detail: got %q want %q", profiles.Skipped[0].Detail, want)
+	}
+	if profiles.Skipped[0].SkipReason != SkipReasonBuiltIn {
+		t.Errorf("expected SkipReasonBuiltIn, got %q", profiles.Skipped[0].SkipReason)
+	}
+}
+
+// TestCollectSummaryProfileBuiltInIdenticalHasEmptyDetail: identical
+// source/target built-in rule sets must render an empty Detail (#309),
+// not the old static "Built-in, not migrated" text.
+func TestCollectSummaryProfileBuiltInIdenticalHasEmptyDetail(t *testing.T) {
+	dir := t.TempDir()
+	runID := "run-01"
+	runDir := filepath.Join(dir, runID)
+	os.MkdirAll(runDir, 0o755)
+
+	serverURL := "https://sq.example.com"
+	extractDir := filepath.Join(dir, "2026-08-20-0001")
+	writeExtractMeta(t, extractDir, serverURL)
+	writeTaskJSONL(t, extractDir, "getProfiles", []map[string]any{
+		{"name": "Sonar way", "language": "java", "isBuiltIn": true},
+	})
+	writeTaskJSONL(t, runDir, "compareBuiltInProfiles", []map[string]any{
+		{"server_url": serverURL, "name": "Sonar way", "language": "java",
+			"rules_added": 0, "rules_removed": 0},
+	})
+
+	summary, err := CollectSummary(runDir, dir)
+	if err != nil {
+		t.Fatalf("CollectSummary: %v", err)
+	}
+	profiles := findSection(summary, "Quality Profiles")
+	if profiles == nil {
+		t.Fatal("missing Quality Profiles section")
+	}
+	if len(profiles.Skipped) != 1 {
+		t.Fatalf("expected 1 skipped row, got %d: %+v", len(profiles.Skipped), profiles.Skipped)
+	}
+	if profiles.Skipped[0].Detail != "" {
+		t.Errorf("expected empty Detail for identical built-in profiles, got %q", profiles.Skipped[0].Detail)
 	}
 }
 
