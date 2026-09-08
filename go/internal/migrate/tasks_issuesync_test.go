@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -1215,5 +1216,73 @@ func TestLoadMatchableIssuesCarriesScorerFields(t *testing.T) {
 	iss := got[0]
 	if iss.Message != "Do not do this" || iss.Type != "BUG" || iss.Severity != "MAJOR" || iss.Author != "dev@example.com" {
 		t.Errorf("loadMatchableIssues: scorer fields not carried through, got %+v", iss)
+	}
+}
+
+// waitForCloudIndexing must return immediately, without logging anything,
+// when the first fetch already reports a non-zero total — the common case
+// (Cloud already indexed) must not pay for a retry log line.
+func TestWaitForCloudIndexingSucceedsImmediatelyWithoutLogging(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	calls := 0
+	err := waitForCloudIndexing(context.Background(), logger, "syncIssueMetadata", "proj-a", func() (int, error) {
+		calls++
+		return 5, nil
+	})
+	if err != nil {
+		t.Fatalf("waitForCloudIndexing: unexpected error: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("fetchFn calls = %d, want 1", calls)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("expected no log output on immediate success, got: %s", buf.String())
+	}
+}
+
+// A fetchFn error must propagate immediately without any retry-wait log
+// line — the loop's error path returns before ever reaching the log call.
+func TestWaitForCloudIndexingPropagatesFetchError(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	wantErr := errors.New("boom")
+
+	err := waitForCloudIndexing(context.Background(), logger, "syncIssueMetadata", "proj-a", func() (int, error) {
+		return 0, wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Errorf("err = %v, want %v", err, wantErr)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("expected no log output when fetchFn errors, got: %s", buf.String())
+	}
+}
+
+// #526-adjacent fix: when Cloud hasn't indexed yet (total == 0), the retry
+// wait must be logged — task/project-scoped — rather than silent, since the
+// backoff can otherwise run for minutes with zero visible activity. Uses an
+// already-canceled context so the test doesn't pay for the real 10s delay:
+// the log line fires before the select on ctx.Done()/time.After(delay).
+func TestWaitForCloudIndexingLogsBeforeRetrying(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := waitForCloudIndexing(ctx, logger, "syncHotspotMetadata", "proj-b", func() (int, error) {
+		return 0, nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "syncHotspotMetadata: waiting for Cloud indexing to catch up") {
+		t.Errorf("expected a waiting-for-indexing log line, got: %s", out)
+	}
+	if !strings.Contains(out, "project=proj-b") {
+		t.Errorf("expected the log line to be project-scoped, got: %s", out)
 	}
 }
