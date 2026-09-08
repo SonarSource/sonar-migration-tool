@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
@@ -59,6 +60,10 @@ func runCompareBuiltInProfiles(ctx context.Context, e *Executor) error {
 	activeByProfile := indexExtractByServerAndField(e, "getActiveProfileRules", "profileKey")
 
 	counter := TaskCounterFromContext(ctx)
+	// One Search per target org, not one per source built-in profile.
+	builtInKeys := map[string]string{} // orgKey\x00lang\x00name -> target profile key
+	searched := map[string]bool{}
+	var mu sync.Mutex
 	return forEachExtractItem(ctx, e, "compareBuiltInProfiles", "getProfiles",
 		func(ctx context.Context, item structure.ExtractItem, w *common.ChunkWriter) error {
 			if !extractBool(item.Data, "isBuiltIn") {
@@ -72,26 +77,29 @@ func runCompareBuiltInProfiles(ctx context.Context, e *Executor) error {
 				return nil
 			}
 
-			targetProfiles, err := e.Cloud.QualityProfiles.Search(ctx, orgKey)
-			if err != nil {
-				failAPI(counter, e.Logger, "compareBuiltInProfiles: searching target profiles failed", err,
-					"organization", orgKey, "language", language)
-				return nil
-			}
-			targetKey := ""
-			for _, p := range targetProfiles {
-				// Match on name AND language, not language alone: a
-				// platform can ship more than one built-in profile per
-				// language (e.g. "Sonar way" and "Sonar agentic AI"
-				// both built-in for java). Matching by language only
-				// would pair every source built-in of that language
-				// against whichever built-in profile happened to come
-				// first in the target's search results.
-				if isBuiltInProfile(p) && strings.EqualFold(p.Language, language) && strings.EqualFold(p.Name, name) {
-					targetKey = p.Key
-					break
+			mu.Lock()
+			if !searched[orgKey] {
+				searched[orgKey] = true
+				if targetProfiles, err := e.Cloud.QualityProfiles.Search(ctx, orgKey); err != nil {
+					failAPI(counter, e.Logger, "compareBuiltInProfiles: searching target profiles failed", err,
+						"organization", orgKey)
+				} else {
+					for _, p := range targetProfiles {
+						// Match on name AND language, not language alone: a
+						// platform can ship more than one built-in profile per
+						// language (e.g. "Sonar way" and "Sonar agentic AI"
+						// both built-in for java). Matching by language only
+						// would pair every source built-in of that language
+						// against whichever built-in profile happened to come
+						// first in the target's search results.
+						if isBuiltInProfile(p) {
+							builtInKeys[orgKey+"\x00"+strings.ToLower(p.Language)+"\x00"+strings.ToLower(p.Name)] = p.Key
+						}
+					}
 				}
 			}
+			targetKey := builtInKeys[orgKey+"\x00"+strings.ToLower(language)+"\x00"+strings.ToLower(name)]
+			mu.Unlock()
 			if targetKey == "" {
 				// No matching built-in profile on the target with this
 				// exact name — leave the row on its default text.
