@@ -118,12 +118,13 @@ func RegisterAll() []TaskDef {
 // SCM-blame, and version data — extracted by default and dropped only
 // when --skip_project_data_migration is set.
 var projectDataTaskNames = map[string]bool{
-	"getProjectIssuesFull":    true,
-	"getProjectComponentTree": true,
-	"getProjectSourceCode":    true,
-	"getProjectSCMData":       true,
-	"getProjectHotspotsFull":  true,
-	"getProjectVersions":      true,
+	"getProjectIssuesFull":      true,
+	"getProjectComponentTree":   true,
+	"getProjectSourceCode":      true,
+	"getProjectSCMData":         true,
+	"getProjectHotspotsFull":    true,
+	"getProjectVersions":        true,
+	"getProjectAnalysisHistory": true, // #554 — PoC project-history migration.
 }
 
 // TargetTasks determines which tasks to extract based on config. objects,

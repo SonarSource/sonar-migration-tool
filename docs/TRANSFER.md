@@ -206,7 +206,7 @@ Omit `--project_key` to transfer **every** project visible to the token (in whic
 ---
 
 ## Flags
-<!-- updated: 2026-08-21_00:00:00 -->
+<!-- updated: 2026-09-08_17:46:11.937 -->
 
 | Flag | Config key | Description |
 |------|------------|-------------|
@@ -227,6 +227,9 @@ Omit `--project_key` to transfer **every** project visible to the token (in whic
 | `--skip_project_data_migration` | top-level `skip_project_data_migration` | Skip the project-data migration (importProjectData + per-issue / per-hotspot sync). Defaults to off — project data is migrated by default. Issue #303. |
 | `--exclude_branches` | `target.exclude_branches` | Glob patterns for non-main branches to skip during project data import. Repeatable. Main branch is never excluded. |
 | `--unsupported_languages` | top-level or `target.unsupported_languages` | How to handle files whose language has no quality profile on the target — typically a language from a 3rd-party SonarQube Server plugin. `exclude` (default) drops those files from the analysis report so the rest of the project still migrates; `skip` does not migrate the project's issues/branches at all; `warn` submits the report unchanged. Issue #474. |
+| `--migrate_history` | top-level `migrate_history` | **PoC.** Also migrate a bounded set of historical analysis snapshots (date + project-level measures only) per project's main branch, backdated on SonarQube Cloud. Defaults to off — no change to existing behavior unless set. Issue #554. |
+| `--history_max_points` | top-level `history_max_points` | Max historical snapshots migrated per project when `--migrate_history` is set (default: `0`, no cap — every analysis is a candidate). |
+| `--history_min_interval_days` | top-level `history_min_interval_days` | Minimum spacing, in days, enforced between two migrated historical snapshots when `--migrate_history` is set (default: `0`, no spacing rule). |
 
 CLI flags override values from the config file when both are provided.
 
@@ -272,6 +275,201 @@ sonar-migration-tool transfer -c config.json --project_key my-project \
 A failure to read the target organization's quality profiles disables the
 detection entirely rather than treating every language as unsupported, so a
 transient API error can never drop a project's files.
+
+### Current-snapshot backdating
+<!-- updated: 2026-09-08_16:00:00 -->
+
+Since #557, every branch's regular current-snapshot import stamps its
+analysis with the source branch's real last-analysis date — read from
+`api/project_branches/list`'s `analysisDate` field — instead of the migration
+run's own wall-clock time. This is **unconditional**: it applies to every
+branch whether or not `--migrate_history` is set, unlike the historical
+points described below. Only the analysis's own stamped date changes; other
+fallback dates used elsewhere in the import are untouched.
+
+### Project history migration (`--migrate_history`) — PoC
+<!-- updated: 2026-09-08_17:42:31.120 -->
+
+**This is a proof-of-concept.** By default, `transfer` (and `migrate`) submit a
+single scanner report per branch. Since #557, that report is backdated to the
+source branch's real last-analysis date instead of "now" (see
+[Current-snapshot backdating](#current-snapshot-backdating) above) — but
+without `--migrate_history`, it is still only one point: the target's analysis
+history starts there, even if the source project has years of prior analyses.
+Issue #554 asks for a way to carry some of that history over.
+
+`--migrate_history` opts into replaying a bounded set of the source project's
+**main branch** historical analyses as separate, backdated entries on the
+target, submitted before the regular current-snapshot import so each lands as
+its own point in SonarQube Cloud's analysis history (`/api/project_analyses/search`),
+not just a re-dated copy of the latest one.
+
+Each historical entry carries the project's own measures as recorded by the
+source server at that analysis: lines of code, complexity, comment density,
+duplication, and — since #557 — `coverage` itself, not just its raw inputs.
+The Compute Engine only ever computes `coverage` from a component's real
+per-line coverage data, never from a pushed aggregate measure (confirmed
+live: pushing `lines_to_cover` etc. as plain measures, #557's first attempt,
+was silently ignored), so each historical point's placeholder file carries
+synthetic per-line coverage records — arbitrary which lines are marked
+covered, since the file is never viewed, but built so the totals match the
+source's real figures exactly.
+
+Duplication turned out to hide the identical bug. `duplicated_lines`,
+`duplicated_blocks` and `duplicated_files` were also silently ignored when
+pushed as plain measures, so `duplicated_lines_density` (itself a formula
+over `duplicated_lines`/`lines`) never actually computed — invisible until
+now because the reference project used to validate this PoC has had 0%
+duplication for its entire history, so "shows 0" looked correct without
+being computed at all. Fixed the same way as coverage: each historical
+point's placeholder file also carries a synthetic same-file duplication
+block — one origin line range and one duplicate line range within that same
+placeholder file, since there is no second real file to duplicate against —
+sized so the reconstructed `duplicated_lines`/`duplicated_blocks`/
+`duplicated_files` match the source's real figures exactly.
+
+Historical points now also carry real `bugs`, `vulnerabilities` and
+`code_smells` counts, `reliability_rating`/`security_rating`, and technical
+debt (`sqale_index`) — reconstructed the same way coverage and duplication
+are: the Compute Engine derives all of these exclusively by counting real
+Issue-shaped entries in the submitted report, never from a pushed aggregate
+measure. So for each historical point the tool fabricates that many
+placeholder issues — one per bug/vulnerability/code smell the source
+recorded at that analysis — submitted through SonarQube Cloud's
+**external-issue** mechanism (for third-party/ad-hoc findings, distinct
+from native rule-based issues) under fixed ad-hoc rules (`smt-history:bug`,
+`smt-history:vulnerability`, `smt-history:code_smell`). These are exactly
+as synthetic as the placeholder file itself: no real code location or
+message, just whatever severity reproduces the source's real historical
+rating (ratings threshold on the single worst severity present, not an
+average, so one issue at the right severity is enough to make this exact
+rather than approximate) and, for code smells, however much effort
+reproduces the real `sqale_index` (confirmed live that only code-smell
+effort drives `sqale_index`, not bug/vulnerability effort). External issues
+were chosen specifically because, unlike native issues, they need no active
+rule in the target's resolved quality profile.
+
+What still can't come across is the *original* issues themselves — their
+file, line, message and identity — and Security Hotspots. Both remain a
+**hard SonarQube API limitation, not a scope choice**: there is no API that
+returns "what issues existed as of a past analysis," so the real, individual
+findings cannot be reconstructed for a historical point — only the
+aggregate counts/ratings/debt above, which the source *does* expose
+historically, via the same measures-history endpoint already used for
+coverage/ncloc/etc. Hotspots specifically stay unreconstructed even in
+aggregate: unlike bugs/vulnerabilities/code smells, converting a hotspot to
+an issue needs a real active rule in the target's resolved quality profile —
+exactly the constraint the external-issue mechanism above exists to
+sidestep, which is why it can't be reused for hotspots. SonarQube also only
+keeps issues (and hotspots) attached to a branch's *most recent* analysis
+anyway, which is exactly what the existing, unchanged current-snapshot
+import already migrates in full.
+
+Two flags can bound how much history is walked, applied to the source's full
+analysis list, oldest to newest, always dropping the single most recent
+analysis (already covered by the current-snapshot import). Left unset, both
+default to `0` — no cap, no spacing — so every analysis becomes a candidate:
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--history_max_points` | `0` | At most this many historical snapshots per project; `0` (the default, whether passed explicitly or left unset) means no cap — every candidate analysis is migrated. When set above `0` and the source has more candidates than that after interval bounding, they are evenly resampled across the *whole* history span, not just the oldest end. |
+| `--history_min_interval_days` | `0` | Two selected snapshots are never closer together than this; `0` (the default, whether passed explicitly or left unset) means no spacing rule at all — every analysis in the source history becomes a candidate, including several on the same day at different times. |
+
+> By default, both flags are left unset — and an unset flag now behaves
+> exactly like explicitly passing `0`: every analysis on the source's main
+> branch becomes a history candidate, with no cap and no minimum spacing.
+> These flags exist for callers who want to dial history *down* from that
+> exhaustive default to something bounded or spaced out, not the other way
+> around — there is nothing "denser" than the default to opt into. Here's
+> what dialing the spacing up costs you, on a source project with 134
+> analyses spanning 2021→2026:
+>
+> | `--history_min_interval_days` | Points selected |
+> |---|---|
+> | `0` | 133 (every analysis but the newest) |
+> | `1` | 105 |
+> | `7` | 71 |
+> | `30` | 31 |
+>
+> Bear in mind each point is a separate report submission plus a Compute
+> Engine poll — roughly 6.5s — so the exhaustive default is a long migration
+> on a project with a lot of history; use `--history_min_interval_days`
+> and/or `--history_max_points` to bound it deliberately.
+
+```bash
+# Migrate the current snapshot as usual, plus every historical analysis on
+# the main branch — unbounded, unspaced (the default when the flags are
+# left unset)
+sonar-migration-tool transfer -c config.json --project_key my-project \
+  --migrate_history
+
+# Bounded history instead: at most 10 points, at least 30 days apart
+sonar-migration-tool transfer -c config.json --project_key my-project \
+  --migrate_history --history_max_points 10 --history_min_interval_days 30
+```
+
+**Known limitations (PoC):**
+
+- **Main branch only.** Non-main branches keep today's single-snapshot
+  behavior. Backdating a non-main branch would need the create-analysis
+  handshake (see [TRANSFER-INTERNALS.md](TRANSFER-INTERNALS.md)) repeated per
+  historical point, which this PoC does not implement.
+- **Best-effort, not transactional.** If a historical submission is rejected
+  by the Compute Engine (for example, on a re-run against a project that
+  already has newer analyses on the target), history migration for that
+  project stops and logs a warning — it never fails or blocks the regular
+  current-snapshot import that follows it.
+- **Not resume-safe.** Re-running a transfer that already replayed history
+  for a project resubmits the same historical points again (duplicate history
+  entries on the target), since completed history points aren't tracked the
+  way branch completion is. Safe to run once per target project.
+- **Not every migrated point stays on the target.** The Compute Engine accepts
+  and writes every point the migration submits, but SonarQube Cloud then
+  removes some of them. Expect the Activity page to hold fewer analyses than
+  were migrated — on a 134-analysis source project, 133 points were submitted,
+  all 133 were accepted, and 61 remain.
+
+  This is target-side behaviour, not a migration failure, and it was confirmed
+  by direct observation rather than inferred. A throwaway project was seeded
+  with exactly one point dated 2021-06-13 and polled sub-second:
+
+  ```
+  15:24:14Z      CE task → SUCCESS
+  15:24:14.437Z  ┐ 12 consecutive HTTP-200 polls of
+                 │ /api/project_analyses/search list the analysis, and
+  15:24:29.659Z  ┘ /api/qualitygates/project_status?analysisId=… returns 200
+  15:24:31Z      the next CE task (the regular current-snapshot import) runs
+  15:24:31.203Z  same endpoint, same query → the analysis is gone,
+                 and its analysisId returns 404 permanently
+  ```
+
+  A control run, killed before any subsequent analysis could succeed, still
+  holds its 2021-06-13 analysis. So the row is created and readable, then
+  deleted — it is not rejected at ingestion, and it is not merely hidden by
+  the API.
+
+  What decides *which* points are removed is **not established**. The oldest
+  points go first, which is consistent with the documented housekeeping
+  retention window, but the source used for testing has an 87-day gap around
+  the apparent boundary, so the data cannot distinguish 260 weeks from 5
+  calendar years — or from any other value in between. Removals were also
+  observed well inside any retention window. Treat the surviving count as
+  something to measure on your own target, not to predict.
+
+  Practically: migrating more points always costs proportional wall clock, and
+  past some point the target discards the extra — so if you don't need
+  exhaustive history, dial down with `--history_min_interval_days` and/or
+  `--history_max_points` rather than paying for points that won't survive.
+- **Each historical entry carries one placeholder file.** A report holding a
+  lone project component with a raw measure is rejected by the Compute Engine,
+  so every historical analysis includes a single empty
+  `__history_snapshot__.<ext>` component for the measures to attach to. Its
+  language is chosen from the ones the *target organization* actually has a
+  quality profile for. The file is never meant to be read, but it is part of
+  the analysis.
+- Requires both `extract` and `migrate` to have `--migrate_history` (or the
+  `migrate_history` config key) set — `transfer` sets both automatically;
+  running the two commands separately needs the flag on each.
 
 ---
 
