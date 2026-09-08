@@ -206,7 +206,7 @@ Omit `--project_key` to transfer **every** project visible to the token (in whic
 ---
 
 ## Flags
-<!-- updated: 2026-09-02_12:28:13 -->
+<!-- updated: 2026-09-08_17:46:11.937 -->
 
 | Flag | Config key | Description |
 |------|------------|-------------|
@@ -228,8 +228,8 @@ Omit `--project_key` to transfer **every** project visible to the token (in whic
 | `--exclude_branches` | `target.exclude_branches` | Glob patterns for non-main branches to skip during project data import. Repeatable. Main branch is never excluded. |
 | `--unsupported_languages` | top-level or `target.unsupported_languages` | How to handle files whose language has no quality profile on the target — typically a language from a 3rd-party SonarQube Server plugin. `exclude` (default) drops those files from the analysis report so the rest of the project still migrates; `skip` does not migrate the project's issues/branches at all; `warn` submits the report unchanged. Issue #474. |
 | `--migrate_history` | top-level `migrate_history` | **PoC.** Also migrate a bounded set of historical analysis snapshots (date + project-level measures only) per project's main branch, backdated on SonarQube Cloud. Defaults to off — no change to existing behavior unless set. Issue #554. |
-| `--history_max_points` | top-level `history_max_points` | Max historical snapshots migrated per project when `--migrate_history` is set (default: `10`). |
-| `--history_min_interval_days` | top-level `history_min_interval_days` | Minimum spacing, in days, enforced between two migrated historical snapshots when `--migrate_history` is set (default: `30`). |
+| `--history_max_points` | top-level `history_max_points` | Max historical snapshots migrated per project when `--migrate_history` is set (default: `0`, no cap — every analysis is a candidate). |
+| `--history_min_interval_days` | top-level `history_min_interval_days` | Minimum spacing, in days, enforced between two migrated historical snapshots when `--migrate_history` is set (default: `0`, no spacing rule). |
 
 CLI flags override values from the config file when both are provided.
 
@@ -288,7 +288,7 @@ points described below. Only the analysis's own stamped date changes; other
 fallback dates used elsewhere in the import are untouched.
 
 ### Project history migration (`--migrate_history`) — PoC
-<!-- updated: 2026-09-08_18:00:00 -->
+<!-- updated: 2026-09-08_17:42:31.120 -->
 
 **This is a proof-of-concept.** By default, `transfer` (and `migrate`) submit a
 single scanner report per branch. Since #557, that report is backdated to the
@@ -365,40 +365,47 @@ keeps issues (and hotspots) attached to a branch's *most recent* analysis
 anyway, which is exactly what the existing, unchanged current-snapshot
 import already migrates in full.
 
-To bound how much history is walked, two flags cap the source's full analysis
-list, oldest to newest, always dropping the single most recent analysis
-(already covered by the current-snapshot import):
+Two flags can bound how much history is walked, applied to the source's full
+analysis list, oldest to newest, always dropping the single most recent
+analysis (already covered by the current-snapshot import). Left unset, both
+default to `0` — no cap, no spacing — so every analysis becomes a candidate:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--history_max_points` | `10` | At most this many historical snapshots per project. When the source has more candidates than this after interval bounding, they are evenly resampled across the *whole* history span, not just the oldest end. |
-| `--history_min_interval_days` | `30` | Two selected snapshots are never closer together than this. Pass `0` for no spacing rule at all — every analysis in the source history becomes a candidate, including several on the same day at different times. |
+| `--history_max_points` | `0` | At most this many historical snapshots per project; `0` (the default, whether passed explicitly or left unset) means no cap — every candidate analysis is migrated. When set above `0` and the source has more candidates than that after interval bounding, they are evenly resampled across the *whole* history span, not just the oldest end. |
+| `--history_min_interval_days` | `0` | Two selected snapshots are never closer together than this; `0` (the default, whether passed explicitly or left unset) means no spacing rule at all — every analysis in the source history becomes a candidate, including several on the same day at different times. |
 
-> `0` is a real value here, distinct from "not set". A config file cannot tell
-> an absent integer from an explicit `0`, so the spacing is carried as a
-> tri-state: absent resolves to the default of 30, while an explicit `0`
-> survives and disables spacing entirely. On a source project with 134
-> analyses spanning 2021→2026, the selection scales as:
+> By default, both flags are left unset — and an unset flag now behaves
+> exactly like explicitly passing `0`: every analysis on the source's main
+> branch becomes a history candidate, with no cap and no minimum spacing.
+> These flags exist for callers who want to dial history *down* from that
+> exhaustive default to something bounded or spaced out, not the other way
+> around — there is nothing "denser" than the default to opt into. Here's
+> what dialing the spacing up costs you, on a source project with 134
+> analyses spanning 2021→2026:
 >
 > | `--history_min_interval_days` | Points selected |
 > |---|---|
 > | `0` | 133 (every analysis but the newest) |
 > | `1` | 105 |
 > | `7` | 71 |
-> | `30` (default) | 31 |
+> | `30` | 31 |
 >
 > Bear in mind each point is a separate report submission plus a Compute
-> Engine poll — roughly 6.5s — so `0` on a busy project is a long migration.
+> Engine poll — roughly 6.5s — so the exhaustive default is a long migration
+> on a project with a lot of history; use `--history_min_interval_days`
+> and/or `--history_max_points` to bound it deliberately.
 
 ```bash
-# Migrate the current snapshot as usual, plus up to 10 historical points
-# at least 30 days apart (defaults)
+# Migrate the current snapshot as usual, plus every historical analysis on
+# the main branch — unbounded, unspaced (the default when the flags are
+# left unset)
 sonar-migration-tool transfer -c config.json --project_key my-project \
   --migrate_history
 
-# Denser history: up to 20 points, at least 7 days apart
+# Bounded history instead: at most 10 points, at least 30 days apart
 sonar-migration-tool transfer -c config.json --project_key my-project \
-  --migrate_history --history_max_points 20 --history_min_interval_days 7
+  --migrate_history --history_max_points 10 --history_min_interval_days 30
 ```
 
 **Known limitations (PoC):**
@@ -450,7 +457,9 @@ sonar-migration-tool transfer -c config.json --project_key my-project \
   something to measure on your own target, not to predict.
 
   Practically: migrating more points always costs proportional wall clock, and
-  past some point the target discards the extra. Start with the defaults.
+  past some point the target discards the extra — so if you don't need
+  exhaustive history, dial down with `--history_min_interval_days` and/or
+  `--history_max_points` rather than paying for points that won't survive.
 - **Each historical entry carries one placeholder file.** A report holding a
   lone project component with a raw measure is rejected by the Compute Engine,
   so every historical analysis includes a single empty

@@ -29,15 +29,16 @@ func histCfgWrite(t *testing.T, body string) string {
 }
 
 // The PoC bounds are part of the documented CLI contract (#554): a bare
-// --migrate_history run extracts at most 10 snapshots per project+branch,
-// spaced at least 30 days apart. Pin them so a silent constant change is a
-// test failure rather than a silent change in what gets extracted.
+// --migrate_history run extracts every real historical analysis per
+// project+branch, no cap and no minimum spacing — accuracy over speed, per
+// explicit user direction. Pin them so a silent constant change is a test
+// failure rather than a silent change in what gets extracted.
 func TestHistCfgDefaultConstants(t *testing.T) {
-	if DefaultHistoryMaxPoints != 10 {
-		t.Errorf("DefaultHistoryMaxPoints = %d, want 10", DefaultHistoryMaxPoints)
+	if DefaultHistoryMaxPoints != 0 {
+		t.Errorf("DefaultHistoryMaxPoints = %d, want 0 (no cap)", DefaultHistoryMaxPoints)
 	}
-	if DefaultHistoryMinIntervalDays != 30 {
-		t.Errorf("DefaultHistoryMinIntervalDays = %d, want 30", DefaultHistoryMinIntervalDays)
+	if DefaultHistoryMinIntervalDays != 0 {
+		t.Errorf("DefaultHistoryMinIntervalDays = %d, want 0 (no spacing rule)", DefaultHistoryMinIntervalDays)
 	}
 }
 

@@ -82,13 +82,15 @@ type ExtractConfig struct {
 	// unchanged from before this feature existed.
 	MigrateHistory bool
 	// HistoryMaxPoints bounds how many historical snapshots are selected
-	// per project+branch when MigrateHistory is set. <=0 resolves to the
-	// default (10) in applyDefaults.
+	// per project+branch when MigrateHistory is set. <=0 means no cap —
+	// which is also the default (accuracy over speed: an unbounded,
+	// unrequested run should still capture every real historical point
+	// rather than silently sampling a subset).
 	HistoryMaxPoints int
 	// HistoryMinIntervalDays is the minimum spacing, in days, enforced
-	// between two selected historical snapshots. HistoryUnset (or any
-	// negative value) resolves to the default (30) in applyDefaults; 0 is
-	// a real value meaning "no spacing rule — take every analysis".
+	// between two selected historical snapshots. HistoryUnset resolves to
+	// the default (0) in applyDefaults; 0 — whether defaulted or passed
+	// explicitly — means "no spacing rule, take every analysis".
 	HistoryMinIntervalDays int
 }
 
@@ -389,11 +391,13 @@ func (cfg *ExtractConfig) applyDefaults() {
 
 // DefaultHistoryMaxPoints / DefaultHistoryMinIntervalDays are the PoC
 // history-migration bounds (#554) applied when --migrate_history is set but
-// --history_max_points / --history_min_interval_days are not: at most 10
-// historical snapshots per project+branch, spaced at least 30 days apart.
+// --history_max_points / --history_min_interval_days are not: no cap, no
+// minimum spacing — every real historical analysis becomes a candidate.
+// Accuracy takes priority over migration speed here; a caller who wants a
+// bounded, faster run opts into that explicitly via the two flags.
 const (
-	DefaultHistoryMaxPoints       = 10
-	DefaultHistoryMinIntervalDays = 30
+	DefaultHistoryMaxPoints       = 0
+	DefaultHistoryMinIntervalDays = 0
 )
 
 // HistoryUnset marks HistoryMinIntervalDays as "caller said nothing", so

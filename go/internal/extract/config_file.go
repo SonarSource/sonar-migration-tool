@@ -145,9 +145,9 @@ func (s configFileShape) applyHistoryTo(cfg *ExtractConfig) {
 func (s configFileShape) toExtractConfig() ExtractConfig {
 	var cfg ExtractConfig
 	// Start the spacing at the "caller said nothing" sentinel so an absent
-	// history_min_interval_days defaults to 30 while an explicit 0 survives
-	// as 0. Every shape branch below overwrites it only when the key was
-	// actually present in the JSON.
+	// history_min_interval_days resolves through applyDefaults (now also 0)
+	// the same as an explicit 0. Every shape branch below overwrites it only
+	// when the key was actually present in the JSON.
 	cfg.HistoryMinIntervalDays = HistoryUnset
 	switch {
 	case s.Source != nil || s.Target != nil:
