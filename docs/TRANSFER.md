@@ -288,7 +288,7 @@ points described below. Only the analysis's own stamped date changes; other
 fallback dates used elsewhere in the import are untouched.
 
 ### Project history migration (`--migrate_history`) — PoC
-<!-- updated: 2026-09-08_01:30:00 -->
+<!-- updated: 2026-09-08_18:00:00 -->
 
 **This is a proof-of-concept.** By default, `transfer` (and `migrate`) submit a
 single scanner report per branch. Since #557, that report is backdated to the
@@ -306,23 +306,64 @@ not just a re-dated copy of the latest one.
 
 Each historical entry carries the project's own measures as recorded by the
 source server at that analysis: lines of code, complexity, comment density,
-duplication and — since #557 — `coverage` and `duplicated_lines_density`
-themselves, not just their raw inputs. The Compute Engine only ever computes
-those two from a component's real per-line coverage data, never from a
-pushed aggregate measure (confirmed live: pushing `lines_to_cover` etc. as
-plain measures, #557's first attempt, was silently ignored), so each
-historical point's placeholder file carries synthetic per-line coverage
-records — arbitrary which lines are marked covered, since the file is never
-viewed, but built so the totals match the source's real figures exactly.
+duplication, and — since #557 — `coverage` itself, not just its raw inputs.
+The Compute Engine only ever computes `coverage` from a component's real
+per-line coverage data, never from a pushed aggregate measure (confirmed
+live: pushing `lines_to_cover` etc. as plain measures, #557's first attempt,
+was silently ignored), so each historical point's placeholder file carries
+synthetic per-line coverage records — arbitrary which lines are marked
+covered, since the file is never viewed, but built so the totals match the
+source's real figures exactly.
 
-What still can't come across is anything issue-derived: `bugs`,
-`vulnerabilities`, ratings, and tech-debt figures. That's a **hard SonarQube
-API limitation, not a scope choice**: there is no API that returns "what
-issues existed as of a past analysis," so those measures cannot be
-reconstructed for a historical point without fabricating fake issues, which
-this PoC does not do. SonarQube also only keeps issues attached to a
-branch's *most recent* analysis anyway, which is exactly what the existing,
-unchanged current-snapshot import already migrates in full.
+Duplication turned out to hide the identical bug. `duplicated_lines`,
+`duplicated_blocks` and `duplicated_files` were also silently ignored when
+pushed as plain measures, so `duplicated_lines_density` (itself a formula
+over `duplicated_lines`/`lines`) never actually computed — invisible until
+now because the reference project used to validate this PoC has had 0%
+duplication for its entire history, so "shows 0" looked correct without
+being computed at all. Fixed the same way as coverage: each historical
+point's placeholder file also carries a synthetic same-file duplication
+block — one origin line range and one duplicate line range within that same
+placeholder file, since there is no second real file to duplicate against —
+sized so the reconstructed `duplicated_lines`/`duplicated_blocks`/
+`duplicated_files` match the source's real figures exactly.
+
+Historical points now also carry real `bugs`, `vulnerabilities` and
+`code_smells` counts, `reliability_rating`/`security_rating`, and technical
+debt (`sqale_index`) — reconstructed the same way coverage and duplication
+are: the Compute Engine derives all of these exclusively by counting real
+Issue-shaped entries in the submitted report, never from a pushed aggregate
+measure. So for each historical point the tool fabricates that many
+placeholder issues — one per bug/vulnerability/code smell the source
+recorded at that analysis — submitted through SonarQube Cloud's
+**external-issue** mechanism (for third-party/ad-hoc findings, distinct
+from native rule-based issues) under fixed ad-hoc rules (`smt-history:bug`,
+`smt-history:vulnerability`, `smt-history:code_smell`). These are exactly
+as synthetic as the placeholder file itself: no real code location or
+message, just whatever severity reproduces the source's real historical
+rating (ratings threshold on the single worst severity present, not an
+average, so one issue at the right severity is enough to make this exact
+rather than approximate) and, for code smells, however much effort
+reproduces the real `sqale_index` (confirmed live that only code-smell
+effort drives `sqale_index`, not bug/vulnerability effort). External issues
+were chosen specifically because, unlike native issues, they need no active
+rule in the target's resolved quality profile.
+
+What still can't come across is the *original* issues themselves — their
+file, line, message and identity — and Security Hotspots. Both remain a
+**hard SonarQube API limitation, not a scope choice**: there is no API that
+returns "what issues existed as of a past analysis," so the real, individual
+findings cannot be reconstructed for a historical point — only the
+aggregate counts/ratings/debt above, which the source *does* expose
+historically, via the same measures-history endpoint already used for
+coverage/ncloc/etc. Hotspots specifically stay unreconstructed even in
+aggregate: unlike bugs/vulnerabilities/code smells, converting a hotspot to
+an issue needs a real active rule in the target's resolved quality profile —
+exactly the constraint the external-issue mechanism above exists to
+sidestep, which is why it can't be reused for hotspots. SonarQube also only
+keeps issues (and hotspots) attached to a branch's *most recent* analysis
+anyway, which is exactly what the existing, unchanged current-snapshot
+import already migrates in full.
 
 To bound how much history is walked, two flags cap the source's full analysis
 list, oldest to newest, always dropping the single most recent analysis

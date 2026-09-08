@@ -19,34 +19,44 @@ import (
 // SonarQube "overview" dashboard rather than the full per-file metric set
 // getProjectComponentTree pulls for the live snapshot.
 //
-// Deliberately excludes bugs, vulnerabilities, code_smells, security_hotspots,
-// violations, and every rating/debt metric (reliability_rating,
-// security_rating, sqale_rating, security_review_rating, sqale_index,
-// sqale_debt_ratio): the SonarQube Cloud Compute Engine computes every one of
-// these FROM the analysis's actual Issues (open bug/vulnerability/code-smell
-// counts, their severities, their remediation effort) and unconditionally
-// overwrites whatever raw value a report pushes under those metric keys — so
-// submitting them here is not just missing a nice-to-have, it is inert. A
-// synthetic historical snapshot carries no issues (per the PoC design, and
-// there is no SonarQube API that returns "what issues existed as of a past
-// analysis" to synthesize them from even if it didn't), so those metrics have
-// nothing to compute from and always land as zero regardless of what this
-// tool sends. This is what previously made LOC look like the only metric
-// that "worked": ncloc has no formula, so it was the one raw value the CE
-// never recomputed away.
+// Every metric here falls into one of three buckets, and which bucket a
+// metric is in determines what the migrate side does with it — this was
+// hard-won across #557: two of these buckets were live-verified to be wrong
+// on the first attempt, in the same way each time (the CE silently ignoring
+// a plausible-looking pushed value), so don't "simplify" this back without
+// re-verifying live against a project with real, nonzero data in that area.
 //
-// What CAN be made to show real history without issues: `coverage` and
-// `duplicated_lines_density` are themselves formulas over OTHER raw metrics
-// (coverage over lines_to_cover/uncovered_lines/conditions_to_cover/
-// uncovered_conditions; duplicated_lines_density over duplicated_lines/lines)
-// — pushing those raw inputs instead of the pre-computed percentage lets the
-// CE compute the correct percentage itself, the same way it already does for
-// ncloc/complexity. Hence the set below: every metric that is either raw
-// (sensor-summed, stored as-is) or a raw input some other formula depends on.
+//  1. Raw, sensor-summed, pushed as a plain Measure and stored as-is:
+//     ncloc, lines, statements, files, classes, functions, comment_lines,
+//     complexity, cognitive_complexity.
+//  2. Formula-derived from real per-line/per-block structural data, NOT from
+//     pushing the formula's own raw inputs as Measures — that was tried and
+//     silently produced nothing, live-verified twice (coverage first, then
+//     duplication turned out to have the identical failure mode once tested
+//     against a project with real duplication rather than this reference
+//     project's permanent zero): `coverage`/`duplicated_lines_density` and
+//     their raw inputs (duplicated_lines, duplicated_blocks, duplicated_files,
+//     lines_to_cover, uncovered_lines, conditions_to_cover,
+//     uncovered_conditions) are fetched here so the migrate side can build
+//     real LineCoverage/Duplication report records from them, never pushed
+//     as Measures directly.
+//  3. Issue-derived (bugs, vulnerabilities, code_smells, and the ratings/debt
+//     computed from them): the CE derives these by literally counting Issue
+//     entries in the report, not from a pushed Measure — also live-verified.
+//     Unlike bucket 2, there genuinely is no way to reconstruct the ORIGINAL
+//     issues (no API returns "what issues existed as of a past analysis"),
+//     but the aggregate COUNTS/ratings/debt *are* available historically via
+//     this same measures-history endpoint, so the migrate side synthesizes
+//     placeholder ExternalIssues that reproduce those aggregates exactly
+//     (see buildSyntheticIssues in internal/migrate/history.go). Hotspots are
+//     the one exception left out here: converting them needs a real active
+//     rule in the target's resolved quality profile (the #474 constraint),
+//     which is more than this fetch alone can resolve.
 const historyMetricKeys = "ncloc,lines,statements,files,classes,functions," +
 	"comment_lines,complexity,cognitive_complexity," +
 	"duplicated_lines,duplicated_blocks,duplicated_files," +
-	"lines_to_cover,uncovered_lines,conditions_to_cover,uncovered_conditions"
+	"lines_to_cover,uncovered_lines,conditions_to_cover,uncovered_conditions," +
+	"bugs,vulnerabilities,code_smells,sqale_index,reliability_rating,security_rating"
 
 // historyPoint is one candidate historical analysis: its date and the
 // project version recorded at that analysis.

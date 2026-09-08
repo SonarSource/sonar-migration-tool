@@ -231,18 +231,19 @@ func retargetMeasures(measures []scanreport.MeasureInput, newComponent string) [
 }
 
 // snapshotLineCount picks the placeholder file's declared Lines: the largest
-// of "lines" (total lines), "ncloc" and "lines_to_cover" seen in this point's
-// own measures, or 1 if none of them carry a positive value. Taking the max
-// across all three (rather than just preferring "lines" when present) keeps
-// the invariant buildSyntheticLineCoverage depends on — Lines must be >= the
-// highest line number any LineCoverage record names — true even on a point
-// whose "lines" measure is missing or, in principle, smaller than
-// lines_to_cover.
+// of "lines" (total lines), "ncloc", "lines_to_cover" and "duplicated_lines"
+// seen in this point's own measures, or 1 if none of them carry a positive
+// value. Taking the max across all four (rather than just preferring "lines"
+// when present) keeps the invariant buildSyntheticLineCoverage and
+// buildSyntheticDuplication depend on — Lines must be >= the highest line
+// number any LineCoverage or Duplication record names — true even on a
+// point whose "lines" measure is missing or, in principle, smaller than
+// lines_to_cover/duplicated_lines.
 func snapshotLineCount(measures []scanreport.MeasureInput) int32 {
 	var best int32
 	for _, m := range measures {
 		switch m.MetricKey {
-		case "lines", "ncloc", "lines_to_cover":
+		case "lines", "ncloc", "lines_to_cover", "duplicated_lines":
 			if v, err := strconv.ParseInt(m.Value, 10, 32); err == nil && int32(v) > best {
 				best = int32(v)
 			}
@@ -334,12 +335,230 @@ func buildCoverageLines(n, linesToCover, uncoveredLines int32) []*pb.LineCoverag
 	return out
 }
 
+// measureFloatValue returns the float value of the first measure under key,
+// or 0 if key is empty, absent, or unparseable — used for ratings (e.g.
+// "3.0"), which are always a small whole number but stored as a decimal
+// string, unlike the plain positive-integer contract measureIntValue has.
+func measureFloatValue(measures []scanreport.MeasureInput, key string) float64 {
+	if key == "" {
+		return 0
+	}
+	for _, m := range measures {
+		if m.MetricKey != key {
+			continue
+		}
+		if v, err := strconv.ParseFloat(m.Value, 64); err == nil {
+			return v
+		}
+	}
+	return 0
+}
+
+// ratingToSeverity maps a SonarQube A-E rating (1.0-5.0) to the classic
+// issue severity whose presence alone would produce that rating: ratings
+// threshold on the single WORST severity present, not an average or a
+// count, so reproducing one only needs one issue at the right severity.
+func ratingToSeverity(rating float64) string {
+	switch {
+	case rating < 2:
+		return "INFO"
+	case rating < 3:
+		return "MINOR"
+	case rating < 4:
+		return "MAJOR"
+	case rating < 5:
+		return "CRITICAL"
+	default:
+		return "BLOCKER"
+	}
+}
+
+// distributeInt splits total as evenly as possible across n buckets (each
+// gets total/n, with the remainder added to the last bucket), so the
+// buckets always sum back to exactly total. Returns nil for n<=0.
+func distributeInt(total int64, n int) []int64 {
+	if n <= 0 {
+		return nil
+	}
+	out := make([]int64, n)
+	base := total / int64(n)
+	for i := range out {
+		out[i] = base
+	}
+	out[n-1] += total - base*int64(n)
+	return out
+}
+
+// syntheticIssueEngineID identifies every placeholder Issue/AdHocRule this
+// tool fabricates for historical points, so they're recognizable as
+// synthetic rather than real findings.
+const syntheticIssueEngineID = "smt-history"
+
+// syntheticIssueType names one of the three issue-derived measure/rating
+// pairs buildSyntheticIssues reconstructs. RatingMetric is empty for code
+// smells, which have no count-driven rating of their own.
+type syntheticIssueType struct {
+	CountMetric  string
+	RatingMetric string
+	Type         string
+	RuleID       string
+}
+
+var syntheticIssueTypes = []syntheticIssueType{
+	{CountMetric: "bugs", RatingMetric: "reliability_rating", Type: "BUG", RuleID: "bug"},
+	{CountMetric: "vulnerabilities", RatingMetric: "security_rating", Type: "VULNERABILITY", RuleID: "vulnerability"},
+	{CountMetric: "code_smells", Type: "CODE_SMELL", RuleID: "code_smell"},
+}
+
+// buildSeverities returns count severities, all "MINOR" except the last,
+// which carries the severity that alone would reproduce rating when
+// hasRating is true — see ratingToSeverity's doc for why only one issue
+// needs to vary.
+func buildSeverities(count int32, rating float64, hasRating bool) []string {
+	out := make([]string, count)
+	for i := range out {
+		out[i] = "MINOR"
+	}
+	if hasRating {
+		out[count-1] = ratingToSeverity(rating)
+	}
+	return out
+}
+
+// buildEfforts distributes sqaleIndex minutes across count issues when typ
+// is CODE_SMELL — confirmed live that maintainability debt (sqale_index) is
+// driven purely by code-smell effort, not bug/vulnerability effort — or
+// returns nil otherwise, leaving those issues' Effort field unset.
+func buildEfforts(typ string, count, sqaleIndex int32) []int64 {
+	if typ != "CODE_SMELL" || sqaleIndex == 0 {
+		return nil
+	}
+	return distributeInt(int64(sqaleIndex), int(count))
+}
+
+// buildIssuesForType builds one ExternalIssueInput per entry in severities,
+// all on componentKey at a fixed placeholder location — arbitrary, since the
+// file they attach to is never viewed. efforts, when non-nil, must be the
+// same length as severities.
+func buildIssuesForType(t syntheticIssueType, componentKey string, severities []string, efforts []int64) []scanreport.ExternalIssueInput {
+	out := make([]scanreport.ExternalIssueInput, len(severities))
+	for i, sev := range severities {
+		iss := scanreport.ExternalIssueInput{
+			EngineID:  syntheticIssueEngineID,
+			RuleID:    t.RuleID,
+			Message:   "synthetic historical " + t.RuleID,
+			Severity:  sev,
+			Type:      t.Type,
+			StartLine: 1,
+			EndLine:   1,
+			Component: componentKey,
+		}
+		if efforts != nil {
+			iss.Effort = fmt.Sprintf("%dmin", efforts[i])
+		}
+		out[i] = iss
+	}
+	return out
+}
+
+// buildSyntheticIssues synthesizes placeholder ExternalIssues (and the
+// AdHocRules they reference) that reproduce this point's bugs/
+// vulnerabilities/code_smells counts, reliability_rating/security_rating and
+// sqale_index (technical debt) as aggregates — live-verified necessary the
+// same way coverage/duplication were: the CE derives every one of these
+// exclusively by counting real Issue-shaped entries in the report, never
+// from a pushed Measure.
+//
+// ExternalIssue (not native Issue) is deliberate: it needs no active rule in
+// the target's resolved quality profile, sidestepping the #474 "rule must
+// be active" constraint entirely — at the cost of these being visibly
+// synthetic (ad-hoc rule, no real code location) rather than real findings,
+// the same honesty trade-off as the placeholder file itself. There is no
+// SonarQube API that returns "what issues existed as of a past analysis" —
+// only the aggregate counts/ratings/debt this function reconstructs are
+// available historically, never the original issues themselves.
+//
+// Security hotspots are deliberately NOT reconstructed here: hotspot
+// conversion (convertHotspotsForReport) uses native Issues specifically
+// because hotspots need a real active rule in the target's profile — a
+// different, larger mechanism this function has no access to.
+func buildSyntheticIssues(measures []scanreport.MeasureInput, componentKey string) ([]scanreport.ExternalIssueInput, []scanreport.AdHocRuleInput) {
+	sqaleIndex := measureIntValue(measures, "sqale_index")
+
+	var issues []scanreport.ExternalIssueInput
+	var rules []scanreport.AdHocRuleInput
+	for _, t := range syntheticIssueTypes {
+		count := measureIntValue(measures, t.CountMetric)
+		if count == 0 {
+			continue
+		}
+		rules = append(rules, scanreport.AdHocRuleInput{
+			EngineID:    syntheticIssueEngineID,
+			RuleID:      t.RuleID,
+			Name:        "Synthetic " + t.RuleID,
+			Description: "Placeholder rule for #554 project history migration; not a real finding.",
+			Severity:    "MAJOR",
+			Type:        t.Type,
+		})
+		severities := buildSeverities(count, measureFloatValue(measures, t.RatingMetric), t.RatingMetric != "")
+		efforts := buildEfforts(t.Type, count, sqaleIndex)
+		issues = append(issues, buildIssuesForType(t, componentKey, severities, efforts)...)
+	}
+	return issues, rules
+}
+
+// buildSyntheticDuplication synthesizes same-file duplication blocks that
+// reproduce this point's duplicated_lines/duplicated_blocks as an aggregate
+// — live-verified necessary the same way coverage was: pushing
+// duplicated_lines/duplicated_blocks/duplicated_files as plain Measures is
+// silently inert, and duplicated_lines_density (itself a formula over
+// duplicated_lines/lines) only computes once real per-block Duplication
+// data is present. Confirmed live: a same-file self-duplication (one origin
+// range + one duplicate range, with Duplicate.OtherFileRef left unset —
+// SonarCloud rejects a Duplicate whose OtherFileRef explicitly names its own
+// file) of 50+50 lines produced duplicated_lines=100, duplicated_blocks=2,
+// duplicated_files=1, exactly as expected.
+//
+// duplicatedBlocks total occurrences (origin + every duplicate) share
+// duplicatedLines total lines as evenly as distributeInt allows, laid out as
+// sequential, non-overlapping ranges starting at line 1 — arbitrary, since
+// the placeholder file is never viewed. Fewer than 2 lines or 2 occurrences
+// can't form a valid duplication (a lone block isn't a duplicate of
+// anything), so those return nil; more occurrences than lines is clamped
+// down to one line per occurrence rather than emitting a malformed range.
+func buildSyntheticDuplication(measures []scanreport.MeasureInput) []*pb.Duplication {
+	duplicatedLines := measureIntValue(measures, "duplicated_lines")
+	duplicatedBlocks := measureIntValue(measures, "duplicated_blocks")
+	if duplicatedLines < 2 || duplicatedBlocks < 2 {
+		return nil
+	}
+	if duplicatedBlocks > duplicatedLines {
+		duplicatedBlocks = duplicatedLines
+	}
+
+	sizes := distributeInt(int64(duplicatedLines), int(duplicatedBlocks))
+	ranges := make([]*pb.TextRange, len(sizes))
+	line := int32(1)
+	for i, size := range sizes {
+		ranges[i] = &pb.TextRange{StartLine: line, EndLine: line + int32(size) - 1}
+		line += int32(size)
+	}
+
+	dup := &pb.Duplication{OriginPosition: ranges[0]}
+	for _, r := range ranges[1:] {
+		dup.Duplicate = append(dup.Duplicate, &pb.Duplicate{Range: r})
+	}
+	return []*pb.Duplication{dup}
+}
+
 // submitHistoricalSnapshot builds and submits one minimal, backdated scanner
-// report for a single historical point: just the project root component and
-// its measures — no files, no issues, no quality profiles (there are no
-// files to validate a language/profile against). Per the issue's own PoC
-// design, files/issues aren't needed for history points; only the measures
-// need to show up in the target's analysis history.
+// report for a single historical point: the project root component, one
+// placeholder file carrying the point's measures plus synthesized coverage/
+// duplication/issue data (see buildSyntheticLineCoverage, buildSyntheticDuplication,
+// buildSyntheticIssues), and no real quality profile dependency (the
+// placeholder's own profile is resolved separately in resolveHistoryPlaceholderProfile,
+// and the synthetic issues use ad-hoc rules specifically to avoid needing
+// another one).
 func submitHistoricalSnapshot(ctx context.Context, e *Executor, bctx branchImportContext, targetBranch string, snap historySnapshot, placeholder historyPlaceholder) error {
 	// A lone PROJECT component with a raw measure attached directly to it is
 	// not a shape the real scanner ever produces — measures normally live on
@@ -367,6 +586,7 @@ func submitHistoricalSnapshot(ctx context.Context, e *Executor, bctx branchImpor
 		return fmt.Errorf("building historical report: placeholder component was not created")
 	}
 	fileRef := fileComps[0].Ref
+	extIssues, adHocRules := buildSyntheticIssues(snap.Measures, placeholderKey)
 
 	reportData := &scanreport.ReportData{
 		Metadata: scanreport.BuildMetadata(scanreport.MetadataInput{
@@ -385,13 +605,17 @@ func submitHistoricalSnapshot(ctx context.Context, e *Executor, bctx branchImpor
 		FileComponents: fileComps,
 		Measures:       scanreport.BuildMeasures(retargetMeasures(snap.Measures, placeholderKey), cr),
 		Coverage:       map[int32][]*pb.LineCoverage{fileRef: buildSyntheticLineCoverage(snap.Measures)},
+		Duplications:   map[int32][]*pb.Duplication{fileRef: buildSyntheticDuplication(snap.Measures)},
+		// ExternalIssue, not native Issue: needs no active rule in the target's
+		// resolved quality profile (see buildSyntheticIssues). No ActiveRules
+		// entry is set for the same reason nothing was needed before this: a
+		// native rule activation has nothing to do with ad-hoc ones.
+		ExternalIssues: scanreport.BuildExternalIssues(extIssues, cr),
+		AdHocRules:     scanreport.BuildAdHocRules(adHocRules),
 		Sources:        map[int32]string{fileRef: ""},
 		Changesets: map[int32]*pb.Changesets{
 			fileRef: scanreport.BuildDefaultChangesets(fileRef, 1, snap.Date),
 		},
-		// No active rules: the report carries no issues, so nothing needs a
-		// rule activated. Naming one would only add another identifier that
-		// has to exist in the target organization.
 	}
 
 	zipBytes, err := scanreport.PackageReport(reportData)

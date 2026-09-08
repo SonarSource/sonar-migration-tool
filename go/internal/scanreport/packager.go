@@ -28,11 +28,16 @@ type ReportData struct {
 	// conditions_to_cover, uncovered_conditions, and `coverage` itself)
 	// exclusively from this data — never from a pushed Measure under those
 	// same metric keys, confirmed live during #557.
-	Coverage    map[int32][]*pb.LineCoverage
-	Changesets  map[int32]*pb.Changesets // ref -> changesets
-	ActiveRules []*pb.ActiveRule
-	AdHocRules  []*pb.AdHocRule
-	Sources     map[int32]string // ref -> source code text
+	Coverage map[int32][]*pb.LineCoverage
+	// Duplications maps a component ref to its duplication blocks, written
+	// as duplications-<ref>.pb. Like Coverage, the CE derives duplicated_lines/
+	// duplicated_blocks/duplicated_files/duplicated_lines_density exclusively
+	// from this data, never from a pushed Measure under those metric keys.
+	Duplications map[int32][]*pb.Duplication
+	Changesets   map[int32]*pb.Changesets // ref -> changesets
+	ActiveRules  []*pb.ActiveRule
+	AdHocRules   []*pb.AdHocRule
+	Sources      map[int32]string // ref -> source code text
 	// SyntaxHighlighting maps a component ref to its ordered syntax-highlighting
 	// rules. Written as syntax-highlightings-<ref>.pb so the migrated Code view
 	// renders with colors instead of raw text (issue #420).
@@ -63,6 +68,9 @@ func PackageReport(data *ReportData) ([]byte, error) {
 		return nil, err
 	}
 	if err := addCoverage(zw, data.Coverage); err != nil {
+		return nil, err
+	}
+	if err := addDuplications(zw, data.Duplications); err != nil {
 		return nil, err
 	}
 	if err := addChangesets(zw, data.Changesets); err != nil {
@@ -177,6 +185,29 @@ func addCoverage(zw *zip.Writer, coverage map[int32][]*pb.LineCoverage) error {
 			}
 		}
 		if err := addBytes(zw, fmt.Sprintf("coverages-%d.pb", ref), buf.Bytes()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// addDuplications writes one duplications-<ref>.pb per component, each a
+// length-delimited stream of Duplication messages — the real scanner's
+// FileStructure.DUPLICATIONS naming ("duplications-", Domain.PB), confirmed
+// against the SonarSource/sonar-scanner-engine source. Refs with no records
+// are skipped, matching addCoverage/addSyntaxHighlighting.
+func addDuplications(zw *zip.Writer, duplications map[int32][]*pb.Duplication) error {
+	for ref, dups := range duplications {
+		if len(dups) == 0 {
+			continue
+		}
+		var buf bytes.Buffer
+		for _, d := range dups {
+			if err := writeDelimited(&buf, d); err != nil {
+				return err
+			}
+		}
+		if err := addBytes(zw, fmt.Sprintf("duplications-%d.pb", ref), buf.Bytes()); err != nil {
 			return err
 		}
 	}
