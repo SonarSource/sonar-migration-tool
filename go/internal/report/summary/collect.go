@@ -854,9 +854,25 @@ func collectFailed(failuresByType map[string][]analysis.ReportRow, def sectionDe
 			Name:         row.EntityName,
 			Organization: row.Organization,
 			ErrorMessage: row.ErrorMessage,
+			Cause:        classifyFailureCause(row.HTTPStatus, row.ErrorMessage),
 		})
 	}
 	return result
+}
+
+// classifyFailureCause labels a failed entity with the run's own failure
+// classification, so a section can separate the failures that need acting
+// on from the ones the migration is content with.
+//
+// Every builder of a Failed item has to set this. While one of them did
+// not, an entity that merely already existed on the target still counted
+// against the executive summary's failure total, which is the whole
+// problem the classification exists to solve. status may be "" where the
+// builder only kept the message; the message-shaped rules recognise the
+// benign cases either way.
+func classifyFailureCause(status, message string) string {
+	code, _ := strconv.Atoi(status)
+	return string(migrate.ClassifyHTTPFailure(code, message).Class)
 }
 
 // collectExplicitFailures reads def.OutputTask for records the task itself
@@ -877,11 +893,13 @@ func collectExplicitFailures(store *common.DataStore, def sectionDef) []EntityIt
 		if jsonStr(item, "status") != "failed" {
 			continue
 		}
+		errMsg := jsonStr(item, "error")
 		result = append(result, EntityItem{
 			Name:         jsonStr(item, def.NameField),
 			Organization: jsonStr(item, "sonarcloud_org_key"),
-			ErrorMessage: jsonStr(item, "error"),
+			ErrorMessage: errMsg,
 			SourceKey:    jsonStr(item, def.SourceKeyField),
+			Cause:        classifyFailureCause("", errMsg),
 		})
 	}
 	return result
@@ -1692,6 +1710,14 @@ func collectGlobalSettings(store *common.DataStore, def sectionDef) Section {
 				skipped = append(skipped, item)
 			case "failed":
 				item.ErrorMessage = oc.Reason
+				// Prefer the class the task recorded. Falling back to
+				// the message means only the message-shaped benign
+				// cases are recognised; anything unrecognised stays a
+				// failure, which is the right way round for a default.
+				item.Cause = oc.Cause
+				if item.Cause == "" {
+					item.Cause = classifyFailureCause("", oc.Reason)
+				}
 				if ncdRecord {
 					nearPerfect = append(nearPerfect, item)
 				} else {
@@ -1729,6 +1755,10 @@ type outcomeRecord struct {
 	Status string `json:"status"`
 	Detail string `json:"detail"`
 	Reason string `json:"reason"`
+	// Cause is the failure class the task recorded, when it knew it.
+	// Preferred over re-deriving one from Reason, which is prose written
+	// for a human and need not resemble any platform error message.
+	Cause string `json:"cause"`
 }
 
 // appendBuiltInGroupSkips injects a single Skipped EntityItem into the

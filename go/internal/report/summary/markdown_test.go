@@ -87,6 +87,7 @@ func fullySeededSummary() *MigrationSummary {
 			{
 				EntityType:   "Project",
 				EntityName:   "Proj Failed",
+				Project:      "org1_api",
 				Organization: "org1",
 				URL:          "/api/projects/create",
 				HTTPStatus:   "400",
@@ -161,16 +162,24 @@ func fullySeededSummary() *MigrationSummary {
 					TargetMetric: "new_security_rating"},
 			},
 		},
+		// Two projects both carrying a "main" — the shape that used to
+		// collapse into one row — so the golden shows them kept apart.
 		Branches: []BranchStat{
 			{
-				Branch: "feature-x", Type: "LONG", Issues: 0, ExternalIssues: 0,
+				Project: "org1_api", Branch: "feature-x", Type: "LONG",
+				Issues: 0, ExternalIssues: 0,
 				Components: 0, ActiveRules: 0, ZipBytes: 0, Status: "skipped",
 				SkipReason: "skipping branch: source code not retrievable",
 			},
 			{
-				Branch: "main", Type: "LONG", Issues: 120, ExternalIssues: 5,
+				Project: "org1_api", Branch: "main", Type: "LONG", Issues: 120, ExternalIssues: 5,
 				Components: 40, ActiveRules: 300, ZipBytes: 1048576, TaskID: "AY-task-1",
 				Status: "submitted",
+			},
+			{
+				Project: "org1_web", Branch: "main", Type: "LONG", Issues: 7, ExternalIssues: 0,
+				Components: 3, ActiveRules: 300, ZipBytes: 2048, TaskID: "AY-task-2",
+				Status: "packaged",
 			},
 		},
 		Throughput: ThroughputStats{

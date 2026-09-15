@@ -66,6 +66,8 @@ var skipReasonOrder = []struct {
 	{SkipReasonUnused, "Unused"},
 	{SkipReasonEmpty, "Empty (no projects)"},
 	{"", "Other"},
+	// Settings absent from SQC's own catalog, discovered at run time.
+	{SkipReasonNotOnSQC, "Not in SonarQube Cloud's settings catalog"},
 	// SQS-only settings appear last so the section ends with the
 	// "not applicable on SQC" notes — one row per such setting,
 	// no Organization (issue #200).
@@ -85,7 +87,13 @@ const (
 	outcomeNearPerfect = "Near Full Migration"
 	outcomePartial     = "Partial Migration"
 	outcomeFailed      = "Failed"
-	outcomeSkipped     = "Skipped"
+	// outcomeExpected covers requests SonarQube Cloud refused for a
+	// reason the migration is content with: the entity already exists, or
+	// the value is one Cloud will never accept. These were reported as
+	// failures, which made a second run into the same organization look
+	// worse than the first while migrating exactly as well.
+	outcomeExpected = "No Action Needed"
+	outcomeSkipped  = "Skipped"
 )
 
 const (
@@ -386,20 +394,26 @@ func renderTitlePage(pdf *fpdf.Fpdf, summary *MigrationSummary) {
 // colours are conveyed by the count cells. Sections present in `omit` are
 // skipped entirely (predictive reports omit "Global Settings", #235).
 func renderExecutiveSummary(pdf *fpdf.Fpdf, sections []Section, omit map[string]bool) {
-	headers := []string{"Objects", outcomeSuccess, outcomeNearPerfect, outcomePartial, outcomeFailed, outcomeSkipped}
+	headers := []string{"Objects", outcomeSuccess, outcomeNearPerfect, outcomePartial,
+		outcomeFailed, outcomeExpected, outcomeSkipped}
+	// Six count columns inside the same 195mm the five used to occupy —
+	// Letter portrait at the default 10mm margins leaves no more than
+	// that, so the No Action Needed column is paid for by narrowing the
+	// rest rather than by running off the page.
 	const (
-		objectsWidth = 45.0
-		countWidth   = 30.0
+		objectsWidth = 39.0
+		countWidth   = 26.0
 	)
-	widths := []float64{objectsWidth, countWidth, countWidth, countWidth, countWidth, countWidth}
+	widths := []float64{objectsWidth, countWidth, countWidth, countWidth,
+		countWidth, countWidth, countWidth}
 
 	// Header row — Poppins Bold on the Sonar primary background (#167). Font
-	// size 8 so the longest label ("Near Full Migration", ~27mm at 8pt) fits
-	// the 30mm count columns (#426).
+	// size 7 so the longest label ("Near Full Migration", ~24mm at 7pt) fits
+	// the narrowed 26mm count columns (#426).
 	pdf.SetDrawColor(colorSonarGrey[0], colorSonarGrey[1], colorSonarGrey[2])
 	setFillColor(pdf, colorSonarBlue)
 	pdf.SetTextColor(255, 255, 255)
-	pdf.SetFont(pdfFontFamilyHeading, "B", 8)
+	pdf.SetFont(pdfFontFamilyHeading, "B", 7)
 	for i, h := range headers {
 		align := "C"
 		if i == 0 {
@@ -411,7 +425,7 @@ func renderExecutiveSummary(pdf *fpdf.Fpdf, sections []Section, omit map[string]
 
 	// Body rows — Inter for readable counts.
 	pdf.SetFont(pdfFontFamilyBody, "", 10)
-	var totalPerfect, totalYellow, totalOrange, totalRed, totalGrey int
+	var totalPerfect, totalYellow, totalOrange, totalRed, totalExpected, totalGrey int
 	rowIdx := 0
 	for _, sec := range sections {
 		if omit[sec.Name] {
@@ -420,12 +434,17 @@ func renderExecutiveSummary(pdf *fpdf.Fpdf, sections []Section, omit map[string]
 		perfect := len(sec.Succeeded)
 		yellow := len(sec.NearPerfect)
 		orange := len(sec.Partial)
-		red := len(sec.Failed)
+		// Only actionable failures are counted red; the expected
+		// refusals get their own neutral column.
+		actionable, expectedItems := sec.SplitFailed()
+		red := len(actionable)
+		expected := len(expectedItems)
 		grey := len(sec.Skipped)
 		totalPerfect += perfect
 		totalYellow += yellow
 		totalOrange += orange
 		totalRed += red
+		totalExpected += expected
 		totalGrey += grey
 
 		if rowIdx%2 == 0 {
@@ -440,7 +459,8 @@ func renderExecutiveSummary(pdf *fpdf.Fpdf, sections []Section, omit map[string]
 		renderCountCell(pdf, widths[2], yellow, colorYellow)
 		renderCountCell(pdf, widths[3], orange, colorAmber)
 		renderCountCell(pdf, widths[4], red, colorRed)
-		renderCountCell(pdf, widths[5], grey, colorDarkGray)
+		renderCountCell(pdf, widths[5], expected, colorDarkGray)
+		renderCountCell(pdf, widths[6], grey, colorDarkGray)
 		pdf.Ln(-1)
 	}
 
@@ -453,7 +473,8 @@ func renderExecutiveSummary(pdf *fpdf.Fpdf, sections []Section, omit map[string]
 	pdf.CellFormat(widths[2], 8, itoa(totalYellow), "1", 0, "C", true, 0, "")
 	pdf.CellFormat(widths[3], 8, itoa(totalOrange), "1", 0, "C", true, 0, "")
 	pdf.CellFormat(widths[4], 8, itoa(totalRed), "1", 0, "C", true, 0, "")
-	pdf.CellFormat(widths[5], 8, itoa(totalGrey), "1", 0, "C", true, 0, "")
+	pdf.CellFormat(widths[5], 8, itoa(totalExpected), "1", 0, "C", true, 0, "")
+	pdf.CellFormat(widths[6], 8, itoa(totalGrey), "1", 0, "C", true, 0, "")
 	pdf.Ln(-1)
 }
 
@@ -1155,12 +1176,20 @@ func buildUnifiedRows(section Section, predictive bool) []unifiedRow {
 		})
 	}
 	for _, item := range section.Failed {
+		// An expected refusal is rendered as such, in neutral grey
+		// rather than red, so the row agrees with both the executive
+		// summary's count and the "Why these failed" block that says no
+		// action is needed for it.
+		outcome, color := outcomeFailed, colorRed
+		if !migrate.FailureClass(item.Cause).Actionable() {
+			outcome, color = outcomeExpected, colorDarkGray
+		}
 		rows = append(rows, unifiedRow{
 			name:      item.Name,
 			language:  item.Language,
 			org:       item.Organization,
-			outcome:   outcomeFailed,
-			color:     colorRed,
+			outcome:   outcome,
+			color:     color,
 			details:   toPredictiveTense(item.ErrorMessage, predictive),
 			sourceKey: item.SourceKey,
 		})
@@ -1170,8 +1199,8 @@ func buildUnifiedRows(section Section, predictive bool) []unifiedRow {
 	for _, item := range section.Skipped {
 		skippedGroups[item.SkipReason] = append(skippedGroups[item.SkipReason], item)
 	}
-	for _, entry := range skipReasonOrder {
-		for _, item := range skippedGroups[entry.Reason] {
+	emitSkipped := func(items []EntityItem) {
+		for _, item := range items {
 			rows = append(rows, unifiedRow{
 				name:      item.Name,
 				language:  item.Language,
@@ -1183,7 +1212,33 @@ func buildUnifiedRows(section Section, predictive bool) []unifiedRow {
 			})
 		}
 	}
+	for _, entry := range skipReasonOrder {
+		emitSkipped(skippedGroups[entry.Reason])
+		delete(skippedGroups, entry.Reason)
+	}
+	// Items whose reason has no entry in skipReasonOrder still have to
+	// appear. Rendering only the known reasons dropped them from the
+	// table while the section header went on counting them, so a section
+	// announced "284 skipped" above a table listing 274 — with the
+	// 10 missing rows being exactly the ones a reader had never seen
+	// before and would most want to look at.
+	for _, reason := range sortedSkipGroups(skippedGroups) {
+		emitSkipped(skippedGroups[reason])
+	}
 	return rows
+}
+
+// sortedSkipGroups returns the non-empty group keys in a deterministic
+// order so the rendered report is byte-stable.
+func sortedSkipGroups(groups map[string][]EntityItem) []string {
+	out := make([]string, 0, len(groups))
+	for reason, items := range groups {
+		if len(items) > 0 {
+			out = append(out, reason)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // toPredictiveTense rewrites past-tense / "Applied" / "Migrated" phrasing
@@ -1543,7 +1598,11 @@ func sectionCountSummary(section Section) string {
 	if len(section.Partial) > 0 {
 		parts = append(parts, fmt.Sprintf("%d partial migration", len(section.Partial)))
 	}
-	parts = append(parts, fmt.Sprintf("%d failed", len(section.Failed)))
+	actionableFailed, expectedFailed := section.SplitFailed()
+	parts = append(parts, fmt.Sprintf("%d failed", len(actionableFailed)))
+	if len(expectedFailed) > 0 {
+		parts = append(parts, fmt.Sprintf("%d needing no action", len(expectedFailed)))
+	}
 
 	if sectionsWithoutSkipped[section.Name] {
 		return strings.Join(parts, ", ")
@@ -1573,8 +1632,32 @@ func skipBreakdown(skipped []EntityItem) []string {
 		if c := counts[entry.Reason]; c > 0 {
 			parts = append(parts, fmt.Sprintf("%d %s", c, lowerLabelPreservingProductName(entry.Label)))
 		}
+		delete(counts, entry.Reason)
+	}
+	// Whatever is left carries a reason skipReasonOrder has no entry
+	// for. It is still part of the total in front of the breakdown, so
+	// leaving it out made the two disagree: "284 skipped (6 not
+	// applicable on SonarQube cloud, 268 left at default value on
+	// SonarQube server)" accounts for 274. Listing the raw reason is
+	// less pretty than a curated label and much better than a total
+	// nobody can reconcile.
+	for _, reason := range sortedCountedReasons(counts) {
+		parts = append(parts, fmt.Sprintf("%d %s", counts[reason], reason))
 	}
 	return parts
+}
+
+// sortedCountedReasons returns the reasons with a non-zero count, in a
+// deterministic order so the rendered report is byte-stable.
+func sortedCountedReasons(counts map[string]int) []string {
+	out := make([]string, 0, len(counts))
+	for reason, c := range counts {
+		if c > 0 {
+			out = append(out, reason)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func renderTableHeader(pdf *fpdf.Fpdf, headers []string, widths []float64) {
@@ -1948,17 +2031,20 @@ func renderBottlenecks(pdf *fpdf.Fpdf, summary *MigrationSummary) {
 			itoa(t.Phase),
 			formatDuration(t.Duration),
 			ok,
+			fmtFailedItems(t),
 		})
 	}
 	renderKVTable(pdf, "Slowest tasks",
-		[]string{"Task", "Phase", "Duration", "OK"},
-		[]float64{105, 25, 30, 20},
+		[]string{"Task", "Phase", "Duration", "OK", "Failed Items"},
+		[]float64{85, 20, 25, 15, 35},
 		taskRows)
 
-	// Per-branch CE activity.
+	// Per-branch CE activity. Project leads the row because branch names
+	// repeat across projects — nearly every project has a "main".
 	branchRows := make([][]string, 0, len(summary.Branches))
 	for _, b := range summary.Branches {
 		branchRows = append(branchRows, []string{
+			b.Project,
 			b.Branch,
 			b.Type,
 			b.Status,
@@ -1966,8 +2052,8 @@ func renderBottlenecks(pdf *fpdf.Fpdf, summary *MigrationSummary) {
 		})
 	}
 	renderKVTable(pdf, "Per-branch CE activity",
-		[]string{"Branch", "Type", "Status", "Task Id"},
-		[]float64{55, 25, 30, 70},
+		[]string{"Project", "Branch", "Type", "Status", "Task Id"},
+		[]float64{50, 35, 20, 25, 50},
 		branchRows)
 }
 
@@ -1985,6 +2071,7 @@ func renderFailureLedger(pdf *fpdf.Fpdf, summary *MigrationSummary) {
 		rows = append(rows, []string{
 			f.EntityType,
 			f.EntityName,
+			f.Project,
 			f.Organization,
 			f.HTTPStatus,
 			failureCauseLabel(f.Cause),
@@ -1992,8 +2079,8 @@ func renderFailureLedger(pdf *fpdf.Fpdf, summary *MigrationSummary) {
 		})
 	}
 	renderKVTable(pdf, "",
-		[]string{"Entity Type", "Name", "Organization", "HTTP", "Cause", "Error"},
-		[]float64{26, 36, 26, 14, 30, 48},
+		[]string{"Entity Type", "Name", "Project", "Organization", "HTTP", "Cause", "Error"},
+		[]float64{24, 30, 30, 22, 12, 26, 36},
 		rows)
 
 	renderFailureCauses(pdf, summary)
@@ -2120,6 +2207,7 @@ func renderBranchProjectData(pdf *fpdf.Fpdf, summary *MigrationSummary) {
 			zipBytes = fmt.Sprintf("%d", b.ZipBytes)
 		}
 		rows = append(rows, []string{
+			b.Project,
 			b.Branch,
 			b.Type,
 			b.Status,
@@ -2132,7 +2220,7 @@ func renderBranchProjectData(pdf *fpdf.Fpdf, summary *MigrationSummary) {
 		})
 	}
 	renderKVTable(pdf, "",
-		[]string{"Branch", "Type", "Status", "Issues", "External", "Components", "Active Rules", "Zip Bytes", "Skip Reason"},
-		[]float64{28, 16, 18, 14, 16, 22, 20, 18, 28},
+		[]string{"Project", "Branch", "Type", "Status", "Issues", "External", "Components", "Active Rules", "Zip Bytes", "Skip Reason"},
+		[]float64{30, 22, 14, 16, 12, 14, 20, 18, 16, 18},
 		rows)
 }
