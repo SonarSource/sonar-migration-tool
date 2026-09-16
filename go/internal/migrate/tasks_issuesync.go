@@ -940,7 +940,7 @@ func mostRecentIssueComments(comments []issueComment, limit int) []issueComment 
 	}
 	sorted := make([]issueComment, len(comments))
 	copy(sorted, comments)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].CreatedAt < sorted[j].CreatedAt })
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].CreatedAt < sorted[j].CreatedAt })
 	return sorted[len(sorted)-limit:]
 }
 
@@ -949,7 +949,13 @@ func mostRecentIssueComments(comments []issueComment, limit int) []issueComment 
 // already present (idempotency via prefix match). Returns true if any
 // comment failed to be added.
 func syncIssueComments(ctx context.Context, e *Executor, cloudKey string, sourceComments []issueComment, cloudComments []issueComment) bool {
-	sourceComments = mostRecentIssueComments(sourceComments, e.MaxIssueComments)
+	if capped := mostRecentIssueComments(sourceComments, e.MaxIssueComments); len(capped) < len(sourceComments) {
+		e.Logger.Info("syncIssueMetadata: comment history truncated by max_issue_comments",
+			"issue", cloudKey, "total", len(sourceComments), "migrated", len(capped))
+		sourceComments = capped
+	} else {
+		sourceComments = capped
+	}
 	var failed bool
 	for _, c := range sourceComments {
 		text := c.Markdown
