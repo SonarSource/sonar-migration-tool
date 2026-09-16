@@ -53,7 +53,16 @@ const (
 const (
 	notFound           = "NOT FOUND"
 	scCompatibleSubset = "SC-compatible subset"
-	ndjsonExt          = ".ndjson"
+	// sonarWayProfileName is the name SonarQube Server gives its built-in
+	// default quality profile for every language. SonarCloud ships the
+	// equivalent default under a different name ("Sonar way core" /
+	// "Sonar way comprehensive"), which is a known SQS_AND_SQC_FEATURE_DIVERGENCE
+	// between the two products, not a migration defect.
+	sonarWayProfileName = "Sonar way"
+	// sonarWayGateName is the built-in default quality gate name, identical
+	// on both products — only its condition count differs (SC's default
+	// ships with more built-in conditions than Server's).
+	sonarWayGateName = "Sonar way"
 )
 
 // allChecks returns every registered check function.
@@ -101,7 +110,7 @@ func allChecks() []checkFn {
 		{catALMBindings, "Per-project ALM binding", checkALMBindings},
 		{"Portfolios", namePortfolioCount, checkPortfolios},
 		{"Measures", "Key metrics per project", checkMeasures},
-		{catExtractFiles, "NDJSON file completeness", checkExtractFiles},
+		{catExtractFiles, "Extract file completeness", checkExtractFiles},
 	}
 }
 
@@ -156,8 +165,19 @@ func checkProjectIdentity(ctx context.Context, s *Suite) []CheckResult {
 		json.Unmarshal(scBody, &scComp)
 		results = append(results, makeResultStr("Projects",
 			fmt.Sprintf("Name: %s", proj), sqsComp.Component.Name, scComp.Component.Name, "Exact"))
-		results = append(results, makeResultStr("Projects",
-			fmt.Sprintf("Visibility: %s", proj), sqsComp.Component.Visibility, scComp.Component.Visibility, "Exact"))
+
+		vis := makeResultStr("Projects", fmt.Sprintf("Visibility: %s", proj),
+			sqsComp.Component.Visibility, scComp.Component.Visibility, "Exact")
+		if !vis.Match {
+			// Intended design decision, confirmed with the product owner and
+			// documented in docs/MIGRATION-FACETS.md — not a bug to fix here.
+			vis = withSqsAndSqcFeatureDivergence(vis, fmt.Sprintf(
+				"SQS_AND_SQC_FEATURE_DIVERGENCE, not a bug: SonarQube Server shows this project as %q, "+
+					"but this tool always creates SonarCloud projects as private regardless of "+
+					"source visibility — a deliberate design decision (see docs/MIGRATION-FACETS.md).",
+				sqsComp.Component.Visibility))
+		}
+		results = append(results, vis)
 	}
 	return results
 }
@@ -306,18 +326,35 @@ func checkProfileRules(ctx context.Context, s *Suite) []CheckResult {
 	for _, p := range sqsResp.Profiles {
 		scRules, found := scMap[p.Name+"|"+p.Language]
 		if !found {
-			results = append(results, CheckResult{
+			r := CheckResult{
 				Category: catQualityProfiles,
 				Name:     fmt.Sprintf("Rules: %s (%s)", p.Name, p.Language),
 				SQSValue: strconv.Itoa(p.ActiveRuleCount),
 				SCValue:  notFound,
 				Match:    false,
 				Notes:    "Profile missing on SC",
-			})
+			}
+			if p.Name == sonarWayProfileName {
+				r = withSqsAndSqcFeatureDivergence(r, fmt.Sprintf(
+					"SQS_AND_SQC_FEATURE_DIVERGENCE, not a bug: SonarQube Server's built-in default profile "+
+						"for %s is named %q; SonarCloud ships the equivalent default under a "+
+						"different name (e.g. %q or %q), so this lookup by exact name never finds it.",
+					p.Language, p.Name, "Sonar way core", "Sonar way comprehensive"))
+			}
+			results = append(results, r)
 			continue
 		}
-		results = append(results, makeResult(catQualityProfiles,
-			fmt.Sprintf("Rules: %s (%s)", p.Name, p.Language), p.ActiveRuleCount, scRules, "Exact"))
+		r := makeResult(catQualityProfiles,
+			fmt.Sprintf("Rules: %s (%s)", p.Name, p.Language), p.ActiveRuleCount, scRules, "Exact")
+		if !r.Match {
+			r = withSqsAndSqcFeatureDivergence(r, fmt.Sprintf(
+				"SQS_AND_SQC_FEATURE_DIVERGENCE, not a bug: SonarQube Server shows %d active rule(s) for "+
+					"%q (%s), SonarCloud shows %d — SonarCloud's rule catalog updates "+
+					"continuously while Server's is pinned to its installed version, so "+
+					"identically-named built-in profiles drift apart over time.",
+				p.ActiveRuleCount, p.Name, p.Language, scRules))
+		}
+		results = append(results, r)
 	}
 	return results
 }
@@ -337,7 +374,9 @@ func checkProfileDefaults(ctx context.Context, s *Suite) []CheckResult {
 		Language  string `json:"language"`
 		IsDefault bool   `json:"isDefault"`
 	}
-	var sqsResp, scResp struct{ Profiles []profile `json:"profiles"` }
+	var sqsResp, scResp struct {
+		Profiles []profile `json:"profiles"`
+	}
 	json.Unmarshal(sqsBody, &sqsResp)
 	json.Unmarshal(scBody, &scResp)
 
@@ -355,8 +394,16 @@ func checkProfileDefaults(ctx context.Context, s *Suite) []CheckResult {
 	}
 	var results []CheckResult
 	for lang, sqsName := range sqsDef {
-		results = append(results, makeResultStr(catQualityProfiles,
-			fmt.Sprintf("Default (%s)", lang), sqsName, scDef[lang], "Exact"))
+		scName := scDef[lang]
+		r := makeResultStr(catQualityProfiles, fmt.Sprintf("Default (%s)", lang), sqsName, scName, "Exact")
+		if !r.Match && sqsName == sonarWayProfileName && strings.HasPrefix(scName, sonarWayProfileName) {
+			r = withSqsAndSqcFeatureDivergence(r, fmt.Sprintf(
+				"SQS_AND_SQC_FEATURE_DIVERGENCE, not a bug: SonarQube Server's default profile for %s is "+
+					"named %q; SonarCloud's built-in default for %s is named %q — same role "+
+					"(the default rule pack for new projects), different name.",
+				lang, sqsName, lang, scName))
+		}
+		results = append(results, r)
 	}
 	return results
 }
@@ -374,7 +421,9 @@ func checkProfileInheritance(ctx context.Context, s *Suite) []CheckResult {
 	type profile struct {
 		ParentKey string `json:"parentKey"`
 	}
-	var sqsResp, scResp struct{ Profiles []profile `json:"profiles"` }
+	var sqsResp, scResp struct {
+		Profiles []profile `json:"profiles"`
+	}
 	json.Unmarshal(sqsBody, &sqsResp)
 	json.Unmarshal(scBody, &scResp)
 
@@ -426,7 +475,9 @@ func checkGateConditions(ctx context.Context, s *Suite) []CheckResult {
 		ID   json.RawMessage `json:"id"`
 		Name string          `json:"name"`
 	}
-	var sqsResp, scResp struct{ QualityGates []gate `json:"qualitygates"` }
+	var sqsResp, scResp struct {
+		QualityGates []gate `json:"qualitygates"`
+	}
 	json.Unmarshal(sqsBody, &sqsResp)
 	json.Unmarshal(scBody, &scResp)
 
@@ -448,7 +499,9 @@ func checkGateConditions(ctx context.Context, s *Suite) []CheckResult {
 			results = append(results, makeError(catQualityGates, fmt.Sprintf("Conditions: %s", sq.Name), err))
 			continue
 		}
-		var sqDet struct{ Conditions []json.RawMessage `json:"conditions"` }
+		var sqDet struct {
+			Conditions []json.RawMessage `json:"conditions"`
+		}
 		json.Unmarshal(sqDetail, &sqDet)
 
 		scID, found := scIDs[sq.Name]
@@ -465,10 +518,20 @@ func checkGateConditions(ctx context.Context, s *Suite) []CheckResult {
 			results = append(results, makeError(catQualityGates, fmt.Sprintf("Conditions: %s", sq.Name), err))
 			continue
 		}
-		var scDet struct{ Conditions []json.RawMessage `json:"conditions"` }
+		var scDet struct {
+			Conditions []json.RawMessage `json:"conditions"`
+		}
 		json.Unmarshal(scDetail, &scDet)
-		results = append(results, makeResult(catQualityGates,
-			fmt.Sprintf("Conditions: %s", sq.Name), len(sqDet.Conditions), len(scDet.Conditions), "Exact"))
+		r := makeResult(catQualityGates,
+			fmt.Sprintf("Conditions: %s", sq.Name), len(sqDet.Conditions), len(scDet.Conditions), "Exact")
+		if !r.Match && sq.Name == sonarWayGateName {
+			r = withSqsAndSqcFeatureDivergence(r, fmt.Sprintf(
+				"SQS_AND_SQC_FEATURE_DIVERGENCE, not a bug: SonarQube Server's built-in %q gate has %d "+
+					"condition(s); SonarCloud's built-in default gate ships with %d — SonarCloud's "+
+					"default gate has more built-in conditions than Server's.",
+				sq.Name, len(sqDet.Conditions), len(scDet.Conditions)))
+		}
+		results = append(results, r)
 	}
 	return results
 }
@@ -478,7 +541,9 @@ func checkGateDefault(ctx context.Context, s *Suite) []CheckResult {
 		Name      string `json:"name"`
 		IsDefault bool   `json:"isDefault"`
 	}
-	var sqsResp, scResp struct{ QualityGates []gate `json:"qualitygates"` }
+	var sqsResp, scResp struct {
+		QualityGates []gate `json:"qualitygates"`
+	}
 	sqsBody, err := queryJSON(ctx, s.sqsRaw, apiGatesList, nil)
 	if err != nil {
 		return []CheckResult{makeError(catQualityGates, nameDefaultGate, err)}
@@ -522,7 +587,9 @@ func checkGateAssociations(ctx context.Context, s *Suite) []CheckResult {
 			continue
 		}
 		var sqsG, scG struct {
-			QualityGate struct{ Name string `json:"name"` } `json:"qualityGate"`
+			QualityGate struct {
+				Name string `json:"name"`
+			} `json:"qualityGate"`
 		}
 		json.Unmarshal(sqsBody, &sqsG)
 		json.Unmarshal(scBody, &scG)
@@ -544,7 +611,15 @@ func checkGroupCount(ctx context.Context, s *Suite) []CheckResult {
 	if err != nil {
 		return []CheckResult{makeError("Groups", nameGroupCount, err)}
 	}
-	return []CheckResult{makeResult("Groups", nameGroupCount, sqsCount, scCount, "Built-in handling may differ")}
+	r := makeResult("Groups", nameGroupCount, sqsCount, scCount, "Built-in handling may differ")
+	if !r.Match {
+		r = withSqsAndSqcFeatureDivergence(r, fmt.Sprintf(
+			"SQS_AND_SQC_FEATURE_DIVERGENCE, not a bug: SonarQube Server has %d group(s), SonarCloud has "+
+				"%d — every SonarCloud organization ships with its own built-in groups "+
+				"(e.g. Owners, Members) that have no Server equivalent.",
+			sqsCount, scCount))
+	}
+	return []CheckResult{r}
 }
 
 func checkGroupMembership(ctx context.Context, s *Suite) []CheckResult {
@@ -556,7 +631,9 @@ func checkGroupMembership(ctx context.Context, s *Suite) []CheckResult {
 		Name         string `json:"name"`
 		MembersCount int    `json:"membersCount"`
 	}
-	var resp struct{ Groups []group `json:"groups"` }
+	var resp struct {
+		Groups []group `json:"groups"`
+	}
 	json.Unmarshal(sqsBody, &resp)
 
 	var results []CheckResult
@@ -571,7 +648,9 @@ func checkGroupMembership(ctx context.Context, s *Suite) []CheckResult {
 			results = append(results, makeError("Groups", fmt.Sprintf("Members: %s", g.Name), err))
 			continue
 		}
-		var scResp struct{ Groups []group `json:"groups"` }
+		var scResp struct {
+			Groups []group `json:"groups"`
+		}
 		json.Unmarshal(scBody, &scResp)
 		scMembers := 0
 		for _, sg := range scResp.Groups {
@@ -580,8 +659,15 @@ func checkGroupMembership(ctx context.Context, s *Suite) []CheckResult {
 				break
 			}
 		}
-		results = append(results, makeResult("Groups",
-			fmt.Sprintf("Members: %s", g.Name), g.MembersCount, scMembers, "Where users exist in SC"))
+		r := makeResult("Groups", fmt.Sprintf("Members: %s", g.Name), g.MembersCount, scMembers, "Where users exist in SC")
+		if !r.Match && g.Name == "sonar-administrators" {
+			r = withSqsAndSqcFeatureDivergence(r, fmt.Sprintf(
+				"SQS_AND_SQC_FEATURE_DIVERGENCE, not a bug: SonarQube Server's %q group has %d member(s); "+
+					"SonarCloud has no equivalent group — Cloud grants organization-admin access "+
+					"through Owners, not a dedicated group, so its membership shows as %d.",
+				g.Name, g.MembersCount, scMembers))
+		}
+		results = append(results, r)
 	}
 	return results
 }
@@ -610,7 +696,9 @@ func checkTemplatePermissions(ctx context.Context, s *Suite) []CheckResult {
 		ID   string `json:"id"`
 		Name string `json:"name"`
 	}
-	var resp struct{ PermissionTemplates []tmpl `json:"permissionTemplates"` }
+	var resp struct {
+		PermissionTemplates []tmpl `json:"permissionTemplates"`
+	}
 	json.Unmarshal(sqsBody, &resp)
 
 	perms := []string{"admin", "codeviewer", "issueadmin", "securityhotspotadmin", "scan", "user"}
@@ -750,11 +838,17 @@ func checkCustomRules(ctx context.Context, s *Suite) []CheckResult {
 		return []CheckResult{makeError("Rules", nameRuleCount, err)}
 	}
 	r := makeResult("Rules", nameRuleCount, sqsTotal, scTotal, "Rule sets may differ")
-	r.Notes = "Rule sets may differ between SQS and SC"
-	// Match is left to makeResult's sqsCount == scCount comparison: SC's
-	// rule catalogue is a subset of SQS so equality is rare and a mismatch
-	// is informational, not a failure. The Notes field explains the gap
-	// for reviewers.
+	// Match is left to makeResult's sqsCount == scCount comparison: the two
+	// products' rule catalogs are versioned and maintained independently,
+	// so equality is rare and a mismatch is a known SQS_AND_SQC_FEATURE_DIVERGENCE,
+	// not a failure.
+	if !r.Match {
+		r = withSqsAndSqcFeatureDivergence(r, fmt.Sprintf(
+			"SQS_AND_SQC_FEATURE_DIVERGENCE, not a bug: SonarQube Server reports %d non-template rule(s), "+
+				"SonarCloud reports %d — the two products' rule catalogs are versioned and "+
+				"maintained independently and are not expected to match exactly.",
+			sqsTotal, scTotal))
+	}
 	return []CheckResult{r}
 }
 
@@ -783,13 +877,28 @@ func checkProjectPermissions(ctx context.Context, s *Suite) []CheckResult {
 				continue
 			}
 			type permResp struct {
-				Groups []struct{ Name string `json:"name"` } `json:"groups"`
+				Groups []struct {
+					Name string `json:"name"`
+				} `json:"groups"`
 			}
 			var sqsP, scP permResp
 			json.Unmarshal(sqsBody, &sqsP)
 			json.Unmarshal(scBody, &scP)
-			results = append(results, makeResult("Permissions",
-				fmt.Sprintf("%s/%s groups", proj, perm), len(sqsP.Groups), len(scP.Groups), "Except built-in remapping"))
+			r := makeResult("Permissions", fmt.Sprintf("%s/%s groups", proj, perm),
+				len(sqsP.Groups), len(scP.Groups), "Except built-in remapping")
+			// Only an SC surplus is a known SQS_AND_SQC_FEATURE_DIVERGENCE (Cloud
+			// auto-grants its default "Members" group baseline permissions on
+			// every project). An SC shortfall stays a real failure — that would
+			// mean a grant the migration should have copied never landed.
+			if !r.Match && len(scP.Groups) > len(sqsP.Groups) {
+				r = withSqsAndSqcFeatureDivergence(r, fmt.Sprintf(
+					"SQS_AND_SQC_FEATURE_DIVERGENCE, not a bug: SonarQube Server granted %q on %s to %d "+
+						"group(s), SonarCloud shows %d — SonarCloud automatically grants baseline "+
+						"project permissions to the organization's default Members group, which "+
+						"Server has no equivalent for.",
+					perm, proj, len(sqsP.Groups), len(scP.Groups)))
+			}
+			results = append(results, r)
 		}
 	}
 	return results
@@ -812,7 +921,9 @@ func checkALMBindings(ctx context.Context, s *Suite) []CheckResult {
 		scBody, err := queryJSON(ctx, s.scRaw, "api/alm_settings/get_binding",
 			urlParams("project", s.scProjectKey(proj)))
 		if err != nil {
-			var sqsB struct{ ALM string `json:"alm"` }
+			var sqsB struct {
+				ALM string `json:"alm"`
+			}
 			json.Unmarshal(sqsBody, &sqsB)
 			results = append(results, CheckResult{
 				Category: catALMBindings, Name: fmt.Sprintf("Binding: %s", proj),
@@ -820,7 +931,9 @@ func checkALMBindings(ctx context.Context, s *Suite) []CheckResult {
 			})
 			continue
 		}
-		var sqsB, scB struct{ ALM string `json:"alm"` }
+		var sqsB, scB struct {
+			ALM string `json:"alm"`
+		}
 		json.Unmarshal(sqsBody, &sqsB)
 		json.Unmarshal(scBody, &scB)
 		results = append(results, makeResultStr(catALMBindings,
@@ -836,7 +949,9 @@ func checkPortfolios(ctx context.Context, s *Suite) []CheckResult {
 	if err != nil {
 		return []CheckResult{makeSkipped("Portfolios", namePortfolioCount, "Enterprise API unavailable")}
 	}
-	var sqsResp struct{ Views []json.RawMessage `json:"views"` }
+	var sqsResp struct {
+		Views []json.RawMessage `json:"views"`
+	}
 	if err := json.Unmarshal(sqsBody, &sqsResp); err != nil || len(sqsResp.Views) == 0 {
 		return []CheckResult{makeSkipped("Portfolios", namePortfolioCount, "0 portfolios on SQS")}
 	}
@@ -847,7 +962,9 @@ func checkPortfolios(ctx context.Context, s *Suite) []CheckResult {
 		r.Notes = "SC enterprise API may require elevated token"
 		return []CheckResult{r}
 	}
-	var scResp struct{ Views []json.RawMessage `json:"views"` }
+	var scResp struct {
+		Views []json.RawMessage `json:"views"`
+	}
 	json.Unmarshal(scBody, &scResp)
 	return []CheckResult{makeResult("Portfolios", namePortfolioCount,
 		len(sqsResp.Views), len(scResp.Views), "Enterprise only")}
@@ -884,7 +1001,9 @@ func checkMeasures(ctx context.Context, s *Suite) []CheckResult {
 			Value  string `json:"value"`
 		}
 		type resp struct {
-			Component struct{ Measures []measure `json:"measures"` } `json:"component"`
+			Component struct {
+				Measures []measure `json:"measures"`
+			} `json:"component"`
 		}
 		var sqsM, scM resp
 		json.Unmarshal(sqsBody, &sqsM)
@@ -908,12 +1027,26 @@ func checkMeasures(ctx context.Context, s *Suite) []CheckResult {
 
 // ── Extract Files ─────────────────────────────────────────────────────
 
+// extractFileTasks maps each entity checkExtractFiles reports on to the real
+// extract task whose output holds it. The on-disk layout is
+// <extractDir>/<taskName>/results.N.jsonl (see common.DataStore.Writer and
+// common.ChunkWriter.WriteChunk) — no code path in this tool has ever
+// written a "*.ndjson" file, which is what this check looked for before.
+var extractFileTasks = [][2]string{
+	{"projects", "getProjects"},
+	{"quality_profiles", "getProfiles"},
+	{"quality_gates", "getGates"},
+	{"groups", "getGroups"},
+	{"permission_templates", "getTemplates"},
+	{"settings", "getServerSettings"},
+	{"issues", "getProjectIssuesFull"},
+	{"hotspots", "getProjectHotspotsFull"},
+	{"rules", "getRules"},
+	{"users", "getUsers"},
+	{"project_branches", "getBranches"},
+}
+
 func checkExtractFiles(ctx context.Context, s *Suite) []CheckResult {
-	expected := []string{
-		"projects", "quality_profiles", "quality_gates", "groups",
-		"permission_templates", "settings", "issues", "hotspots",
-		"rules", "users", "project_branches",
-	}
 	dirs, err := findExtractDirs(s.cfg.ExportDir)
 	if err != nil || len(dirs) == 0 {
 		return []CheckResult{makeError(catExtractFiles, "Find extract dirs",
@@ -921,14 +1054,12 @@ func checkExtractFiles(ctx context.Context, s *Suite) []CheckResult {
 	}
 	var results []CheckResult
 	for _, dir := range dirs {
-		for _, name := range expected {
-			matches, _ := filepath.Glob(filepath.Join(dir, "*", name+ndjsonExt))
-			if len(matches) == 0 {
-				matches, _ = filepath.Glob(filepath.Join(dir, name+ndjsonExt))
-			}
+		for _, entry := range extractFileTasks {
+			name, taskName := entry[0], entry[1]
+			matches, _ := filepath.Glob(filepath.Join(dir, taskName, "results.*.jsonl"))
 			if len(matches) == 0 {
 				results = append(results, CheckResult{
-					Category: catExtractFiles, Name: fmt.Sprintf("%s.ndjson", name),
+					Category: catExtractFiles, Name: name,
 					SQSValue: "expected", SCValue: "MISSING", Match: false,
 				})
 				continue
@@ -936,17 +1067,17 @@ func checkExtractFiles(ctx context.Context, s *Suite) []CheckResult {
 			for _, f := range matches {
 				info, err := os.Stat(f)
 				if err != nil {
-					results = append(results, makeError(catExtractFiles, name+ndjsonExt, err))
+					results = append(results, makeError(catExtractFiles, name, err))
 					continue
 				}
 				if info.Size() == 0 {
 					results = append(results, CheckResult{
-						Category: catExtractFiles, Name: fmt.Sprintf("%s.ndjson", name),
+						Category: catExtractFiles, Name: name,
 						SQSValue: "expected non-empty", SCValue: "EMPTY", Match: false,
 					})
 				} else {
 					results = append(results, CheckResult{
-						Category: catExtractFiles, Name: fmt.Sprintf("%s.ndjson", name),
+						Category: catExtractFiles, Name: name,
 						SQSValue: fmt.Sprintf("%d bytes", info.Size()), SCValue: "present", Match: true,
 					})
 				}

@@ -168,6 +168,155 @@ func TestCheckCustomRulesDoesNotUnconditionallyMatch(t *testing.T) {
 	if r.SQSValue != "100" || r.SCValue != "80" {
 		t.Errorf("result values wrong: SQS=%s SC=%s (want 100 / 80)", r.SQSValue, r.SCValue)
 	}
+	// A rule-count mismatch is a known SQS_AND_SQC_FEATURE_DIVERGENCE (independently
+	// versioned rule catalogs), not a migration bug — it must be reported
+	// (yellow), not failed (red).
+	if !r.SqsAndSqcFeatureDivergence {
+		t.Errorf("checkCustomRules mismatch should be marked SqsAndSqcFeatureDivergence, got SqsAndSqcFeatureDivergence=false")
+	}
+	if !strings.Contains(r.Notes, "100") || !strings.Contains(r.Notes, "80") {
+		t.Errorf("Notes should state both observed values plainly, got %q", r.Notes)
+	}
+}
+
+// TestCheckGroupCountMarksSqsAndSqcFeatureDivergenceOnMismatch ensures a group-count mismatch
+// (SonarCloud's built-in Owners/Members groups have no Server equivalent) is
+// reported as a known SQS_AND_SQC_FEATURE_DIVERGENCE rather than a plain failure.
+func TestCheckGroupCountMarksSqsAndSqcFeatureDivergenceOnMismatch(t *testing.T) {
+	sqs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"groups": []map[string]any{{"name": "sonar-users"}, {"name": "sonar-administrators"}},
+		})
+	}))
+	defer sqs.Close()
+	sc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"groups": []map[string]any{{}, {}, {}, {}, {}},
+		})
+	}))
+	defer sc.Close()
+
+	s := newTestSuite(t, sqs, sc)
+	results := checkGroupCount(context.Background(), s)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if r.Match {
+		t.Fatalf("expected a mismatch (SQS=2, SC=5), got Match=true")
+	}
+	if !r.SqsAndSqcFeatureDivergence {
+		t.Errorf("group-count mismatch should be marked SqsAndSqcFeatureDivergence, got SqsAndSqcFeatureDivergence=false")
+	}
+	if r.SQSValue != "2" || r.SCValue != "5" {
+		t.Errorf("result values wrong: SQS=%s SC=%s (want 2 / 5)", r.SQSValue, r.SCValue)
+	}
+}
+
+// TestCheckProfileDefaults_SonarWayRenameIsSqsAndSqcFeatureDivergenceNotFail ensures the
+// "Sonar way" -> "Sonar way core"/"Sonar way comprehensive" default-profile
+// naming difference is reported as a known SQS_AND_SQC_FEATURE_DIVERGENCE, while an unrelated
+// name mismatch still fails.
+func TestCheckProfileDefaults_SonarWayRenameIsSqsAndSqcFeatureDivergenceNotFail(t *testing.T) {
+	sqs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"profiles": []map[string]any{
+				{"name": "Sonar way", "language": "java", "isDefault": true},
+				{"name": "My Custom Profile", "language": "go", "isDefault": true},
+			},
+		})
+	}))
+	defer sqs.Close()
+	sc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"profiles": []map[string]any{
+				{"name": "Sonar way core", "language": "java", "isDefault": true},
+				{"name": "Some Other Profile", "language": "go", "isDefault": true},
+			},
+		})
+	}))
+	defer sc.Close()
+
+	s := newTestSuite(t, sqs, sc)
+	results := checkProfileDefaults(context.Background(), s)
+
+	byName := make(map[string]CheckResult, len(results))
+	for _, r := range results {
+		byName[r.Name] = r
+	}
+
+	java := byName["Default (java)"]
+	if java.Match {
+		t.Fatalf("expected java default to mismatch (%q vs %q)", java.SQSValue, java.SCValue)
+	}
+	if !java.SqsAndSqcFeatureDivergence {
+		t.Errorf("Sonar way -> Sonar way core rename should be SqsAndSqcFeatureDivergence, got SqsAndSqcFeatureDivergence=false (Notes=%q)", java.Notes)
+	}
+
+	goResult := byName["Default (go)"]
+	if goResult.Match {
+		t.Fatalf("expected go default to mismatch (%q vs %q)", goResult.SQSValue, goResult.SCValue)
+	}
+	if goResult.SqsAndSqcFeatureDivergence {
+		t.Errorf("an unrelated custom-profile name mismatch must stay a real failure, not SqsAndSqcFeatureDivergence")
+	}
+}
+
+// TestCheckProjectPermissions_SCSurplusDivergesSCShortfallFails ensures only
+// an SC-side surplus (Cloud's default Members group auto-grant) is treated
+// as a known SQS_AND_SQC_FEATURE_DIVERGENCE — a shortfall on SC (a grant the migration should
+// have copied but didn't) must still fail.
+func TestCheckProjectPermissions_SCSurplusDivergesSCShortfallFails(t *testing.T) {
+	sqs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		perm := r.URL.Query().Get("permission")
+		groups := []map[string]any{{"name": "devs"}}
+		if perm == "admin" {
+			groups = []map[string]any{{"name": "devs"}, {"name": "admins"}}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"groups": groups})
+	}))
+	defer sqs.Close()
+	sc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		perm := r.URL.Query().Get("permission")
+		groups := []map[string]any{{"name": "devs"}, {"name": "Members"}}
+		if perm == "admin" {
+			// Shortfall: SQS had 2 groups, SC only shows 1.
+			groups = []map[string]any{{"name": "admins"}}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"groups": groups})
+	}))
+	defer sc.Close()
+
+	s := newTestSuite(t, sqs, sc)
+	s.cfg.ProjectKeys = []string{"proj1"}
+	results := checkProjectPermissions(context.Background(), s)
+
+	byName := make(map[string]CheckResult, len(results))
+	for _, r := range results {
+		byName[r.Name] = r
+	}
+
+	surplus := byName["proj1/user groups"]
+	if surplus.Match {
+		t.Fatalf("expected user-permission mismatch (SQS=1, SC=2), got Match=true")
+	}
+	if !surplus.SqsAndSqcFeatureDivergence {
+		t.Errorf("SC surplus (Members group auto-grant) should be SqsAndSqcFeatureDivergence, got SqsAndSqcFeatureDivergence=false (Notes=%q)", surplus.Notes)
+	}
+
+	shortfall := byName["proj1/admin groups"]
+	if shortfall.Match {
+		t.Fatalf("expected admin-permission mismatch (SQS=2, SC=1), got Match=true")
+	}
+	if shortfall.SqsAndSqcFeatureDivergence {
+		t.Errorf("SC shortfall must stay a real failure, not SqsAndSqcFeatureDivergence")
+	}
 }
 
 // TestCheckGlobalSettingsSubsetLogic ensures the settings check is no
