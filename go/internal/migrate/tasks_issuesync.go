@@ -953,8 +953,6 @@ func syncIssueComments(ctx context.Context, e *Executor, cloudKey string, source
 		e.Logger.Info("syncIssueMetadata: comment history truncated by max_issue_comments",
 			"issue", cloudKey, "total", len(sourceComments), "migrated", len(capped))
 		sourceComments = capped
-	} else {
-		sourceComments = capped
 	}
 	var failed bool
 	for _, c := range sourceComments {

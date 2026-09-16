@@ -189,6 +189,8 @@ func PollCETask(ctx context.Context, client *http.Client, cloudURL, taskID strin
 				return ctx.Err()
 			case <-time.After(CEPollInterval):
 			}
+		} else if err := ctx.Err(); err != nil {
+			return err
 		}
 		first = false
 
