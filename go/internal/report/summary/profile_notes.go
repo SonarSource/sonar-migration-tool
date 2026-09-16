@@ -239,6 +239,56 @@ func applyProfileFindings(succeeded, nearPerfect, partial []EntityItem, findings
 	return keep, nearPerfect, partial
 }
 
+// builtInProfileDiff mirrors migrate.BuiltInProfileDiff for the read-side
+// (#309). Keeping a separate copy avoids a summary → migrate import flip,
+// same rationale as profileFinding above.
+type builtInProfileDiff struct {
+	ServerURL    string `json:"server_url"`
+	Name         string `json:"name"`
+	Language     string `json:"language"`
+	RulesAdded   int    `json:"rules_added"`
+	RulesRemoved int    `json:"rules_removed"`
+}
+
+// readBuiltInProfileDiffs reads the compareBuiltInProfiles JSONL sidecar
+// (only ever written by a real migrate run — never by the predictive
+// report's synthetic run directory) and keys each record the same way
+// collectExtractSkipped's own dedup key is built: serverURL+"|"+name+"|"+language.
+func readBuiltInProfileDiffs(store *common.DataStore) map[string]builtInProfileDiff {
+	items, err := store.ReadAll("compareBuiltInProfiles")
+	if err != nil || len(items) == 0 {
+		return nil
+	}
+	out := make(map[string]builtInProfileDiff, len(items))
+	for _, raw := range items {
+		var d builtInProfileDiff
+		if err := json.Unmarshal(raw, &d); err != nil {
+			continue
+		}
+		if d.Name == "" || d.Language == "" {
+			continue
+		}
+		out[d.ServerURL+"|"+d.Name+"|"+d.Language] = d
+	}
+	return out
+}
+
+// formatBuiltInProfileDiff renders the rules-added/removed counts for a
+// built-in quality profile's Detail column (#309): empty when the source
+// and target rule sets are identical, and never mentions a zero count.
+func formatBuiltInProfileDiff(added, removed int) string {
+	switch {
+	case added == 0 && removed == 0:
+		return ""
+	case removed == 0:
+		return fmt.Sprintf("%d rule(s) added", added)
+	case added == 0:
+		return fmt.Sprintf("%d rule(s) removed", removed)
+	default:
+		return fmt.Sprintf("%d rule(s) added, %d rule(s) removed", added, removed)
+	}
+}
+
 // Profile finding kind constants used throughout profile_notes.go.
 const (
 	kindTemplateInstance  = "template-instance"

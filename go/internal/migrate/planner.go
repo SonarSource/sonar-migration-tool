@@ -85,6 +85,7 @@ func RegisterAll() []TaskDef {
 	all = append(all, almTasks()...)
 	all = append(all, portfolioTasks()...)
 	all = append(all, ruleTasks()...)
+	all = append(all, compareTasks()...)
 	all = append(all, deleteTasks()...)
 	all = append(all, projectDataTasks()...)
 	all = append(all, hotspotMetadataSyncTasks()...)
