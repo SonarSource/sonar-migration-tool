@@ -1194,12 +1194,26 @@ func buildUnifiedRows(section Section, predictive bool) []unifiedRow {
 			sourceKey: item.SourceKey,
 		})
 	}
-	// Skipped — preserve group ordering by SkipReason.
-	skippedGroups := make(map[string][]EntityItem)
-	for _, item := range section.Skipped {
-		skippedGroups[item.SkipReason] = append(skippedGroups[item.SkipReason], item)
+	return append(rows, buildSkippedRows(section.Skipped, predictive)...)
+}
+
+// buildSkippedRows renders the Skipped bucket, grouped by SkipReason in
+// skipReasonOrder.
+//
+// Items whose reason has no entry in that order still have to appear.
+// Rendering only the known reasons dropped them from the table while the
+// section header went on counting them, so a section announced "284
+// skipped" above a table listing 274 — and the 10 missing rows were
+// exactly the ones a reader had never seen before and would most want to
+// look at.
+func buildSkippedRows(skipped []EntityItem, predictive bool) []unifiedRow {
+	groups := make(map[string][]EntityItem)
+	for _, item := range skipped {
+		groups[item.SkipReason] = append(groups[item.SkipReason], item)
 	}
-	emitSkipped := func(items []EntityItem) {
+
+	rows := make([]unifiedRow, 0, len(skipped))
+	emit := func(items []EntityItem) {
 		for _, item := range items {
 			rows = append(rows, unifiedRow{
 				name:      item.Name,
@@ -1212,18 +1226,13 @@ func buildUnifiedRows(section Section, predictive bool) []unifiedRow {
 			})
 		}
 	}
+
 	for _, entry := range skipReasonOrder {
-		emitSkipped(skippedGroups[entry.Reason])
-		delete(skippedGroups, entry.Reason)
+		emit(groups[entry.Reason])
+		delete(groups, entry.Reason)
 	}
-	// Items whose reason has no entry in skipReasonOrder still have to
-	// appear. Rendering only the known reasons dropped them from the
-	// table while the section header went on counting them, so a section
-	// announced "284 skipped" above a table listing 274 — with the
-	// 10 missing rows being exactly the ones a reader had never seen
-	// before and would most want to look at.
-	for _, reason := range sortedSkipGroups(skippedGroups) {
-		emitSkipped(skippedGroups[reason])
+	for _, reason := range sortedSkipGroups(groups) {
+		emit(groups[reason])
 	}
 	return rows
 }

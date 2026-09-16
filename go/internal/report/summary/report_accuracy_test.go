@@ -101,24 +101,30 @@ func TestRenamedMainBranchCollapsesToOneRow(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var rt runtimeData
 			collectRunEvents(runDirWithEvents(t, tc.events), &rt)
-
-			if len(rt.Branches) != 1 {
-				t.Fatalf("got %d rows, want 1; rows: %+v", len(rt.Branches), rt.Branches)
-			}
-			got := rt.Branches[0]
-			if got.Branch != "main" {
-				t.Errorf("Branch = %q, want %q (the post-rename name)", got.Branch, "main")
-			}
-			if got.Issues != 72 || got.Components != 12 {
-				t.Errorf("metrics lost in merge: %+v", got)
-			}
-			if got.TaskID != "task-abc" {
-				t.Errorf("TaskID = %q, want task-abc", got.TaskID)
-			}
-			if got.Status != "packaged" {
-				t.Errorf("Status = %q, want packaged (the stronger statement)", got.Status)
-			}
+			assertOneMergedMainBranch(t, rt.Branches)
 		})
+	}
+}
+
+// assertOneMergedMainBranch checks that the packaged metrics and the CE
+// task id ended up on a single row carrying the post-rename branch name.
+func assertOneMergedMainBranch(t *testing.T, branches []BranchStat) {
+	t.Helper()
+	if len(branches) != 1 {
+		t.Fatalf("got %d rows, want 1; rows: %+v", len(branches), branches)
+	}
+	got := branches[0]
+	if got.Branch != "main" {
+		t.Errorf("Branch = %q, want %q (the post-rename name)", got.Branch, "main")
+	}
+	if got.Issues != 72 || got.Components != 12 {
+		t.Errorf("metrics lost in merge: %+v", got)
+	}
+	if got.TaskID != "task-abc" {
+		t.Errorf("TaskID = %q, want task-abc", got.TaskID)
+	}
+	if got.Status != "packaged" {
+		t.Errorf("Status = %q, want packaged (the stronger statement)", got.Status)
 	}
 }
 

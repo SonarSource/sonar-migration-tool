@@ -34,6 +34,10 @@ type ReportRow struct {
 	Project string `csv:"project"`
 }
 
+// entityProjectLink is the entity label shared by every project-link
+// endpoint, named once so the three rows below cannot drift apart.
+const entityProjectLink = "Project Link"
+
 // urlEntityMap maps API URL paths to human-readable entity type names.
 var urlEntityMap = map[string]string{
 	"/api/projects/create":                  "Project",
@@ -61,9 +65,9 @@ var urlEntityMap = map[string]string{
 	"/api/permissions/add_group":             "Group Permission",
 	"/api/settings/set":                     "Setting",
 	"/api/settings/values":                  "Setting",
-	"/api/project_links/create":              "Project Link",
-	"/api/project_links/search":              "Project Link",
-	"/api/project_links/delete":              "Project Link",
+	"/api/project_links/create":              entityProjectLink,
+	"/api/project_links/search":              entityProjectLink,
+	"/api/project_links/delete":              entityProjectLink,
 	"/api/webhooks/create":                   "Webhook",
 	"/api/new_code_periods/set":              "New Code Period",
 	"/api/rules/update":                     "Rule",
