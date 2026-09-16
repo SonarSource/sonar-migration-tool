@@ -7,6 +7,7 @@ package summary
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -112,11 +113,12 @@ func renderMarkdownExecutiveSummary(sb *strings.Builder, summary *MigrationSumma
 		{Header: outcomeNearPerfect, Key: "nearPerfect"},
 		{Header: outcomePartial, Key: "partial"},
 		{Header: outcomeFailed, Key: "failed"},
+		{Header: outcomeExpected, Key: "expected"},
 		{Header: outcomeSkipped, Key: "skipped"},
 	}
 
 	var rows []map[string]any
-	var totalPerfect, totalNear, totalPartial, totalFailed, totalSkipped int
+	var totalPerfect, totalNear, totalPartial, totalFailed, totalExpected, totalSkipped int
 	for _, sec := range summary.Sections {
 		if summary.OmitSections[sec.Name] {
 			continue
@@ -124,12 +126,18 @@ func renderMarkdownExecutiveSummary(sb *strings.Builder, summary *MigrationSumma
 		perfect := len(sec.Succeeded)
 		near := len(sec.NearPerfect)
 		partial := len(sec.Partial)
-		failed := len(sec.Failed)
+		// Failed counts only what needs acting on; the rest is reported
+		// separately so a re-run into a populated organization does not
+		// look like a failing one.
+		actionable, expectedItems := sec.SplitFailed()
+		failed := len(actionable)
+		expected := len(expectedItems)
 		skipped := len(sec.Skipped)
 		totalPerfect += perfect
 		totalNear += near
 		totalPartial += partial
 		totalFailed += failed
+		totalExpected += expected
 		totalSkipped += skipped
 		rows = append(rows, map[string]any{
 			"objects":     mdCell(sec.Name),
@@ -137,6 +145,7 @@ func renderMarkdownExecutiveSummary(sb *strings.Builder, summary *MigrationSumma
 			"nearPerfect": near,
 			"partial":     partial,
 			"failed":      failed,
+			"expected":    expected,
 			"skipped":     skipped,
 		})
 	}
@@ -146,6 +155,7 @@ func renderMarkdownExecutiveSummary(sb *strings.Builder, summary *MigrationSumma
 		"nearPerfect": totalNear,
 		"partial":     totalPartial,
 		"failed":      totalFailed,
+		"expected":    totalExpected,
 		"skipped":     totalSkipped,
 	})
 
@@ -247,6 +257,7 @@ func renderMarkdownBottlenecks(sb *strings.Builder, summary *MigrationSummary) {
 			{Header: "Phase", Key: "phase"},
 			{Header: "Duration", Key: "duration"},
 			{Header: "OK", Key: "ok"},
+			{Header: "Failed Items", Key: "failedItems"},
 		}
 		rows := make([]map[string]any, 0, len(summary.Tasks))
 		for _, t := range summary.Tasks {
@@ -255,6 +266,10 @@ func renderMarkdownBottlenecks(sb *strings.Builder, summary *MigrationSummary) {
 				"phase":    t.Phase,
 				"duration": fmtDuration(t.Duration),
 				"ok":       t.OK,
+				// Shown next to OK so a "No" says how much of the task
+				// failed. Blank rather than 0 on the clean majority of
+				// rows, so the eye goes to the ones that are not.
+				"failedItems": fmtFailedItems(t),
 			})
 		}
 		sb.WriteString(report.GenerateSection(columns, rows,
@@ -264,6 +279,7 @@ func renderMarkdownBottlenecks(sb *strings.Builder, summary *MigrationSummary) {
 
 	if len(summary.Branches) > 0 {
 		columns := []report.Column{
+			{Header: "Project", Key: "project"},
 			{Header: "Branch", Key: "branch"},
 			{Header: "Type", Key: "type"},
 			{Header: "Status", Key: "status"},
@@ -272,15 +288,35 @@ func renderMarkdownBottlenecks(sb *strings.Builder, summary *MigrationSummary) {
 		rows := make([]map[string]any, 0, len(summary.Branches))
 		for _, b := range summary.Branches {
 			rows = append(rows, map[string]any{
-				"branch": mdCell(b.Branch),
-				"type":   mdCell(b.Type),
-				"status": mdCell(b.Status),
-				"taskId": mdCell(b.TaskID),
+				"project": mdCell(b.Project),
+				"branch":  mdCell(b.Branch),
+				"type":    mdCell(b.Type),
+				"status":  mdCell(b.Status),
+				"taskId":  mdCell(b.TaskID),
 			})
 		}
 		sb.WriteString(report.GenerateSection(columns, rows,
 			report.WithTitle("Per-Branch CE", 3)))
 		sb.WriteString("\n")
+	}
+}
+
+// fmtFailedItems renders a task's failed-item count for the Slowest Tasks
+// table, distinguishing failures that need attention from the by-design
+// and already-done ones nobody has to act on.
+//
+// Returns "" for a task that failed nothing, so the column stays quiet on
+// the rows where there is nothing to say.
+func fmtFailedItems(t TaskTiming) string {
+	switch {
+	case t.Failed == 0:
+		return ""
+	case t.ActionableFailures == 0:
+		return fmt.Sprintf("%d (none actionable)", t.Failed)
+	case t.ActionableFailures == t.Failed:
+		return strconv.FormatInt(t.Failed, 10)
+	default:
+		return fmt.Sprintf("%d (%d actionable)", t.Failed, t.ActionableFailures)
 	}
 }
 
@@ -294,6 +330,7 @@ func renderMarkdownFailureLedger(sb *strings.Builder, summary *MigrationSummary)
 	columns := []report.Column{
 		{Header: "Entity Type", Key: "entityType"},
 		{Header: "Name", Key: "name"},
+		{Header: "Project", Key: "project"},
 		{Header: "Organization", Key: "organization"},
 		{Header: "HTTP", Key: "http"},
 		{Header: "Cause", Key: "cause"},
@@ -304,6 +341,7 @@ func renderMarkdownFailureLedger(sb *strings.Builder, summary *MigrationSummary)
 		rows = append(rows, map[string]any{
 			"entityType":   mdCell(f.EntityType),
 			"name":         mdCell(f.EntityName),
+			"project":      mdCell(f.Project),
 			"organization": mdCell(f.Organization),
 			"http":         mdCell(f.HTTPStatus),
 			"cause":        mdCell(failureCauseLabel(f.Cause)),
@@ -477,6 +515,7 @@ func renderMarkdownBranchProjectData(sb *strings.Builder, summary *MigrationSumm
 	}
 
 	columns := []report.Column{
+		{Header: "Project", Key: "project"},
 		{Header: "Branch", Key: "branch"},
 		{Header: "Type", Key: "type"},
 		{Header: "Status", Key: "status"},
@@ -491,6 +530,7 @@ func renderMarkdownBranchProjectData(sb *strings.Builder, summary *MigrationSumm
 	rows := make([]map[string]any, 0, len(summary.Branches))
 	for _, b := range summary.Branches {
 		rows = append(rows, map[string]any{
+			"project":        mdCell(b.Project),
 			"branch":         mdCell(b.Branch),
 			"type":           mdCell(b.Type),
 			"status":         mdCell(b.Status),

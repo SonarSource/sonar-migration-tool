@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/extract"
 	"testing"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
@@ -69,6 +71,14 @@ func newTransferTestCmd() *cobra.Command {
 	f.String(flagCertPassword, "", "")
 	f.Bool(flagDebug, false, "")
 	f.Bool(flagFastSync, false, "")
+	// #554 — history flags. Without these registered the harness stops
+	// mirroring transferCmd: pflag's Changed() silently reports false for
+	// a flag that does not exist, so resolveTransferConfig's history
+	// branches would be unreachable from any test.
+	f.Bool(flagMigrateHistory, false, "")
+	f.Int(flagHistoryMaxPoints, 0, "")
+	// Mirrors transferCmd's real default: the sentinel, not 0.
+	f.Int(flagHistoryMinIntervalDays, extract.HistoryUnset, "")
 	return cmd
 }
 
@@ -131,6 +141,11 @@ func TestResolveTransferConfig_UnifiedConfigShape(t *testing.T) {
 		pemFilePath:         "/cert/pem",
 		keyFilePath:         "/cert/key",
 		certPassword:        "p4ss",
+		// #554: this config sets no history_min_interval_days, so it must
+		// arrive as the "caller said nothing" sentinel rather than 0 — 0 is
+		// itself a valid request ("no spacing rule") and would otherwise be
+		// indistinguishable from an absent key.
+		historyMinIntervalDays: extract.HistoryUnset,
 	}
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("got %+v\nwant %+v", cfg, want)

@@ -64,8 +64,8 @@ func TestBuildBranchMapShortFiltered(t *testing.T) {
 
 func TestProjectDataTasks(t *testing.T) {
 	tasks := projectDataTasks()
-	if len(tasks) != 6 {
-		t.Fatalf("expected 6 project data tasks, got %d", len(tasks))
+	if len(tasks) != 7 {
+		t.Fatalf("expected 7 project data tasks, got %d", len(tasks))
 	}
 
 	names := map[string]bool{}
@@ -79,6 +79,7 @@ func TestProjectDataTasks(t *testing.T) {
 		"getProjectSourceCode",
 		"getProjectSCMData",
 		"getProjectVersions",
+		"getProjectAnalysisHistory",
 	}
 	for _, name := range expected {
 		if !names[name] {

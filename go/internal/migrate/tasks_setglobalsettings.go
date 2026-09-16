@@ -950,6 +950,7 @@ func fanOutOutcome(ctx context.Context, e *Executor, raw json.RawMessage,
 			Org: org, Status: outcomeFailed,
 			Reason: "rejected at org scope, key absent from project scope",
 			Detail: "Failed: rejected at org scope, key absent from project scope" + mergeSuffix,
+			Cause:  FailureByDesign,
 		}
 	}
 	if alreadyKnown {
@@ -1350,6 +1351,14 @@ type orgOutcome struct {
 	Status string `json:"status"`
 	Detail string `json:"detail"`
 	Reason string `json:"reason,omitempty"`
+	// Cause carries the FailureClass for a failed outcome so the report
+	// does not have to infer it from Reason's prose. Reason is written
+	// for a human — "rejected at org scope, key absent from project
+	// scope" — and matches none of the platform's own error wording, so
+	// re-deriving the class from it classified a deliberate by-design
+	// drop as a failure needing attention. The task already knows the
+	// class when it records the outcome; this passes it along.
+	Cause FailureClass `json:"cause,omitempty"`
 }
 
 // outcomeStatus* constants name the values orgOutcome.Status can take.

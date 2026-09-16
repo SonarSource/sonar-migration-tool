@@ -56,6 +56,27 @@ const (
 	FailureBug FailureClass = "bug"
 )
 
+// Actionable reports whether a failure of this class needs someone to do
+// something about it.
+//
+// FailureByDesign and FailureAlreadyDone are end states the migration is
+// content with: SonarQube Cloud will never do what was asked, or it was
+// already done. Counting them as failures makes a healthy re-run look
+// like a degrading one — migrating twice into the same organization turned
+// a run's failure count from 3 into 6 without a single thing going wrong.
+//
+// The zero class is deliberately actionable: an unclassified Fail() was
+// never told what went wrong, and the breakdown must not claim a failure
+// is benign on no evidence.
+func (c FailureClass) Actionable() bool {
+	switch c {
+	case FailureByDesign, FailureAlreadyDone:
+		return false
+	default:
+		return true
+	}
+}
+
 // FailureVerdict is the full explanation attached to a failed operation.
 type FailureVerdict struct {
 	Class FailureClass

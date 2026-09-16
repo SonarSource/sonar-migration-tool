@@ -16,10 +16,11 @@ import "github.com/sonar-solutions/sonar-migration-tool/internal/common"
 // reflection of the flag's real effect, and still satisfies "project data
 // migration ... turned off" from the issue.
 var extractProjectDataTasks = map[string]bool{
-	"getProjectComponentTree": true,
-	"getProjectSourceCode":    true,
-	"getProjectSCMData":       true,
-	"getProjectVersions":      true,
+	"getProjectComponentTree":   true,
+	"getProjectSourceCode":      true,
+	"getProjectSCMData":         true,
+	"getProjectVersions":        true,
+	"getProjectAnalysisHistory": true, // #554 — PoC project-history migration.
 }
 
 var extractIssueSyncTasks = map[string]bool{

@@ -51,6 +51,15 @@ type configFileShape struct {
 	// global value win but still falling back to the command-scoped one.
 	Objects    []string `json:"objects"`
 	ProjectKey string   `json:"project_key"`
+	// MigrateHistory / HistoryMaxPoints / HistoryMinIntervalDays — see
+	// ExtractConfig doc comments. #554. Top-level only: like
+	// skip_project_data_migration / skip_issue_sync, this is a plain bool
+	// with no per-shape nesting.
+	MigrateHistory   bool `json:"migrate_history"`
+	HistoryMaxPoints int  `json:"history_max_points"`
+	// Pointer, unlike HistoryMaxPoints: 0 is a legal explicit value here
+	// ("no spacing rule"), so absent and 0 must stay distinguishable.
+	HistoryMinIntervalDays *int `json:"history_min_interval_days"`
 
 	// Shape 2 (command-sectioned).
 	Extract *configFileShape `json:"extract"`
@@ -120,8 +129,26 @@ func parseConfigFile(path string) (configFileShape, error) {
 	return common.ParseJSONConfigFile[configFileShape](path)
 }
 
+// applyHistoryTo copies the three #554 history settings onto cfg. Extracted
+// from toExtractConfig because every shape branch needs the identical block,
+// and the nil check for HistoryMinIntervalDays — absent must stay
+// distinguishable from an explicit 0 — is easy to get subtly wrong three
+// times over.
+func (s configFileShape) applyHistoryTo(cfg *ExtractConfig) {
+	cfg.MigrateHistory = s.MigrateHistory
+	cfg.HistoryMaxPoints = s.HistoryMaxPoints
+	if s.HistoryMinIntervalDays != nil {
+		cfg.HistoryMinIntervalDays = *s.HistoryMinIntervalDays
+	}
+}
+
 func (s configFileShape) toExtractConfig() ExtractConfig {
 	var cfg ExtractConfig
+	// Start the spacing at the "caller said nothing" sentinel so an absent
+	// history_min_interval_days resolves through applyDefaults (now also 0)
+	// the same as an explicit 0. Every shape branch below overwrites it only
+	// when the key was actually present in the JSON.
+	cfg.HistoryMinIntervalDays = HistoryUnset
 	switch {
 	case s.Source != nil || s.Target != nil:
 		// #266 unified shape. Extract pulls from the "source"
@@ -154,6 +181,7 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		cfg.SkipIssueSync = s.SkipIssueSync
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKey = s.ProjectKey
+		s.applyHistoryTo(&cfg)
 	case s.SonarQube != nil:
 		cfg.URL = s.SonarQube.URL
 		cfg.Token = s.SonarQube.Token
@@ -166,6 +194,7 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		cfg.SkipIssueSync = s.SkipIssueSync
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKey = s.ProjectKey
+		s.applyHistoryTo(&cfg)
 	case s.Extract != nil:
 		cfg = s.Extract.toExtractConfig()
 		// #536: "objects" / "project_key" set at the outermost (global)
@@ -195,6 +224,7 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		cfg.SkipIssueSync = s.SkipIssueSync
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKey = s.ProjectKey
+		s.applyHistoryTo(&cfg)
 	}
 	return cfg
 }

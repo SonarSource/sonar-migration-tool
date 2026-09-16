@@ -41,6 +41,27 @@ type TaskTiming struct {
 	Duration float64 `json:"duration_seconds"`
 	OK       bool    `json:"ok"`
 	Err      string  `json:"err,omitempty"`
+
+	// StartedAt is when the task began, recorded so a consumer can work
+	// out how long a group of tasks actually took. Tasks within a phase
+	// run concurrently, so adding their durations together overstates
+	// elapsed time — the report's four coarse phases once totalled 47.9s
+	// inside a 26.7s run. With a start time the breakdown can measure the
+	// union of the intervals instead of their sum.
+	StartedAt time.Time `json:"started_at,omitempty"`
+
+	// Per-item tallies carried over from the task's TaskCounter.
+	//
+	// A task reports its error only when the whole task could not run.
+	// Per-item failures are counted and logged but deliberately do not
+	// abort the migration, so Err stays empty and the run continues —
+	// which meant a task that failed every item it touched recorded
+	// ok=true with no error, and the report rendered "OK: Yes" for it.
+	// ActionableFailures excludes by-design and already-done, so a re-run
+	// into a populated organization does not look like a degrading one.
+	Succeeded          int64 `json:"succeeded,omitempty"`
+	Failed             int64 `json:"failed,omitempty"`
+	ActionableFailures int64 `json:"actionable_failures,omitempty"`
 }
 
 // RunMeta is the single-object summary written to run_meta.json.
@@ -226,18 +247,33 @@ func writeRunEvents(runDir string, c *eventCollector) error {
 }
 
 // computeStatus maps the run's terminal error and recorded task outcomes to an
-// overall status string: "success" when retErr is nil, "partial" when at least
-// one task succeeded, otherwise "failed".
+// overall status string: "failed" when nothing succeeded, "partial" when the
+// run completed but did not do everything it was asked to, "success" only
+// when it did.
+//
+// A nil terminal error used to be reported as "success" outright. That is the
+// wrong question: per-item failures never abort the run, so a migration that
+// left every project without its source link — because the token lacked
+// Administer — finished with retErr nil and announced "success" at the top of
+// its own report, directly above a ledger listing the failures. Anything
+// actionable now degrades the run to "partial"; by-design and already-done do
+// not, so a clean re-run still reports success.
 func computeStatus(retErr error, tm *RunTimings) string {
-	if retErr == nil {
-		return "success"
+	tasks := tm.tasksSnapshot()
+	if retErr != nil {
+		for _, t := range tasks {
+			if t.OK {
+				return "partial"
+			}
+		}
+		return "failed"
 	}
-	for _, t := range tm.tasksSnapshot() {
-		if t.OK {
+	for _, t := range tasks {
+		if t.ActionableFailures > 0 {
 			return "partial"
 		}
 	}
-	return "failed"
+	return "success"
 }
 
 // errString returns the error message, or "" when err is nil.

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
@@ -24,7 +25,18 @@ type ReportRow struct {
 	HTTPStatus   string `csv:"http_status"`
 	Outcome      string `csv:"outcome"`
 	ErrorMessage string `csv:"error_message"`
+
+	// Project is the project the request acted on, when its body named
+	// one. Many entities are only meaningful alongside their project: two
+	// projects failing to have their source link set produced two rows
+	// reading "SQS migrated project" — the link's name, identical for
+	// every project — with no way to tell which projects were affected.
+	Project string `csv:"project"`
 }
+
+// entityProjectLink is the entity label shared by every project-link
+// endpoint, named once so the three rows below cannot drift apart.
+const entityProjectLink = "Project Link"
 
 // urlEntityMap maps API URL paths to human-readable entity type names.
 var urlEntityMap = map[string]string{
@@ -53,6 +65,11 @@ var urlEntityMap = map[string]string{
 	"/api/permissions/add_group":             "Group Permission",
 	"/api/settings/set":                     "Setting",
 	"/api/settings/values":                  "Setting",
+	"/api/project_links/create":              entityProjectLink,
+	"/api/project_links/search":              entityProjectLink,
+	"/api/project_links/delete":              entityProjectLink,
+	"/api/webhooks/create":                   "Webhook",
+	"/api/new_code_periods/set":              "New Code Period",
 	"/api/rules/update":                     "Rule",
 	"/api/alm_integration/list_repositories": "ALM Repository",
 	"/dop-translation/project-bindings":      "Project Binding",
@@ -196,6 +213,27 @@ func extractOrganization(payload map[string]any) string {
 	return ""
 }
 
+// projectFields is the priority order for identifying the project a
+// request acted on. "projectKey" first: where a body carries both, it is
+// the target-side key, while "project" is sometimes the source one.
+var projectFields = []string{"projectKey", "project", "component"}
+
+// extractProject returns the project named in the request body, or "".
+func extractProject(payload map[string]any) string {
+	body := getRequestBody(payload)
+	if body == nil {
+		return ""
+	}
+	for _, field := range projectFields {
+		if v, ok := body[field]; ok && v != nil {
+			if s := fmt.Sprintf("%v", v); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
 func extractErrorMessage(payload map[string]any) string {
 	responseVal := payload["response"]
 	if responseVal == nil {
@@ -217,10 +255,61 @@ func extractErrorsFromValue(val any) string {
 		}
 		var parsed map[string]any
 		if json.Unmarshal([]byte(v), &parsed) == nil {
-			return joinErrorMsgs(parsed)
+			if msgs := joinErrorMsgs(parsed); msgs != "" {
+				return msgs
+			}
+			return ""
 		}
+		// Not SonarQube's {"errors":[{"msg":...}]} shape. Returning ""
+		// here left the ledger's Error column blank for every failure
+		// that did not come from SonarQube itself — a CloudFront 403
+		// served as an HTML page recorded its status and nothing else,
+		// so the report showed a bare "403" with no reason.
+		return summarizeNonJSONError(v)
 	}
 	return ""
+}
+
+// htmlTagRe strips tags so an HTML error page can be reduced to its text.
+var htmlTagRe = regexp.MustCompile(`(?s)<[^>]*>`)
+
+// htmlTitleRe pulls the most descriptive line out of an HTML error page:
+// its <title>, or the first heading.
+var htmlTitleRe = regexp.MustCompile(`(?is)<(?:title|h1|h2)[^>]*>(.*?)</(?:title|h1|h2)>`)
+
+// maxNonJSONErrorLen caps the summary so one gateway error page cannot
+// push a whole table off the side of the report.
+const maxNonJSONErrorLen = 200
+
+// summarizeNonJSONError reduces a non-JSON error body to a single
+// readable line: the headings of an HTML page, else its collapsed text.
+func summarizeNonJSONError(body string) string {
+	var out string
+	if matches := htmlTitleRe.FindAllStringSubmatch(body, -1); len(matches) > 0 {
+		parts := make([]string, 0, len(matches))
+		seen := map[string]bool{}
+		for _, m := range matches {
+			text := collapseWhitespace(htmlTagRe.ReplaceAllString(m[1], " "))
+			if text != "" && !seen[text] {
+				seen[text] = true
+				parts = append(parts, text)
+			}
+		}
+		out = strings.Join(parts, ": ")
+	}
+	if out == "" {
+		out = collapseWhitespace(htmlTagRe.ReplaceAllString(body, " "))
+	}
+	if len(out) > maxNonJSONErrorLen {
+		out = strings.TrimSpace(out[:maxNonJSONErrorLen]) + "..."
+	}
+	return out
+}
+
+// collapseWhitespace squeezes every run of whitespace into one space and
+// trims the result, so a multi-line page becomes one table cell.
+func collapseWhitespace(s string) string {
+	return strings.TrimSpace(strings.Join(strings.Fields(s), " "))
 }
 
 func joinErrorMsgs(obj map[string]any) string {
@@ -303,6 +392,7 @@ func processEntry(entry map[string]any) *ReportRow {
 		HTTPStatus:   statusStr,
 		Outcome:      outcome,
 		ErrorMessage: errorMessage,
+		Project:      extractProject(payload),
 	}
 }
 

@@ -1,5 +1,13 @@
 # What's New
 
+# v1.2 - unreleased
+
+Changes introduced in `sonar-migration-tool` **1.2**, since the **1.1** release. Issue numbers refer to [GitHub issues](https://github.com/SonarSource/sonar-migration-tool/issues).
+
+## New features
+
+- Added **`--migrate_history` option** (proof of concept) to `extract`, `migrate` and `transfer` — a migrated project's analysis history no longer has to start on the day it was migrated. When set, a bounded set of the source project's earlier main-branch analyses is replayed as separate, backdated points in the target's analysis history. Each point carries the project's measures recorded at that analysis (main branch only), including `coverage` and `duplicated_lines_density` — both are silently ignored by the Compute Engine when pushed as plain aggregate measures, so each is reconstructed from real per-file report data instead (synthetic per-line coverage records for `coverage`; duplication needed the identical fix, via synthetic per-block duplication data). Real `bugs`/`vulnerabilities`/`code_smells` counts, `reliability_rating`/`security_rating`, and technical debt (`sqale_index`) are now reconstructed too, via fabricated placeholder external issues under ad-hoc rules — the Compute Engine only derives these from real issue-shaped entries in the report, never a pushed number. Still excluded: the original issues themselves (no API returns what issues existed as of a past analysis) and Security Hotspots (they need a real active rule in the target's profile, unlike the external-issue mechanism used above). `--history_max_points` (default `0`, no cap) and `--history_min_interval_days` (default `0`, no spacing rule) bound how much history is walked; off by default. Separately, every branch's last-analysis date — regardless of whether this option is set — is now backdated to the source's real analysis date instead of the migration run's timestamp. ([#554](https://github.com/SonarSource/sonar-migration-tool/issues/554))
+
 # v1.1 - 2026-08-26
 
 Changes introduced in `sonar-migration-tool` **1.1**, since the **1.0** release. Issue numbers refer to [GitHub issues](https://github.com/SonarSource/sonar-migration-tool/issues).

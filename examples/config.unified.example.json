@@ -9,6 +9,9 @@
     "projects", "portfolios", "groups"
   ],
   "project_key": null,
+  "migrate_history": false,
+  "history_max_points": 10,
+  "history_min_interval_days": 30,
   "source": {
     "url": "https://sonarqube.example.com",
     "token": "squ_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
