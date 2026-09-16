@@ -24,7 +24,7 @@ organization. Run it locally before opening a PR:
 
 ```bash
 make smoke-fast                              # Tier 0: no network, no credentials
-make smoke                                   # Tiers 0+1: needs the source server
+make smoke                                   # Tiers 0, 1 and 3: needs the source server
 SMOKE_ALLOW_DESTRUCTIVE=1 make smoke-full    # all tiers, destructive
 ```
 

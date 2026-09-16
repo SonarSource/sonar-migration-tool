@@ -143,6 +143,28 @@ func TestTier0_CommandInventory(t *testing.T) {
 	res := runCLI(t, "--help")
 	requireExit(t, res, 0, "root --help")
 
+	// Names in the "Available Commands:" block, minus Cobra's built-ins.
+	var got []string
+	if _, after, ok := strings.Cut(res.stdout, "Available Commands:"); ok {
+		for _, line := range strings.Split(after, "\n") {
+			fields := strings.Fields(line)
+			if len(fields) == 0 {
+				// The blank line right after the heading, and the one
+				// separating the command list from "Flags:" below.
+				continue
+			}
+			if len(fields) < 2 || strings.HasSuffix(fields[0], ":") {
+				break
+			}
+			if name := fields[0]; name != "completion" && name != "help" {
+				got = append(got, name)
+			}
+		}
+	}
+	if len(got) != expectedCommandCount {
+		t.Fatalf("the binary registers %d commands %v, but this suite knows %d — update allCommands and expectedCommandCount", len(got), got, expectedCommandCount)
+	}
+
 	for _, cmd := range allCommands {
 		if !strings.Contains(res.stdout, cmd) {
 			t.Errorf("root --help does not list the %q command", cmd)

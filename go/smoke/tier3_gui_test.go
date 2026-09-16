@@ -76,7 +76,9 @@ func (b *syncBuffer) String() string {
 // dependency to close this gap.
 // ---------------------------------------------------------------------------
 func TestTier3_GUI(t *testing.T) {
-	defer track(t, "3", "gui")()
+	// Registered before every other cleanup so, Cleanup being LIFO, it runs
+	// LAST — after the subprocess output check below marks the test failed.
+	t.Cleanup(track(t, "3", "gui"))
 
 	// Pick a free port. There is an inherent race between closing this
 	// probe listener and the subprocess binding the same port — accepted,
