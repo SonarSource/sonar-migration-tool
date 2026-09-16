@@ -249,7 +249,7 @@
           "type": ["integer", "null"],
           "minimum": 0,
           "maximum": 20,
-          "description": "Override the top-level max_issue_comments for migrate/reset. Issue #571."
+          "description": "Override the top-level max_issue_comments for migrate / transfer / sync-issues. Ignored by reset, which replays no comments. Issue #571."
         }
       }
     }

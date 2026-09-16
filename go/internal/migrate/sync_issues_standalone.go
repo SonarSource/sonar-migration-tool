@@ -62,7 +62,7 @@ func (cfg *SyncIssuesConfig) applyDefaults() {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 60
 	}
-	if cfg.MaxIssueComments <= 0 {
+	if cfg.MaxIssueComments == 0 {
 		cfg.MaxIssueComments = DefaultMaxIssueComments
 	}
 	if cfg.ExportDirectory == "" {

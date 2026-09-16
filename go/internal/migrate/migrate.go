@@ -46,9 +46,11 @@ const DefaultMaxIssueComments = 5
 const MaxAllowedIssueComments = 20
 
 // ValidateMaxIssueComments rejects a --max_issue_comments value above
-// MaxAllowedIssueComments. A value <= 0 is not an error: it means "use the
+// MaxAllowedIssueComments. A value of 0 is not an error: it means "use the
 // default" (applyDefaults fills in DefaultMaxIssueComments), matching the
-// existing zero-means-default convention for Concurrency/Timeout.
+// existing zero-means-default convention for Concurrency/Timeout. A value
+// of -1 is the documented sentinel for "no cap": applyDefaults leaves it
+// untouched and capIssueComments replays every source comment (#571).
 func ValidateMaxIssueComments(n int) error {
 	if n > MaxAllowedIssueComments {
 		return fmt.Errorf("max_issue_comments %d exceeds the maximum allowed value of %d", n, MaxAllowedIssueComments)
@@ -691,7 +693,7 @@ func (cfg *MigrateConfig) applyDefaults() {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 60
 	}
-	if cfg.MaxIssueComments <= 0 {
+	if cfg.MaxIssueComments == 0 {
 		cfg.MaxIssueComments = DefaultMaxIssueComments
 	}
 	if cfg.ExportDirectory == "" {

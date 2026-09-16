@@ -926,7 +926,12 @@ const migratedIssueCommentPrefix = "[Migrated from"
 // Returns true if any comment failed to be added.
 func syncIssueComments(ctx context.Context, e *Executor, cloudKey string, sourceComments []issueComment, cloudComments []issueComment, maxComments int) bool {
 	var failed bool
-	for _, c := range capIssueComments(sourceComments, maxComments) {
+	capped := capIssueComments(sourceComments, maxComments)
+	if dropped := len(sourceComments) - len(capped); dropped > 0 {
+		e.Logger.Debug("syncIssueMetadata: comments capped by max_issue_comments",
+			"issue", cloudKey, "dropped", dropped, "max_issue_comments", maxComments)
+	}
+	for _, c := range capped {
 		text := c.Markdown
 		if text == "" {
 			text = c.HTMLText
@@ -957,7 +962,8 @@ func syncIssueComments(ctx context.Context, e *Executor, cloudKey string, source
 // capIssueComments returns the maxComments most-recent entries of comments,
 // in their original (chronological) order (#571). CreatedAt is an ISO-8601
 // timestamp, so a lexical sort is also a chronological sort. maxComments <=
-// 0 or a comments slice no longer than maxComments is returned unchanged —
+// 0 (including the -1 "no cap" sentinel — see ValidateMaxIssueComments) or
+// a comments slice no longer than maxComments is returned unchanged —
 // sorting is skipped so callers with few comments pay no extra cost.
 //
 // Stable and deterministic across re-runs: given the same source comments,
