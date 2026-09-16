@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 )
@@ -301,7 +302,16 @@ func summarizeNonJSONError(body string) string {
 		out = collapseWhitespace(htmlTagRe.ReplaceAllString(body, " "))
 	}
 	if len(out) > maxNonJSONErrorLen {
-		out = strings.TrimSpace(out[:maxNonJSONErrorLen]) + "..."
+		// The bodies that reach here are the non-JSON ones — a gateway
+		// or proxy error page — which is exactly where non-ASCII text
+		// turns up. A byte cut lands inside a multi-byte rune whenever
+		// the boundary falls there, and the broken rune flows on into
+		// final_analysis_report.csv. Back off to the last whole one.
+		cut := out[:maxNonJSONErrorLen]
+		for len(cut) > 0 && !utf8.ValidString(cut) {
+			cut = cut[:len(cut)-1]
+		}
+		out = strings.TrimSpace(cut) + "..."
 	}
 	return out
 }
