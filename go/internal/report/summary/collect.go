@@ -900,6 +900,8 @@ func dropFailuresAlreadySucceeded(failed, succeeded []EntityItem) []EntityItem {
 		out = append(out, f)
 	}
 	return out
+}
+
 // classifyFailureCause labels a failed entity with the run's own failure
 // classification, so a section can separate the failures that need acting
 // on from the ones the migration is content with.
