@@ -15,13 +15,17 @@ package smoke
 // additionally enforces the staging host allowlist in assertHostAllowed so
 // this suite can never point at a production SonarQube Cloud host.
 //
-// Both tests pass --skip_project_data_migration by default: PollCETask
-// (go/internal/scanreport/submit.go:170) polls the Compute Engine task queue
-// on a hardcoded 5-second interval that is not injectable from tests, so
-// exercising project-data migration here would be slow without adding
-// coverage this suite's assertions can check.
+// Both tests migrate project data (issues, hotspots, source code, SCM
+// blame) rather than passing --skip_project_data_migration: regtest's Issues
+// and Measures categories compare source vs. target project data, so
+// skipping that migration here would make those categories fail every run
+// regardless of whether the tool actually works. This costs real wall-clock
+// time: PollCETask (go/internal/scanreport/submit.go:170) polls the Compute
+// Engine task queue on a hardcoded 5-second interval that is not injectable
+// from tests.
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -45,6 +49,52 @@ func tier2Setup(t *testing.T) smokeConfig {
 		t.Fatalf("config has no target.default_organization set — the smoke suite needs it to scope the destructive reset")
 	}
 	return cfg
+}
+
+// regtestConfigPath copies the smoke config with target.export_directory
+// overridden to exportDir. Unlike extract/migrate/transfer, `regtest` has no
+// --export_directory (or --export_dir) flag at all (see cmd/regtest.go) — it
+// only reads the field from the file passed to --config, via
+// regtest.LoadConfigFile. Passing this path as a later --config to runRegtest
+// overrides the earlier one: pflag applies repeated string flags in order, so
+// the last one set wins.
+func regtestConfigPath(t *testing.T, cfg smokeConfig, exportDir string) string {
+	t.Helper()
+	raw, err := os.ReadFile(cfg.path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", cfg.path, err)
+	}
+	var parsed map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("parsing %s: %v", cfg.path, err)
+	}
+	var target map[string]json.RawMessage
+	if raw, ok := parsed["target"]; ok {
+		if err := json.Unmarshal(raw, &target); err != nil {
+			t.Fatalf("parsing %s target section: %v", cfg.path, err)
+		}
+	} else {
+		target = map[string]json.RawMessage{}
+	}
+	dirJSON, err := json.Marshal(exportDir)
+	if err != nil {
+		t.Fatalf("marshaling export dir: %v", err)
+	}
+	target["export_directory"] = dirJSON
+	targetJSON, err := json.Marshal(target)
+	if err != nil {
+		t.Fatalf("marshaling target section: %v", err)
+	}
+	parsed["target"] = targetJSON
+	out, err := json.Marshal(parsed)
+	if err != nil {
+		t.Fatalf("marshaling scoped config: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "regtest-config.json")
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
+	}
+	return path
 }
 
 // tier2ProjectKey resolves the source project key the destructive tier
@@ -106,7 +156,6 @@ func TestTier2_PathA_Transfer(t *testing.T) {
 			"--config", cfg.path,
 			"--project_key", projectKey,
 			"--export_dir", exportDir,
-			"--skip_project_data_migration",
 		)
 		requireExit(t, res, 0, "transfer")
 		assertNoPanics(t, res.combined())
@@ -130,7 +179,11 @@ func TestTier2_PathA_Transfer(t *testing.T) {
 
 	t.Run("regtest", func(t *testing.T) {
 		defer track(t, "2A", "regtest")()
-		runRegtest(t, cfg)
+		// Scoped to the one project this run actually transferred and to
+		// the export dir it used — unscoped, regtest checks every project
+		// on the source against the default "./migration-files" and fails
+		// on projects this run never touched.
+		runRegtest(t, cfg, "--project_key", projectKey, "--config", regtestConfigPath(t, cfg, exportDir))
 	})
 
 	t.Run("report_accuracy", func(t *testing.T) {
@@ -214,7 +267,6 @@ func TestTier2_PathB_FullPipeline(t *testing.T) {
 			"--config", cfg.path,
 			"--export_directory", exportDir,
 			"--project_key", projectKey,
-			"--skip_project_data_migration",
 		)
 		requireExit(t, res, 0, "migrate")
 		assertNoPanics(t, res.combined())
@@ -222,7 +274,11 @@ func TestTier2_PathB_FullPipeline(t *testing.T) {
 
 	t.Run("regtest", func(t *testing.T) {
 		defer track(t, "2B", "regtest")()
-		runRegtest(t, cfg)
+		// Scoped to the one project this run actually migrated and to the
+		// export dir it used — unscoped, regtest checks every project on
+		// the source against the default "./migration-files" and fails on
+		// projects this run never touched.
+		runRegtest(t, cfg, "--project_key", projectKey, "--config", regtestConfigPath(t, cfg, exportDir))
 	})
 
 	t.Run("migrate_idempotent", func(t *testing.T) {
@@ -236,11 +292,10 @@ func TestTier2_PathB_FullPipeline(t *testing.T) {
 			"--config", cfg.path,
 			"--export_directory", exportDir,
 			"--project_key", projectKey,
-			"--skip_project_data_migration",
 		)
 		requireExit(t, res, 0, "migrate (idempotent re-run)")
 		assertNoPanics(t, res.combined())
-		runRegtest(t, cfg)
+		runRegtest(t, cfg, "--project_key", projectKey, "--config", regtestConfigPath(t, cfg, exportDir))
 	})
 
 	t.Run("sync_issues", func(t *testing.T) {
@@ -264,6 +319,16 @@ func TestTier2_PathB_FullPipeline(t *testing.T) {
 
 		res := runCLI(t, "analysis_report", runID, "--export_directory", exportDir)
 		requireExit(t, res, 0, "analysis_report")
+
+		// This pipeline migrates project data, so requests.log normally holds
+		// POST requests to report on. If the test project happens to have no
+		// issues/hotspots to push, requests.log holds none either:
+		// cmd/analysis_report.go prints this exact message and exits 0
+		// without writing the CSV. That is the tool working as designed,
+		// not a failure.
+		if strings.Contains(res.stdout, "No POST requests found in requests.log") {
+			return
+		}
 
 		reportPath := filepath.Join(runDir, "final_analysis_report.csv")
 		raw, err := os.ReadFile(reportPath)
