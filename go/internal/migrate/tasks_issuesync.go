@@ -929,19 +929,19 @@ const DefaultMaxIssueComments = 5
 // than silently clamped, so a typo doesn't quietly change behavior.
 const MaxAllowedIssueComments = 20
 
-// mostRecentIssueComments returns at most max of comments, keeping only the
-// most recent ones by CreatedAt (#571). max <= 0 means no cap — the
+// mostRecentIssueComments returns at most limit of comments, keeping only
+// the most recent ones by CreatedAt (#571). limit <= 0 means no cap — the
 // defensive fallback for callers/tests that build an Executor directly
 // without going through MigrateConfig/SyncIssuesConfig.applyDefaults(),
 // which normally seeds DefaultMaxIssueComments.
-func mostRecentIssueComments(comments []issueComment, max int) []issueComment {
-	if max <= 0 || len(comments) <= max {
+func mostRecentIssueComments(comments []issueComment, limit int) []issueComment {
+	if limit <= 0 || len(comments) <= limit {
 		return comments
 	}
 	sorted := make([]issueComment, len(comments))
 	copy(sorted, comments)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].CreatedAt < sorted[j].CreatedAt })
-	return sorted[len(sorted)-max:]
+	return sorted[len(sorted)-limit:]
 }
 
 // syncIssueComments migrates the most recent sourceComments (capped by

@@ -853,7 +853,7 @@ func TestSyncIssueCommentsCapsToMostRecent(t *testing.T) {
 		{Login: "c", Markdown: "newest", CreatedAt: "2024-12-01T00:00:00+0000"},
 	}
 
-	if failed := syncIssueComments(context.Background(), e, "cloud-1", source, nil); failed {
+	if syncIssueComments(context.Background(), e, "cloud-1", source, nil) {
 		t.Fatal("syncIssueComments reported failure on 200 responses")
 	}
 	if len(*seen) != 2 {
