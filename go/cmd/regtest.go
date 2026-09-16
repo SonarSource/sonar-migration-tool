@@ -71,6 +71,13 @@ data from SonarQube Server exists and is correct in SonarCloud."`,
 				report.Failed, report.Errors, report.TotalChecks)
 		}
 
+		if report.Verdict == "YELLOW" {
+			fmt.Fprintf(os.Stderr, "\nRegression test PASSED with %d SQS_AND_SQC_FEATURE_DIVERGENCE(s) "+
+				"(not migration bugs — see the report for details): %d/%d checks passed\n",
+				report.SqsAndSqcFeatureDivergence, report.Passed, report.TotalChecks)
+			return nil
+		}
+
 		fmt.Fprintf(os.Stderr, "\nRegression test PASSED: %d/%d checks passed\n",
 			report.Passed, report.TotalChecks)
 		return nil

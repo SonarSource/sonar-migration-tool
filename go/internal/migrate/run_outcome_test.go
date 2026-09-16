@@ -97,6 +97,19 @@ func TestComputeStatusDegradesOnActionableFailures(t *testing.T) {
 			want: "partial",
 		},
 		{
+			// OK now also means "recorded no actionable item failure",
+			// so it no longer answers "did anything happen". A run whose
+			// tasks all moved items, each also recording one actionable
+			// failure, has OK false everywhere — reading only OK calls
+			// that "nothing succeeded".
+			name:   "a terminal error after per-item failures is still partial",
+			retErr: errors.New("boom"),
+			tasks: []TaskTiming{
+				{Name: "createProjects", OK: false, Succeeded: 5, Failed: 1, ActionableFailures: 1},
+			},
+			want: "partial",
+		},
+		{
 			name:   "a terminal error with no progress is failed",
 			retErr: errors.New("boom"),
 			tasks:  []TaskTiming{{Name: "createProjects", OK: false}},
