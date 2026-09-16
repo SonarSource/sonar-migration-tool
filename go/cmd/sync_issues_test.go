@@ -335,7 +335,7 @@ func TestValidateSyncIssuesConfig_MissingFields(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := validateSyncIssuesConfig(c.cfg)
+			err := validateSyncIssuesConfig(newSyncIssuesTestCmd(), c.cfg)
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -351,7 +351,7 @@ func TestValidateSyncIssuesConfig_HappyPathNoProjectKey(t *testing.T) {
 		sourceURL: "https://sq", sourceToken: "t",
 		targetToken: "ct", defaultOrganization: "o",
 	}
-	if err := validateSyncIssuesConfig(cfg); err != nil {
+	if err := validateSyncIssuesConfig(newSyncIssuesTestCmd(), cfg); err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
 }
