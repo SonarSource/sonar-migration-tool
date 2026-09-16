@@ -659,10 +659,19 @@ func runRegtest(t *testing.T, cfg smokeConfig, extraArgs ...string) regtest.Repo
 			err, res.stdout, res.stderr)
 	}
 
-	if report.Verdict != "PASS" {
+	// YELLOW means every mismatch in this run is a SQS_AND_SQC_FEATURE_DIVERGENCE
+	// (regtest.CheckResult.SqsAndSqcFeatureDivergence) — a known, permanent
+	// SonarQube Server vs. SonarQube Cloud difference, e.g. Cloud's
+	// differently-named built-in default profiles, its independently-versioned
+	// rule catalog, or this tool's documented decision to force every migrated
+	// project private. That is the product working as designed, not a
+	// migration bug, so it must not fail the suite — but it is logged so the
+	// SQS_AND_SQC_FEATURE_DIVERGENCE results stay visible. Only FAIL (a
+	// mismatch that is NOT a SQS_AND_SQC_FEATURE_DIVERGENCE) fails the test.
+	if report.Verdict == "FAIL" {
 		var failures []string
 		for _, c := range report.Results {
-			if !c.Match {
+			if !c.Match && !c.SqsAndSqcFeatureDivergence {
 				detail := fmt.Sprintf("  [%s] %s: source=%q target=%q", c.Category, c.Name, c.SQSValue, c.SCValue)
 				if c.Error != "" {
 					detail += " error=" + c.Error
@@ -673,13 +682,23 @@ func runRegtest(t *testing.T, cfg smokeConfig, extraArgs ...string) regtest.Repo
 				failures = append(failures, detail)
 			}
 		}
-		t.Errorf("regtest verdict %s (%d passed, %d failed, %d errors, %d skipped of %d):\n%s",
-			report.Verdict, report.Passed, report.Failed, report.Errors, report.Skipped,
+		t.Errorf("regtest verdict %s (%d passed, %d failed, %d errors, %d skipped, %d sqs_and_sqc_feature_divergence of %d):\n%s",
+			report.Verdict, report.Passed, report.Failed, report.Errors, report.Skipped, report.SqsAndSqcFeatureDivergence,
 			report.TotalChecks, strings.Join(failures, "\n"))
+	} else if report.Verdict == "YELLOW" {
+		var sqsAndSqcFeatureDivergences []string
+		for _, c := range report.Results {
+			if c.SqsAndSqcFeatureDivergence {
+				sqsAndSqcFeatureDivergences = append(sqsAndSqcFeatureDivergences, fmt.Sprintf("  [%s] %s: source=%q target=%q — %s",
+					c.Category, c.Name, c.SQSValue, c.SCValue, c.Notes))
+			}
+		}
+		logf(t, "regtest: verdict=YELLOW — %d SQS_AND_SQC_FEATURE_DIVERGENCE(s), not migration bugs:\n%s\n",
+			report.SqsAndSqcFeatureDivergence, strings.Join(sqsAndSqcFeatureDivergences, "\n"))
 	}
 	requireExit(t, res, 0, "regtest")
-	logf(t, "regtest: verdict=%s passed=%d failed=%d errors=%d skipped=%d\n",
-		report.Verdict, report.Passed, report.Failed, report.Errors, report.Skipped)
+	logf(t, "regtest: verdict=%s passed=%d failed=%d errors=%d skipped=%d sqs_and_sqc_feature_divergence=%d\n",
+		report.Verdict, report.Passed, report.Failed, report.Errors, report.Skipped, report.SqsAndSqcFeatureDivergence)
 	return report
 }
 
