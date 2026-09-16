@@ -73,14 +73,12 @@ func init() {
 	f.Bool(flagSkipProjectDataMigration, false, "Skip the entire project-data migration: importProjectData and the trailing per-issue/per-hotspot sync (#303). Defaults to false (data is migrated); pass the flag to skip.")
 	f.Bool(flagFastSync, false, "Skip tagging and back-linking hotspots/issues with zero user changes on the source (original state, no comments, no custom tags). Defaults to false (every hotspot is tagged and back-linked). #527.")
 	f.Bool(flagMigrateHistory, false, "PoC: replay each project's extracted historical analysis snapshots as separate, backdated analyses on the target's main branch, before the regular current-snapshot import (#554). Defaults to false; requires extract to have run with --migrate_history too.")
-	f.Int(flagMaxIssueComments, migrate.DefaultMaxIssueComments,
-		fmt.Sprintf("Max number of an issue's most recent comments migrated via api/issues/add_comment (default: %d, max: %d). #571.",
-			migrate.DefaultMaxIssueComments, migrate.MaxAllowedIssueComments))
 	f.String("default_organization", "", "SonarQube Cloud organization to migrate every project into when organizations.csv has no mapping defined. Ignored if any mapping is present.")
 	f.String("project_key_pattern", "", "Template for target project keys, built from <ORIGINAL_PROJECT_KEY> and <ORGANIZATION_KEY> (default: <ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>). #138")
 	f.StringSlice("exclude_branches", nil, "Glob patterns for non-main branches to skip during project data import (e.g. feature/*,bugfix/*)")
 	f.String("objects", "", "Comma-separated list of object categories to migrate: "+strings.Join(common.AllObjects, ", ")+" (aliases: qp, qg, pt, lp). Omit to migrate everything (default). #536")
 	f.String(flagProjectKey, "", "Regexp pattern of source project keys to migrate (only applies when the projects category is selected via --objects). Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"BANKING_.+\" matches every key starting with BANKING_, not just a key containing that substring. A plain key like \"my-project\" matches only itself. #536")
+	f.Int(flagMaxIssueComments, 0, fmt.Sprintf("Max most-recent source comments replayed onto each migrated issue/hotspot (default %d, max %d) — reduces SonarQube Cloud API pressure on long comment threads (#571).", migrate.DefaultMaxIssueComments, migrate.MaxAllowedIssueComments))
 }
 
 func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfig, error) {
@@ -114,6 +112,7 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	overrideInt(cmd, "concurrency", &cfg.Concurrency)
 	overrideInt(cmd, "project_data_build_concurrency", &cfg.BuildConcurrency)
 	overrideInt(cmd, "timeout", &cfg.Timeout)
+	overrideInt(cmd, flagMaxIssueComments, &cfg.MaxIssueComments)
 	if cmd.Flags().Changed("skip_profiles") {
 		cfg.SkipProfiles, _ = cmd.Flags().GetBool("skip_profiles")
 	}
@@ -135,13 +134,6 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	applyFlagBool(cmd, flagFastSync, &cfg.FastSync)
 	applyFlagBool(cmd, flagMigrateHistory, &cfg.MigrateHistory)
 	applyFlagInt(cmd, flagMaxIssueComments, &cfg.MaxIssueComments)
-	// #571 — reject up front rather than failing deep inside the sync phase.
-	if cmd.Flags().Changed(flagMaxIssueComments) && cfg.MaxIssueComments < 1 {
-		return cfg, fmt.Errorf("--%s (%d) must be at least 1", flagMaxIssueComments, cfg.MaxIssueComments)
-	}
-	if cfg.MaxIssueComments > migrate.MaxAllowedIssueComments {
-		return cfg, fmt.Errorf("--%s (%d) exceeds the maximum allowed value of %d", flagMaxIssueComments, cfg.MaxIssueComments, migrate.MaxAllowedIssueComments)
-	}
 
 	if err := applyObjectsFlag(cmd, &cfg.Objects); err != nil {
 		return cfg, err
@@ -149,6 +141,11 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	warnIfLicenseProfilesSelected(cfg.Objects)
 	if err := applyMigrateProjectKeyFlag(cmd, &cfg); err != nil {
 		return cfg, err
+	}
+	// #571 — reject an out-of-range cap up front rather than silently
+	// clamping it deep inside the issue/hotspot sync.
+	if err := migrate.ValidateMaxIssueComments(cfg.MaxIssueComments); err != nil {
+		return cfg, fmt.Errorf("--%s: %w", flagMaxIssueComments, err)
 	}
 
 	// Default the export directory when neither config nor flag supplied

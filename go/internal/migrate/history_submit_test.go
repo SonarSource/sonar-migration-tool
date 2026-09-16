@@ -29,7 +29,7 @@ import (
 // TestMain drives scanreport.CEPollInterval down to near-zero for the whole
 // package so tests that exercise PollCETask (via submitHistoricalSnapshot,
 // importBranch, ...) don't pay its real wall-clock delay on every poll
-// (#571; also see go/internal/scanreport/submit_test.go's own TestMain).
+// (#571; also see go/internal/scanreport/submit_test.go's withFastCEPoll).
 func TestMain(m *testing.M) {
 	scanreport.CEPollInterval = time.Millisecond
 	os.Exit(m.Run())

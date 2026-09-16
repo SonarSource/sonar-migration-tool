@@ -59,10 +59,7 @@ type configFileShape struct {
 	// MigrateHistory opts into the project-history migration PoC (#554).
 	// Defaults to false. Same FlexibleBool semantics as skip_issue_sync.
 	MigrateHistory *FlexibleBool `json:"migrate_history"`
-	// MaxIssueComments — see MigrateConfig.MaxIssueComments (#571). 0 means
-	// unset (resolves to DefaultMaxIssueComments), same convention as
-	// concurrency/timeout above — a real 0-comment cap isn't distinguishable
-	// from "not configured" through this field.
+	// MaxIssueComments — see MigrateConfig.MaxIssueComments (#571).
 	MaxIssueComments int `json:"max_issue_comments"`
 	// ConfirmedOrgs is reset-only: it additively pre-populates
 	// ResetConfig.ConfirmedOrgs (#550) for config-driven / programmatic
@@ -177,6 +174,8 @@ type settingsBlock struct {
 	Concurrency      int    `json:"concurrency"`
 	BuildConcurrency int    `json:"project_data_build_concurrency"`
 	Timeout          int    `json:"timeout"`
+	// MaxIssueComments — see configFileShape.MaxIssueComments (#571).
+	MaxIssueComments int `json:"max_issue_comments"`
 }
 
 func parseConfigFile(path string) (configFileShape, error) {
@@ -263,9 +262,6 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		if s.MigrateHistory != nil && s.MigrateHistory.Set {
 			cfg.MigrateHistory = s.MigrateHistory.Value
 		}
-		if s.MaxIssueComments > 0 {
-			cfg.MaxIssueComments = s.MaxIssueComments
-		}
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKeyFilter = s.ProjectKey
 		return cfg
@@ -289,10 +285,6 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		if s.MigrateHistory != nil && s.MigrateHistory.Set {
 			cfg.MigrateHistory = s.MigrateHistory.Value
 		}
-		// Same outer-wins-else-inner semantics for max_issue_comments (#571).
-		if s.MaxIssueComments > 0 {
-			cfg.MaxIssueComments = s.MaxIssueComments
-		}
 		// #536: outer-level "objects" / "project_key" win over the same
 		// fields nested inside "migrate" — but fall back to the nested
 		// value (already captured above by the recursive call) when the
@@ -314,6 +306,7 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			Concurrency:        s.Concurrency,
 			BuildConcurrency:   s.BuildConcurrency,
 			Timeout:            s.Timeout,
+			MaxIssueComments:   s.MaxIssueComments,
 			RunID:              s.RunID,
 			TargetTask:         s.TargetTask,
 			SkipProfiles:       s.SkipProfiles,
@@ -322,7 +315,6 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			ExcludeBranches:    s.ExcludeBranches,
 			// #474 — flat shape reads the field directly.
 			UnsupportedLanguages: s.UnsupportedLanguages,
-			MaxIssueComments:     s.MaxIssueComments,
 		}
 		if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
 			cfg.SkipIssueSync = s.SkipIssueSync.Value
@@ -368,6 +360,7 @@ func (sc sonarCloudBlock) toMigrateConfig(settings *settingsBlock) MigrateConfig
 		cfg.Concurrency = settings.Concurrency
 		cfg.BuildConcurrency = settings.BuildConcurrency
 		cfg.Timeout = settings.Timeout
+		cfg.MaxIssueComments = settings.MaxIssueComments
 	}
 	return cfg
 }

@@ -52,12 +52,11 @@ const (
 	flagDebug                    = "debug"
 	flagExcludeBranches          = "exclude_branches"
 	flagUnsupportedLanguages     = "unsupported_languages"
+	flagMaxIssueComments         = "max_issue_comments"
 	// #554 — PoC project-history migration flags.
 	flagMigrateHistory         = "migrate_history"
 	flagHistoryMaxPoints       = "history_max_points"
 	flagHistoryMinIntervalDays = "history_min_interval_days"
-	// #571 — cap api/issues/add_comment calls per issue.
-	flagMaxIssueComments = "max_issue_comments"
 )
 
 // transferTargetTasks is the explicit set of project-scoped "leaf" migrate
@@ -207,9 +206,7 @@ func init() {
 	f.Bool(flagMigrateHistory, false, "PoC: also migrate a bounded set of historical analysis snapshots (date + project-level measures) per project's main branch, backdated on "+scCloudName+" (#554). Defaults to false — no change to existing single-snapshot behavior unless set. (maps to migrate_history)")
 	f.Int(flagHistoryMaxPoints, 0, "Max historical snapshots migrated per project when --"+flagMigrateHistory+" is set (default: no cap, every analysis is a candidate). Pass a positive number to bound it. (maps to history_max_points)")
 	f.Int(flagHistoryMinIntervalDays, extract.HistoryUnset, "Minimum spacing, in days, enforced between two migrated historical snapshots when --"+flagMigrateHistory+" is set (default 0 — no spacing rule, every analysis in the source history becomes a candidate). (maps to history_min_interval_days)")
-	f.Int(flagMaxIssueComments, migrate.DefaultMaxIssueComments,
-		fmt.Sprintf("Max number of an issue's most recent comments migrated via api/issues/add_comment (default: %d, max: %d). #571.",
-			migrate.DefaultMaxIssueComments, migrate.MaxAllowedIssueComments))
+	f.Int(flagMaxIssueComments, 0, fmt.Sprintf("Max most-recent source comments replayed onto each migrated issue/hotspot (default %d, max %d) — reduces "+scCloudName+" API pressure on long comment threads (#571). (maps to max_issue_comments)", migrate.DefaultMaxIssueComments, migrate.MaxAllowedIssueComments))
 }
 
 // transferConfig holds the resolved configuration after merging file and flag values.
@@ -437,6 +434,7 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 	}
 	applyFlagString(cmd, flagUnsupportedLanguages, &cfg.unsupportedLanguages)
 	applyFlagBool(cmd, flagFastSync, &cfg.fastSync)
+	applyFlagInt(cmd, flagMaxIssueComments, &cfg.maxIssueComments)
 	// --migrate_history is one-way, same semantics as --skip_project_data_migration. #554.
 	if cmd.Flags().Changed(flagMigrateHistory) {
 		v, _ := cmd.Flags().GetBool(flagMigrateHistory)
@@ -446,7 +444,6 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 	}
 	applyFlagInt(cmd, flagHistoryMaxPoints, &cfg.historyMaxPoints)
 	applyFlagInt(cmd, flagHistoryMinIntervalDays, &cfg.historyMinIntervalDays)
-	applyFlagInt(cmd, flagMaxIssueComments, &cfg.maxIssueComments)
 
 	if cfg.exportDir == "" {
 		cfg.exportDir = "./migration-files/"
@@ -458,7 +455,7 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 	return cfg, nil
 }
 
-func validateTransferConfig(cmd *cobra.Command, cfg transferConfig) error {
+func validateTransferConfig(cfg transferConfig) error {
 	if cfg.sourceURL == "" || cfg.sourceToken == "" {
 		return fmt.Errorf("%s URL and token are required (--%s / --%s or source.url / source.token in config file)", sqServerName, flagSourceURL, flagSourceToken)
 	}
@@ -487,12 +484,10 @@ func validateTransferConfig(cmd *cobra.Command, cfg transferConfig) error {
 	if _, err := migrate.ParseUnsupportedLanguageMode(cfg.unsupportedLanguages); err != nil {
 		return fmt.Errorf("--%s: %w", flagUnsupportedLanguages, err)
 	}
-	// #571 — reject up front rather than failing deep inside the sync phase.
-	if cmd.Flags().Changed(flagMaxIssueComments) && cfg.maxIssueComments < 1 {
-		return fmt.Errorf("--%s (%d) must be at least 1", flagMaxIssueComments, cfg.maxIssueComments)
-	}
-	if cfg.maxIssueComments > migrate.MaxAllowedIssueComments {
-		return fmt.Errorf("--%s (%d) exceeds the maximum allowed value of %d", flagMaxIssueComments, cfg.maxIssueComments, migrate.MaxAllowedIssueComments)
+	// #571 — reject an out-of-range cap up front rather than silently
+	// clamping it deep inside the issue/hotspot sync.
+	if err := migrate.ValidateMaxIssueComments(cfg.maxIssueComments); err != nil {
+		return fmt.Errorf("--%s: %w", flagMaxIssueComments, err)
 	}
 	return nil
 }
@@ -517,7 +512,7 @@ func runTransfer(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	if err := validateTransferConfig(cmd, cfg); err != nil {
+	if err := validateTransferConfig(cfg); err != nil {
 		return err
 	}
 
@@ -727,9 +722,9 @@ func runTransferMigrate(ctx context.Context, cfg transferConfig) (string, error)
 		ExcludeBranches:          cfg.excludeBranches,
 		UnsupportedLanguages:     cfg.unsupportedLanguages,
 		FastSync:                 cfg.fastSync,
-		MaxIssueComments:         cfg.maxIssueComments,
 		ProjectKeyPattern:        cfg.projectKeyPattern,
 		MigrateHistory:           cfg.migrateHistory,
+		MaxIssueComments:         cfg.maxIssueComments,
 	})
 	if err != nil {
 		return "", fmt.Errorf("migrate failed: %w", err)

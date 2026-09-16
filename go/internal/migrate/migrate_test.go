@@ -14,30 +14,6 @@ import (
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
-// #571 — MaxIssueComments defaults to DefaultMaxIssueComments when unset or
-// non-positive, and is left untouched otherwise.
-func TestMigrateConfigApplyDefaultsMaxIssueComments(t *testing.T) {
-	cases := []struct {
-		name string
-		in   int
-		want int
-	}{
-		{"unset", 0, DefaultMaxIssueComments},
-		{"negative", -1, DefaultMaxIssueComments},
-		{"explicit value kept", 3, 3},
-		{"explicit value above default kept", 15, 15},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			cfg := MigrateConfig{MaxIssueComments: c.in}
-			cfg.applyDefaults()
-			if cfg.MaxIssueComments != c.want {
-				t.Errorf("MaxIssueComments = %d, want %d", cfg.MaxIssueComments, c.want)
-			}
-		})
-	}
-}
-
 // #571 — a value above MaxAllowedIssueComments is rejected up front, before
 // any client is built or API call made, rather than silently clamped.
 func TestRunMigrateRejectsExcessiveMaxIssueComments(t *testing.T) {

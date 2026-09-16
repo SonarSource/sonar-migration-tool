@@ -87,9 +87,7 @@ func init() {
 	f.String(flagKeyFilePath, "", "Path to client mTLS key file for the source server (maps to source.key_file_path)")
 	f.String(flagCertPassword, "", "Password for the source server mTLS client certificate (maps to source.cert_password)")
 	f.Bool(flagFastSync, false, "Skip tagging and back-linking hotspots/issues with zero user changes on the source (original state, no comments, no custom tags). Defaults to false (every hotspot is tagged and back-linked). #527.")
-	f.Int(flagMaxIssueComments, migrate.DefaultMaxIssueComments,
-		fmt.Sprintf("Max number of an issue's most recent comments migrated via api/issues/add_comment (default: %d, max: %d). #571.",
-			migrate.DefaultMaxIssueComments, migrate.MaxAllowedIssueComments))
+	f.Int(flagMaxIssueComments, 0, fmt.Sprintf("Max most-recent source comments replayed onto each synced issue/hotspot (default %d, max %d) — reduces "+scCloudName+" API pressure on long comment threads (#571). (maps to max_issue_comments)", migrate.DefaultMaxIssueComments, migrate.MaxAllowedIssueComments))
 	// --debug is inherited from the persistent root flag; see cmd/root.go.
 }
 
@@ -200,19 +198,17 @@ func resolveSyncIssuesConfig(cmd *cobra.Command) (syncIssuesConfig, error) {
 	return cfg, nil
 }
 
-func validateSyncIssuesConfig(cmd *cobra.Command, cfg syncIssuesConfig) error {
+func validateSyncIssuesConfig(cfg syncIssuesConfig) error {
 	if cfg.sourceURL == "" || cfg.sourceToken == "" {
 		return fmt.Errorf("%s URL and token are required (--%s / --%s or source.url / source.token in config file)", sqServerName, flagSourceURL, flagSourceToken)
 	}
 	if cfg.targetToken == "" || cfg.defaultOrganization == "" {
 		return fmt.Errorf("%s token and organization key are required (--%s / --%s or target.token / target.default_organization in config file)", scCloudName, flagTargetToken, flagDefaultOrg)
 	}
-	// #571 — reject up front rather than failing deep inside the sync phase.
-	if cmd.Flags().Changed(flagMaxIssueComments) && cfg.maxIssueComments < 1 {
-		return fmt.Errorf("--%s (%d) must be at least 1", flagMaxIssueComments, cfg.maxIssueComments)
-	}
-	if cfg.maxIssueComments > migrate.MaxAllowedIssueComments {
-		return fmt.Errorf("--%s (%d) exceeds the maximum allowed value of %d", flagMaxIssueComments, cfg.maxIssueComments, migrate.MaxAllowedIssueComments)
+	// #571 — reject an out-of-range cap up front rather than silently
+	// clamping it deep inside the issue/hotspot sync.
+	if err := migrate.ValidateMaxIssueComments(cfg.maxIssueComments); err != nil {
+		return fmt.Errorf("--%s: %w", flagMaxIssueComments, err)
 	}
 	return nil
 }
@@ -224,7 +220,7 @@ func runSyncIssuesCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	if err := validateSyncIssuesConfig(cmd, cfg); err != nil {
+	if err := validateSyncIssuesConfig(cfg); err != nil {
 		return err
 	}
 

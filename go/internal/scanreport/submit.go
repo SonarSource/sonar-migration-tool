@@ -21,11 +21,13 @@ import (
 
 const headerContentType = "Content-Type"
 
-// CEPollInterval is the delay between api/ce/task polls in PollCETask.
-// Doubled from the original 5s (#571) to reduce the polling pressure a
-// migration run puts on SonarQube Cloud. A package-level var rather than a
-// const so tests can drive it down to near-zero instead of paying the real
-// wall-clock cost of every CE poll in the suite.
+// CEPollInterval is the wait between successive api/ce/task polls in
+// PollCETask. Doubled from the original 5s (#571) to reduce the request
+// volume PollCETask puts on SonarQube Cloud — a project-data migration can
+// poll for minutes per branch, and this runs once per branch. Exported (and
+// a package variable rather than an inline constant) so tests — including
+// other packages' tests that exercise PollCETask indirectly, e.g.
+// internal/migrate's — can drive it down instead of waiting for real.
 var CEPollInterval = 10 * time.Second
 
 // SubmitConfig holds the parameters for submitting a scanner report.
@@ -181,16 +183,12 @@ func PollCETask(ctx context.Context, client *http.Client, cloudURL, taskID strin
 	// scannerContext|warnings are valid) and the 400 would break polling.
 	params := url.Values{"id": {taskID}}
 
-	first := true
 	for {
-		if !first {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(CEPollInterval):
-			}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(CEPollInterval):
 		}
-		first = false
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, activityURL+"?"+params.Encode(), nil)
 		if err != nil {

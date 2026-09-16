@@ -119,6 +119,7 @@ sonar-migration-tool sync-issues -c config.json
 | `--pem_file_path` | `source.pem_file_path` | Client mTLS PEM file for the source server |
 | `--key_file_path` | `source.key_file_path` | Client mTLS key file for the source server |
 | `--cert_password` | `source.cert_password` | Password for the source server mTLS client certificate |
+| `--max_issue_comments` | `max_issue_comments` | Max most-recent source comments replayed onto each synced issue/hotspot (default: `5`, max: `20`). Reduces SonarQube Cloud API pressure on long comment threads (#571). |
 | `--debug` | — | Verbose troubleshooting logs |
 
 CLI flags override values from the config file when both are provided.

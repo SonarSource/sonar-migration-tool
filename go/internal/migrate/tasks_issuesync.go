@@ -767,7 +767,7 @@ func syncOnePair(ctx context.Context, e *Executor, pair issuePair, baseURL, proj
 	}
 
 	transFailed := syncIssueTransition(ctx, e, cloudKey, pair.source, pair.cloud.Transitions)
-	commentFailed := syncIssueComments(ctx, e, cloudKey, pair.source.Comments, pair.cloud.Comments)
+	commentFailed := syncIssueComments(ctx, e, cloudKey, pair.source.Comments, pair.cloud.Comments, e.MaxIssueComments)
 	// Source-link back to the original SonarQube Server issue, added as
 	// the final comment so traceability survives the migration (#321).
 	// Best-effort: a failure here (e.g. an upstream CDN/WAF rejecting the
@@ -918,46 +918,20 @@ func syncIssueTransition(ctx context.Context, e *Executor, cloudKey string, src 
 // Its presence in a Cloud comment indicates that comment was already migrated.
 const migratedIssueCommentPrefix = "[Migrated from"
 
-// DefaultMaxIssueComments is how many of an issue's most recent comments are
-// migrated when --max_issue_comments isn't set (#571): a heavily discussed
-// source issue could otherwise cost one api/issues/add_comment call per
-// historical comment, every run.
-const DefaultMaxIssueComments = 5
-
-// MaxAllowedIssueComments is the hard ceiling on --max_issue_comments (#571)
-// — rejected up front by MigrateConfig/SyncIssuesConfig validation rather
-// than silently clamped, so a typo doesn't quietly change behavior.
-const MaxAllowedIssueComments = 20
-
-// mostRecentIssueComments returns at most limit of comments, keeping only
-// the most recent ones by CreatedAt (#571). limit <= 0 means no cap — the
-// defensive fallback for callers/tests that build an Executor directly
-// without going through MigrateConfig/SyncIssuesConfig.applyDefaults(),
-// which normally seeds DefaultMaxIssueComments.
-func mostRecentIssueComments(comments []issueComment, limit int) []issueComment {
-	if limit <= 0 || len(comments) <= limit {
-		return comments
-	}
-	sorted := make([]issueComment, len(comments))
-	copy(sorted, comments)
-	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].CreatedAt < sorted[j].CreatedAt })
-	return sorted[len(sorted)-limit:]
-}
-
-// syncIssueComments migrates the most recent sourceComments (capped by
-// e.MaxIssueComments, #571) to the Cloud issue. Skips comments that are
-// already present (idempotency via prefix match). Returns true if any
-// comment failed to be added.
-func syncIssueComments(ctx context.Context, e *Executor, cloudKey string, sourceComments []issueComment, cloudComments []issueComment) bool {
-	if capped := mostRecentIssueComments(sourceComments, e.MaxIssueComments); len(capped) < len(sourceComments) {
-		e.Logger.Info("syncIssueMetadata: comment history truncated by max_issue_comments",
-			"issue", cloudKey, "total", len(sourceComments), "migrated", len(capped))
-		sourceComments = capped
-	} else {
-		sourceComments = capped
-	}
+// syncIssueComments migrates the source comments to the Cloud issue,
+// capped to the maxComments most recent ones (#571) — every comment is an
+// extra /api/issues/add_comment call, so an issue with a long discussion
+// thread would otherwise put outsized pressure on SonarQube Cloud.
+// Skips comments that are already present (idempotency via prefix match).
+// Returns true if any comment failed to be added.
+func syncIssueComments(ctx context.Context, e *Executor, cloudKey string, sourceComments []issueComment, cloudComments []issueComment, maxComments int) bool {
 	var failed bool
-	for _, c := range sourceComments {
+	capped := capIssueComments(sourceComments, maxComments)
+	if dropped := len(sourceComments) - len(capped); dropped > 0 {
+		e.Logger.Debug("syncIssueMetadata: comments capped by max_issue_comments",
+			"issue", cloudKey, "dropped", dropped, "max_issue_comments", maxComments)
+	}
+	for _, c := range capped {
 		text := c.Markdown
 		if text == "" {
 			text = c.HTMLText
@@ -983,6 +957,28 @@ func syncIssueComments(ctx context.Context, e *Executor, cloudKey string, source
 		}
 	}
 	return failed
+}
+
+// capIssueComments returns the maxComments most-recent entries of comments,
+// in their original (chronological) order (#571). CreatedAt is an ISO-8601
+// timestamp, so a lexical sort is also a chronological sort. maxComments <=
+// 0 (including the -1 "no cap" sentinel — see ValidateMaxIssueComments) or
+// a comments slice no longer than maxComments is returned unchanged —
+// sorting is skipped so callers with few comments pay no extra cost.
+//
+// Stable and deterministic across re-runs: given the same source comments,
+// it always keeps the same trailing subset, so a re-run's idempotency check
+// (isAlreadyMigratedIssueComment) keeps working correctly.
+func capIssueComments(comments []issueComment, maxComments int) []issueComment {
+	if maxComments <= 0 || len(comments) <= maxComments {
+		return comments
+	}
+	sorted := make([]issueComment, len(comments))
+	copy(sorted, comments)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return sorted[i].CreatedAt < sorted[j].CreatedAt
+	})
+	return sorted[len(sorted)-maxComments:]
 }
 
 // isAlreadyMigratedIssueComment returns true when a migrated comment containing

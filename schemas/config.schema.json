@@ -86,10 +86,10 @@
     },
     "max_issue_comments": {
       "type": "integer",
-      "minimum": 1,
+      "minimum": 0,
       "maximum": 20,
       "default": 5,
-      "description": "Issue #571: max number of an issue's most recent comments migrated via api/issues/add_comment, reducing API pressure on SonarQube Cloud. Defaults to 5; values above 20 are rejected."
+      "description": "Max most-recent source comments replayed onto each migrated issue/hotspot (default 5, max 20). Reduces SonarQube Cloud API pressure on long comment threads. Issue #571. Overridable via target.max_issue_comments."
     },
     "source": {
       "$ref": "#/$defs/sourceBlock",
@@ -246,10 +246,10 @@
           "description": "PoC (issue #554): overrides the top-level migrate_history for migrate/reset. When true (or on / yes / 1), also migrate a bounded set of historical analysis snapshots (date + project-level measures only) per project's main branch, backdated on SonarQube Cloud. When absent, the top-level migrate_history applies (default false)."
         },
         "max_issue_comments": {
-          "type": "integer",
-          "minimum": 1,
+          "type": ["integer", "null"],
+          "minimum": 0,
           "maximum": 20,
-          "description": "Issue #571: overrides the top-level max_issue_comments for migrate/reset/sync-issues. When absent, the top-level max_issue_comments applies (default 5)."
+          "description": "Override the top-level max_issue_comments for migrate / transfer / sync-issues. Ignored by reset, which replays no comments. Issue #571."
         }
       }
     }

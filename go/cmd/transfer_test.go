@@ -417,7 +417,7 @@ func TestValidateTransferConfig_MissingFields(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := validateTransferConfig(newTransferTestCmd(), c.cfg)
+			err := validateTransferConfig(c.cfg)
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -438,7 +438,7 @@ func TestValidateTransferConfig_HappyPath(t *testing.T) {
 		targetToken:         "sc-tok",
 		defaultOrganization: "my-org",
 	}
-	if err := validateTransferConfig(newTransferTestCmd(), cfg); err != nil {
+	if err := validateTransferConfig(cfg); err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
 }
@@ -457,14 +457,14 @@ func TestValidateTransferConfig_UnsupportedLanguages(t *testing.T) {
 	for _, mode := range []string{"", "exclude", "skip", "warn", "SKIP"} {
 		cfg := base
 		cfg.unsupportedLanguages = mode
-		if err := validateTransferConfig(newTransferTestCmd(), cfg); err != nil {
+		if err := validateTransferConfig(cfg); err != nil {
 			t.Errorf("mode %q: expected no error, got %v", mode, err)
 		}
 	}
 	for _, mode := range []string{"skipp", "none", "exclude-all"} {
 		cfg := base
 		cfg.unsupportedLanguages = mode
-		err := validateTransferConfig(newTransferTestCmd(), cfg)
+		err := validateTransferConfig(cfg)
 		if err == nil {
 			t.Errorf("mode %q: expected a validation error", mode)
 			continue
@@ -485,7 +485,7 @@ func TestValidateTransferConfig_InvalidRegex(t *testing.T) {
 		targetToken:         "sc-tok",
 		defaultOrganization: "my-org",
 	}
-	err := validateTransferConfig(newTransferTestCmd(), cfg)
+	err := validateTransferConfig(cfg)
 	if err == nil {
 		t.Fatal("expected an error for an uncompilable --project_key pattern")
 	}
@@ -504,7 +504,7 @@ func TestValidateTransferConfig_PlainKeyIsValidPattern(t *testing.T) {
 		targetToken:         "sc-tok",
 		defaultOrganization: "my-org",
 	}
-	if err := validateTransferConfig(newTransferTestCmd(), cfg); err != nil {
+	if err := validateTransferConfig(cfg); err != nil {
 		t.Errorf("expected no error for a plain key, got %v", err)
 	}
 }

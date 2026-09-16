@@ -14,18 +14,10 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
 )
-
-// TestMain drives CEPollInterval down to near-zero for the whole package so
-// PollCETask tests don't pay its real wall-clock delay on every poll (#571).
-func TestMain(m *testing.M) {
-	CEPollInterval = time.Millisecond
-	os.Exit(m.Run())
-}
 
 func TestPreCreateAnalysis(t *testing.T) {
 	var gotPath string
@@ -171,7 +163,18 @@ func TestSubmitReportHTTPError(t *testing.T) {
 	}
 }
 
+// withFastCEPoll speeds up CEPollInterval for the duration of a test
+// (#571 bumped it to 10s in production, which would otherwise make these
+// tests take tens of seconds for no benefit).
+func withFastCEPoll(t *testing.T) {
+	t.Helper()
+	orig := CEPollInterval
+	CEPollInterval = time.Millisecond
+	t.Cleanup(func() { CEPollInterval = orig })
+}
+
 func TestPollCETaskSuccess(t *testing.T) {
+	withFastCEPoll(t)
 	callCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
@@ -195,6 +198,7 @@ func TestPollCETaskSuccess(t *testing.T) {
 }
 
 func TestPollCETaskFailure(t *testing.T) {
+	withFastCEPoll(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"task": map[string]string{"id": "AX-123", "status": "FAILED", "errorMessage": "analysis error"},
