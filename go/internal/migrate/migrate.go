@@ -239,9 +239,9 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 	cfg.applyDefaults()
 
 	// #571: reject up front rather than silently letting a mistyped, huge
-	// value through — cmd/migrate.go and cmd/transfer.go already validate
-	// this at build-config time, but a config-file-only caller (e.g. the
-	// GUI wizard) may reach RunMigrate without going through that check.
+	// value through — cmd/transfer.go and cmd/sync_issues.go validate this at
+	// build-config time, but `migrate` and config-file-only callers (e.g. the
+	// GUI wizard) reach RunMigrate without any such check.
 	if cfg.MaxIssueComments > MaxAllowedIssueComments {
 		return "", fmt.Errorf("max_issue_comments (%d) exceeds the maximum allowed value of %d",
 			cfg.MaxIssueComments, MaxAllowedIssueComments)

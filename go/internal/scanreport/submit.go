@@ -181,12 +181,16 @@ func PollCETask(ctx context.Context, client *http.Client, cloudURL, taskID strin
 	// scannerContext|warnings are valid) and the 400 would break polling.
 	params := url.Values{"id": {taskID}}
 
+	first := true
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(CEPollInterval):
+		if !first {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(CEPollInterval):
+			}
 		}
+		first = false
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, activityURL+"?"+params.Encode(), nil)
 		if err != nil {
