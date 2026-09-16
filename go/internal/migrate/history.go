@@ -93,6 +93,39 @@ func extractHistoryMeasures(data json.RawMessage, cloudProjectKey string) []scan
 	return out
 }
 
+// projectHistoryPointTotal sums the history points migrateBranchHistory
+// will attempt to replay across every extracted project's main branch
+// (#564) — a pure read of already-extracted data (readExtractItems,
+// collectBranchInfo, loadExtractedAnalysisHistory), no API calls, safe to
+// call before a single migrate task has run. Lets RunMigrate give history
+// replay its own tracked unit of work in the overall ETA up front. Returns
+// 0 when history migration is off, or when extract never ran with
+// --migrate_history (loadExtractedAnalysisHistory then returns nil for
+// every project) — both keep the feature a true no-op.
+func projectHistoryPointTotal(e *Executor) int {
+	if !e.MigrateHistory {
+		return 0
+	}
+	projects, err := readExtractItems(e, "getProjects")
+	if err != nil {
+		return 0
+	}
+	total := 0
+	for _, p := range projects {
+		serverKey := extractField(p.Data, "key")
+		if serverKey == "" {
+			continue
+		}
+		for _, b := range collectBranchInfo(e, p.ServerURL, serverKey) {
+			if !b.IsMain {
+				continue
+			}
+			total += len(loadExtractedAnalysisHistory(e, p.ServerURL, serverKey, b.Name))
+		}
+	}
+	return total
+}
+
 // migrateBranchHistory replays a project's extracted historical analysis
 // snapshots as separate, backdated analyses on the target, oldest to
 // newest (#554, PoC).
@@ -143,7 +176,18 @@ func migrateBranchHistory(ctx context.Context, e *Executor, bctx branchImportCon
 		"placeholder_language", placeholder.Language)
 
 	for i, snap := range snapshots {
-		if err := submitHistoricalSnapshot(ctx, e, bctx, targetBranch, snap, placeholder); err != nil {
+		err := submitHistoricalSnapshot(ctx, e, bctx, targetBranch, snap, placeholder)
+		// Count this point toward the run-wide ETA (#564) whether it
+		// succeeded or not — either way the wall-clock time was spent.
+		// A branch that stops early below leaves its remaining points
+		// never incremented, so HistoryProgress's fraction can plateau
+		// slightly under 100% for the rest of the run; LogFinal always
+		// emits the fixed 100% closing line regardless, so this only
+		// affects the live percentage, not the final one.
+		if e.HistoryProgress != nil {
+			e.HistoryProgress.Increment()
+		}
+		if err != nil {
 			// Stop rather than skip-and-continue: submitting a later
 			// historical date after a skipped earlier one would still be
 			// chronologically valid, but a submission failure here is far
