@@ -14,9 +14,18 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+	"time"
 )
+
+// TestMain drives CEPollInterval down to near-zero for the whole package so
+// PollCETask tests don't pay its real wall-clock delay on every poll (#571).
+func TestMain(m *testing.M) {
+	CEPollInterval = time.Millisecond
+	os.Exit(m.Run())
+}
 
 func TestPreCreateAnalysis(t *testing.T) {
 	var gotPath string

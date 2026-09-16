@@ -784,6 +784,99 @@ func TestOpenIssueWithCustomTagIsActionableAndNeedsNoTransition(t *testing.T) {
 	}
 }
 
+// --- #571: coverage for capping the number of comments migrated per issue ---
+
+func TestMostRecentIssueCommentsCapsToNewest(t *testing.T) {
+	comments := []issueComment{
+		{Login: "a", Markdown: "oldest", CreatedAt: "2024-01-01T00:00:00+0000"},
+		{Login: "b", Markdown: "middle", CreatedAt: "2024-06-01T00:00:00+0000"},
+		{Login: "c", Markdown: "newest", CreatedAt: "2024-12-01T00:00:00+0000"},
+	}
+	got := mostRecentIssueComments(comments, 2)
+	if len(got) != 2 {
+		t.Fatalf("want 2 comments, got %d", len(got))
+	}
+	if got[0].Markdown != "middle" || got[1].Markdown != "newest" {
+		t.Errorf("want [middle newest] (oldest-to-newest order preserved), got %+v", got)
+	}
+}
+
+func TestMostRecentIssueCommentsNoCapWhenUnderLimit(t *testing.T) {
+	comments := []issueComment{{Markdown: "a"}, {Markdown: "b"}}
+	got := mostRecentIssueComments(comments, 5)
+	if len(got) != 2 {
+		t.Errorf("want passthrough of 2 comments, got %d", len(got))
+	}
+}
+
+// max <= 0 is the defensive fallback for callers that bypass
+// MigrateConfig/SyncIssuesConfig.applyDefaults() (e.g. newTestExecutor).
+func TestMostRecentIssueCommentsZeroMeansNoCap(t *testing.T) {
+	comments := make([]issueComment, 50)
+	for i := range comments {
+		comments[i] = issueComment{Markdown: strings.Repeat("x", i+1)}
+	}
+	got := mostRecentIssueComments(comments, 0)
+	if len(got) != 50 {
+		t.Errorf("want no cap (50), got %d", len(got))
+	}
+}
+
+// newCommentSyncServer returns a cloud stub that records every
+// /api/issues/add_comment "text" payload, plus the recorder itself.
+func newCommentSyncServer(t *testing.T) (*httptest.Server, *[]string) {
+	t.Helper()
+	var seen []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/issues/add_comment", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		seen = append(seen, r.Form.Get("text"))
+		w.WriteHeader(http.StatusOK)
+	})
+	return httptest.NewServer(mux), &seen
+}
+
+// syncIssueComments must migrate only the most recent e.MaxIssueComments
+// source comments (#571) — reducing api/issues/add_comment calls for
+// heavily-discussed issues rather than replaying the entire history.
+func TestSyncIssueCommentsCapsToMostRecent(t *testing.T) {
+	cloudSrv, seen := newCommentSyncServer(t)
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+	e := newTestExecutor(cloudSrv, apiSrv, t.TempDir())
+	e.MaxIssueComments = 2
+
+	source := []issueComment{
+		{Login: "a", Markdown: "oldest", CreatedAt: "2024-01-01T00:00:00+0000"},
+		{Login: "b", Markdown: "middle", CreatedAt: "2024-06-01T00:00:00+0000"},
+		{Login: "c", Markdown: "newest", CreatedAt: "2024-12-01T00:00:00+0000"},
+	}
+
+	if failed := syncIssueComments(context.Background(), e, "cloud-1", source, nil); failed {
+		t.Fatal("syncIssueComments reported failure on 200 responses")
+	}
+	if len(*seen) != 2 {
+		t.Fatalf("want exactly 2 add_comment calls (capped), got %d: %v", len(*seen), *seen)
+	}
+	for _, want := range []string{"middle", "newest"} {
+		found := false
+		for _, s := range *seen {
+			if strings.Contains(s, want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected a comment containing %q to be migrated, got %v", want, *seen)
+		}
+	}
+	for _, s := range *seen {
+		if strings.Contains(s, "oldest") {
+			t.Errorf("oldest comment should have been dropped by the cap, got %v", *seen)
+		}
+	}
+}
+
 // --- #456: coverage for the tag write path and the not_found accounting ---
 
 // newTagSyncServer returns a cloud stub that records every /api/issues/set_tags

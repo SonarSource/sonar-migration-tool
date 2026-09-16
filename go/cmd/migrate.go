@@ -73,6 +73,9 @@ func init() {
 	f.Bool(flagSkipProjectDataMigration, false, "Skip the entire project-data migration: importProjectData and the trailing per-issue/per-hotspot sync (#303). Defaults to false (data is migrated); pass the flag to skip.")
 	f.Bool(flagFastSync, false, "Skip tagging and back-linking hotspots/issues with zero user changes on the source (original state, no comments, no custom tags). Defaults to false (every hotspot is tagged and back-linked). #527.")
 	f.Bool(flagMigrateHistory, false, "PoC: replay each project's extracted historical analysis snapshots as separate, backdated analyses on the target's main branch, before the regular current-snapshot import (#554). Defaults to false; requires extract to have run with --migrate_history too.")
+	f.Int(flagMaxIssueComments, migrate.DefaultMaxIssueComments,
+		fmt.Sprintf("Max number of an issue's most recent comments migrated via api/issues/add_comment (default: %d, max: %d). #571.",
+			migrate.DefaultMaxIssueComments, migrate.MaxAllowedIssueComments))
 	f.String("default_organization", "", "SonarQube Cloud organization to migrate every project into when organizations.csv has no mapping defined. Ignored if any mapping is present.")
 	f.String("project_key_pattern", "", "Template for target project keys, built from <ORIGINAL_PROJECT_KEY> and <ORGANIZATION_KEY> (default: <ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>). #138")
 	f.StringSlice("exclude_branches", nil, "Glob patterns for non-main branches to skip during project data import (e.g. feature/*,bugfix/*)")
@@ -131,6 +134,7 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	}
 	applyFlagBool(cmd, flagFastSync, &cfg.FastSync)
 	applyFlagBool(cmd, flagMigrateHistory, &cfg.MigrateHistory)
+	applyFlagInt(cmd, flagMaxIssueComments, &cfg.MaxIssueComments)
 
 	if err := applyObjectsFlag(cmd, &cfg.Objects); err != nil {
 		return cfg, err

@@ -364,6 +364,71 @@ func TestLoadMigrateConfigFile_FastSync_MigrateSectionedShape(t *testing.T) {
 	}
 }
 
+// Issue #571: max_issue_comments follows the same target-overrides-top-level
+// convention as concurrency/timeout (a plain int, 0 = unset — applyDefaults,
+// not this loader, resolves that to DefaultMaxIssueComments).
+func TestLoadMigrateConfigFile_MaxIssueComments(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want int
+	}{
+		{"absent (unset)", `{"target": {"url": "u", "token": "t"}}`, 0},
+		{"top-level set", `{"max_issue_comments": 8, "target": {"url": "u", "token": "t"}}`, 8},
+		{
+			"target overrides top-level",
+			`{"max_issue_comments": 8, "target": {"url": "u", "token": "t", "max_issue_comments": 3}}`,
+			3,
+		},
+		{
+			"target unset falls back to top-level",
+			`{"max_issue_comments": 8, "target": {"url": "u", "token": "t"}}`,
+			8,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := dir + "/max_issue_comments.json"
+			if err := os.WriteFile(path, []byte(c.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadMigrateConfigFile(path)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if cfg.MaxIssueComments != c.want {
+				t.Errorf("MaxIssueComments: got %d, want %d", cfg.MaxIssueComments, c.want)
+			}
+		})
+	}
+}
+
+// Issue #571: max_issue_comments also parses in the "migrate"-sectioned
+// shape, with the outer (command-sectioned) field winning when both are set
+// — same precedence as fast_sync.
+func TestLoadMigrateConfigFile_MaxIssueComments_MigrateSectionedShape(t *testing.T) {
+	body := `{
+  "max_issue_comments": 7,
+  "migrate": {
+    "url": "u", "token": "t",
+    "max_issue_comments": 2
+  }
+}`
+	dir := t.TempDir()
+	path := dir + "/max_issue_comments_sectioned.json"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadMigrateConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.MaxIssueComments != 7 {
+		t.Errorf("MaxIssueComments: got %d, want 7 (outer wins)", cfg.MaxIssueComments)
+	}
+}
+
 // Issue #281: target.default_organization parses into
 // MigrateConfig.DefaultOrganization.
 func TestLoadMigrateConfigFileUnifiedShape_DefaultOrganization(t *testing.T) {

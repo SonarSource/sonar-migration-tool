@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/url"
 	"slices"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -917,10 +918,38 @@ func syncIssueTransition(ctx context.Context, e *Executor, cloudKey string, src 
 // Its presence in a Cloud comment indicates that comment was already migrated.
 const migratedIssueCommentPrefix = "[Migrated from"
 
-// syncIssueComments migrates all source comments to the Cloud issue.
-// Skips comments that are already present (idempotency via prefix match).
-// Returns true if any comment failed to be added.
+// DefaultMaxIssueComments is how many of an issue's most recent comments are
+// migrated when --max_issue_comments isn't set (#571): a heavily discussed
+// source issue could otherwise cost one api/issues/add_comment call per
+// historical comment, every run.
+const DefaultMaxIssueComments = 5
+
+// MaxAllowedIssueComments is the hard ceiling on --max_issue_comments (#571)
+// — rejected up front by MigrateConfig/SyncIssuesConfig validation rather
+// than silently clamped, so a typo doesn't quietly change behavior.
+const MaxAllowedIssueComments = 20
+
+// mostRecentIssueComments returns at most max of comments, keeping only the
+// most recent ones by CreatedAt (#571). max <= 0 means no cap — the
+// defensive fallback for callers/tests that build an Executor directly
+// without going through MigrateConfig/SyncIssuesConfig.applyDefaults(),
+// which normally seeds DefaultMaxIssueComments.
+func mostRecentIssueComments(comments []issueComment, max int) []issueComment {
+	if max <= 0 || len(comments) <= max {
+		return comments
+	}
+	sorted := make([]issueComment, len(comments))
+	copy(sorted, comments)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].CreatedAt < sorted[j].CreatedAt })
+	return sorted[len(sorted)-max:]
+}
+
+// syncIssueComments migrates the most recent sourceComments (capped by
+// e.MaxIssueComments, #571) to the Cloud issue. Skips comments that are
+// already present (idempotency via prefix match). Returns true if any
+// comment failed to be added.
 func syncIssueComments(ctx context.Context, e *Executor, cloudKey string, sourceComments []issueComment, cloudComments []issueComment) bool {
+	sourceComments = mostRecentIssueComments(sourceComments, e.MaxIssueComments)
 	var failed bool
 	for _, c := range sourceComments {
 		text := c.Markdown

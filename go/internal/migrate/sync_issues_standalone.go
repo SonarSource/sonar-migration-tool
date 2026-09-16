@@ -50,6 +50,9 @@ type SyncIssuesConfig struct {
 
 	// FastSync — see MigrateConfig.FastSync (#527).
 	FastSync bool
+
+	// MaxIssueComments — see MigrateConfig.MaxIssueComments (#571).
+	MaxIssueComments int
 }
 
 func (cfg *SyncIssuesConfig) applyDefaults() {
@@ -67,6 +70,9 @@ func (cfg *SyncIssuesConfig) applyDefaults() {
 	}
 	if strings.TrimSpace(cfg.ProjectKeyPattern) == "" {
 		cfg.ProjectKeyPattern = DefaultProjectKeyPattern
+	}
+	if cfg.MaxIssueComments <= 0 {
+		cfg.MaxIssueComments = DefaultMaxIssueComments
 	}
 	if cfg.URL != "" && cfg.URL[len(cfg.URL)-1] != '/' {
 		cfg.URL += "/"
@@ -112,6 +118,14 @@ func RunSyncIssues(ctx context.Context, cfg SyncIssuesConfig) (SyncIssuesSummary
 	cfg.applyDefaults()
 
 	var summary SyncIssuesSummary
+
+	// #571: reject up front — cmd/sync_issues.go already validates this at
+	// build-config time, but a config-file-only caller may reach
+	// RunSyncIssues without going through that check.
+	if cfg.MaxIssueComments > MaxAllowedIssueComments {
+		return summary, fmt.Errorf("max_issue_comments (%d) exceeds the maximum allowed value of %d",
+			cfg.MaxIssueComments, MaxAllowedIssueComments)
+	}
 
 	level := slog.LevelInfo
 	if cfg.Debug {
@@ -170,6 +184,7 @@ func RunSyncIssues(ctx context.Context, cfg SyncIssuesConfig) (SyncIssuesSummary
 		Sem:               make(chan struct{}, cfg.Concurrency),
 		ProjectKeyPattern: cfg.ProjectKeyPattern,
 		FastSync:          cfg.FastSync,
+		MaxIssueComments:  cfg.MaxIssueComments,
 		Logger:            logger,
 	}
 

@@ -21,6 +21,13 @@ import (
 
 const headerContentType = "Content-Type"
 
+// CEPollInterval is the delay between api/ce/task polls in PollCETask.
+// Doubled from the original 5s (#571) to reduce the polling pressure a
+// migration run puts on SonarQube Cloud. A package-level var rather than a
+// const so tests can drive it down to near-zero instead of paying the real
+// wall-clock cost of every CE poll in the suite.
+var CEPollInterval = 10 * time.Second
+
 // SubmitConfig holds the parameters for submitting a scanner report.
 type SubmitConfig struct {
 	CloudURL       string // e.g. "https://sonarcloud.io/"
@@ -178,7 +185,7 @@ func PollCETask(ctx context.Context, client *http.Client, cloudURL, taskID strin
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(5 * time.Second):
+		case <-time.After(CEPollInterval):
 		}
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, activityURL+"?"+params.Encode(), nil)

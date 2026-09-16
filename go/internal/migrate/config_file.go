@@ -59,6 +59,11 @@ type configFileShape struct {
 	// MigrateHistory opts into the project-history migration PoC (#554).
 	// Defaults to false. Same FlexibleBool semantics as skip_issue_sync.
 	MigrateHistory *FlexibleBool `json:"migrate_history"`
+	// MaxIssueComments — see MigrateConfig.MaxIssueComments (#571). 0 means
+	// unset (resolves to DefaultMaxIssueComments), same convention as
+	// concurrency/timeout above — a real 0-comment cap isn't distinguishable
+	// from "not configured" through this field.
+	MaxIssueComments int `json:"max_issue_comments"`
 	// ConfirmedOrgs is reset-only: it additively pre-populates
 	// ResetConfig.ConfirmedOrgs (#550) for config-driven / programmatic
 	// callers that don't go through cmd/reset.go's interactive
@@ -139,6 +144,8 @@ type unifiedTargetBlock struct {
 	FastSync *FlexibleBool `json:"fast_sync"`
 	// MigrateHistory — see configFileShape.MigrateHistory (#554).
 	MigrateHistory *FlexibleBool `json:"migrate_history"`
+	// MaxIssueComments — see configFileShape.MaxIssueComments (#571).
+	MaxIssueComments int `json:"max_issue_comments"`
 }
 
 type sonarCloudBlock struct {
@@ -198,6 +205,7 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			cfg.ProjectKeyPattern = s.Target.ProjectKeyPattern
 			cfg.ExcludeBranches = s.Target.ExcludeBranches
 			cfg.UnsupportedLanguages = s.Target.UnsupportedLanguages
+			cfg.MaxIssueComments = s.Target.MaxIssueComments
 		}
 		// #474 — target.unsupported_languages wins, else the top-level field.
 		cfg.UnsupportedLanguages = resolveUnsupportedLanguages(
@@ -222,6 +230,9 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		}
 		if cfg.Timeout == 0 {
 			cfg.Timeout = s.Timeout
+		}
+		if cfg.MaxIssueComments == 0 {
+			cfg.MaxIssueComments = s.MaxIssueComments
 		}
 		cfg.ExportDirectory = s.ExportDirectory
 		// Top-level skip_issue_sync applies to every shape (#299).
@@ -252,6 +263,9 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		if s.MigrateHistory != nil && s.MigrateHistory.Set {
 			cfg.MigrateHistory = s.MigrateHistory.Value
 		}
+		if s.MaxIssueComments > 0 {
+			cfg.MaxIssueComments = s.MaxIssueComments
+		}
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKeyFilter = s.ProjectKey
 		return cfg
@@ -274,6 +288,10 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		// Same outer-wins-else-inner semantics for migrate_history (#554).
 		if s.MigrateHistory != nil && s.MigrateHistory.Set {
 			cfg.MigrateHistory = s.MigrateHistory.Value
+		}
+		// Same outer-wins-else-inner semantics for max_issue_comments (#571).
+		if s.MaxIssueComments > 0 {
+			cfg.MaxIssueComments = s.MaxIssueComments
 		}
 		// #536: outer-level "objects" / "project_key" win over the same
 		// fields nested inside "migrate" — but fall back to the nested
@@ -304,6 +322,7 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			ExcludeBranches:    s.ExcludeBranches,
 			// #474 — flat shape reads the field directly.
 			UnsupportedLanguages: s.UnsupportedLanguages,
+			MaxIssueComments:     s.MaxIssueComments,
 		}
 		if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
 			cfg.SkipIssueSync = s.SkipIssueSync.Value

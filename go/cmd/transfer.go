@@ -56,6 +56,8 @@ const (
 	flagMigrateHistory         = "migrate_history"
 	flagHistoryMaxPoints       = "history_max_points"
 	flagHistoryMinIntervalDays = "history_min_interval_days"
+	// #571 — cap api/issues/add_comment calls per issue.
+	flagMaxIssueComments = "max_issue_comments"
 )
 
 // transferTargetTasks is the explicit set of project-scoped "leaf" migrate
@@ -205,6 +207,9 @@ func init() {
 	f.Bool(flagMigrateHistory, false, "PoC: also migrate a bounded set of historical analysis snapshots (date + project-level measures) per project's main branch, backdated on "+scCloudName+" (#554). Defaults to false — no change to existing single-snapshot behavior unless set. (maps to migrate_history)")
 	f.Int(flagHistoryMaxPoints, 0, "Max historical snapshots migrated per project when --"+flagMigrateHistory+" is set (default: no cap, every analysis is a candidate). Pass a positive number to bound it. (maps to history_max_points)")
 	f.Int(flagHistoryMinIntervalDays, extract.HistoryUnset, "Minimum spacing, in days, enforced between two migrated historical snapshots when --"+flagMigrateHistory+" is set (default 0 — no spacing rule, every analysis in the source history becomes a candidate). (maps to history_min_interval_days)")
+	f.Int(flagMaxIssueComments, migrate.DefaultMaxIssueComments,
+		fmt.Sprintf("Max number of an issue's most recent comments migrated via api/issues/add_comment (default: %d, max: %d). #571.",
+			migrate.DefaultMaxIssueComments, migrate.MaxAllowedIssueComments))
 }
 
 // transferConfig holds the resolved configuration after merging file and flag values.
@@ -232,6 +237,7 @@ type transferConfig struct {
 	excludeBranches          []string
 	unsupportedLanguages     string
 	fastSync                 bool
+	maxIssueComments         int
 	// #554 — PoC project-history migration.
 	migrateHistory         bool
 	historyMaxPoints       int
@@ -365,6 +371,7 @@ func loadTransferFileDefaults(path string) (transferConfig, error) {
 	cfg.excludeBranches = migrateCfg.ExcludeBranches
 	cfg.unsupportedLanguages = migrateCfg.UnsupportedLanguages
 	cfg.fastSync = migrateCfg.FastSync
+	cfg.maxIssueComments = migrateCfg.MaxIssueComments
 	// #554 — the two bounds exist only on the extract side (they bound the
 	// source-side API calls extract makes). migrate_history, though, can be
 	// set in two places: the top-level plain bool the extract loader reads,
@@ -439,6 +446,7 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 	}
 	applyFlagInt(cmd, flagHistoryMaxPoints, &cfg.historyMaxPoints)
 	applyFlagInt(cmd, flagHistoryMinIntervalDays, &cfg.historyMinIntervalDays)
+	applyFlagInt(cmd, flagMaxIssueComments, &cfg.maxIssueComments)
 
 	if cfg.exportDir == "" {
 		cfg.exportDir = "./migration-files/"
@@ -478,6 +486,10 @@ func validateTransferConfig(cfg transferConfig) error {
 	// falling back to the default after the extract phase has already run.
 	if _, err := migrate.ParseUnsupportedLanguageMode(cfg.unsupportedLanguages); err != nil {
 		return fmt.Errorf("--%s: %w", flagUnsupportedLanguages, err)
+	}
+	// #571 — reject up front rather than failing deep inside the sync phase.
+	if cfg.maxIssueComments > migrate.MaxAllowedIssueComments {
+		return fmt.Errorf("--%s (%d) exceeds the maximum allowed value of %d", flagMaxIssueComments, cfg.maxIssueComments, migrate.MaxAllowedIssueComments)
 	}
 	return nil
 }
@@ -712,6 +724,7 @@ func runTransferMigrate(ctx context.Context, cfg transferConfig) (string, error)
 		ExcludeBranches:          cfg.excludeBranches,
 		UnsupportedLanguages:     cfg.unsupportedLanguages,
 		FastSync:                 cfg.fastSync,
+		MaxIssueComments:         cfg.maxIssueComments,
 		ProjectKeyPattern:        cfg.projectKeyPattern,
 		MigrateHistory:           cfg.migrateHistory,
 	})

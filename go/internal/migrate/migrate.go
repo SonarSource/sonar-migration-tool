@@ -89,6 +89,12 @@ type MigrateConfig struct {
 	// every hotspot is tagged and back-linked, the pre-#527 behavior.
 	FastSync bool
 
+	// MaxIssueComments caps how many of an issue's most recent comments are
+	// migrated via api/issues/add_comment (#571). 0 or unset resolves to
+	// DefaultMaxIssueComments in applyDefaults; validated against
+	// MaxAllowedIssueComments in validateMigrateConfig.
+	MaxIssueComments int
+
 	// ProjectKeyPattern is the template used to derive each target
 	// SonarQube Cloud project key from the source key, the org key, and
 	// the enterprise key. Defaults to DefaultProjectKeyPattern. Issue #138.
@@ -183,6 +189,11 @@ type Executor struct {
 	// FastSync — see MigrateConfig.FastSync (#527).
 	FastSync bool
 
+	// MaxIssueComments — see MigrateConfig.MaxIssueComments (#571). Zero
+	// means no cap — only expected outside applyDefaults (e.g. tests that
+	// build an Executor directly); see mostRecentIssueComments.
+	MaxIssueComments int
+
 	// ProjectKeyPattern is the resolved target-key template (issue #138),
 	// consumed by every task that derives a SonarQube Cloud project key
 	// (createProjects, matchProjectRepos, permission templates, portfolios).
@@ -219,6 +230,15 @@ type Executor struct {
 // Returns the run ID on success.
 func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr error) {
 	cfg.applyDefaults()
+
+	// #571: reject up front rather than silently letting a mistyped, huge
+	// value through — cmd/migrate.go and cmd/transfer.go already validate
+	// this at build-config time, but a config-file-only caller (e.g. the
+	// GUI wizard) may reach RunMigrate without going through that check.
+	if cfg.MaxIssueComments > MaxAllowedIssueComments {
+		return "", fmt.Errorf("max_issue_comments (%d) exceeds the maximum allowed value of %d",
+			cfg.MaxIssueComments, MaxAllowedIssueComments)
+	}
 
 	// #536: compile --project_key defensively even though cmd/migrate.go
 	// already validated it at build-config time — a config-file-only
@@ -318,6 +338,7 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 		ExcludeBranches:      cfg.ExcludeBranches,
 		UnsupportedLanguages: cfg.UnsupportedLanguages,
 		FastSync:             cfg.FastSync,
+		MaxIssueComments:     cfg.MaxIssueComments,
 		ProjectKeyPattern:    cfg.ProjectKeyPattern,
 		Objects:              cfg.Objects,
 		ProjectKeyRe:         projectKeyRe,
@@ -645,6 +666,9 @@ func (cfg *MigrateConfig) applyDefaults() {
 	}
 	if strings.TrimSpace(cfg.ProjectKeyPattern) == "" {
 		cfg.ProjectKeyPattern = DefaultProjectKeyPattern
+	}
+	if cfg.MaxIssueComments <= 0 {
+		cfg.MaxIssueComments = DefaultMaxIssueComments
 	}
 	// #474 — normalise the unsupported-language handling mode. An invalid
 	// value is rejected at the CLI layer (ValidateUnsupportedLanguages), so
