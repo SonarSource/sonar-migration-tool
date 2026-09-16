@@ -135,6 +135,13 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	applyFlagBool(cmd, flagFastSync, &cfg.FastSync)
 	applyFlagBool(cmd, flagMigrateHistory, &cfg.MigrateHistory)
 	applyFlagInt(cmd, flagMaxIssueComments, &cfg.MaxIssueComments)
+	// #571 — reject up front rather than failing deep inside the sync phase.
+	if cmd.Flags().Changed(flagMaxIssueComments) && cfg.MaxIssueComments < 1 {
+		return cfg, fmt.Errorf("--%s (%d) must be at least 1", flagMaxIssueComments, cfg.MaxIssueComments)
+	}
+	if cfg.MaxIssueComments > migrate.MaxAllowedIssueComments {
+		return cfg, fmt.Errorf("--%s (%d) exceeds the maximum allowed value of %d", flagMaxIssueComments, cfg.MaxIssueComments, migrate.MaxAllowedIssueComments)
+	}
 
 	if err := applyObjectsFlag(cmd, &cfg.Objects); err != nil {
 		return cfg, err

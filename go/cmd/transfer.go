@@ -458,7 +458,7 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 	return cfg, nil
 }
 
-func validateTransferConfig(cfg transferConfig) error {
+func validateTransferConfig(cmd *cobra.Command, cfg transferConfig) error {
 	if cfg.sourceURL == "" || cfg.sourceToken == "" {
 		return fmt.Errorf("%s URL and token are required (--%s / --%s or source.url / source.token in config file)", sqServerName, flagSourceURL, flagSourceToken)
 	}
@@ -488,6 +488,9 @@ func validateTransferConfig(cfg transferConfig) error {
 		return fmt.Errorf("--%s: %w", flagUnsupportedLanguages, err)
 	}
 	// #571 — reject up front rather than failing deep inside the sync phase.
+	if cmd.Flags().Changed(flagMaxIssueComments) && cfg.maxIssueComments < 1 {
+		return fmt.Errorf("--%s (%d) must be at least 1", flagMaxIssueComments, cfg.maxIssueComments)
+	}
 	if cfg.maxIssueComments > migrate.MaxAllowedIssueComments {
 		return fmt.Errorf("--%s (%d) exceeds the maximum allowed value of %d", flagMaxIssueComments, cfg.maxIssueComments, migrate.MaxAllowedIssueComments)
 	}
@@ -514,7 +517,7 @@ func runTransfer(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	if err := validateTransferConfig(cfg); err != nil {
+	if err := validateTransferConfig(cmd, cfg); err != nil {
 		return err
 	}
 

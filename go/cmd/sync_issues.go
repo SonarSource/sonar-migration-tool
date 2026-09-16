@@ -200,7 +200,7 @@ func resolveSyncIssuesConfig(cmd *cobra.Command) (syncIssuesConfig, error) {
 	return cfg, nil
 }
 
-func validateSyncIssuesConfig(cfg syncIssuesConfig) error {
+func validateSyncIssuesConfig(cmd *cobra.Command, cfg syncIssuesConfig) error {
 	if cfg.sourceURL == "" || cfg.sourceToken == "" {
 		return fmt.Errorf("%s URL and token are required (--%s / --%s or source.url / source.token in config file)", sqServerName, flagSourceURL, flagSourceToken)
 	}
@@ -208,6 +208,9 @@ func validateSyncIssuesConfig(cfg syncIssuesConfig) error {
 		return fmt.Errorf("%s token and organization key are required (--%s / --%s or target.token / target.default_organization in config file)", scCloudName, flagTargetToken, flagDefaultOrg)
 	}
 	// #571 — reject up front rather than failing deep inside the sync phase.
+	if cmd.Flags().Changed(flagMaxIssueComments) && cfg.maxIssueComments < 1 {
+		return fmt.Errorf("--%s (%d) must be at least 1", flagMaxIssueComments, cfg.maxIssueComments)
+	}
 	if cfg.maxIssueComments > migrate.MaxAllowedIssueComments {
 		return fmt.Errorf("--%s (%d) exceeds the maximum allowed value of %d", flagMaxIssueComments, cfg.maxIssueComments, migrate.MaxAllowedIssueComments)
 	}
@@ -221,7 +224,7 @@ func runSyncIssuesCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	if err := validateSyncIssuesConfig(cfg); err != nil {
+	if err := validateSyncIssuesConfig(cmd, cfg); err != nil {
 		return err
 	}
 
