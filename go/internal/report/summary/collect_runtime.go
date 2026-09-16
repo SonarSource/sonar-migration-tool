@@ -222,6 +222,13 @@ type eventAggregator struct {
 	// names. Without the redirect it produced two rows: one holding the
 	// issue and component counts, the other holding only the CE task id.
 	aliases map[branchKey]branchKey
+
+	// selfNamed holds the names a packaged event claimed as its OWN
+	// source branch. Such a name belongs to a branch in its own right
+	// and must never be redirected: a project can have both a "master"
+	// (its main) and a separate "main", and the alias registered for the
+	// main branch's rename would otherwise swallow the real "main".
+	selfNamed map[branchKey]bool
 }
 
 func newEventAggregator() *eventAggregator {
@@ -229,6 +236,8 @@ func newEventAggregator() *eventAggregator {
 		retries:  map[string]*RetryStat{},
 		branches: map[branchKey]*BranchStat{},
 		aliases:  map[branchKey]branchKey{},
+
+		selfNamed: map[branchKey]bool{},
 	}
 }
 
@@ -248,6 +257,24 @@ func (agg *eventAggregator) branchFor(project, branch string) *BranchStat {
 	return bs
 }
 
+// claimBranchName records that a packaged event named `branch` as its own
+// source branch, dropping any alias already pointing that name elsewhere.
+//
+// The main branch is packaged under its source name but submitted under
+// SonarQube Cloud's, so the two are aliased together. When a project's
+// source main is "master" while SonarQube Cloud's is "main", that alias
+// is main->master — and a second, genuinely distinct branch called "main"
+// then resolved through it, overwriting the main branch's issue and
+// component counts and emitting no row of its own.
+func (agg *eventAggregator) claimBranchName(project, branch string) {
+	if branch == "" {
+		return
+	}
+	k := branchKey{project: project, branch: branch}
+	agg.selfNamed[k] = true
+	delete(agg.aliases, k)
+}
+
 // aliasBranch records that `from` and `to` name the same branch of
 // `project`, folding an already-collected `from` row into `to`.
 //
@@ -259,6 +286,12 @@ func (agg *eventAggregator) aliasBranch(project, from, to string) {
 		return
 	}
 	fromKey := branchKey{project: project, branch: from}
+	// Some packaged event named `from` as its own source branch, so it is
+	// a branch of its own and keeps its own row. Redirecting it here is
+	// how the row collapse this keying fixes came back one level down.
+	if agg.selfNamed[fromKey] {
+		return
+	}
 	toKey := branchKey{project: project, branch: to}
 	agg.aliases[fromKey] = toKey
 
@@ -407,6 +440,9 @@ func (agg *eventAggregator) applyReportPackaged(ev logEventLine) {
 	// aliased onto it so the CE submission, which only knows the target
 	// name, lands on this same row.
 	branch := firstNonEmpty(evStr(a, "sourceBranch"), target, project)
+	// Claimed before the alias is registered, so this branch keeps its
+	// own row whichever order the two events arrive in.
+	agg.claimBranchName(project, branch)
 	agg.aliasBranch(project, target, branch)
 
 	bs := agg.branchFor(project, branch)

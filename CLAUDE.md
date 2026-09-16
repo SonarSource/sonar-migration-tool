@@ -16,6 +16,53 @@ Please reference https://docs.sonarsource.com/llms.txt for all documentation lin
 ## Always try to harvest features from CloudVoyager
 This project is supposed to be the successor of a past project called CloudVoyager. You can read the `README.md` and `docs/` folder for that project here on ` ---> Desktop/Active Projects/CloudVoyager Agents/CloudVoyager` if the folder is not there, then reference the online repo at `https://github.com/sonar-solutions/cloudvoyager`
 
+## MANDATORY: Keep the live smoke suite current
+
+`go/smoke/` is the live end-to-end smoke suite and the pre-PR gate. It drives the
+real binary against a real SonarQube Server and a real staging SonarQube Cloud
+organization. Run it locally before opening a PR:
+
+```bash
+make smoke-fast                              # Tier 0: no network, no credentials
+make smoke                                   # Tiers 0, 1 and 3: needs the source server
+SMOKE_ALLOW_DESTRUCTIVE=1 make smoke-full    # all tiers, destructive
+```
+
+Whenever you add, rename, or remove a **command, flag, config field, or written
+artifact**, you MUST update the smoke suite in the same change:
+
+- Command added/renamed/removed → update `allCommands` AND `expectedCommandCount`
+  in `go/smoke/tier0_cli_test.go`, and add a functional case in the tier that owns
+  it.
+- Flag added/renamed/removed → update the `commandFlags` table in
+  `go/smoke/tier0_cli_test.go`.
+- New validation error or exit code → add a case to `TestTier0_ExitCodeMatrix` in
+  `go/smoke/tier0_cli_test.go`. Run the real binary to observe the actual exit code
+  and message; never guess them.
+- New written artifact (report, CSV, JSONL, log) → assert its existence and shape in
+  the tier that produces it.
+- New migration phase or task group → extend `TestTier2_PathB_FullPipeline` in
+  `go/smoke/tier2_full_test.go`.
+- New report field or total → extend `assertReportAccuracy` in
+  `go/smoke/tier2_full_test.go`.
+
+A feature change with no corresponding smoke-suite change is incomplete. If a change
+genuinely needs no smoke update, state that explicitly and say why.
+
+Two structural traps, both already fixed — do not reintroduce them:
+
+- `go/smoke/doc.go` carries **no** build tag on purpose. Remove it and
+  `go test ./...` fails with "build constraints exclude all Go files".
+- The run-summary test lives in `go/smoke/zzz_summary_test.go` because Go runs tests
+  in source-file order. Moving it into `harness_test.go` makes it run *first*, where
+  it records nothing and silently skips.
+
+**Safety, non-negotiable:** `sonarcloud.io` and `sonarqube.us` are hard-denied in
+`assertHostAllowed` (`go/smoke/harness_test.go`) because this suite calls
+`reset --yes`, which deletes migrated entities. Never weaken that denylist, never
+remove the `SMOKE_ALLOW_DESTRUCTIVE` gate, and never let a network call run before
+the host check.
+
 <!-- sonar:begin:sonarqube-agentic-analysis-protocol -->
 # Vortex analysis protocol
 

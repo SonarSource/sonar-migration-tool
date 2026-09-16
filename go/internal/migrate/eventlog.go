@@ -262,7 +262,12 @@ func computeStatus(retErr error, tm *RunTimings) string {
 	tasks := tm.tasksSnapshot()
 	if retErr != nil {
 		for _, t := range tasks {
-			if t.OK {
+			// OK now also requires zero actionable item failures, so on
+			// its own it no longer answers "did anything happen": a run
+			// whose tasks each moved items but each also recorded an
+			// actionable failure has OK false throughout, and reading
+			// only OK reports the run as having achieved nothing.
+			if t.OK || t.Succeeded > 0 {
 				return "partial"
 			}
 		}

@@ -392,9 +392,10 @@ default to `0` — no cap, no spacing — so every analysis becomes a candidate:
 > | `30` | 31 |
 >
 > Bear in mind each point is a separate report submission plus a Compute
-> Engine poll — roughly 6.5s — so the exhaustive default is a long migration
-> on a project with a lot of history; use `--history_min_interval_days`
-> and/or `--history_max_points` to bound it deliberately.
+> Engine poll — roughly 11.5s (the CE poll interval is 10s, #571) — so the
+> exhaustive default is a long migration on a project with a lot of history;
+> use `--history_min_interval_days` and/or `--history_max_points` to bound it
+> deliberately.
 
 ```bash
 # Migrate the current snapshot as usual, plus every historical analysis on

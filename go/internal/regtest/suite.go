@@ -49,22 +49,32 @@ type CheckResult struct {
 	Tolerance string `json:"tolerance,omitempty"`
 	Notes     string `json:"notes,omitempty"`
 	Error     string `json:"error,omitempty"`
+	// SqsAndSqcFeatureDivergence marks a mismatch (Match: false) that is a
+	// known, permanent difference between how SonarQube Server (SQS) and
+	// SonarQube Cloud (SQC, formerly SonarCloud) behave by design — e.g.
+	// Cloud's built-in default profile/gate naming, its independently-
+	// versioned rule catalog, or this tool's own documented decision to
+	// force every migrated project private. It is never a migration
+	// defect, so it is reported (yellow), not failed (red). Notes must say
+	// plainly what SQS shows vs. what SQC shows and why.
+	SqsAndSqcFeatureDivergence bool `json:"sqs_and_sqc_feature_divergence,omitempty"`
 }
 
 // Report is the full output of a regression test run.
 type Report struct {
-	Timestamp    time.Time     `json:"timestamp"`
-	SQSURL       string        `json:"sqs_url"`
-	SCURL        string        `json:"sc_url"`
-	SCOrg        string        `json:"sc_org"`
-	TotalChecks  int           `json:"total_checks"`
-	Passed       int           `json:"passed"`
-	Failed       int           `json:"failed"`
-	Errors       int           `json:"errors"`
-	Skipped      int           `json:"skipped"`
-	Results      []CheckResult `json:"results"`
-	Duration     time.Duration `json:"duration"`
-	Verdict      string        `json:"verdict"` // "PASS" or "FAIL"
+	Timestamp                  time.Time     `json:"timestamp"`
+	SQSURL                     string        `json:"sqs_url"`
+	SCURL                      string        `json:"sc_url"`
+	SCOrg                      string        `json:"sc_org"`
+	TotalChecks                int           `json:"total_checks"`
+	Passed                     int           `json:"passed"`
+	Failed                     int           `json:"failed"`
+	Errors                     int           `json:"errors"`
+	Skipped                    int           `json:"skipped"`
+	SqsAndSqcFeatureDivergence int           `json:"sqs_and_sqc_feature_divergence"`
+	Results                    []CheckResult `json:"results"`
+	Duration                   time.Duration `json:"duration"`
+	Verdict                    string        `json:"verdict"` // "PASS", "YELLOW" (SQS_AND_SQC_FEATURE_DIVERGENCE only), or "FAIL"
 }
 
 // Suite runs all regression checks against SQS and SC.
@@ -234,13 +244,15 @@ func (s *Suite) buildReport(start time.Time) *Report {
 		s.results[i].ID = i + 1
 	}
 
-	var passed, failed, errors, skipped int
+	var passed, failed, errors, skipped, sqsAndSqcFeatureDivergence int
 	for _, r := range s.results {
 		switch {
 		case r.Error != "":
 			errors++
 		case r.Notes == "SKIPPED":
 			skipped++
+		case r.SqsAndSqcFeatureDivergence:
+			sqsAndSqcFeatureDivergence++
 		case r.Match:
 			passed++
 		default:
@@ -248,24 +260,30 @@ func (s *Suite) buildReport(start time.Time) *Report {
 		}
 	}
 
+	// FAIL beats YELLOW: even one SQS_AND_SQC_FEATURE_DIVERGENCE result must
+	// never mask a real failure elsewhere in the run.
 	verdict := "PASS"
-	if failed > 0 || errors > 0 {
+	switch {
+	case failed > 0 || errors > 0:
 		verdict = "FAIL"
+	case sqsAndSqcFeatureDivergence > 0:
+		verdict = "YELLOW"
 	}
 
 	return &Report{
-		Timestamp:   start,
-		SQSURL:      s.cfg.SQSURL,
-		SCURL:       s.cfg.SCURL,
-		SCOrg:       s.cfg.SCOrg,
-		TotalChecks: len(s.results),
-		Passed:      passed,
-		Failed:      failed,
-		Errors:      errors,
-		Skipped:     skipped,
-		Results:     s.results,
-		Duration:    time.Since(start),
-		Verdict:     verdict,
+		Timestamp:                  start,
+		SQSURL:                     s.cfg.SQSURL,
+		SCURL:                      s.cfg.SCURL,
+		SCOrg:                      s.cfg.SCOrg,
+		TotalChecks:                len(s.results),
+		Passed:                     passed,
+		Failed:                     failed,
+		Errors:                     errors,
+		Skipped:                    skipped,
+		SqsAndSqcFeatureDivergence: sqsAndSqcFeatureDivergence,
+		Results:                    s.results,
+		Duration:                   time.Since(start),
+		Verdict:                    verdict,
 	}
 }
 

@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 const (
@@ -532,6 +534,25 @@ func TestURLEntityMapCoverage(t *testing.T) {
 		}
 		if classifyEntityType(url) == "Unknown" {
 			t.Errorf("URL classified as Unknown: %s", url)
+		}
+	}
+}
+
+// summarizeNonJSONError's whole reason to exist is the body that is not
+// JSON — a gateway or proxy error page, which is exactly the input that
+// carries non-ASCII text. Capping it with a byte slice cuts inside a
+// multi-byte rune whenever the boundary falls there, and the broken rune
+// flows on into final_analysis_report.csv and the report's Error column.
+func TestSummarizeNonJSONErrorCutsOnARuneBoundary(t *testing.T) {
+	// Walk the cut point through every offset within a 2- and a 3-byte
+	// rune, so the test does not pass by landing on a clean boundary.
+	for _, r := range []string{"é", "€"} {
+		for _, prefix := range []string{"", "x", "xx", "xxx"} {
+			body := prefix + strings.Repeat(r, 300)
+			got := summarizeNonJSONError(body)
+			if !utf8.ValidString(got) {
+				t.Errorf("rune %q prefix %q: summary is not valid UTF-8: %q", r, prefix, got)
+			}
 		}
 	}
 }

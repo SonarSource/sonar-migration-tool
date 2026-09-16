@@ -40,8 +40,8 @@ func formatTable(w io.Writer, r *Report) error {
 	fmt.Fprintf(w, "║  Duration: %-64s ║\n", r.Duration.Round(100*1e6))
 	fmt.Fprintf(w, "╠══════════════════════════════════════════════════════════════════════════════╣\n")
 
-	verdictLine := fmt.Sprintf("  VERDICT: %s  |  Total: %d  Passed: %d  Failed: %d  Errors: %d  Skipped: %d",
-		r.Verdict, r.TotalChecks, r.Passed, r.Failed, r.Errors, r.Skipped)
+	verdictLine := fmt.Sprintf("  VERDICT: %s  |  Total: %d  Passed: %d  Failed: %d  Errors: %d  Skipped: %d  SQS_AND_SQC_FEATURE_DIVERGENCE: %d",
+		r.Verdict, r.TotalChecks, r.Passed, r.Failed, r.Errors, r.Skipped, r.SqsAndSqcFeatureDivergence)
 	fmt.Fprintf(w, "║%-77s║\n", verdictLine)
 	fmt.Fprintf(w, "╚══════════════════════════════════════════════════════════════════════════════╝\n\n")
 
@@ -49,15 +49,17 @@ func formatTable(w io.Writer, r *Report) error {
 	categories := groupByCategory(r.Results)
 	for _, cat := range categories {
 		fmt.Fprintf(w, "── %s ─────────────────────────────────────────────────────────\n", cat.Name)
-		fmt.Fprintf(w, "  %-4s %-40s %-12s %-12s %-6s %s\n", "#", "Check", "SQS", "SC", "Match", "Notes")
-		fmt.Fprintf(w, "  %-4s %-40s %-12s %-12s %-6s %s\n",
-			"----", "----------------------------------------", "------------", "------------", "------", "-----")
+		fmt.Fprintf(w, "  %-4s %-40s %-12s %-12s %-30s %s\n", "#", "Check", "SQS", "SC", "Match", "Notes")
+		fmt.Fprintf(w, "  %-4s %-40s %-12s %-12s %-30s %s\n",
+			"----", "----------------------------------------", "------------", "------------", "------------------------------", "-----")
 		for _, r := range cat.Results {
 			status := "PASS"
 			if r.Error != "" {
 				status = "ERR"
 			} else if r.Notes == "SKIPPED" {
 				status = "SKIP"
+			} else if r.SqsAndSqcFeatureDivergence {
+				status = "SQS_AND_SQC_FEATURE_DIVERGENCE"
 			} else if !r.Match {
 				status = "FAIL"
 			}
@@ -69,18 +71,33 @@ func formatTable(w io.Writer, r *Report) error {
 			if r.Error != "" {
 				notes = "ERROR: " + truncateStr(r.Error, 40)
 			}
-			fmt.Fprintf(w, "  %-4d %-40s %-12s %-12s %-6s %s\n",
+			fmt.Fprintf(w, "  %-4d %-40s %-12s %-12s %-30s %s\n",
 				r.ID, name, sqsVal, scVal, status, notes)
 		}
 		fmt.Fprintf(w, "\n")
 	}
 
-	// Summary of failures
-	failures := filterResults(r.Results, func(r CheckResult) bool { return !r.Match && r.Error == "" && r.Notes != "SKIPPED" })
+	// Summary of failures (real mismatches only — SQS_AND_SQC_FEATURE_DIVERGENCE
+	// results are reported separately below, not as failures).
+	failures := filterResults(r.Results, func(r CheckResult) bool {
+		return !r.Match && !r.SqsAndSqcFeatureDivergence && r.Error == "" && r.Notes != "SKIPPED"
+	})
 	if len(failures) > 0 {
 		fmt.Fprintf(w, "═══ FAILURES (%d) ═══════════════════════════════════════════════════════════\n", len(failures))
 		for _, f := range failures {
 			fmt.Fprintf(w, "  [%s] %s: SQS=%s SC=%s %s\n", f.Category, f.Name, f.SQSValue, f.SCValue, f.Notes)
+		}
+		fmt.Fprintf(w, "\n")
+	}
+
+	// SQS_AND_SQC_FEATURE_DIVERGENCE: known SonarQube Server vs. SonarQube
+	// Cloud differences that are expected, permanent, and not something a
+	// rerun or a code fix will change.
+	sqsAndSqcFeatureDivergences := filterResults(r.Results, func(r CheckResult) bool { return r.SqsAndSqcFeatureDivergence })
+	if len(sqsAndSqcFeatureDivergences) > 0 {
+		fmt.Fprintf(w, "═══ SQS_AND_SQC_FEATURE_DIVERGENCE (%d) — SQS vs SQC by design, not bugs ═══════════\n", len(sqsAndSqcFeatureDivergences))
+		for _, d := range sqsAndSqcFeatureDivergences {
+			fmt.Fprintf(w, "  [%s] %s: SQS=%s SC=%s\n      %s\n", d.Category, d.Name, d.SQSValue, d.SCValue, d.Notes)
 		}
 		fmt.Fprintf(w, "\n")
 	}
@@ -109,7 +126,8 @@ func formatMarkdown(w io.Writer, r *Report) error {
 	fmt.Fprintf(w, "| Passed | %d |\n", r.Passed)
 	fmt.Fprintf(w, "| Failed | %d |\n", r.Failed)
 	fmt.Fprintf(w, "| Errors | %d |\n", r.Errors)
-	fmt.Fprintf(w, "| Skipped | %d |\n\n", r.Skipped)
+	fmt.Fprintf(w, "| Skipped | %d |\n", r.Skipped)
+	fmt.Fprintf(w, "| SQS_AND_SQC_FEATURE_DIVERGENCE (known SQS vs SQC differences) | %d |\n\n", r.SqsAndSqcFeatureDivergence)
 
 	fmt.Fprintf(w, "## Results\n\n")
 	fmt.Fprintf(w, "| # | Category | Check | SQS | SC | Match | Notes |\n")
@@ -120,6 +138,8 @@ func formatMarkdown(w io.Writer, r *Report) error {
 			status = "ERR"
 		} else if res.Notes == "SKIPPED" {
 			status = "SKIP"
+		} else if res.SqsAndSqcFeatureDivergence {
+			status = "SQS_AND_SQC_FEATURE_DIVERGENCE"
 		} else if !res.Match {
 			status = "FAIL"
 		}
