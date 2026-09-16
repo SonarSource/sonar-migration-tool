@@ -78,6 +78,7 @@ func init() {
 	f.StringSlice("exclude_branches", nil, "Glob patterns for non-main branches to skip during project data import (e.g. feature/*,bugfix/*)")
 	f.String("objects", "", "Comma-separated list of object categories to migrate: "+strings.Join(common.AllObjects, ", ")+" (aliases: qp, qg, pt, lp). Omit to migrate everything (default). #536")
 	f.String(flagProjectKey, "", "Regexp pattern of source project keys to migrate (only applies when the projects category is selected via --objects). Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"BANKING_.+\" matches every key starting with BANKING_, not just a key containing that substring. A plain key like \"my-project\" matches only itself. #536")
+	f.Int(flagMaxIssueComments, 0, fmt.Sprintf("Max most-recent source comments replayed onto each migrated issue/hotspot (default %d, max %d) — reduces SonarQube Cloud API pressure on long comment threads (#571).", migrate.DefaultMaxIssueComments, migrate.MaxAllowedIssueComments))
 }
 
 func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfig, error) {
@@ -111,6 +112,7 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	overrideInt(cmd, "concurrency", &cfg.Concurrency)
 	overrideInt(cmd, "project_data_build_concurrency", &cfg.BuildConcurrency)
 	overrideInt(cmd, "timeout", &cfg.Timeout)
+	overrideInt(cmd, flagMaxIssueComments, &cfg.MaxIssueComments)
 	if cmd.Flags().Changed("skip_profiles") {
 		cfg.SkipProfiles, _ = cmd.Flags().GetBool("skip_profiles")
 	}
@@ -138,6 +140,11 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	warnIfLicenseProfilesSelected(cfg.Objects)
 	if err := applyMigrateProjectKeyFlag(cmd, &cfg); err != nil {
 		return cfg, err
+	}
+	// #571 — reject an out-of-range cap up front rather than silently
+	// clamping it deep inside the issue/hotspot sync.
+	if err := migrate.ValidateMaxIssueComments(cfg.MaxIssueComments); err != nil {
+		return cfg, fmt.Errorf("--%s: %w", flagMaxIssueComments, err)
 	}
 
 	// Default the export directory when neither config nor flag supplied

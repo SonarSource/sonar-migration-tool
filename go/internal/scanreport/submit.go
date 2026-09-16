@@ -21,6 +21,14 @@ import (
 
 const headerContentType = "Content-Type"
 
+// ceTaskPollInterval is the wait between successive api/ce/task polls in
+// PollCETask. Doubled from the original 5s (#571) to reduce the request
+// volume PollCETask puts on SonarQube Cloud — a project-data migration can
+// poll for minutes per branch, and this runs once per branch. A package
+// variable (rather than an inline constant) so tests can override it to
+// avoid waiting for real.
+var ceTaskPollInterval = 10 * time.Second
+
 // SubmitConfig holds the parameters for submitting a scanner report.
 type SubmitConfig struct {
 	CloudURL       string // e.g. "https://sonarcloud.io/"
@@ -178,7 +186,7 @@ func PollCETask(ctx context.Context, client *http.Client, cloudURL, taskID strin
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(5 * time.Second):
+		case <-time.After(ceTaskPollInterval):
 		}
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, activityURL+"?"+params.Encode(), nil)

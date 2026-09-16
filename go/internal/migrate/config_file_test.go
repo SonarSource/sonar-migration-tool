@@ -489,6 +489,95 @@ func TestMigrateConfig_ApplyDefaultsFillsTimeout(t *testing.T) {
 	}
 }
 
+// #571: MaxIssueComments must flow into MigrateConfig from every documented
+// config-file shape, mirroring Timeout's precedence (unified top-level
+// supplies a default, target overrides it).
+func TestLoadMigrateConfigFile_MaxIssueCommentsAllShapes(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want int
+	}{
+		{
+			name: "flat",
+			body: `{"url":"u","token":"t","max_issue_comments":3}`,
+			want: 3,
+		},
+		{
+			name: "command-sectioned (migrate block)",
+			body: `{"migrate":{"url":"u","token":"t","max_issue_comments":7}}`,
+			want: 7,
+		},
+		{
+			name: "side-sectioned (sonarcloud + settings)",
+			body: `{"sonarcloud":{"url":"u","token":"t"},"settings":{"max_issue_comments":12}}`,
+			want: 12,
+		},
+		{
+			name: "unified — top-level only",
+			body: `{"max_issue_comments":9,"target":{"url":"u","token":"t"}}`,
+			want: 9,
+		},
+		{
+			name: "unified — target overrides top-level",
+			body: `{"max_issue_comments":9,"target":{"url":"u","token":"t","max_issue_comments":2}}`,
+			want: 2,
+		},
+		{
+			name: "unified — missing leaves MaxIssueComments at zero (applyDefaults will fill it)",
+			body: `{"target":{"url":"u","token":"t"}}`,
+			want: 0,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := dir + "/cfg.json"
+			if err := os.WriteFile(path, []byte(c.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadMigrateConfigFile(path)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if cfg.MaxIssueComments != c.want {
+				t.Errorf("MaxIssueComments: got %d, want %d (body=%s)", cfg.MaxIssueComments, c.want, c.body)
+			}
+		})
+	}
+}
+
+// #571: applyDefaults must fill MaxIssueComments with DefaultMaxIssueComments
+// (5) when the config left it at zero, and preserve an explicit value.
+func TestMigrateConfig_ApplyDefaultsFillsMaxIssueComments(t *testing.T) {
+	cfg := MigrateConfig{}
+	cfg.applyDefaults()
+	if cfg.MaxIssueComments != DefaultMaxIssueComments {
+		t.Errorf("MaxIssueComments default: got %d, want %d", cfg.MaxIssueComments, DefaultMaxIssueComments)
+	}
+
+	cfg = MigrateConfig{MaxIssueComments: 3}
+	cfg.applyDefaults()
+	if cfg.MaxIssueComments != 3 {
+		t.Errorf("MaxIssueComments preservation: got %d, want 3", cfg.MaxIssueComments)
+	}
+}
+
+// #571: values above MaxAllowedIssueComments (20) are rejected; unset (<= 0)
+// and any value up to the cap are accepted.
+func TestValidateMaxIssueComments(t *testing.T) {
+	for _, n := range []int{-1, 0, 1, 5, 20} {
+		if err := ValidateMaxIssueComments(n); err != nil {
+			t.Errorf("ValidateMaxIssueComments(%d) = %v, want nil", n, err)
+		}
+	}
+	for _, n := range []int{21, 100} {
+		if err := ValidateMaxIssueComments(n); err == nil {
+			t.Errorf("ValidateMaxIssueComments(%d) = nil, want an error", n)
+		}
+	}
+}
+
 // LoadResetConfigFile must also recognise the unified shape and pull
 // from "target".
 func TestLoadResetConfigFileUnifiedShape(t *testing.T) {

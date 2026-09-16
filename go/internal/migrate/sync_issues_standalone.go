@@ -50,6 +50,9 @@ type SyncIssuesConfig struct {
 
 	// FastSync — see MigrateConfig.FastSync (#527).
 	FastSync bool
+
+	// MaxIssueComments — see MigrateConfig.MaxIssueComments (#571).
+	MaxIssueComments int
 }
 
 func (cfg *SyncIssuesConfig) applyDefaults() {
@@ -58,6 +61,9 @@ func (cfg *SyncIssuesConfig) applyDefaults() {
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 60
+	}
+	if cfg.MaxIssueComments <= 0 {
+		cfg.MaxIssueComments = DefaultMaxIssueComments
 	}
 	if cfg.ExportDirectory == "" {
 		cfg.ExportDirectory = "./migration-files/"
@@ -170,6 +176,7 @@ func RunSyncIssues(ctx context.Context, cfg SyncIssuesConfig) (SyncIssuesSummary
 		Sem:               make(chan struct{}, cfg.Concurrency),
 		ProjectKeyPattern: cfg.ProjectKeyPattern,
 		FastSync:          cfg.FastSync,
+		MaxIssueComments:  cfg.MaxIssueComments,
 		Logger:            logger,
 	}
 

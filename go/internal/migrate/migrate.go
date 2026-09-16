@@ -35,6 +35,27 @@ import (
 // cutting peak memory by roughly the ratio between the two.
 const DefaultBuildConcurrency = 4
 
+// DefaultMaxIssueComments is the number of most-recent comments migrated
+// onto each Cloud issue/hotspot when --max_issue_comments is unset (#571).
+const DefaultMaxIssueComments = 5
+
+// MaxAllowedIssueComments is the highest value --max_issue_comments accepts.
+// Comments are migrated one add_comment API call at a time, so an
+// unbounded value could put real pressure on SonarQube Cloud for issues
+// with long discussion threads (#571).
+const MaxAllowedIssueComments = 20
+
+// ValidateMaxIssueComments rejects a --max_issue_comments value above
+// MaxAllowedIssueComments. A value <= 0 is not an error: it means "use the
+// default" (applyDefaults fills in DefaultMaxIssueComments), matching the
+// existing zero-means-default convention for Concurrency/Timeout.
+func ValidateMaxIssueComments(n int) error {
+	if n > MaxAllowedIssueComments {
+		return fmt.Errorf("max_issue_comments %d exceeds the maximum allowed value of %d", n, MaxAllowedIssueComments)
+	}
+	return nil
+}
+
 // MigrateConfig holds all parameters for a migrate run.
 type MigrateConfig struct {
 	Token         string
@@ -132,6 +153,15 @@ type MigrateConfig struct {
 	// this feature existed, even if extract happened to capture history
 	// data for a different run.
 	MigrateHistory bool
+
+	// MaxIssueComments caps the number of source comments replayed onto a
+	// single Cloud issue/hotspot during metadata sync, keeping only the
+	// most recent ones (#571) — every comment is an extra
+	// /api/issues/add_comment call, and instances with long comment
+	// threads were putting avoidable pressure on SonarQube Cloud. <= 0
+	// resolves to DefaultMaxIssueComments; values above MaxAllowedIssueComments
+	// are rejected by ValidateMaxIssueComments at the CLI layer.
+	MaxIssueComments int
 }
 
 // Executor is the runtime context passed to every migrate task function.
@@ -204,6 +234,9 @@ type Executor struct {
 	ProjectKeyRe *regexp.Regexp
 	// MigrateHistory — see MigrateConfig.MigrateHistory (#554).
 	MigrateHistory bool
+
+	// MaxIssueComments — see MigrateConfig.MaxIssueComments (#571).
+	MaxIssueComments int
 
 	// ResetConfirmedOrgs is populated only by RunReset after the
 	// operator has interactively confirmed which SonarCloud orgs to
@@ -322,6 +355,7 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 		Objects:              cfg.Objects,
 		ProjectKeyRe:         projectKeyRe,
 		MigrateHistory:       cfg.MigrateHistory,
+		MaxIssueComments:     cfg.MaxIssueComments,
 		Logger:               logger,
 	}
 
@@ -633,6 +667,9 @@ func (cfg *MigrateConfig) applyDefaults() {
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 60
+	}
+	if cfg.MaxIssueComments <= 0 {
+		cfg.MaxIssueComments = DefaultMaxIssueComments
 	}
 	if cfg.ExportDirectory == "" {
 		cfg.ExportDirectory = "/app/files/"

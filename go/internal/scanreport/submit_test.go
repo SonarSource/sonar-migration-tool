@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPreCreateAnalysis(t *testing.T) {
@@ -162,7 +163,18 @@ func TestSubmitReportHTTPError(t *testing.T) {
 	}
 }
 
+// withFastCEPoll speeds up ceTaskPollInterval for the duration of a test
+// (#571 bumped it to 10s in production, which would otherwise make these
+// tests take tens of seconds for no benefit).
+func withFastCEPoll(t *testing.T) {
+	t.Helper()
+	orig := ceTaskPollInterval
+	ceTaskPollInterval = time.Millisecond
+	t.Cleanup(func() { ceTaskPollInterval = orig })
+}
+
 func TestPollCETaskSuccess(t *testing.T) {
+	withFastCEPoll(t)
 	callCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
@@ -186,6 +198,7 @@ func TestPollCETaskSuccess(t *testing.T) {
 }
 
 func TestPollCETaskFailure(t *testing.T) {
+	withFastCEPoll(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"task": map[string]string{"id": "AX-123", "status": "FAILED", "errorMessage": "analysis error"},

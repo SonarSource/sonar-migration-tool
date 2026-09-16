@@ -102,6 +102,133 @@ func TestIsAlreadyMigratedIssueComment(t *testing.T) {
 	}
 }
 
+// #571: capIssueComments must keep only the most recent maxComments
+// comments, sorted back into chronological order, regardless of the
+// input's original ordering.
+func TestCapIssueComments(t *testing.T) {
+	c := func(createdAt string) issueComment { return issueComment{CreatedAt: createdAt} }
+	createdAtsOf := func(comments []issueComment) []string {
+		out := make([]string, len(comments))
+		for i, cm := range comments {
+			out[i] = cm.CreatedAt
+		}
+		return out
+	}
+
+	tests := []struct {
+		name string
+		in   []issueComment
+		max  int
+		want []string
+	}{
+		{
+			name: "under cap returns input unchanged",
+			in:   []issueComment{c("2024-01-01"), c("2024-01-02")},
+			max:  5,
+			want: []string{"2024-01-01", "2024-01-02"},
+		},
+		{
+			name: "zero max means no cap",
+			in:   []issueComment{c("2024-01-01"), c("2024-01-02"), c("2024-01-03")},
+			max:  0,
+			want: []string{"2024-01-01", "2024-01-02", "2024-01-03"},
+		},
+		{
+			name: "negative max means no cap",
+			in:   []issueComment{c("2024-01-01")},
+			max:  -1,
+			want: []string{"2024-01-01"},
+		},
+		{
+			name: "exact cap returns input unchanged",
+			in:   []issueComment{c("2024-01-01"), c("2024-01-02")},
+			max:  2,
+			want: []string{"2024-01-01", "2024-01-02"},
+		},
+		{
+			name: "over cap keeps the most recent, re-sorted chronologically",
+			in:   []issueComment{c("2024-01-03"), c("2024-01-01"), c("2024-01-02")},
+			max:  2,
+			want: []string{"2024-01-02", "2024-01-03"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := createdAtsOf(capIssueComments(tc.in, tc.max))
+			if !equalStrings(got, tc.want) {
+				t.Errorf("capIssueComments(...) = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// newCommentSyncServer returns a cloud stub that records every
+// /api/issues/add_comment "text" payload.
+func newCommentSyncServer(t *testing.T) (*httptest.Server, *[]string) {
+	t.Helper()
+	var seen []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/issues/add_comment", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		seen = append(seen, r.Form.Get("text"))
+		w.WriteHeader(http.StatusOK)
+	})
+	return httptest.NewServer(mux), &seen
+}
+
+// #571: syncIssueComments only replays the maxComments most recent source
+// comments — every comment is an extra add_comment API call, so an issue
+// with a long discussion thread must not send them all.
+func TestSyncIssueCommentsCapsToMostRecent(t *testing.T) {
+	cloudSrv, seen := newCommentSyncServer(t)
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+	e := newTestExecutor(cloudSrv, apiSrv, t.TempDir())
+
+	source := []issueComment{
+		{Login: "alice", Markdown: "first", CreatedAt: "2024-01-01T00:00:00+0000"},
+		{Login: "bob", Markdown: "second", CreatedAt: "2024-01-02T00:00:00+0000"},
+		{Login: "carol", Markdown: "third", CreatedAt: "2024-01-03T00:00:00+0000"},
+	}
+
+	if syncIssueComments(context.Background(), e, "cloud-1", source, nil, 2) {
+		t.Fatal("syncIssueComments reported failure on 200 responses")
+	}
+	if len(*seen) != 2 {
+		t.Fatalf("want 2 add_comment calls (capped to 2), got %d: %v", len(*seen), *seen)
+	}
+	if !strings.Contains((*seen)[0], "second") || !strings.Contains((*seen)[1], "third") {
+		t.Errorf("expected the two most recent comments (second, third) to be replayed in order, got %v", *seen)
+	}
+}
+
+// A maxComments of 0 (or below) must not cap anything — this is the
+// zero-value Executor.MaxIssueComments used by test fixtures that don't
+// exercise #571 directly, and it must reproduce the pre-#571 behavior of
+// replaying every comment.
+func TestSyncIssueCommentsUncappedReplaysEveryComment(t *testing.T) {
+	cloudSrv, seen := newCommentSyncServer(t)
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+	e := newTestExecutor(cloudSrv, apiSrv, t.TempDir())
+
+	source := []issueComment{
+		{Login: "alice", Markdown: "first", CreatedAt: "2024-01-01T00:00:00+0000"},
+		{Login: "bob", Markdown: "second", CreatedAt: "2024-01-02T00:00:00+0000"},
+		{Login: "carol", Markdown: "third", CreatedAt: "2024-01-03T00:00:00+0000"},
+	}
+
+	if syncIssueComments(context.Background(), e, "cloud-1", source, nil, 0) {
+		t.Fatal("syncIssueComments reported failure on 200 responses")
+	}
+	if len(*seen) != 3 {
+		t.Fatalf("want all 3 add_comment calls when uncapped, got %d: %v", len(*seen), *seen)
+	}
+}
+
 // #350: narrowed source-side candidate set. Sync only issues whose
 // triage state, tags or comments mark them as touched by a human;
 // auto-assigned issues and CONFIRMED-no-extras issues are skipped.
