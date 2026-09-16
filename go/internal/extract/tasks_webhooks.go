@@ -36,6 +36,13 @@ func webhookDeliveries(taskName, depTask string) func(ctx context.Context, e *Ex
 				items, err := e.Raw.GetPaginated(ctx, PaginatedOpts{
 					Path: "api/webhooks/deliveries", ResultKey: "deliveries", MaxPageSize: 500, PageLimit: 10,
 					Params: url.Values{"webhook": {webhookKey}},
+					// The 10-page cap is a deliberate 5,000-row sample
+					// of a delivery log that grows without bound, not a
+					// workaround for the 10,000-result ceiling. Without
+					// this flag every instance with a busy webhook would
+					// get a data-loss bullet in its migration report for
+					// deliveries nobody asked to migrate (#574).
+					SamplingCap: true,
 				})
 				if err != nil {
 					return err

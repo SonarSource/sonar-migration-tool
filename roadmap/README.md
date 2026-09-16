@@ -55,7 +55,7 @@ These specs handle edge cases and scale challenges that CloudVoyager solved thro
 
 | Spec | Title | Priority | Effort | Status |
 |------|-------|----------|--------|--------|
-| [SPEC-006](specs/SPEC-006-large-scale-issue-handling.md) | Large-Scale Issue Handling (>10K) | P0 | L | Draft |
+| [SPEC-006](specs/SPEC-006-large-scale-issue-handling.md) | Large-Scale Issue Handling (>10K) | P0 | L | Partially Implemented |
 | [SPEC-007](specs/SPEC-007-issue-batch-distribution.md) | Issue Batch Distribution | P0 | L | Deprecated |
 | [SPEC-008](specs/SPEC-008-issue-metadata-sync.md) | Issue Metadata Synchronization | P0 | XL | Draft |
 | [SPEC-009](specs/SPEC-009-hotspot-metadata-sync.md) | Hotspot Metadata Synchronization | P0 | L | Draft |

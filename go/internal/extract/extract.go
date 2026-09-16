@@ -107,6 +107,14 @@ type Executor struct {
 	SkipIssueSync bool            // drop additionalFields=_all + hotspot detail enrichment. #398.
 	Progress      *common.Tracker // run-wide progress/ETA estimator (#520)
 
+	// Truncation collects every truncated API response observed during
+	// the run, for the end-of-run console block and the
+	// extract_truncation.json artefact the migration report reads
+	// (#574). Nil-safe on every method, so hand-built executors (tests,
+	// and anything that does not go through RunExtract) need no change
+	// and simply record nothing.
+	Truncation *TruncationTracker
+
 	// MigrateHistory / HistoryMaxPoints / HistoryMinIntervalDays — see
 	// ExtractConfig. #554.
 	MigrateHistory         bool
@@ -190,6 +198,16 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 	executor.HistoryMaxPoints = cfg.HistoryMaxPoints
 	executor.HistoryMinIntervalDays = cfg.HistoryMinIntervalDays
 
+	// Truncation tracking (#574). The observer is installed on the raw
+	// client — one installation covering all of its call sites,
+	// including the ones nobody remembers to wire — and it is installed
+	// HERE, before any task can run: a record produced by a task that
+	// started first would otherwise be dropped, and the failure mode of
+	// installing it late is the feature being dead in production while
+	// every unit test stays green.
+	executor.Truncation = NewTruncationTracker()
+	raw.SetTruncationObserver(executor.Truncation.Record)
+
 	// Overall progress/ETA logging (#520) — every 10s for the duration of
 	// the run, stopped once phases finish (success or error).
 	executor.Progress = common.NewTracker(executor.Logger, plan, CategorizeTask, common.DefaultCategoryWeights)
@@ -197,11 +215,21 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 	executor.Progress.Start(ctx, 10*time.Second)
 	defer executor.Progress.Stop()
 
-	if err := executePhases(ctx, executor, plan, registry, store); err != nil {
-		return nil, err
+	phaseErr := executePhases(ctx, executor, plan, registry, store)
+	// Flushed on both exits: the truncation a completed phase recorded
+	// is real whether or not a later phase then failed, and the tracker
+	// is the only place it exists until the artefact is written (#574).
+	flushTruncation(extractDir, executor.Truncation, executor.Logger)
+	if phaseErr != nil {
+		return nil, phaseErr
 	}
 	executor.Progress.Stop() // silence the ticker before the closing line
 	executor.Progress.LogFinal()
+
+	// Before the success banner, not after it: printing in place here
+	// rather than widening RunExtract's return gives all of its callers
+	// (extract, transfer, sync_issues, the wizard) the same warning.
+	PrintTruncationBlock(os.Stderr, executor.Truncation.State())
 
 	fmt.Printf("%s %s - Extract Complete: %s\n", smtver.ToolName, smtver.Version, extractID)
 	return executor.SkippedProjectKeys(), nil

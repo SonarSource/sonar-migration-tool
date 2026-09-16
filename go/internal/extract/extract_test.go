@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
 const (
@@ -917,5 +919,146 @@ func TestListAllProjectKeys_SkipsItemsWithoutKey(t *testing.T) {
 	want := []string{"proj-a"}
 	if !reflect.DeepEqual(keys, want) {
 		t.Errorf("keys = %v, want %v", keys, want)
+	}
+}
+
+// componentTreeCeilingTotal is a component-tree total far past the
+// PageLimit clamp (20 pages x 500 = 10,000), so the fetch is
+// unambiguously short. Before #574 that short slice was returned as if
+// it were the whole tree.
+const componentTreeCeilingTotal = 20000
+
+// truncatingComponentTreeMux is a mock server whose component-tree
+// endpoint reports 20,000 components and hands back one per page, so
+// the 20-page clamp fires on the first project+branch it is asked for.
+// Every other endpoint answers with an empty, untruncated page.
+func truncatingComponentTreeMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/server/version", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, testServerVersion)
+	})
+	mux.HandleFunc("GET /api/system/info", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"edition": "developer", "version": testServerVersion})
+	})
+	mux.HandleFunc("GET /api/projects/search", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"paging":     map[string]any{"total": 1},
+			"components": []map[string]any{{"key": "proj1", "name": "Project 1", "qualifier": "TRK"}},
+		})
+	})
+	mux.HandleFunc("GET /api/measures/component_tree", func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("p")
+		json.NewEncoder(w).Encode(map[string]any{
+			"paging": map[string]any{"pageSize": 500, "total": componentTreeCeilingTotal},
+			"components": []map[string]any{
+				{"key": "proj1:src/File" + page + ".java", "name": "File" + page + ".java", "language": "java"},
+			},
+		})
+	})
+	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"paging": map[string]any{"total": 0}})
+	})
+	return mux
+}
+
+// readTruncationArtefact reads extract_truncation.json out of an
+// extract directory, failing when it is absent — every caller here
+// expects a run that lost data to have left the evidence behind.
+func readTruncationArtefact(t *testing.T, extractDir string) common.TruncationState {
+	t.Helper()
+	path := filepath.Join(extractDir, TruncationEventsFile)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected the truncation artefact at %s: %v", path, err)
+	}
+	state, err := common.ReadTruncationState(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	return state
+}
+
+// TestRunExtractInstallsTheObserver prevents the one failure no other
+// test in this change can catch: every unit test green and the feature
+// dead in production because the client-level truncation observer was
+// never installed, or was installed after the tasks that produce
+// records had already run. The artefact is the only proof the record
+// travelled from the raw client through the tracker to the extract
+// directory (#574).
+func TestRunExtractInstallsTheObserver(t *testing.T) {
+	srv := httptest.NewServer(truncatingComponentTreeMux())
+	defer srv.Close()
+
+	dir := t.TempDir()
+	cfg := ExtractConfig{
+		URL: srv.URL, Token: testToken, ExportDirectory: dir,
+		TargetTask: "getProjectComponentTree", Concurrency: 1,
+	}
+	if _, err := RunExtract(context.Background(), cfg); err != nil {
+		t.Fatalf("RunExtract failed: %v", err)
+	}
+
+	state := readTruncationArtefact(t, firstExtractDir(t, dir))
+	if len(state.Records) != 1 {
+		t.Fatalf("expected exactly 1 truncation record, got %d: %+v", len(state.Records), state.Records)
+	}
+	rec := state.Records[0]
+	if rec.Endpoint != "api/measures/component_tree" {
+		t.Errorf("endpoint: got %q, want %q", rec.Endpoint, "api/measures/component_tree")
+	}
+	if rec.Reason != common.ReasonPageLimitClamp {
+		t.Errorf("reason: got %q, want %q", rec.Reason, common.ReasonPageLimitClamp)
+	}
+	want := common.TruncationScope{Task: "getProjectComponentTree", ProjectKey: "proj1", Branch: "main"}
+	if rec.Scope != want {
+		t.Errorf("scope: got %+v, want %+v", rec.Scope, want)
+	}
+	if !rec.TotalKnown || rec.Total != componentTreeCeilingTotal {
+		t.Errorf("total: got %d (known=%t), want %d (known=true)", rec.Total, rec.TotalKnown, componentTreeCeilingTotal)
+	}
+	if rec.Lost != componentTreeCeilingTotal-rec.Fetched {
+		t.Errorf("lost: got %d, want %d (total %d - fetched %d)",
+			rec.Lost, componentTreeCeilingTotal-rec.Fetched, componentTreeCeilingTotal, rec.Fetched)
+	}
+	if state.TotalLost != rec.Lost {
+		t.Errorf("artefact totalLost: got %d, want %d", state.TotalLost, rec.Lost)
+	}
+}
+
+// TestRunExtractWritesTheTruncationArtefactOnTaskFailure prevents the
+// evidence dying with the run. A phase that truncated data really did
+// truncate it, whether or not a later phase then failed, and the
+// tracker is in memory only — flushing on the success path alone would
+// leave an operator with a failed extract and no record of what the
+// part that succeeded silently dropped (#574).
+func TestRunExtractWritesTheTruncationArtefactOnTaskFailure(t *testing.T) {
+	mux := truncatingComponentTreeMux()
+	// getProjectSourceCode runs in a later phase than
+	// getProjectComponentTree, and HTTP 500 is not in isNonFatalHTTPErr,
+	// so this fails the whole run after the truncation was recorded.
+	mux.HandleFunc("GET /api/sources/raw", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	cfg := ExtractConfig{
+		URL: srv.URL, Token: testToken, ExportDirectory: dir,
+		TargetTask: "getProjectSourceCode", Concurrency: 1,
+	}
+	if _, err := RunExtract(context.Background(), cfg); err == nil {
+		t.Fatal("expected RunExtract to fail on the HTTP 500 from api/sources/raw")
+	}
+
+	state := readTruncationArtefact(t, firstExtractDir(t, dir))
+	if len(state.Records) != 1 {
+		t.Fatalf("expected the component-tree truncation to survive the failed run, got %d records: %+v",
+			len(state.Records), state.Records)
+	}
+	if got := state.Records[0].Scope.Task; got != "getProjectComponentTree" {
+		t.Errorf("scope task: got %q, want %q", got, "getProjectComponentTree")
+	}
+	if state.TotalLost == 0 {
+		t.Error("expected a non-zero lost count in the artefact of a failed run")
 	}
 }

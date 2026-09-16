@@ -152,6 +152,16 @@ func listHistoricalAnalyses(ctx context.Context, e *Executor, projectKey, branch
 		Params:    params,
 		ResultKey: "analyses",
 		PageLimit: 20,
+		// Warning only. The clamp bounds this at 20 x 500 = 10,000
+		// analyses on one project+branch, which is not a shape we have
+		// seen; and the date filter here is from/to, not
+		// createdAfter/createdBefore, so the issue slicer does not apply
+		// (#574).
+		Scope: TruncationScope{
+			Task:       "getProjectAnalysisHistory",
+			ProjectKey: projectKey,
+			Branch:     branch,
+		},
 	})
 	if err != nil {
 		return nil, err
