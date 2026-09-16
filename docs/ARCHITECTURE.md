@@ -366,9 +366,12 @@ Two outcome classes cannot be predicted ahead of time and are omitted from the p
 ## Testing
 <!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
-- **Framework:** stdlib `testing` + `net/http/httptest` for HTTP mocking
-- **Run tests:** `cd go && go test ./... -count=1`
-- **Coverage:** `cd go && go test ./... -coverprofile=coverage.out`
+- **Unit / integration tests** — stdlib `testing` + `net/http/httptest` for HTTP mocking, using hand-built `httptest` fakes. This is what CI runs.
+  - **Run tests:** `cd go && go test ./... -count=1`
+  - **Coverage:** `cd go && go test ./... -coverprofile=coverage.out`
+- **Live smoke suite** — `go/smoke/`, behind a `//go:build smoke` tag so `go test ./...` never compiles it. Drives the real built binary against real SonarQube Server + staging SonarQube Cloud instances. Local-only, not run in CI.
+  - **Run:** `make smoke-fast` / `make smoke` / `make smoke-full`
+  - **Docs:** [SMOKE-TESTING.md](SMOKE-TESTING.md)
 
 ## Roadmap: Data Migration Specs
 <!-- updated: 2026-06-04_01:14:00.000 by Claude -->

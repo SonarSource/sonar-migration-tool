@@ -301,7 +301,15 @@ func TestFailedItemsColumnDistinguishesActionableFromExpected(t *testing.T) {
 // exercised it with runtime data before, so a table running off the page
 // would have shipped unnoticed.
 func TestRenderPDFWithWidenedRuntimeTables(t *testing.T) {
-	pdfBytes, err := RenderPDF(fullySeededSummary())
+	seeded := fullySeededSummary()
+	// The fixture's tasks carry no per-item tallies, so fmtFailedItems
+	// returns "" for both and the new column is laid out empty — the
+	// width it actually has to hold never gets exercised. Seed the
+	// widest forms: "5 (2 actionable)" and "2 (none actionable)".
+	seeded.Tasks[0].Succeeded, seeded.Tasks[0].Failed, seeded.Tasks[0].ActionableFailures = 3, 5, 2
+	seeded.Tasks[1].Failed, seeded.Tasks[1].ActionableFailures = 2, 0
+
+	pdfBytes, err := RenderPDF(seeded)
 	if err != nil {
 		t.Fatalf("RenderPDF: %v", err)
 	}
@@ -316,9 +324,17 @@ func TestRenderPDFWithWidenedRuntimeTables(t *testing.T) {
 	if pages := bytes.Count(pdfBytes, []byte("/Type /Page\n")); pages < 2 {
 		t.Errorf("got %d pages, want at least 2 — sections appear to be missing", pages)
 	}
-	// Guards against a table that renders but produces almost nothing.
-	if len(pdfBytes) < 20_000 {
-		t.Errorf("PDF is only %d bytes, which is too small to contain the seeded report", len(pdfBytes))
+	// A fixed byte floor proves nothing here: RenderPDF embeds fonts, so
+	// a summary with no sections at all already clears any round number.
+	// Measure against that empty rendering instead, so runtime sections
+	// silently ceasing to render shows up as the gap collapsing.
+	baseline, err := RenderPDF(&MigrationSummary{RunID: "baseline", GeneratedAt: time.Now()})
+	if err != nil {
+		t.Fatalf("RenderPDF(baseline): %v", err)
+	}
+	if len(pdfBytes) <= len(baseline)+10_000 {
+		t.Errorf("seeded PDF is %d bytes against a %d-byte empty baseline — sections appear to be missing",
+			len(pdfBytes), len(baseline))
 	}
 }
 
@@ -358,5 +374,51 @@ func TestRenderersDegradeOnAnEmptySummary(t *testing.T) {
 	}
 	if _, err := RenderPDF(predictive); err != nil {
 		t.Fatalf("RenderPDF on a predictive summary: %v", err)
+	}
+}
+
+// A project can carry both a "master" (its main branch) and a genuinely
+// separate branch called "main". The main branch is packaged under its
+// source name "master" but submitted under SonarQube Cloud's "main", so
+// "main" is aliased onto "master" — and the real "main" branch then
+// resolved through that alias, overwriting master's counts and emitting
+// no row of its own. That is this change's own row collapse, one level
+// down: a name a branch owns must never be aliased away.
+func TestAliasDoesNotSwallowABranchThatOwnsTheName(t *testing.T) {
+	renamedMain := event("report packaged", map[string]any{
+		"project": "org_alpha", "sourceBranch": "master", "targetBranch": "main",
+		"issues": 72.0, "components": 12.0,
+	})
+	// A non-main branch is never renamed, so it is packaged and
+	// submitted under the single name it has.
+	ownsTheName := event("report packaged", map[string]any{
+		"project": "org_alpha", "sourceBranch": "main", "targetBranch": "main",
+		"issues": 9.0, "components": 3.0,
+	})
+
+	for _, tc := range []struct {
+		name   string
+		events []map[string]any
+	}{
+		{"renamed main first", []map[string]any{renamedMain, ownsTheName}},
+		{"real main first", []map[string]any{ownsTheName, renamedMain}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var rt runtimeData
+			collectRunEvents(runDirWithEvents(t, tc.events), &rt)
+
+			if len(rt.Branches) != 2 {
+				t.Fatalf("got %d rows, want 2 (master and main); rows: %+v", len(rt.Branches), rt.Branches)
+			}
+			if got := findBranch(t, rt.Branches, "org_alpha", "master"); got.Issues != 72 || got.Components != 12 {
+				t.Errorf("master row = %+v, want issues=72 components=12", got)
+			}
+			if got := findBranch(t, rt.Branches, "org_alpha", "main"); got.Issues != 9 || got.Components != 3 {
+				t.Errorf("main row = %+v, want issues=9 components=3", got)
+			}
+			if rt.Throughput.TotalIssues != 81 {
+				t.Errorf("TotalIssues = %d, want 81 (72+9)", rt.Throughput.TotalIssues)
+			}
+		})
 	}
 }

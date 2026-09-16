@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 )
@@ -301,7 +302,24 @@ func summarizeNonJSONError(body string) string {
 		out = collapseWhitespace(htmlTagRe.ReplaceAllString(body, " "))
 	}
 	if len(out) > maxNonJSONErrorLen {
-		out = strings.TrimSpace(out[:maxNonJSONErrorLen]) + "..."
+		// The bodies that reach here are the non-JSON ones — a gateway
+		// or proxy error page — which is exactly where non-ASCII text
+		// turns up. A byte cut lands inside a multi-byte rune whenever
+		// the boundary falls there, and the broken rune flows on into
+		// final_analysis_report.csv. Back off to the last whole one.
+		cut := out[:maxNonJSONErrorLen]
+		// Back off only over a trailing partial rune (at most UTFMax-1
+		// bytes). Requiring the whole prefix to be valid throws the summary
+		// away when the body is not UTF-8 at all, which these bodies often
+		// are not.
+		for i := 0; i < utf8.UTFMax-1 && len(cut) > 0; i++ {
+			if r, size := utf8.DecodeLastRuneInString(cut); r == utf8.RuneError && size <= 1 {
+				cut = cut[:len(cut)-1]
+				continue
+			}
+			break
+		}
+		out = strings.TrimSpace(cut) + "..."
 	}
 	return out
 }

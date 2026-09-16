@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	sqapi "github.com/sonar-solutions/sq-api-go"
@@ -25,21 +26,22 @@ import (
 var debugBodyWriter io.Writer = os.Stderr
 
 // NewHTTPDebugLogger returns a DebugLogFunc that emits one slog Debug entry
-// per HTTP request/response pair containing method, URL, headers, and
-// response status. When the request or response has a body, it is written
-// to debugBodyWriter (os.Stderr by default) as a separate block: JSON
-// bodies are pretty-printed, non-JSON bodies are written verbatim.
+// per HTTP request/response pair containing method, URL, headers, duration,
+// and response status. When the request or response has a body, it is
+// written to debugBodyWriter (os.Stderr by default) as a separate block:
+// JSON bodies are pretty-printed, non-JSON bodies are written verbatim.
 // Authorization headers are already redacted by the SDK before this
 // callback runs.
 //
 // Shared by extract and migrate so --debug produces the same shape of
 // per-request log regardless of which command emitted it.
 func NewHTTPDebugLogger(logger *slog.Logger) sqapi.DebugLogFunc {
-	return func(method, url string, headers map[string][]string, reqBody []byte, respStatus int, respBody []byte, err error) {
+	return func(method, url string, headers map[string][]string, reqBody []byte, respStatus int, respBody []byte, duration time.Duration, err error) {
 		args := []any{
 			"method", method,
 			"url", url,
 			"headers", headers,
+			"duration_ms", duration.Milliseconds(),
 		}
 		if err != nil {
 			args = append(args, "err", err.Error())

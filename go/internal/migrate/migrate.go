@@ -234,6 +234,13 @@ type Executor struct {
 	ProjectKeyRe *regexp.Regexp
 	// MigrateHistory — see MigrateConfig.MigrateHistory (#554).
 	MigrateHistory bool
+	// HistoryProgress tracks project-history replay (#554) as its own
+	// unit of work for the overall ETA (#564): migrateBranchHistory
+	// increments it once per historical point submitted. Nil when
+	// MigrateHistory is off or there's no history to replay — callers
+	// must go through it via ProgressLogger's own nil-safety, or check
+	// for nil directly (see migrateBranchHistory).
+	HistoryProgress *common.ProgressLogger
 
 	// MaxIssueComments — see MigrateConfig.MaxIssueComments (#571).
 	MaxIssueComments int
@@ -361,7 +368,22 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 
 	// Overall progress/ETA logging (#520) — every 10s for the duration of
 	// the run, stopped once phases finish (success or error).
-	executor.Progress = common.NewTracker(logger, phases, CategorizeTask, common.DefaultCategoryWeights)
+	executor.Progress = common.NewTracker(logger, phases, CategorizeTask, common.DefaultCategoryWeights, common.ExpectedTaskDuration)
+
+	// #554/#564: project-history replay runs inline inside importProjectData
+	// rather than as its own TaskDef, so without this it's invisible to the
+	// overall ETA. The point count is known upfront from already-extracted
+	// data (no API calls), so give it its own tracked unit of work before a
+	// single migrate task has even started. Left nil/unregistered when the
+	// feature is off or there's nothing to replay — zero overhead otherwise.
+	if totalPoints := projectHistoryPointTotal(executor); totalPoints > 0 {
+		executor.HistoryProgress = common.NewProgressLogger(logger, "migrateProjectHistory", totalPoints)
+		executor.Progress.Registry().Register("migrateProjectHistory", executor.HistoryProgress)
+		executor.Progress.AddPseudoTask(common.CategoryProjectData, "migrateProjectHistory")
+		executor.Progress.SetExpectedDuration("migrateProjectHistory",
+			time.Duration(float64(totalPoints)*common.SecondsPerHistoryPoint*float64(time.Second)))
+	}
+
 	executor.Progress.OnUpdate(cfg.ProgressCallback)
 	executor.Progress.Start(ctx, 10*time.Second)
 	defer executor.Progress.Stop()
@@ -618,6 +640,7 @@ func runPhase(ctx context.Context, e *Executor, taskNames []string, registry map
 	for _, name := range taskNames {
 		def := registry[name]
 		e.Logger.Info("running task", "task", name)
+		e.Progress.MarkTaskStarted(name)
 		g.Go(func() error {
 			taskStart := time.Now()
 			counter := NewTaskCounter(name)
