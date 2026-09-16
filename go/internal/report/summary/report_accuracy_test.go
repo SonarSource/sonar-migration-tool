@@ -5,6 +5,7 @@
 package summary
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"time"
@@ -287,5 +288,75 @@ func TestFailedItemsColumnDistinguishesActionableFromExpected(t *testing.T) {
 				t.Errorf("fmtFailedItems = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// The report's widest tables gained a column each, on a Letter page that
+// was already using every millimetre of its 195mm content width. Render
+// the fully-seeded summary — two projects sharing a main branch, failures
+// carrying a project, tasks carrying failed-item counts, retries carrying
+// a status — and assert a well-formed PDF still comes out.
+//
+// RenderPDF is the only consumer of the column widths, and nothing
+// exercised it with runtime data before, so a table running off the page
+// would have shipped unnoticed.
+func TestRenderPDFWithWidenedRuntimeTables(t *testing.T) {
+	pdfBytes, err := RenderPDF(fullySeededSummary())
+	if err != nil {
+		t.Fatalf("RenderPDF: %v", err)
+	}
+	if !bytes.HasPrefix(pdfBytes, []byte("%PDF-")) {
+		t.Fatalf("output is not a PDF; first bytes: %q", pdfBytes[:min(8, len(pdfBytes))])
+	}
+	if !bytes.Contains(pdfBytes, []byte("%%EOF")) {
+		t.Error("PDF is missing its EOF trailer, so it was truncated mid-write")
+	}
+	// A seeded report spans several pages; a collapse to one page would
+	// mean whole sections silently stopped rendering.
+	if pages := bytes.Count(pdfBytes, []byte("/Type /Page\n")); pages < 2 {
+		t.Errorf("got %d pages, want at least 2 — sections appear to be missing", pages)
+	}
+	// Guards against a table that renders but produces almost nothing.
+	if len(pdfBytes) < 20_000 {
+		t.Errorf("PDF is only %d bytes, which is too small to contain the seeded report", len(pdfBytes))
+	}
+}
+
+// Predictive reports never populate the runtime fields, so every renderer
+// this change touched has to no-op rather than divide by zero, index an
+// empty slice, or emit a headerless table.
+func TestRenderersDegradeOnAnEmptySummary(t *testing.T) {
+	empty := &MigrationSummary{RunID: "empty", GeneratedAt: time.Now()}
+
+	md, err := RenderMarkdown(empty)
+	if err != nil {
+		t.Fatalf("RenderMarkdown on an empty summary: %v", err)
+	}
+	for _, unwanted := range []string{"Branch Project Data", "Per-Branch CE", "Failure Ledger", "Retries"} {
+		if strings.Contains(string(md), unwanted) {
+			t.Errorf("empty summary still rendered the %q section", unwanted)
+		}
+	}
+	if _, err := RenderPDF(empty); err != nil {
+		t.Fatalf("RenderPDF on an empty summary: %v", err)
+	}
+
+	// A predictive summary omits Global Settings and has no runtime data,
+	// which is the shape predictive-report produces.
+	predictive := &MigrationSummary{
+		RunID:        "predictive",
+		GeneratedAt:  time.Now(),
+		Predictive:   true,
+		OmitSections: map[string]bool{"Global Settings": true},
+		Sections: []Section{{
+			Name:      "Projects",
+			Succeeded: []EntityItem{{Name: "proj-a", Organization: "org1"}},
+		}},
+	}
+	if _, err := RenderMarkdown(predictive); err != nil {
+		t.Fatalf("RenderMarkdown on a predictive summary: %v", err)
+	}
+	if _, err := RenderPDF(predictive); err != nil {
+		t.Fatalf("RenderPDF on a predictive summary: %v", err)
 	}
 }
