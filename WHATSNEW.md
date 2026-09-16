@@ -11,6 +11,8 @@ Changes introduced in `sonar-migration-tool` **1.2**, since the **1.1** release.
 ## Enhancements
 
 - **Reduced API pressure on SonarQube Cloud** — `api/ce/task` polling now waits twice as long between polls (10s instead of 5s), and issue comment migration is capped to each issue's `--max_issue_comments` most recent comments (default `5`, max `20`) instead of replaying its entire comment history via `api/issues/add_comment` on every run. ([#571](https://github.com/SonarSource/sonar-migration-tool/issues/571))
+## Other improvements
+- **Live smoke suite** — a live end-to-end smoke suite now covers every CLI subcommand against real SonarQube Server and SonarQube Cloud instances, run locally before opening a PR via `make smoke-fast` / `make smoke` / `make smoke-full`; it automates the previously-manual regression protocol. See [docs/SMOKE-TESTING.md](docs/SMOKE-TESTING.md).
 
 # v1.1 - 2026-08-26
 

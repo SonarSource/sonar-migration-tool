@@ -192,7 +192,7 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 
 	// Overall progress/ETA logging (#520) — every 10s for the duration of
 	// the run, stopped once phases finish (success or error).
-	executor.Progress = common.NewTracker(executor.Logger, plan, CategorizeTask, common.DefaultCategoryWeights)
+	executor.Progress = common.NewTracker(executor.Logger, plan, CategorizeTask, common.DefaultCategoryWeights, common.ExpectedTaskDuration)
 	executor.Progress.OnUpdate(cfg.ProgressCallback)
 	executor.Progress.Start(ctx, 10*time.Second)
 	defer executor.Progress.Stop()
@@ -339,6 +339,7 @@ func runPhase(ctx context.Context, e *Executor, taskNames []string, registry map
 	for _, name := range taskNames {
 		def := registry[name]
 		e.Logger.Info("running task", "task", name)
+		e.Progress.MarkTaskStarted(name)
 		g.Go(func() error {
 			taskStart := time.Now()
 			err := def.Run(ctx, e)

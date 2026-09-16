@@ -31,7 +31,7 @@ func TestNewHTTPDebugLogger_PrettyPrintsJSON(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&meta, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	debug := NewHTTPDebugLogger(logger)
-	debug("GET", "https://x/api/y", nil, nil, 200, []byte(`{"a":1,"nested":{"b":2}}`), nil)
+	debug("GET", "https://x/api/y", nil, nil, 200, []byte(`{"a":1,"nested":{"b":2}}`), 123*time.Millisecond, nil)
 
 	out := body.String()
 	wantLines := []string{
@@ -52,6 +52,9 @@ func TestNewHTTPDebugLogger_PrettyPrintsJSON(t *testing.T) {
 	if !strings.Contains(meta.String(), `msg="http request"`) {
 		t.Errorf("expected slog meta entry, got %q", meta.String())
 	}
+	if !strings.Contains(meta.String(), "duration_ms=123") {
+		t.Errorf("expected duration_ms=123 in slog meta entry, got %q", meta.String())
+	}
 	if strings.Contains(meta.String(), "response_body") {
 		t.Errorf("body should not appear in slog meta entry, got %q", meta.String())
 	}
@@ -63,7 +66,7 @@ func TestNewHTTPDebugLogger_NonJSONVerbatim(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	debug := NewHTTPDebugLogger(logger)
-	debug("GET", "https://x/api/y", nil, nil, 200, []byte("10.7.0.12345"), nil)
+	debug("GET", "https://x/api/y", nil, nil, 200, []byte("10.7.0.12345"), time.Millisecond, nil)
 
 	if !strings.Contains(body.String(), `    10.7.0.12345`) {
 		t.Errorf("expected verbatim plain-text body, got %q", body.String())
@@ -76,7 +79,7 @@ func TestNewHTTPDebugLogger_PrettyPrintsRequestBody(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	debug := NewHTTPDebugLogger(logger)
-	debug("POST", "https://x/api/y", nil, []byte(`{"k":"v"}`), 200, nil, nil)
+	debug("POST", "https://x/api/y", nil, []byte(`{"k":"v"}`), 200, nil, time.Millisecond, nil)
 
 	out := body.String()
 	if !strings.Contains(out, `  request_body:`) {
@@ -95,13 +98,16 @@ func TestNewHTTPDebugLogger_ErrorPath(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&meta, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	debug := NewHTTPDebugLogger(logger)
-	debug("GET", "https://x/api/y", nil, nil, 0, nil, &dnsError{})
+	debug("GET", "https://x/api/y", nil, nil, 0, nil, 5*time.Millisecond, &dnsError{})
 
 	if !strings.Contains(meta.String(), `msg="http request failed"`) {
 		t.Errorf("expected the failure message, got %q", meta.String())
 	}
 	if !strings.Contains(meta.String(), `err=`) {
 		t.Errorf("expected err= field, got %q", meta.String())
+	}
+	if !strings.Contains(meta.String(), "duration_ms=5") {
+		t.Errorf("expected duration_ms=5 in slog meta entry, got %q", meta.String())
 	}
 	if body.Len() != 0 {
 		t.Errorf("expected no body output, got %q", body.String())
@@ -128,7 +134,7 @@ func TestNewHTTPDebugLogger_BinaryBodyReplaced(t *testing.T) {
 			logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 			debug := NewHTTPDebugLogger(logger)
-			debug("GET", "https://x/api/y", nil, nil, 200, tc.body, nil)
+			debug("GET", "https://x/api/y", nil, nil, 200, tc.body, time.Millisecond, nil)
 
 			want := strings.Contains(body.String(), "<binary, ") && strings.Contains(body.String(), " bytes>")
 			if !want {
@@ -150,7 +156,7 @@ func TestNewHTTPDebugLogger_NonASCIIUTF8KeptVerbatim(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	debug := NewHTTPDebugLogger(logger)
-	debug("GET", "https://x/api/y", nil, nil, 200, []byte("Bonjour — naïve café 한국어"), nil)
+	debug("GET", "https://x/api/y", nil, nil, 200, []byte("Bonjour — naïve café 한국어"), time.Millisecond, nil)
 
 	out := body.String()
 	if strings.Contains(out, "<binary") {
@@ -167,7 +173,7 @@ func TestNewHTTPDebugLogger_EmptyBodiesSkipped(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	debug := NewHTTPDebugLogger(logger)
-	debug("GET", "https://x/api/y", nil, nil, 204, nil, nil)
+	debug("GET", "https://x/api/y", nil, nil, 204, nil, time.Millisecond, nil)
 
 	if body.Len() != 0 {
 		t.Errorf("expected no body output for empty bodies, got %q", body.String())
@@ -196,7 +202,7 @@ func TestNewHTTPDebugLogger_LargeBodyTerminatesQuickly(t *testing.T) {
 	debug := NewHTTPDebugLogger(logger)
 	done := make(chan struct{})
 	go func() {
-		debug("GET", "https://x/api/y", nil, nil, 200, big, nil)
+		debug("GET", "https://x/api/y", nil, nil, 200, big, time.Millisecond, nil)
 		close(done)
 	}()
 
