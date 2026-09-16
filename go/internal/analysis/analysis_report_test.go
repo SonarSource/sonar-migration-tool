@@ -198,7 +198,15 @@ func TestExtractErrorMessage(t *testing.T) {
 		{"SQ error string", map[string]any{"response": errJSON}, "Project already exists"},
 		{"multiple errors", map[string]any{"response": multiErrJSON}, "Error 1; Error 2"},
 		{"no response", map[string]any{}, ""},
-		{"non-JSON response", map[string]any{"response": "Internal Server Error"}, ""},
+		// A response that is not SonarQube's {"errors":[...]} envelope is
+		// summarized rather than dropped. Returning "" here left the
+		// report's Error column blank for every failure that did not come
+		// from SonarQube itself, so a gateway 403 served as an HTML page
+		// showed a bare status and no reason at all.
+		{"non-JSON response", map[string]any{"response": "Internal Server Error"}, "Internal Server Error"},
+		{"HTML error page", map[string]any{"response": "<html><head><TITLE>ERROR: The request could not be satisfied</TITLE></head>" +
+			"<body><H1>403 ERROR</H1><H2>The request could not be satisfied.</H2>Request blocked.</body></html>"},
+			"ERROR: The request could not be satisfied: 403 ERROR: The request could not be satisfied."},
 		{"content field", map[string]any{"content": `{"errors": [{"msg": "From content"}]}`}, "From content"},
 		{"response as dict", map[string]any{"response": map[string]any{"errors": []any{map[string]any{"msg": "Already a dict"}}}}, "Already a dict"},
 	}

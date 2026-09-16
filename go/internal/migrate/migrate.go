@@ -590,12 +590,21 @@ func runPhase(ctx context.Context, e *Executor, taskNames []string, registry map
 			taskCtx := WithTaskCounter(ctx, counter)
 			runErr := def.Run(taskCtx, e)
 			elapsed := time.Since(taskStart)
+			// The counter is read before LogSummary so the recorded
+			// outcome and the logged one come from the same snapshot.
+			// OK means "did what it was asked", which a task that
+			// returned nil while failing every item did not.
+			outcome := counter.Outcome()
 			tm.addTask(TaskTiming{
-				Phase:    phaseIdx,
-				Name:     name,
-				Duration: elapsed.Seconds(),
-				OK:       runErr == nil,
-				Err:      errString(runErr),
+				Phase:              phaseIdx,
+				Name:               name,
+				Duration:           elapsed.Seconds(),
+				StartedAt:          taskStart,
+				OK:                 runErr == nil && outcome.Actionable() == 0,
+				Err:                errString(runErr),
+				Succeeded:          outcome.Succeeded,
+				Failed:             outcome.Failed,
+				ActionableFailures: outcome.Actionable(),
 			})
 			// Single end-of-task INFO log carrying counts + duration
 			// (#311 + #333). When the task didn't record any per-

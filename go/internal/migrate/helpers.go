@@ -568,6 +568,47 @@ func NewTaskCounter(task string) *TaskCounter {
 	return &TaskCounter{task: task}
 }
 
+// TaskOutcome is a snapshot of a TaskCounter's tallies. Taken once so a
+// caller sees one self-consistent set of numbers instead of re-reading
+// the atomics between decisions.
+type TaskOutcome struct {
+	Succeeded    int64
+	Failed       int64
+	ByDesign     int64
+	AlreadyDone  int64
+	Environment  int64
+	Bugs         int64
+	Unclassified int64
+}
+
+// Actionable returns how many of the failures need someone to act, i.e.
+// the total minus the classes the migration is content with. See
+// FailureClass.Actionable for why by-design and already-done do not
+// count.
+func (o TaskOutcome) Actionable() int64 {
+	return o.Failed - o.ByDesign - o.AlreadyDone
+}
+
+// Outcome snapshots the counter's tallies.
+//
+// A task can return nil — so the run continues and its recorded error is
+// empty — while having failed every item it touched. setProjectSourceLink
+// failing 2 of 2 on 403s is the case that exposed this: the run recorded
+// ok=true, the report rendered "OK: Yes", and the only trace was a log
+// line. Exposing the tallies lets the run metadata carry what the counter
+// already knew.
+func (c *TaskCounter) Outcome() TaskOutcome {
+	return TaskOutcome{
+		Succeeded:    c.succeeded.Load(),
+		Failed:       c.failed.Load(),
+		ByDesign:     c.byDesign.Load(),
+		AlreadyDone:  c.alreadyDone.Load(),
+		Environment:  c.environment.Load(),
+		Bugs:         c.bugs.Load(),
+		Unclassified: c.unclassified.Load(),
+	}
+}
+
 // taskCounterCtxKey scopes the per-task counter inside the task's
 // context (#333). runPhase injects a fresh counter so the merged
 // "task summary" log can be emitted from a single place after the
@@ -651,7 +692,8 @@ func (c *TaskCounter) FailAPI(err error) FailureClass {
 // falls back to the plain duration line so every task still ends with
 // exactly one closing log entry.
 func (c *TaskCounter) LogSummary(logger *slog.Logger, duration time.Duration) {
-	s, f := c.succeeded.Load(), c.failed.Load()
+	o := c.Outcome()
+	s, f := o.Succeeded, o.Failed
 	total := s + f
 	if total == 0 {
 		common.LogTaskDuration(logger, c.task, duration)
@@ -672,14 +714,14 @@ func (c *TaskCounter) LogSummary(logger *slog.Logger, duration time.Duration) {
 	// Break the failure count down by cause. "failed=42048, all by
 	// design" and "failed=3, all bugs" demand completely different
 	// reactions, and the bare count cannot tell them apart.
-	bugs := c.bugs.Load()
 	if f > 0 {
 		attrs = append(attrs,
-			"failed_by_design", c.byDesign.Load(),
-			"failed_already_done", c.alreadyDone.Load(),
-			"failed_customer_environment_issue", c.environment.Load(),
-			"failed_bugs", bugs,
-			"failed_unclassified", c.unclassified.Load(),
+			"failed_by_design", o.ByDesign,
+			"failed_already_done", o.AlreadyDone,
+			"failed_customer_environment_issue", o.Environment,
+			"failed_bugs", o.Bugs,
+			"failed_unclassified", o.Unclassified,
+			"failed_actionable", o.Actionable(),
 		)
 	}
 
@@ -687,10 +729,18 @@ func (c *TaskCounter) LogSummary(logger *slog.Logger, duration time.Duration) {
 	// #333 merged-summary contract keep matching; only the level varies.
 	//
 	// Severity follows the cause, not the count: a suspected defect or a
-	// task that achieved nothing is an error; expected platform
-	// limitations are a warning however many there are.
+	// task that achieved nothing for a reason worth acting on is an error;
+	// expected platform limitations are a warning however many there are.
+	//
+	// The "achieved nothing" escalation is measured in actionable
+	// failures, not raw ones. setProjectGates failing 2 of 2 because both
+	// source gates were built-in — and built-ins are deliberately not
+	// migrated — logged at ERROR, reading as a broken migration when the
+	// tool had done exactly the right thing. Such a task stays a warning:
+	// still visible, no longer alarming.
+	actionable := o.Actionable()
 	switch {
-	case bugs > 0, f > 0 && s == 0:
+	case o.Bugs > 0, actionable > 0 && s == 0:
 		logger.Error(taskSummaryMsg, attrs...)
 	case f > 0:
 		logger.Warn(taskSummaryMsg, attrs...)

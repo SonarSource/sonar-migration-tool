@@ -5,7 +5,11 @@
 // Package summary generates a PDF migration summary report from task outputs.
 package summary
 
-import "time"
+import (
+	"time"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/migrate"
+)
 
 // MigrationSummary holds the collected data for the PDF report.
 //
@@ -141,6 +145,20 @@ type TaskTiming struct {
 	Duration time.Duration
 	OK       bool
 	Err      string
+
+	// StartedAt lets the phase breakdown measure the wall-clock union of
+	// concurrent tasks rather than the sum of their durations. Zero for
+	// runs recorded before it was written, which the breakdown falls back
+	// to summing.
+	StartedAt time.Time
+
+	// Succeeded, Failed and ActionableFailures mirror the task's per-item
+	// tallies. OK alone could not distinguish "ran and did its job" from
+	// "ran, returned no error, and failed every item it touched" — the
+	// latter rendered as "OK: Yes" for every task in the run.
+	Succeeded          int64
+	Failed             int64
+	ActionableFailures int64
 }
 
 // PhaseBreakdownEntry captures the total wall-clock time spent across all
@@ -160,6 +178,11 @@ type FailureRow struct {
 	URL          string
 	HTTPStatus   string
 	ErrorMessage string
+
+	// Project is the project the failed request acted on, where its body
+	// named one. Without it, per-project failures whose entity name is
+	// the same for every project were indistinguishable from each other.
+	Project string
 
 	// Cause, Why and Remediation explain the failure in operator terms,
 	// classified with the same rules the run used when it happened (see
@@ -228,7 +251,15 @@ type WarningLedger struct {
 
 // BranchStat captures per-branch packaging/submission stats.
 // Status is one of packaged|submitted|skipped.
+//
+// Project is part of the row's identity, not decoration. Rows used to be
+// keyed on the branch name alone, so every project's "main" collapsed
+// into one entry and whichever project was written last won: a
+// two-project run published one project's issue and component counts and
+// dropped the other's entirely. Branch names are shared across projects
+// by definition, so a bare branch name cannot identify a branch.
 type BranchStat struct {
+	Project        string
 	Branch         string
 	Type           string
 	Issues         int
@@ -273,6 +304,25 @@ type Section struct {
 	Skipped     []EntityItem
 }
 
+// SplitFailed divides the Failed bucket into the failures that need
+// someone to act and the ones that are an expected end state.
+//
+// The distinction is the difference between a report that means something
+// and one that does not. Migrating twice into the same organization took
+// a run's failure count from 3 to 6 — every new "failure" being a group
+// or template that already existed, which is precisely what a re-run is
+// supposed to find — while the run itself was as healthy as the first.
+func (s Section) SplitFailed() (actionable, expected []EntityItem) {
+	for _, item := range s.Failed {
+		if migrate.FailureClass(item.Cause).Actionable() {
+			actionable = append(actionable, item)
+		} else {
+			expected = append(expected, item)
+		}
+	}
+	return actionable, expected
+}
+
 // EntityItem represents a single entity in the report.
 type EntityItem struct {
 	Name         string
@@ -282,6 +332,12 @@ type EntityItem struct {
 	ErrorMessage string   // failures only
 	SkipReason   string   // for skipped items: SkipReason* constants below
 	Issues       []string // for partial migrations: human-readable list of issues
+	// Cause is the migrate.FailureClass for items in the Failed bucket,
+	// classified from the error message. It separates the failures that
+	// need someone to act from the ones the migration is content with —
+	// an entity that already exists, or a value SonarQube Cloud will
+	// never accept. Empty for every other bucket.
+	Cause string
 	// SourceKey is the source-side project key, shown beneath the project
 	// name in the report's Name column (issue #448). Populated for the
 	// Projects section only; empty for all other sections.
@@ -309,6 +365,13 @@ const (
 	SkipReasonUnused       = "unused"
 	SkipReasonSQSOnly      = "sqs-only"
 	SkipReasonDefaultValue = "default-value"
+	// SkipReasonNotOnSQC marks a setting the migration discovered is
+	// absent from SonarQube Cloud's own settings catalog at run time, as
+	// opposed to SkipReasonSQSOnly's curated list of known
+	// Server-only settings. Written by the global-settings task; it had
+	// no entry in skipReasonOrder, so items carrying it were counted in
+	// each section's total but never rendered or broken down.
+	SkipReasonNotOnSQC = "not-on-sqc"
 	// SkipReasonEmpty marks portfolios that resolve to zero projects
 	// on the source — empty SQS portfolios are not migrated.
 	SkipReasonEmpty = "empty"
