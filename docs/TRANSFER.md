@@ -224,6 +224,7 @@ Omit `--project_key` to transfer **every** project visible to the token (in whic
 | `--pem_file_path` | `source.pem_file_path` | Client mTLS PEM file for the source server |
 | `--key_file_path` | `source.key_file_path` | Client mTLS key file for the source server |
 | `--cert_password` | `source.cert_password` | Password for the source server mTLS client certificate |
+| `--insecure` | `source.insecure` | Skip TLS certificate verification for the source SonarQube Server connection. For a trusted internal server whose certificate is self-signed or not signed by a trusted CA; leaves the connection open to man-in-the-middle interception. Defaults to off. Issue #586. |
 | `--skip_project_data_migration` | top-level `skip_project_data_migration` | Skip the project-data migration (importProjectData + per-issue / per-hotspot sync). Defaults to off — project data is migrated by default. Issue #303. |
 | `--exclude_branches` | `target.exclude_branches` | Glob patterns for non-main branches to skip during project data import. Repeatable. Main branch is never excluded. |
 | `--unsupported_languages` | top-level or `target.unsupported_languages` | How to handle files whose language has no quality profile on the target — typically a language from a 3rd-party SonarQube Server plugin. `exclude` (default) drops those files from the analysis report so the rest of the project still migrates; `skip` does not migrate the project's issues/branches at all; `warn` submits the report unchanged. Issue #474. |

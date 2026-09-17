@@ -147,6 +147,7 @@ func TestJSONFormat(t *testing.T) {
   "include_issue_sync": null,
   "pem_file_path": null,
   "key_file_path": null,
+  "insecure": null,
   "project_key_pattern": null,
   "default_organization": null
 }`

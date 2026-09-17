@@ -59,6 +59,12 @@ type WizardState struct {
 	PEMFilePath *string `json:"pem_file_path"`
 	KeyFilePath *string `json:"key_file_path"`
 
+	// Insecure carries source.insecure from the config file (#586): skip
+	// TLS certificate verification when reading from the source server.
+	// nil means "not set" and resolves to false. Not secret, so it
+	// persists to disk like PEMFilePath.
+	Insecure *bool `json:"insecure"`
+
 	// ProjectKeyPattern scopes extraction to matching project keys
 	// (full-match regex, #515/#529 convention). Not secret, persists
 	// to disk like SourceURL.
@@ -125,6 +131,7 @@ func resetPhaseState(state *WizardState, phase WizardPhase) {
 		state.PEMFilePath = nil
 		state.KeyFilePath = nil
 		state.CertPassword = nil
+		state.Insecure = nil
 		state.ProjectKeyPattern = nil
 	case PhaseOrgMapping:
 		state.OrganizationsMapped = false
