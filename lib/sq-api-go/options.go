@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"os"
+	"time"
 )
 
 // Option is a functional option for configuring a Client.
@@ -27,10 +28,11 @@ type clientConfig struct {
 }
 
 // DebugLogFunc is invoked once per request/response pair with the verbatim
-// HTTP method, URL, sanitized header set, request body, response status, and
-// response body. The Authorization header is replaced with "<redacted>"
-// before the callback fires.
-type DebugLogFunc func(method, url string, headers map[string][]string, reqBody []byte, respStatus int, respBody []byte, err error)
+// HTTP method, URL, sanitized header set, request body, response status,
+// response body, and wall-clock duration of the round trip. The
+// Authorization header is replaced with "<redacted>" before the callback
+// fires.
+type DebugLogFunc func(method, url string, headers map[string][]string, reqBody []byte, respStatus int, respBody []byte, duration time.Duration, err error)
 
 func defaultClientConfig() *clientConfig {
 	return &clientConfig{

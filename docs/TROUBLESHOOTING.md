@@ -448,6 +448,23 @@ Multiple projects are imported in parallel (bounded by concurrency). A failure i
 
 ---
 
+## Checking Whether a Change Broke Something
+
+Before opening a PR, run the live smoke suite in `go/smoke/` against the
+build you just produced:
+
+```bash
+make smoke-fast   # fast, no credentials needed
+make smoke        # runs against a real source SonarQube Server
+```
+
+Per-command logs land in `.smoke/<TestName>.log`, each recording the exact
+command run, its exit code, and scrubbed output — check there first when a
+run reports a failure. See [SMOKE-TESTING.md](SMOKE-TESTING.md) for the full
+tier breakdown and safety model.
+
+---
+
 ## Getting Help
 <!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 

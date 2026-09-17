@@ -1,6 +1,11 @@
 # Live Regression Testing Plan
 <!-- updated: 2026-06-04_16:00:00 -->
 
+> **Automated:** This protocol is now automated by the live smoke suite.
+> `SMOKE_ALLOW_DESTRUCTIVE=1 make smoke-full` runs both paths below end-to-end.
+> This document remains the reference for what the paths mean and for running
+> them by hand. See [SMOKE-TESTING.md](SMOKE-TESTING.md).
+
 After any fix or feature, run **both** migration paths against real SonarQube Server and SonarCloud instances, then verify **everything** migrated correctly. "Everything" means: projects, issues (all statuses/severities/types/resolutions), hotspots, quality profiles, quality gates, groups, permission templates, settings, new code periods, custom rules, project permissions, ALM bindings, portfolios, measures, and extract file integrity.
 
 Both paths must be tested because they exercise different code paths:

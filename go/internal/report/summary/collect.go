@@ -940,13 +940,19 @@ func collectExplicitFailures(store *common.DataStore, def sectionDef) []EntityIt
 		if jsonStr(item, "status") != "failed" {
 			continue
 		}
-		errMsg := jsonStr(item, "error")
 		result = append(result, EntityItem{
 			Name:         jsonStr(item, def.NameField),
 			Organization: jsonStr(item, "sonarcloud_org_key"),
-			ErrorMessage: errMsg,
+			ErrorMessage: jsonStr(item, "error"),
 			SourceKey:    jsonStr(item, def.SourceKeyField),
-			Cause:        classifyFailureCause("", errMsg),
+			// Only a class the task recorded for itself. This message is
+			// prose written for a human: the cross-org key conflict opens
+			// "project key %q already exists under a different ...
+			// organization", and re-deriving a class from that sentence
+			// matched "already exists" and called a project that did not
+			// migrate — and cannot until someone frees the key — benign.
+			// Unset stays actionable, which is the right default.
+			Cause: jsonStr(item, "cause"),
 		})
 	}
 	return result

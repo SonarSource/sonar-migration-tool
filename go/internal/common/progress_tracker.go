@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 )
@@ -39,12 +40,17 @@ type CategoryWeights struct {
 	IssueSync     float64
 }
 
-// DefaultCategoryWeights is the split mandated by issue #520.
+// DefaultCategoryWeights is the split recalibrated from real observed
+// run data (#564) — a complete migrate run's task-by-task durations
+// (migrate-fast.log) split roughly General 13% / ProjectConfig 13% /
+// ProjectData 26% / IssueSync 48%; rounded here and nudged slightly to
+// leave ProjectData room for #554's project-history replay. Supersedes
+// the original #520 guess of 5/20/25/50.
 var DefaultCategoryWeights = CategoryWeights{
-	General:       5,
-	ProjectConfig: 20,
-	ProjectData:   25,
-	IssueSync:     50,
+	General:       12,
+	ProjectConfig: 14,
+	ProjectData:   27,
+	IssueSync:     47,
 }
 
 func (w CategoryWeights) forCategory(cat TaskCategory) float64 {
@@ -117,9 +123,12 @@ type Tracker struct {
 	weights       CategoryWeights
 	categoryTasks map[TaskCategory][]string
 	registry      *ProgressRegistry
+	expected      func(string) time.Duration
 
 	mu        sync.Mutex
 	completed map[string]bool
+	running   map[string]time.Time
+	overrides map[string]time.Duration
 
 	onUpdate func(percent float64, eta time.Duration, known bool)
 
@@ -129,8 +138,12 @@ type Tracker struct {
 }
 
 // NewTracker builds a Tracker from the fully-resolved execution plan
-// (flattened phases → task names) and a package-specific categorizer.
-func NewTracker(logger *slog.Logger, plan [][]string, categorize func(string) TaskCategory, weights CategoryWeights) *Tracker {
+// (flattened phases → task names), a package-specific categorizer, the
+// category weights, and a per-task expected-duration function (#564) used
+// both to weight tasks within a category by their real relative cost and
+// to credit partial progress on a long-running task that has no
+// item-level ProgressRegistry entry (see snapshot/taskFraction).
+func NewTracker(logger *slog.Logger, plan [][]string, categorize func(string) TaskCategory, weights CategoryWeights, expected func(string) time.Duration) *Tracker {
 	categoryTasks := make(map[TaskCategory][]string)
 	for _, phase := range plan {
 		for _, name := range phase {
@@ -144,7 +157,9 @@ func NewTracker(logger *slog.Logger, plan [][]string, categorize func(string) Ta
 		weights:       weights,
 		categoryTasks: categoryTasks,
 		registry:      NewProgressRegistry(),
+		expected:      expected,
 		completed:     make(map[string]bool),
+		running:       make(map[string]time.Time),
 		stopCh:        make(chan struct{}),
 		doneCh:        make(chan struct{}),
 	}
@@ -186,6 +201,68 @@ func (t *Tracker) MarkTaskComplete(name string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.completed[name] = true
+}
+
+// MarkTaskStarted records when a task's Run function began, so snapshot
+// can credit a still-running task with no item-level ProgressRegistry
+// entry proportionally to elapsed/expected duration instead of leaving it
+// at 0% until it completes (#564). A nil receiver is a no-op, matching
+// every other Tracker method's contract.
+func (t *Tracker) MarkTaskStarted(name string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.running[name] = time.Now()
+}
+
+// AddPseudoTask adds a task name to a category's weighting set after
+// construction, for work that never appears in the resolved execution
+// plan handed to NewTracker — e.g. migrate's project-history replay
+// (#554), which runs inline inside importProjectData rather than as its
+// own TaskDef. The pseudo-task's progress comes from whatever
+// ProgressLogger gets registered under the same name via Registry(); no
+// further special-casing is needed. A nil receiver is a no-op.
+func (t *Tracker) AddPseudoTask(cat TaskCategory, name string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.categoryTasks[cat] = append(t.categoryTasks[cat], name)
+}
+
+// SetExpectedDuration overrides the seeded/default expected duration for
+// one task name — used for pseudo-tasks whose real cost scales with a
+// per-run quantity known only once the plan starts (e.g.
+// migrateProjectHistory's total history-point count), rather than a
+// fixed seed. A nil receiver is a no-op.
+func (t *Tracker) SetExpectedDuration(name string, d time.Duration) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.overrides == nil {
+		t.overrides = make(map[string]time.Duration)
+	}
+	t.overrides[name] = d
+}
+
+// expectedDuration resolves name's expected duration: an explicit
+// SetExpectedDuration override (from the given snapshot copy) first, then
+// the injected seed function. Pure — takes the overrides map as a
+// parameter rather than reading t.overrides directly, so callers can
+// snapshot it under lock once and then compute lock-free (see snapshot).
+func (t *Tracker) expectedDuration(name string, overrides map[string]time.Duration) time.Duration {
+	if d, ok := overrides[name]; ok {
+		return d
+	}
+	if t.expected != nil {
+		return t.expected(name)
+	}
+	return 0
 }
 
 // Start launches a goroutine that logs the overall progress/ETA line every
@@ -255,15 +332,95 @@ func (t *Tracker) LogFinal() {
 	}
 }
 
+// taskFraction returns how complete one task is, 0-1 (#564):
+//   - 1 once MarkTaskComplete recorded it, or the item-level
+//     ProgressRegistry fraction itself reaches exactly 1 (every item
+//     genuinely done).
+//   - otherwise, for a task with BOTH a partial item-level fraction and a
+//     recorded start time, whichever of the item-count fraction and the
+//     time-based inFlightCredit is smaller — see below for why.
+//   - the item-count fraction alone, for a task with partial progress but
+//     no recorded start (shouldn't happen in production; every runPhase
+//     calls MarkTaskStarted, but tests may register progress directly).
+//   - inFlightCredit alone, for a running task with no item-level counter
+//     at all (syncIssueMetadata's own INTERNAL granularity aside, tasks
+//     like getProjectSourceCode never register one).
+//   - 0 for a task that hasn't started at all.
+//
+// Why min(), not the item-count fraction directly: a real run showed
+// percent jump 52%→98% in under a minute right as syncIssueMetadata
+// started. It has a per-PROJECT ProgressLogger (78 items), but almost all
+// projects had zero/few issues and finished in milliseconds while the one
+// or two projects with hundreds of issues — which actually determined the
+// remaining wall-clock time — hadn't. Item count said "90% done" a few
+// seconds in; barely any real time had elapsed. Capping the item-count
+// fraction at what elapsed/expected alone would justify prevents a
+// skewed item-cost distribution from making a task look far more
+// complete than the clock does, without ever contradicting the registry
+// once it genuinely reports 1.0 (that check always wins outright, no
+// matter how little time has elapsed — a task can legitimately finish
+// faster than its seed).
+func (t *Tracker) taskFraction(name string, completed map[string]bool, running map[string]time.Time, overrides map[string]time.Duration) float64 {
+	if completed[name] {
+		return 1
+	}
+	itemFrac := t.registry.Fraction(name)
+	if itemFrac >= 1 {
+		return 1
+	}
+	startedAt, started := running[name]
+	exp := t.expectedDuration(name, overrides)
+	if !started || exp <= 0 {
+		return itemFrac
+	}
+	timeFrac := inFlightCredit(time.Since(startedAt), exp)
+	if itemFrac == 0 {
+		return timeFrac
+	}
+	return math.Min(itemFrac, timeFrac)
+}
+
+// inFlightCredit estimates how "done" a running task is from elapsed vs.
+// its seeded expected duration, asymptotically: elapsed/(elapsed+expected).
+// This is 0 at start, exactly 0.5 right when elapsed reaches expected, and
+// keeps climbing toward (but never reaching) 1 for as long as the task
+// keeps running past its seed — deliberately NOT a linear ramp with a hard
+// cap (#564's first attempt): a real run's syncIssueMetadata took 30m04s
+// against a 492s (8m12s) seed, so a linear-then-clamp formula hit its cap
+// after ~7.8 minutes and then sat frozen there for the remaining ~22
+// minutes — the exact "stuck" symptom this whole feature exists to fix,
+// just relocated to a different task. An always-still-climbing curve
+// tolerates a seed being wrong by any factor: it just creeps more slowly,
+// never freezes, and is provably always < 1 until real completion signals
+// it (MarkTaskComplete or the registry reaching its total).
+func inFlightCredit(elapsed, expected time.Duration) float64 {
+	e, x := elapsed.Seconds(), expected.Seconds()
+	return e / (e + x)
+}
+
 // snapshot computes the current overall percentage (0-100) and ETA. known
 // is false until the run has made enough progress to extrapolate an ETA
 // (percent > 0). Pure and side-effect-free — the shape unit tests exercise
 // directly against the issue's worked examples.
+//
+// Within each category, a task's contribution is weighted by its real
+// expected duration rather than counted equally against its siblings
+// (#564) — e.g. IssueSync's syncIssueMetadata (~492s observed) now
+// dominates syncHotspotMetadata (~54s observed) instead of each counting
+// for half of the category, regardless of actual relative cost.
 func (t *Tracker) snapshot() (percent float64, eta time.Duration, known bool) {
 	t.mu.Lock()
 	completedSnapshot := make(map[string]bool, len(t.completed))
 	for k, v := range t.completed {
 		completedSnapshot[k] = v
+	}
+	runningSnapshot := make(map[string]time.Time, len(t.running))
+	for k, v := range t.running {
+		runningSnapshot[k] = v
+	}
+	overridesSnapshot := make(map[string]time.Duration, len(t.overrides))
+	for k, v := range t.overrides {
+		overridesSnapshot[k] = v
 	}
 	t.mu.Unlock()
 
@@ -275,15 +432,19 @@ func (t *Tracker) snapshot() (percent float64, eta time.Duration, known bool) {
 		weight := t.weights.forCategory(cat)
 		activeWeight += weight
 
-		var sum float64
+		var doneExpected, totalExpected float64
 		for _, name := range tasks {
-			if completedSnapshot[name] {
-				sum++
-				continue
+			exp := t.expectedDuration(name, overridesSnapshot).Seconds()
+			if exp <= 0 {
+				exp = DefaultTaskDuration.Seconds()
 			}
-			sum += t.registry.Fraction(name)
+			totalExpected += exp
+			doneExpected += exp * t.taskFraction(name, completedSnapshot, runningSnapshot, overridesSnapshot)
 		}
-		categoryFraction := sum / float64(len(tasks))
+		if totalExpected <= 0 {
+			continue
+		}
+		categoryFraction := doneExpected / totalExpected
 		weighted += categoryFraction * weight
 	}
 
