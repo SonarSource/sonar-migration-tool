@@ -212,36 +212,6 @@ func truncationCountPhrase(n int, noun string) string {
 	return fmt.Sprintf("%s %s(s)", common.FormatCount(n), noun)
 }
 
-// truncationLead renders the reason-specific sentence of a bullet.
-//
-// The sentences are deliberately not interchangeable. Only the reasons
-// that actually establish missing data are allowed to say data is
-// absent:
-//
-//   - page_limit_clamp, atomic_window, dates_ignored and max_depth are
-//     fetch outcomes: the API refused to return the rest, so the items
-//     really are not in the export. page_limit_clamp splits again on
-//     window-presence — a clamp on a date window the slicer had already
-//     probed is a race against issues created during the run, and a
-//     re-run recovers it, which is the opposite advice from a query
-//     that could never be narrowed at all.
-//   - count_drift is an accounting statement about the extract's own
-//     bookkeeping. It must never assert absence and must never blame
-//     the 10,000-result ceiling, because it is raised precisely when
-//     the arithmetic did not identify a cause. Its residual has a sign:
-//     a surplus is reported as a surplus.
-//   - incomplete_slice says what is on disk and that the set around it
-//     is incomplete, without guessing why.
-//   - unknown_total has no count at all to report.
-//
-// Every sentence here is also phrased to survive toPredictiveTense
-// untouched. That rewriter turns "were not " into "will not be ", so
-// the earlier "N result(s) were not extracted" rendered in the
-// predictive report as a forecast of a loss that had already happened.
-// Truncation is always a settled fact about an extract that has
-// already run, in both report modes, so these leads avoid "was",
-// "were", "has been" and "have been" entirely, and
-// TestTruncationLeadsSurvivePredictiveTense holds that line.
 // absorbTruncationState folds one artefact's records into the grouped
 // tally.
 //
@@ -285,6 +255,36 @@ func absorbTruncationRecord(
 	}
 }
 
+// truncationLead renders the reason-specific sentence of a bullet.
+//
+// The sentences are deliberately not interchangeable. Only the reasons
+// that actually establish missing data are allowed to say data is
+// absent:
+//
+//   - page_limit_clamp, atomic_window, dates_ignored and max_depth are
+//     fetch outcomes: the API refused to return the rest, so the items
+//     really are not in the export. page_limit_clamp splits again on
+//     window-presence — a clamp on a date window the slicer had already
+//     probed is a race against issues created during the run, and a
+//     re-run recovers it, which is the opposite advice from a query
+//     that could never be narrowed at all.
+//   - count_drift is an accounting statement about the extract's own
+//     bookkeeping. It must never assert absence and must never blame
+//     the 10,000-result ceiling, because it is raised precisely when
+//     the arithmetic did not identify a cause. Its residual has a sign:
+//     a surplus is reported as a surplus.
+//   - incomplete_slice says what is on disk and that the set around it
+//     is incomplete, without guessing why.
+//   - unknown_total has no count at all to report.
+//
+// Every sentence here is also phrased to survive toPredictiveTense
+// untouched. That rewriter turns "were not " into "will not be ", so
+// the earlier "N result(s) were not extracted" rendered in the
+// predictive report as a forecast of a loss that had already happened.
+// Truncation is always a settled fact about an extract that has
+// already run, in both report modes, so these leads avoid "was",
+// "were", "has been" and "have been" entirely, and
+// TestTruncationLeadsSurvivePredictiveTense holds that line.
 func truncationLead(key truncationGroupKey, group *truncationGroup) string {
 	name := truncationTaskLabel(key.task)
 	switch key.reason {

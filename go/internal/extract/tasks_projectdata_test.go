@@ -983,17 +983,13 @@ func newSrvExecutor(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *
 	return srv, e
 }
 
-// TestHotspotsTaskRecordsTruncationPerStatusAndNeverSendsDates guards
-// the worst trap in SPEC-006. /api/hotspots/search declares no
-// createdAfter / createdBefore and silently ignores unknown parameters,
-// so date-slicing it returns HTTP 200 with the same truncated set
-// forever while the log claims completeness. The ceiling here must be
-// reported, never worked around — and the two per-status fetches must
-// stay distinguishable, or a REVIEWED ceiling gets merged into the
-// TO_REVIEW record and one of the two losses disappears (#574).
-func TestHotspotsTaskRecordsTruncationPerStatusAndNeverSendsDates(t *testing.T) {
-	const total = 11000
-	srv, e := newSrvExecutor(t, func(w http.ResponseWriter, r *http.Request) {
+// hotspotsSearchAboveCeilingHandler serves /api/hotspots/search with a paging
+// total above the result ceiling, one hotspot per page keyed by status and
+// page, and fails the test if a request ever carries a date parameter the
+// endpoint would silently ignore (#574).
+func hotspotsSearchAboveCeilingHandler(t *testing.T, total int) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/hotspots/search" {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -1011,7 +1007,42 @@ func TestHotspotsTaskRecordsTruncationPerStatusAndNeverSendsDates(t *testing.T) 
 			},
 			"paging": map[string]any{"pageSize": 500, "total": total},
 		})
-	})
+	}
+}
+
+// assertHotspotStatusTruncationRecord checks one per-status hotspot ceiling
+// record whole: the endpoint and reason that classify it, the task/project/
+// branch scope that attributes it, and the arithmetic of the loss it reports.
+func assertHotspotStatusTruncationRecord(t *testing.T, rec common.TruncationRecord, total int) {
+	t.Helper()
+	if rec.Endpoint != "api/hotspots/search" {
+		t.Errorf("endpoint: got %q, want %q", rec.Endpoint, "api/hotspots/search")
+	}
+	if rec.Reason != common.ReasonPageLimitClamp {
+		t.Errorf("reason: got %q, want %q", rec.Reason, common.ReasonPageLimitClamp)
+	}
+	if rec.Scope.Task != "getProjectHotspotsFull" || rec.Scope.ProjectKey != "p1" || rec.Scope.Branch != "main" {
+		t.Errorf("scope: got %+v, want task getProjectHotspotsFull p1@main", rec.Scope)
+	}
+	if !rec.TotalKnown || rec.Total != total {
+		t.Errorf("total: got %d (known=%t), want %d (known=true)", rec.Total, rec.TotalKnown, total)
+	}
+	if rec.Lost != total-rec.Fetched {
+		t.Errorf("lost: got %d, want %d (total %d - fetched %d)", rec.Lost, total-rec.Fetched, total, rec.Fetched)
+	}
+}
+
+// TestHotspotsTaskRecordsTruncationPerStatusAndNeverSendsDates guards
+// the worst trap in SPEC-006. /api/hotspots/search declares no
+// createdAfter / createdBefore and silently ignores unknown parameters,
+// so date-slicing it returns HTTP 200 with the same truncated set
+// forever while the log claims completeness. The ceiling here must be
+// reported, never worked around — and the two per-status fetches must
+// stay distinguishable, or a REVIEWED ceiling gets merged into the
+// TO_REVIEW record and one of the two losses disappears (#574).
+func TestHotspotsTaskRecordsTruncationPerStatusAndNeverSendsDates(t *testing.T) {
+	const total = 11000
+	srv, e := newSrvExecutor(t, hotspotsSearchAboveCeilingHandler(t, total))
 	defer srv.Close()
 	e.SkipIssueSync = true
 
@@ -1035,21 +1066,7 @@ func TestHotspotsTaskRecordsTruncationPerStatusAndNeverSendsDates(t *testing.T) 
 		if !ok {
 			t.Fatalf("no record for status=%s, got %v", status, byDetail)
 		}
-		if rec.Endpoint != "api/hotspots/search" {
-			t.Errorf("endpoint: got %q, want %q", rec.Endpoint, "api/hotspots/search")
-		}
-		if rec.Reason != common.ReasonPageLimitClamp {
-			t.Errorf("reason: got %q, want %q", rec.Reason, common.ReasonPageLimitClamp)
-		}
-		if rec.Scope.Task != "getProjectHotspotsFull" || rec.Scope.ProjectKey != "p1" || rec.Scope.Branch != "main" {
-			t.Errorf("scope: got %+v, want task getProjectHotspotsFull p1@main", rec.Scope)
-		}
-		if !rec.TotalKnown || rec.Total != total {
-			t.Errorf("total: got %d (known=%t), want %d (known=true)", rec.Total, rec.TotalKnown, total)
-		}
-		if rec.Lost != total-rec.Fetched {
-			t.Errorf("lost: got %d, want %d (total %d - fetched %d)", rec.Lost, total-rec.Fetched, total, rec.Fetched)
-		}
+		assertHotspotStatusTruncationRecord(t, rec, total)
 	}
 	if want := 2 * (total - byDetail["status=TO_REVIEW"].Fetched); state.TotalLost != want {
 		t.Errorf("totalLost: got %d, want %d", state.TotalLost, want)

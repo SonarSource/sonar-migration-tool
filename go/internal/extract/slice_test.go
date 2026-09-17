@@ -608,16 +608,7 @@ func TestOuterEdgesStayOpenThroughEveryLevelOfBisection(t *testing.T) {
 	for depth := 1; depth <= 20; depth++ {
 		left, right := splitWindow(leftmost)
 		leftmost = left
-		if !leftmost.openStart {
-			t.Fatalf("depth %d: the leftmost window closed its lower edge: %s", depth, leftmost.label())
-		}
-		if leftmost.openEnd {
-			t.Fatalf("depth %d: the leftmost window kept an open upper edge, so it overlaps its sibling: %s",
-				depth, leftmost.label())
-		}
-		if got := windowParams(base, leftmost).Get(createdAfterParam); got != "" {
-			t.Fatalf("depth %d: the leftmost window sent createdAfter=%q", depth, got)
-		}
+		assertLeftmostEdgeStaysOpen(t, base, leftmost, depth)
 		// The interior sibling carries both bounds, and only interior
 		// windows ever do.
 		if right.openStart || (depth == 1 && !right.openEnd) {
@@ -626,15 +617,41 @@ func TestOuterEdgesStayOpenThroughEveryLevelOfBisection(t *testing.T) {
 
 		_, r := splitWindow(rightmost)
 		rightmost = r
-		if !rightmost.openEnd {
-			t.Fatalf("depth %d: the rightmost window closed its upper edge: %s", depth, rightmost.label())
-		}
-		if rightmost.openStart {
-			t.Fatalf("depth %d: the rightmost window kept an open lower edge: %s", depth, rightmost.label())
-		}
-		if got := windowParams(base, rightmost).Get(createdBeforeParam); got != "" {
-			t.Fatalf("depth %d: the rightmost window sent createdBefore=%q", depth, got)
-		}
+		assertRightmostEdgeStaysOpen(t, base, rightmost, depth)
+	}
+}
+
+// assertLeftmostEdgeStaysOpen checks the invariant that makes the
+// partition total: however deep the bisection goes, the window on the
+// far left never acquires a lower bound, so no issue can be older than
+// the range the walk covers.
+func assertLeftmostEdgeStaysOpen(t *testing.T, base url.Values, w issueWindow, depth int) {
+	t.Helper()
+	if !w.openStart {
+		t.Fatalf("depth %d: the leftmost window closed its lower edge: %s", depth, w.label())
+	}
+	if w.openEnd {
+		t.Fatalf("depth %d: the leftmost window kept an open upper edge, so it overlaps its sibling: %s",
+			depth, w.label())
+	}
+	if got := windowParams(base, w).Get(createdAfterParam); got != "" {
+		t.Fatalf("depth %d: the leftmost window sent createdAfter=%q", depth, got)
+	}
+}
+
+// assertRightmostEdgeStaysOpen is the mirror of the above: the window
+// on the far right never acquires an upper bound, so an issue created
+// while the walk is still running still lands inside it.
+func assertRightmostEdgeStaysOpen(t *testing.T, base url.Values, w issueWindow, depth int) {
+	t.Helper()
+	if !w.openEnd {
+		t.Fatalf("depth %d: the rightmost window closed its upper edge: %s", depth, w.label())
+	}
+	if w.openStart {
+		t.Fatalf("depth %d: the rightmost window kept an open lower edge: %s", depth, w.label())
+	}
+	if got := windowParams(base, w).Get(createdBeforeParam); got != "" {
+		t.Fatalf("depth %d: the rightmost window sent createdBefore=%q", depth, got)
 	}
 }
 
@@ -870,28 +887,42 @@ func TestNeverSendsADateOnlyOrSubSecondBound(t *testing.T) {
 		t.Fatalf("fetchProjectIssues: %v", err)
 	}
 
-	layout := regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{4}$`)
 	seen := 0
 	for _, q := range corpus.allQueries() {
-		for _, key := range []string{createdAfterParam, createdBeforeParam} {
-			bound := q.Get(key)
-			if bound == "" {
-				continue
-			}
-			seen++
-			if !layout.MatchString(bound) {
-				t.Errorf("%s=%q does not match the only layout the API accepts", key, bound)
-			}
-			for _, bad := range []string{"Z", ".", "+00:00", " "} {
-				if strings.Contains(bound, bad) {
-					t.Errorf("%s=%q contains %q, which the API rejects with HTTP 400", key, bound, bad)
-				}
-			}
-		}
+		seen += assertQueryDateBoundsAreWireLegal(t, q)
 	}
 	if seen == 0 {
 		t.Fatal("no date bound was ever sent, so this test proved nothing")
 	}
+}
+
+// sqWireDateLayout is the only shape /api/issues/search accepts for a
+// date bound. Date-only is accepted by the server but double-counts the
+// split day, so it is banned here too.
+var sqWireDateLayout = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{4}$`)
+
+// assertQueryDateBoundsAreWireLegal checks both bounds of one request
+// and returns how many it found, so the caller can prove the walk
+// actually sent some.
+func assertQueryDateBoundsAreWireLegal(t *testing.T, q url.Values) int {
+	t.Helper()
+	seen := 0
+	for _, key := range []string{createdAfterParam, createdBeforeParam} {
+		bound := q.Get(key)
+		if bound == "" {
+			continue
+		}
+		seen++
+		if !sqWireDateLayout.MatchString(bound) {
+			t.Errorf("%s=%q does not match the only layout the API accepts", key, bound)
+		}
+		for _, bad := range []string{"Z", ".", "+00:00", " "} {
+			if strings.Contains(bound, bad) {
+				t.Errorf("%s=%q contains %q, which the API rejects with HTTP 400", key, bound, bad)
+			}
+		}
+	}
+	return seen
 }
 
 // TestAtomicSecondRecordsTruncationAndStops is the test that proves the
@@ -1014,9 +1045,9 @@ func TestRefusesAnEndpointThatIgnoresDateParams(t *testing.T) {
 // surface somewhere, which is what the closing reconciliation is for
 // (#574).
 func TestBenignChurnDoesNotDisableSlicing(t *testing.T) {
-	const real = 12000
+	const realTotal = 12000
 	corpus := newIssueCorpus(t)
-	corpus.addSpread(corpusStart, real, time.Minute, "iss")
+	corpus.addSpread(corpusStart, realTotal, time.Minute, "iss")
 	// The project's own count is one higher than its windows can add up
 	// to, so left+right != parent at depth 0.
 	corpus.extraTotal = 1
@@ -1028,9 +1059,9 @@ func TestBenignChurnDoesNotDisableSlicing(t *testing.T) {
 	}
 
 	counts := sink.keyCounts()
-	if len(counts) != real {
+	if len(counts) != realTotal {
 		t.Errorf("distinct issue keys delivered: got %d, want %d - a one-issue disagreement must not disable slicing",
-			len(counts), real)
+			len(counts), realTotal)
 	}
 	if len(corpus.datedQueries()) <= 2 {
 		t.Errorf("the walk never recursed past the depth-0 probes: %v", corpus.datedQueries())
@@ -1620,6 +1651,19 @@ func assertDegradeRecord(t *testing.T, state common.TruncationState,
 	}
 }
 
+// dateRefusalCase is one shape of server refusal and what the walk is
+// expected to do about it.
+type dateRefusalCase struct {
+	name          string
+	datedStatus   int
+	everyStatus   int
+	wantErr       bool
+	wantNonFatal  bool
+	wantDelivered int
+	wantReason    common.TruncationReason
+	wantLost      int
+}
+
 // TestRejectedDateBoundsDegradeInsteadOfFailingTheRun is the
 // no-regression contract against deployments this tool was never
 // tested on.
@@ -1640,16 +1684,7 @@ func assertDegradeRecord(t *testing.T, state common.TruncationState,
 func TestRejectedDateBoundsDegradeInsteadOfFailingTheRun(t *testing.T) {
 	const total = 12000
 
-	cases := []struct {
-		name          string
-		datedStatus   int
-		everyStatus   int
-		wantErr       bool
-		wantNonFatal  bool
-		wantDelivered int
-		wantReason    common.TruncationReason
-		wantLost      int
-	}{
+	cases := []dateRefusalCase{
 		{
 			name:          "HTTP 400 on every dated request degrades to the undated fetch and the run continues",
 			datedStatus:   http.StatusBadRequest,
@@ -1658,11 +1693,17 @@ func TestRejectedDateBoundsDegradeInsteadOfFailingTheRun(t *testing.T) {
 			wantLost:      total - common.ResultWindowLimit,
 		},
 		{
-			name:          "HTTP 429 on every dated request degrades the same way, whatever the status",
-			datedStatus:   http.StatusTooManyRequests,
-			wantDelivered: common.ResultWindowLimit,
-			wantReason:    common.ReasonDatesRejected,
-			wantLost:      total - common.ResultWindowLimit,
+			// Narrowed after review: a rate limit is transient, and one
+			// of them on one window used to end the walk and report
+			// that the source refuses creation-date filters entirely.
+			// The operator was then told date slicing is impossible on
+			// their instance and left holding 10,000 issues of a
+			// project a re-run would have extracted in full.
+			name:        "HTTP 429 is transient, so it keeps today's error path instead of blaming the date filter",
+			datedStatus: http.StatusTooManyRequests,
+			wantErr:     true,
+			wantReason:  common.ReasonIncompleteSlice,
+			wantLost:    total,
 		},
 		{
 			name:         "HTTP 403 keeps today's behaviour: the error propagates for the call site to skip the project",
@@ -1681,46 +1722,170 @@ func TestRejectedDateBoundsDegradeInsteadOfFailingTheRun(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			corpus := newIssueCorpus(t)
-			corpus.addSpread(corpusStart, total, time.Minute, "iss")
-			corpus.rejectDatedStatus = tc.datedStatus
-			corpus.rejectEveryStatus = tc.everyStatus
-			e, tracker := corpus.start()
+			runDateRefusalCase(t, tc, total)
+		})
+	}
+}
 
-			var logs bytes.Buffer
-			e.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+// runDateRefusalCase drives one server-refusal shape and checks what
+// the walk did about it: whether the error propagated, whether the
+// call site can still recognise it as skippable, how many issues
+// reached the sink, and which reason was recorded.
+func runDateRefusalCase(t *testing.T, tc dateRefusalCase, total int) {
+	t.Helper()
+	corpus := newIssueCorpus(t)
+	corpus.addSpread(corpusStart, total, time.Minute, "iss")
+	corpus.rejectDatedStatus = tc.datedStatus
+	corpus.rejectEveryStatus = tc.everyStatus
+	e, tracker := corpus.start()
+
+	var logs bytes.Buffer
+	e.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+
+	var sink issueCollector
+	err := fetchProjectIssues(ctx(t), e, "p1", "main", taskIssueParams(), sink.sink)
+	switch {
+	case tc.wantErr && err == nil:
+		t.Fatal("expected the error to propagate so the call site decides what to do with it")
+	case !tc.wantErr && err != nil:
+		t.Fatalf("a rejected date bound must not fail the extract: %v", err)
+	}
+	if tc.wantNonFatal && !isNonFatalHTTPErr(err) {
+		t.Errorf("error %v is no longer recognised as non-fatal, so the call site would abort the whole run", err)
+	}
+	if got := sink.delivered(); got != tc.wantDelivered {
+		t.Errorf("delivered: got %d, want %d", got, tc.wantDelivered)
+	}
+
+	state := tracker.State()
+	if tc.wantReason == "" {
+		if len(state.Records) != 0 {
+			t.Errorf("a server that answers nothing has nothing to report about yet: got %+v", state.Records)
+		}
+		return
+	}
+	assertDegradeRecord(t, state, tc.wantReason, total, tc.wantDelivered, tc.wantLost)
+	if tc.wantReason != common.ReasonDatesRejected {
+		return
+	}
+	for _, want := range []string{"refused its date parameters", "falling back to the undated fetch"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("log does not mention %q:\n%s", want, logs.String())
+		}
+	}
+}
+
+// TestWalkLevelRecordDoesNotDoubleCountWindowLoss guards #574. A
+// walk-level record (incomplete_slice, or a degradation) reports the
+// whole-project shortfall, and record() has already summed the Lost of
+// every per-window record into expectedLoss. Before this guard,
+// unaccounted() returned initialTotal-unique without subtracting what
+// was already booked, so a project that hit an atomic second AND then
+// failed reported that second's loss twice: totalLost and the console
+// block were inflated, and Drift() went negative, which made the
+// migration report tell an operator who genuinely lost data that the
+// walk had collected a surplus and nothing was missing.
+func TestWalkLevelRecordDoesNotDoubleCountWindowLoss(t *testing.T) {
+	corpus := newIssueCorpus(t)
+	// An atomic second the walk must record, then more data behind it
+	// so the walk keeps going and can fail afterwards.
+	corpus.addBurst(corpusStart, 22000, "burst")
+	corpus.addSpread(corpusStart.Add(time.Hour), 3000, time.Minute, "later")
+	// 20 pages is exactly one clamped window, so the atomic record is
+	// written before the failure lands.
+	corpus.failAfterPages = 22
+	e, tracker := corpus.start()
+
+	var sink issueCollector
+	_ = fetchProjectIssues(ctx(t), e, "p1", "main", taskIssueParams(), sink.sink)
+
+	state := tracker.State()
+	var booked int
+	for _, rec := range state.Records {
+		booked += rec.Lost
+	}
+	delivered := sink.delivered()
+	shortfall := 25000 - delivered
+
+	if booked > shortfall {
+		t.Errorf("recorded loss %d exceeds the real shortfall %d (delivered %d of 25000) — a loss is being counted twice",
+			booked, shortfall, delivered)
+	}
+	if got := state.TotalLost; got > shortfall {
+		t.Errorf("totalLost: got %d, want no more than the real shortfall %d", got, shortfall)
+	}
+	for _, recon := range state.Reconciliations {
+		if d := recon.UnexplainedDrift(); d < 0 {
+			t.Errorf("UnexplainedDrift is %d: a negative residual renders as a surplus, telling the operator nothing is missing when data was lost", d)
+		}
+	}
+}
+
+// TestTransientErrorOnADatedRequestIsNotCalledDatesRejected guards
+// #574. asDateBoundRejection tagged every non-403/404 HTTP error on a
+// dated request as a date-parameter refusal. A single 429 or 5xx on one
+// window therefore ended the walk, fell back to the undated capped
+// fetch, and recorded dates_rejected — after which the report told the
+// operator their instance rejects creation-date filters entirely, and
+// left them holding 10,000 issues of a project a re-run would have
+// extracted in full. Only a refusal of the request itself (4xx, not
+// 429) can be a refusal of its parameters.
+func TestTransientErrorOnADatedRequestIsNotCalledDatesRejected(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+	}{
+		{"rate limited", http.StatusTooManyRequests},
+		{"internal server error", http.StatusInternalServerError},
+		{"bad gateway", http.StatusBadGateway},
+		{"gateway timeout", http.StatusGatewayTimeout},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			corpus := newIssueCorpus(t)
+			corpus.addSpread(corpusStart, 25000, time.Minute, "iss")
+			corpus.rejectDatedStatus = tc.status
+			e, tracker := corpus.start()
 
 			var sink issueCollector
 			err := fetchProjectIssues(ctx(t), e, "p1", "main", taskIssueParams(), sink.sink)
-			switch {
-			case tc.wantErr && err == nil:
-				t.Fatal("expected the error to propagate so the call site decides what to do with it")
-			case !tc.wantErr && err != nil:
-				t.Fatalf("a rejected date bound must not fail the extract: %v", err)
+			if err == nil {
+				t.Fatalf("a transient %d must keep today's error path, not degrade silently", tc.status)
 			}
-			if tc.wantNonFatal && !isNonFatalHTTPErr(err) {
-				t.Errorf("error %v is no longer recognised as non-fatal, so the call site would abort the whole run", err)
-			}
-			if got := sink.delivered(); got != tc.wantDelivered {
-				t.Errorf("delivered: got %d, want %d", got, tc.wantDelivered)
-			}
-
-			state := tracker.State()
-			if tc.wantReason == "" {
-				if len(state.Records) != 0 {
-					t.Errorf("a server that answers nothing has nothing to report about yet: got %+v", state.Records)
-				}
-				return
-			}
-			assertDegradeRecord(t, state, tc.wantReason, total, tc.wantDelivered, tc.wantLost)
-			if tc.wantReason != common.ReasonDatesRejected {
-				return
-			}
-			for _, want := range []string{"refused its date parameters", "falling back to the undated fetch"} {
-				if !strings.Contains(logs.String(), want) {
-					t.Errorf("log does not mention %q:\n%s", want, logs.String())
+			for _, rec := range tracker.State().Records {
+				if rec.Reason == common.ReasonDatesRejected {
+					t.Errorf("a transient %d was recorded as %q; the report would claim the source refuses date filters",
+						tc.status, common.ReasonDatesRejected)
 				}
 			}
 		})
+	}
+}
+
+// TestPersistentDateRefusalIsStillCalledDatesRejected is the other half
+// of the pair above (#574): narrowing the tag to 4xx must not stop a
+// genuine parameter refusal from being detected, because that is the
+// case the degrade path exists for.
+func TestPersistentDateRefusalIsStillCalledDatesRejected(t *testing.T) {
+	corpus := newIssueCorpus(t)
+	corpus.addSpread(corpusStart, 25000, time.Minute, "iss")
+	corpus.rejectDatedStatus = http.StatusBadRequest
+	e, tracker := corpus.start()
+
+	var sink issueCollector
+	if err := fetchProjectIssues(ctx(t), e, "p1", "main", taskIssueParams(), sink.sink); err != nil {
+		t.Fatalf("a rejected date bound must degrade, not fail the run: %v", err)
+	}
+	if got := sink.delivered(); got != common.ResultWindowLimit {
+		t.Errorf("delivered: got %d, want the pre-#574 clamped fetch of %d", got, common.ResultWindowLimit)
+	}
+	var found bool
+	for _, rec := range tracker.State().Records {
+		if rec.Reason == common.ReasonDatesRejected {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("an HTTP 400 on every dated request must still record dates_rejected")
 	}
 }

@@ -391,6 +391,67 @@ func TestUnreadableArtefactSaysTheReportCannotConfirm(t *testing.T) {
 	}
 }
 
+// windowedClampClaim is one of the two sentences a mixed
+// page_limit_clamp group must produce, expressed as a case so the loop
+// body can move into a helper without losing the reason each phrase is
+// required or forbidden.
+type windowedClampClaim struct {
+	name            string
+	marker          string
+	wants           []string
+	forbidden       []string
+	forbiddenReason string
+}
+
+// onlyTruncationBulletContaining returns the single bullet carrying
+// marker, failing when zero or several do. Demanding exactly one keeps
+// the two clamp claims distinguishable: a run that emitted the same
+// sentence twice must not read as a clean split.
+func onlyTruncationBulletContaining(t *testing.T, bullets []string, marker string) string {
+	t.Helper()
+	var found []string
+	for _, b := range bullets {
+		if strings.Contains(b, marker) {
+			found = append(found, b)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("expected exactly one bullet containing %q, got %d: %v", marker, len(found), bullets)
+	}
+	return found[0]
+}
+
+// assertWindowedClampClaim checks one clamp claim's exact phrases, both
+// the ones it must state and the ones that would give the operator the
+// other cause's remedy.
+func assertWindowedClampClaim(t *testing.T, bullets []string, tc windowedClampClaim) {
+	t.Helper()
+	got := onlyTruncationBulletContaining(t, bullets, tc.marker)
+	for _, want := range tc.wants {
+		if !strings.Contains(got, want) {
+			t.Errorf("clamp bullet is missing %q: got %q", want, got)
+		}
+	}
+	for _, forbidden := range tc.forbidden {
+		if strings.Contains(got, forbidden) {
+			t.Errorf("clamp bullet must not contain %q: %s: got %q", forbidden, tc.forbiddenReason, got)
+		}
+	}
+}
+
+// assertNoTruncationBulletContains fails when any bullet carries one of
+// the phrases, reporting why that phrase is wrong wherever it appears.
+func assertNoTruncationBulletContains(t *testing.T, bullets []string, why string, phrases ...string) {
+	t.Helper()
+	for _, phrase := range phrases {
+		for _, b := range bullets {
+			if strings.Contains(b, phrase) {
+				t.Errorf("%s (found %q): got %q", why, phrase, b)
+			}
+		}
+	}
+}
+
 // #574: page_limit_clamp means two different things, and the bullet
 // used to state one cause for both while carrying the other's evidence
 // beside it. A clamp with no window bounds is a query that could never
@@ -431,45 +492,40 @@ func TestWindowedAndUnwindowedClampsAreSeparateClaims(t *testing.T) {
 		t.Fatalf("expected one bullet per window-presence, got %d: %v", len(bullets), bullets)
 	}
 
-	var windowed, unwindowed string
-	for _, b := range bullets {
-		switch {
-		case strings.Contains(b, "still fitted when the slicer probed it"):
-			windowed = b
-		case strings.Contains(b, "could not be narrowed into smaller date windows"):
-			unwindowed = b
-		}
-	}
-	if windowed == "" || unwindowed == "" {
-		t.Fatalf("expected a windowed and an unwindowed clamp bullet, got %v", bullets)
+	cases := []windowedClampClaim{
+		{
+			name:   "the windowed clamp blames issues created during the run and points at a re-run",
+			marker: "still fitted when the slicer probed it",
+			wants: []string{
+				"issues created during the extraction",
+				"250 result(s) are missing from the extract",
+				"re-running the extract recovers them",
+				"beta@main 2025-09-05T17:29:07+0000 to 2025-09-05T17:29:08+0000",
+			},
+			forbidden:       []string{"could not be narrowed"},
+			forbiddenReason: "a windowed clamp WAS narrowed into a date window, so it must not claim otherwise",
+		},
+		{
+			name:   "the unwindowed clamp keeps its own count and offers no re-run remedy",
+			marker: "could not be narrowed into smaller date windows",
+			wants: []string{
+				"4,903 result(s) are missing from the extract and cannot be migrated",
+			},
+			forbidden:       []string{"re-running"},
+			forbiddenReason: "a query that cannot be narrowed is not fixed by a re-run",
+		},
 	}
 
-	for _, want := range []string{
-		"issues created during the extraction",
-		"250 result(s) are missing from the extract",
-		"re-running the extract recovers them",
-		"beta@main 2025-09-05T17:29:07+0000 to 2025-09-05T17:29:08+0000",
-	} {
-		if !strings.Contains(windowed, want) {
-			t.Errorf("windowed clamp bullet is missing %q: got %q", want, windowed)
-		}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertWindowedClampClaim(t, bullets, tc)
+		})
 	}
-	if strings.Contains(windowed, "could not be narrowed") {
-		t.Errorf("a windowed clamp WAS narrowed into a date window, so it must not claim otherwise: got %q", windowed)
-	}
-	if !strings.Contains(unwindowed, "4,903 result(s) are missing from the extract and cannot be migrated") {
-		t.Errorf("unwindowed clamp bullet must keep its own count: got %q", unwindowed)
-	}
-	if strings.Contains(unwindowed, "re-running") {
-		t.Errorf("a query that cannot be narrowed is not fixed by a re-run: got %q", unwindowed)
-	}
-	for _, summed := range []string{"5,153", "5153"} {
-		for _, b := range bullets {
-			if strings.Contains(b, summed) {
-				t.Errorf("the two causes must never be summed into one claim: got %q", b)
-			}
-		}
-	}
+
+	t.Run("neither bullet sums the two losses", func(t *testing.T) {
+		assertNoTruncationBulletContains(t, bullets,
+			"the two causes must never be summed into one claim", "5,153", "5153")
+	})
 }
 
 // #574: the slicer clamps a NEGATIVE unexplained drift to zero before

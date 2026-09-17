@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
 	"time"
@@ -734,11 +735,16 @@ func (e *dateBoundRejected) Unwrap() error { return e.err }
 // 403 and 404 are excluded so they keep today's behaviour exactly: the
 // call site already treats them as "this project's issues are not
 // available to us", which is a statement about permissions, not about
-// dates. Every other status is included, and that is safe rather than
-// sloppy, because the label is only written once the UNDATED fallback
-// has SUCCEEDED — a server fault that is nothing to do with the date
-// parameters fails that fallback too and falls straight through to
-// today's error path.
+// dates.
+//
+// 429 and 5xx are excluded too, and that exclusion is the whole point.
+// Only a refusal of the request itself can be a refusal of its date
+// parameters. A rate limit or a server fault is transient, and one of
+// them on a single window is enough to end the walk — after which the
+// undated fallback, a simpler request issued moments later, succeeds.
+// Labelling that dates_rejected would tell the operator their instance
+// cannot do date slicing at all, and leave them holding 10,000 issues
+// of a project a re-run would have extracted completely.
 //
 // An error on an UNDATED request is never tagged: w.dated() is the
 // whole precondition, so the entry fetch, the fallback fetch and the
@@ -749,6 +755,9 @@ func asDateBoundRejection(w issueWindow, err error) error {
 	}
 	var he *common.HTTPError
 	if !errors.As(err, &he) {
+		return err
+	}
+	if he.StatusCode < 400 || he.StatusCode >= 500 || he.StatusCode == http.StatusTooManyRequests {
 		return err
 	}
 	return &dateBoundRejected{window: w, err: err}
@@ -1112,13 +1121,28 @@ func (s *issueSlicer) recordIncompleteSlice() {
 }
 
 // unaccounted is how many of the project's issues never reached the
-// sink, and 0 when the server never told us how many there were — an
-// unknown loss is reported as unknown, never as zero.
+// sink AND have not already been booked by a per-window record, and 0
+// when the server never told us how many there were — an unknown loss
+// is reported as unknown, never as zero.
+//
+// Subtracting expectedLoss is what stops a walk-level record from
+// re-counting a loss record() has already summed. A walk that hits an
+// atomic second and THEN degrades (a rejected date bound, a sink
+// error, a cancelled context) would otherwise report that second's
+// loss twice: once from its own atomic_window record, once inside this
+// whole-walk shortfall. That inflates totalLost and the console block,
+// and it drives Drift() negative, so the report tells an operator who
+// genuinely lost data that the walk collected a surplus and nothing is
+// missing.
 func (s *issueSlicer) unaccounted() int {
-	if !s.totalKnown || s.initialTotal <= s.unique {
+	if !s.totalKnown {
 		return 0
 	}
-	return s.initialTotal - s.unique
+	remaining := s.initialTotal - s.unique - s.expectedLoss
+	if remaining <= 0 {
+		return 0
+	}
+	return remaining
 }
 
 // reconcile is the check neither CloudVoyager nor SPEC-006 has: after

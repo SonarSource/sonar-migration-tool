@@ -68,79 +68,130 @@ func captureDefaultLogger(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
+// assertFetchOutcome asserts the three fields that together state what a
+// fetch returned and whether it admitted losing anything: the item
+// count, the Reason, and Truncated — which must follow Reason and never
+// a count comparison.
+func assertFetchOutcome(t *testing.T, res PageResult, wantFetched int, wantReason TruncationReason) {
+	t.Helper()
+	if res.Fetched != wantFetched {
+		t.Errorf("Fetched: got %d, want %d", res.Fetched, wantFetched)
+	}
+	if res.Reason != wantReason {
+		t.Errorf("Reason: got %q, want %q", res.Reason, wantReason)
+	}
+	if res.Truncated != (wantReason != "") {
+		t.Errorf("Truncated: got %v, want %v", res.Truncated, wantReason != "")
+	}
+}
+
+// assertKnownTotal asserts the server's total came back intact and
+// flagged as known.
+func assertKnownTotal(t *testing.T, res PageResult, wantTotal int) {
+	t.Helper()
+	if !res.TotalKnown || res.Total != wantTotal {
+		t.Errorf("Total/TotalKnown: got %d/%v, want %d/true", res.Total, res.TotalKnown, wantTotal)
+	}
+}
+
+// assertEffectivePaging asserts the effective page settings travelled
+// with the result, so no caller re-derives them from a by-value opts
+// copy whose MaxPageSize is still zero.
+func assertEffectivePaging(t *testing.T, res PageResult, wantSize, wantLimit int) {
+	t.Helper()
+	if res.PageSize != wantSize || res.PageLimit != wantLimit {
+		t.Errorf("effective PageSize/PageLimit: got %d/%d, want %d/%d", res.PageSize, res.PageLimit, wantSize, wantLimit)
+	}
+}
+
+// firstRecord asserts the observer saw exactly wantRecords truncation(s)
+// and hands back the first one for inspection. The bool is false when
+// the expectation was zero records, i.e. there is nothing to inspect.
+func firstRecord(t *testing.T, records []TruncationRecord, wantRecords int) (TruncationRecord, bool) {
+	t.Helper()
+	if len(records) != wantRecords {
+		t.Fatalf("recorded %d truncation(s), want %d", len(records), wantRecords)
+	}
+	if wantRecords == 0 {
+		return TruncationRecord{}, false
+	}
+	return records[0], true
+}
+
+// clampCase is one side of the page-limit ceiling: the totals just
+// below, exactly at, and just above it, with the outcome each must
+// produce.
+type clampCase struct {
+	name        string
+	total       int
+	wantFetched int
+	wantReason  TruncationReason
+	wantLost    int
+	wantRecords int
+}
+
 // TestClampFiresRecordOnlyAboveTheLimit prevents both halves of the
 // off-by-one: a fetch of exactly the ceiling's worth of results being
 // reported as truncated (a false data-loss bullet in the report, since
 // p=20&ps=500 is a legal request that returns HTTP 200), and a fetch one
 // item past the ceiling being reported as complete (#574).
 func TestClampFiresRecordOnlyAboveTheLimit(t *testing.T) {
-	cases := []struct {
-		name        string
-		total       int
-		wantFetched int
-		wantReason  TruncationReason
-		wantLost    int
-		wantRecords int
-	}{
+	cases := []clampCase{
 		{"one result short of the ceiling", 9999, 9999, "", 0, 0},
 		{"exactly the ceiling, which is fetchable", 10000, 10000, "", 0, 0},
 		{"one result past the ceiling", 10001, 10000, ReasonPageLimitClamp, 1, 1},
 	}
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			raw, _ := pagedServer(t, "/api/test/clamp", tc.total, true)
-			records := observeTruncation(raw)
+		t.Run(tc.name, func(t *testing.T) { runClampCase(t, tc) })
+	}
+}
 
-			res, err := raw.GetPaginatedResult(context.Background(), PaginatedOpts{
-				Path: "api/test/clamp", ResultKey: "items",
-				MaxPageSize: 500, PageLimit: 20,
-				Scope: TruncationScope{Task: "getProjectIssuesFull", ProjectKey: "alpha", Branch: "main"},
-			})
-			if err != nil {
-				t.Fatalf("GetPaginatedResult failed: %v", err)
-			}
+// runClampCase fetches one clampCase against a server holding tc.total
+// results and asserts the whole outcome: the result fields, the
+// effective page settings, and the truncation record (or its absence).
+func runClampCase(t *testing.T, tc clampCase) {
+	raw, _ := pagedServer(t, "/api/test/clamp", tc.total, true)
+	records := observeTruncation(raw)
 
-			if res.Fetched != tc.wantFetched {
-				t.Errorf("Fetched: got %d, want %d", res.Fetched, tc.wantFetched)
-			}
-			if res.Reason != tc.wantReason {
-				t.Errorf("Reason: got %q, want %q", res.Reason, tc.wantReason)
-			}
-			if res.Truncated != (tc.wantReason != "") {
-				t.Errorf("Truncated: got %v, want %v", res.Truncated, tc.wantReason != "")
-			}
-			if !res.TotalKnown || res.Total != tc.total {
-				t.Errorf("Total/TotalKnown: got %d/%v, want %d/true", res.Total, res.TotalKnown, tc.total)
-			}
-			// The effective page settings must travel with the result so
-			// no caller re-derives them from a by-value opts copy whose
-			// MaxPageSize is still zero.
-			if res.PageSize != 500 || res.PageLimit != 20 {
-				t.Errorf("effective PageSize/PageLimit: got %d/%d, want 500/20", res.PageSize, res.PageLimit)
-			}
-			if len(*records) != tc.wantRecords {
-				t.Fatalf("recorded %d truncation(s), want %d", len(*records), tc.wantRecords)
-			}
-			if tc.wantRecords == 0 {
-				return
-			}
-			rec := (*records)[0]
-			if rec.Lost != tc.wantLost {
-				t.Errorf("record Lost: got %d, want %d", rec.Lost, tc.wantLost)
-			}
-			if rec.Reason != tc.wantReason {
-				t.Errorf("record Reason: got %q, want %q", rec.Reason, tc.wantReason)
-			}
-			if rec.Endpoint != "api/test/clamp" {
-				t.Errorf("record Endpoint: got %q, want %q", rec.Endpoint, "api/test/clamp")
-			}
-			if got := rec.Scope.Label(); got != "getProjectIssuesFull alpha@main" {
-				t.Errorf("record scope label: got %q, want %q", got, "getProjectIssuesFull alpha@main")
-			}
-			if rec.ObservedAt.IsZero() {
-				t.Error("record ObservedAt is zero; the artefact needs a timestamp")
-			}
-		})
+	res, err := raw.GetPaginatedResult(context.Background(), PaginatedOpts{
+		Path: "api/test/clamp", ResultKey: "items",
+		MaxPageSize: 500, PageLimit: 20,
+		Scope: TruncationScope{Task: "getProjectIssuesFull", ProjectKey: "alpha", Branch: "main"},
+	})
+	if err != nil {
+		t.Fatalf("GetPaginatedResult failed: %v", err)
+	}
+
+	assertFetchOutcome(t, res, tc.wantFetched, tc.wantReason)
+	assertKnownTotal(t, res, tc.total)
+	assertEffectivePaging(t, res, 500, 20)
+
+	rec, ok := firstRecord(t, *records, tc.wantRecords)
+	if !ok {
+		return
+	}
+	assertClampRecord(t, rec, tc)
+}
+
+// assertClampRecord asserts the artefact a clamp leaves behind carries
+// everything the report bullet needs: the lost count, the cause, the
+// endpoint, the attribution and a timestamp.
+func assertClampRecord(t *testing.T, rec TruncationRecord, tc clampCase) {
+	t.Helper()
+	if rec.Lost != tc.wantLost {
+		t.Errorf("record Lost: got %d, want %d", rec.Lost, tc.wantLost)
+	}
+	if rec.Reason != tc.wantReason {
+		t.Errorf("record Reason: got %q, want %q", rec.Reason, tc.wantReason)
+	}
+	if rec.Endpoint != "api/test/clamp" {
+		t.Errorf("record Endpoint: got %q, want %q", rec.Endpoint, "api/test/clamp")
+	}
+	if got := rec.Scope.Label(); got != "getProjectIssuesFull alpha@main" {
+		t.Errorf("record scope label: got %q, want %q", got, "getProjectIssuesFull alpha@main")
+	}
+	if rec.ObservedAt.IsZero() {
+		t.Error("record ObservedAt is zero; the artefact needs a timestamp")
 	}
 }
 
@@ -184,64 +235,65 @@ func TestStopOnTruncationReturnsAfterPageOne(t *testing.T) {
 	}
 }
 
+// unknownTotalCase is one response with no parseable total: a
+// completely full page, which is indistinguishable from a first page of
+// many, and a partial one, which can only be the whole result set.
+type unknownTotalCase struct {
+	name        string
+	total       int
+	wantReason  TruncationReason
+	wantRecords int
+}
+
 // TestUnknownTotalWithAFullPageIsReportedAsTruncation prevents the one
 // silent-truncation class this repo has already shipped: a response with
 // no parseable total makes TotalPages return zero, the loop never runs,
 // a single full page comes back and nothing is flagged — the exact shape
 // described in migrate/tasks_compare_profiles.go (#574).
 func TestUnknownTotalWithAFullPageIsReportedAsTruncation(t *testing.T) {
-	cases := []struct {
-		name        string
-		total       int
-		wantReason  TruncationReason
-		wantRecords int
-	}{
+	cases := []unknownTotalCase{
 		{"a completely full page and no total", 3, ReasonUnknownTotal, 1},
 		{"a partial page and no total is complete", 2, "", 0},
 	}
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			raw, requestCount := pagedServer(t, "/api/test/nototal", tc.total, false)
-			records := observeTruncation(raw)
+		t.Run(tc.name, func(t *testing.T) { runUnknownTotalCase(t, tc) })
+	}
+}
 
-			res, err := raw.GetPaginatedResult(context.Background(), PaginatedOpts{
-				Path: "api/test/nototal", ResultKey: "items", MaxPageSize: 3,
-			})
-			if err != nil {
-				t.Fatalf("GetPaginatedResult failed: %v", err)
-			}
+// runUnknownTotalCase fetches one unknownTotalCase from a server that
+// reports no paging.total and asserts the outcome: one request, a total
+// that stays flagged unknown, and a record that refuses to guess how
+// much was lost (or no record at all for a partial page).
+func runUnknownTotalCase(t *testing.T, tc unknownTotalCase) {
+	raw, requestCount := pagedServer(t, "/api/test/nototal", tc.total, false)
+	records := observeTruncation(raw)
 
-			if *requestCount != 1 {
-				t.Errorf("made %d request(s), want 1", *requestCount)
-			}
-			if res.TotalKnown {
-				t.Error("TotalKnown = true for a response with no paging.total, want false")
-			}
-			if res.Reason != tc.wantReason {
-				t.Errorf("Reason: got %q, want %q", res.Reason, tc.wantReason)
-			}
-			if res.Truncated != (tc.wantReason != "") {
-				t.Errorf("Truncated: got %v, want %v", res.Truncated, tc.wantReason != "")
-			}
-			if res.Fetched != tc.total {
-				t.Errorf("Fetched: got %d, want %d", res.Fetched, tc.total)
-			}
-			if len(*records) != tc.wantRecords {
-				t.Fatalf("recorded %d truncation(s), want %d", len(*records), tc.wantRecords)
-			}
-			if tc.wantRecords == 0 {
-				return
-			}
-			rec := (*records)[0]
-			if rec.TotalKnown {
-				t.Error("record TotalKnown = true, want false — the server never said how many there were")
-			}
-			// Lost is unknowable here, and guessing it would put a
-			// fabricated number in the report.
-			if rec.Lost != 0 {
-				t.Errorf("record Lost: got %d, want 0 for an unknown total", rec.Lost)
-			}
-		})
+	res, err := raw.GetPaginatedResult(context.Background(), PaginatedOpts{
+		Path: "api/test/nototal", ResultKey: "items", MaxPageSize: 3,
+	})
+	if err != nil {
+		t.Fatalf("GetPaginatedResult failed: %v", err)
+	}
+
+	if *requestCount != 1 {
+		t.Errorf("made %d request(s), want 1", *requestCount)
+	}
+	if res.TotalKnown {
+		t.Error("TotalKnown = true for a response with no paging.total, want false")
+	}
+	assertFetchOutcome(t, res, tc.total, tc.wantReason)
+
+	rec, ok := firstRecord(t, *records, tc.wantRecords)
+	if !ok {
+		return
+	}
+	if rec.TotalKnown {
+		t.Error("record TotalKnown = true, want false — the server never said how many there were")
+	}
+	// Lost is unknowable here, and guessing it would put a fabricated
+	// number in the report.
+	if rec.Lost != 0 {
+		t.Errorf("record Lost: got %d, want 0 for an unknown total", rec.Lost)
 	}
 }
 
