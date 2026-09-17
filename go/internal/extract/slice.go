@@ -757,7 +757,14 @@ func asDateBoundRejection(w issueWindow, err error) error {
 	if !errors.As(err, &he) {
 		return err
 	}
-	if he.StatusCode < 400 || he.StatusCode >= 500 || he.StatusCode == http.StatusTooManyRequests {
+	switch {
+	case he.StatusCode < 400 || he.StatusCode >= 500,
+		// Transient for the same reason 429 is: the request never
+		// reached the server's date parsing at all, so its failure
+		// says nothing about the date parameters it carried.
+		he.StatusCode == http.StatusRequestTimeout,
+		he.StatusCode == http.StatusTooEarly,
+		he.StatusCode == http.StatusTooManyRequests:
 		return err
 	}
 	return &dateBoundRejected{window: w, err: err}
@@ -1083,7 +1090,23 @@ func (s *issueSlicer) degrade(ctx context.Context, reason common.TruncationReaso
 // issue set is short and by how much, and only the project-level
 // arithmetic makes that number true. Writing it while the walk was
 // still running would have fixed a count that was still moving.
+// fullyBooked reports whether every missing issue already has a
+// per-window record naming it, so a walk-level record would add no
+// count of its own.
+//
+// It matters because unaccounted() clamps at zero, and the report
+// renders a Lost of zero as "an unknown number of issue(s)" — the
+// honest rendering when the server never gave a total, but a false
+// claim of further loss when the arithmetic has just proved the
+// residual is exactly nothing (#574).
+func (s *issueSlicer) fullyBooked() bool {
+	return s.totalKnown && s.expectedLoss > 0 && s.unaccounted() == 0
+}
+
 func (s *issueSlicer) recordDegradation() {
+	if s.fullyBooked() {
+		return
+	}
 	s.record(common.TruncationRecord{
 		Endpoint:   issuesSearchAPI,
 		Reason:     s.degradedReason,
@@ -1107,6 +1130,9 @@ func (s *issueSlicer) recordDegradation() {
 // project, which is the honest number, because the entry fetch's single
 // page was discarded rather than written.
 func (s *issueSlicer) recordIncompleteSlice() {
+	if s.fullyBooked() {
+		return
+	}
 	s.record(common.TruncationRecord{
 		Endpoint:   issuesSearchAPI,
 		Reason:     common.ReasonIncompleteSlice,

@@ -1836,6 +1836,8 @@ func TestTransientErrorOnADatedRequestIsNotCalledDatesRejected(t *testing.T) {
 		status int
 	}{
 		{"rate limited", http.StatusTooManyRequests},
+		{"request timeout", http.StatusRequestTimeout},
+		{"too early", http.StatusTooEarly},
 		{"internal server error", http.StatusInternalServerError},
 		{"bad gateway", http.StatusBadGateway},
 		{"gateway timeout", http.StatusGatewayTimeout},
@@ -1887,5 +1889,87 @@ func TestPersistentDateRefusalIsStillCalledDatesRejected(t *testing.T) {
 	}
 	if !found {
 		t.Error("an HTTP 400 on every dated request must still record dates_rejected")
+	}
+}
+
+// TestNoWalkRecordWhenEveryLostIssueIsAlreadyNamed guards #574.
+// unaccounted() clamps its residual at zero, and the report renders a
+// Lost of zero as "an unknown number of issue(s)" — the honest
+// rendering when the server never gave a total, but a false claim of
+// further loss when the arithmetic has just proved the residual is
+// exactly nothing. A walk whose whole shortfall is already named by
+// per-window records must add no walk-level bullet on top of them.
+//
+// Driven against the slicer directly rather than through a corpus: the
+// state under test is "every missing issue is already booked AND the
+// walk still ends in a degradation", which an end-to-end fixture
+// reaches only by coincidence.
+func TestNoWalkRecordWhenEveryLostIssueIsAlreadyNamed(t *testing.T) {
+	cases := []struct {
+		name         string
+		totalKnown   bool
+		initialTotal int
+		unique       int
+		expectedLoss int
+		wantRecords  int
+	}{
+		{
+			name:         "every missing issue already named by a window record",
+			totalKnown:   true,
+			initialTotal: 22000,
+			unique:       10000,
+			expectedLoss: 12000,
+			wantRecords:  0,
+		},
+		{
+			name:         "a residual the window records do not explain is still reported",
+			totalKnown:   true,
+			initialTotal: 25000,
+			unique:       10000,
+			expectedLoss: 12000,
+			wantRecords:  1,
+		},
+		{
+			name:         "no total from the server, so an unknown loss stays reportable",
+			totalKnown:   false,
+			initialTotal: 0,
+			unique:       10000,
+			expectedLoss: 0,
+			wantRecords:  1,
+		},
+		{
+			name:         "nothing booked yet, so the walk-level record is the only evidence",
+			totalKnown:   true,
+			initialTotal: 25000,
+			unique:       10000,
+			expectedLoss: 0,
+			wantRecords:  1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, write := range []struct {
+				what string
+				fn   func(*issueSlicer)
+			}{
+				{"incomplete_slice", (*issueSlicer).recordIncompleteSlice},
+				{"degradation", (*issueSlicer).recordDegradation},
+			} {
+				tracker := common.NewTruncationTracker()
+				s := &issueSlicer{
+					e:              &Executor{Truncation: tracker},
+					scope:          TruncationScope{Task: "getProjectIssuesFull", ProjectKey: "p1", Branch: "main"},
+					initialTotal:   tc.initialTotal,
+					totalKnown:     tc.totalKnown,
+					unique:         tc.unique,
+					expectedLoss:   tc.expectedLoss,
+					degradedReason: common.ReasonMaxDepth,
+				}
+				write.fn(s)
+				if got := len(tracker.State().Records); got != tc.wantRecords {
+					t.Errorf("%s: wrote %d record(s), want %d", write.what, got, tc.wantRecords)
+				}
+			}
+		})
 	}
 }
