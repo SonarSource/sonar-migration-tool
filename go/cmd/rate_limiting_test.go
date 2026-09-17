@@ -44,12 +44,14 @@ func TestValidateAPIMaxRatePerMin(t *testing.T) {
 // #573 — a concurrency value is deprecated for SonarQube Cloud targets:
 // having one in effect must log a warning, regardless of whether it came
 // from --concurrency on the CLI or from a config file's "concurrency"
-// field — both produce the same resolved int by the time this is called,
-// and both put ConcurrencyLimiter in the same fixed mode (see
-// MigrateConfig.ConcurrencyExplicit). A live run against a pre-#573
-// config file (concurrency set, no --concurrency flag) previously
-// produced neither this warning nor any recalculation log, with nothing
-// to explain why — this test guards against that regression.
+// field — both produce the same resolved int by the time this is called.
+// Concurrency now only seeds the ConcurrencyLimiter's starting point (it
+// is always dynamically re-evaluated every 30s regardless), but
+// --api_max_rate_per_min is the supported way to influence the target
+// rate, so the warning still fires. A live run against a pre-#573 config
+// file (concurrency set, no --concurrency flag) previously produced
+// neither this warning nor any recalculation log, with nothing to
+// explain why — this test guards against that regression.
 func TestWarnIfConcurrencyDeprecated(t *testing.T) {
 	original := slog.Default()
 	t.Cleanup(func() { slog.SetDefault(original) })

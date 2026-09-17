@@ -30,15 +30,10 @@ type SyncIssuesConfig struct {
 	EnterpriseKey string
 
 	ExportDirectory string
-	Concurrency     int
-	// ConcurrencyExplicit records whether Concurrency was explicitly set
-	// (before applyDefaults fills in the default) — see
-	// MigrateConfig.ConcurrencyExplicit (#573).
-	ConcurrencyExplicit bool
-	// APIMaxRatePerMin caps sustained SonarQube Cloud API calls/min and,
-	// when Concurrency was not explicitly set, is the target rate the
-	// dynamic ConcurrencyLimiter aims for (#573). See
-	// MigrateConfig.APIMaxRatePerMin.
+	// Concurrency — see MigrateConfig.Concurrency (#573): only seeds the
+	// starting point for the dynamic ConcurrencyLimiter.
+	Concurrency int
+	// APIMaxRatePerMin — see MigrateConfig.APIMaxRatePerMin (#573).
 	APIMaxRatePerMin int
 	Timeout          int
 
@@ -66,9 +61,6 @@ type SyncIssuesConfig struct {
 }
 
 func (cfg *SyncIssuesConfig) applyDefaults() {
-	// Captured before defaulting Concurrency below — see
-	// MigrateConfig.applyDefaults (#573).
-	cfg.ConcurrencyExplicit = cfg.Concurrency > 0
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 25
 	}
@@ -155,7 +147,7 @@ func RunSyncIssues(ctx context.Context, cfg SyncIssuesConfig) (SyncIssuesSummary
 	cloudURL := cfg.URL
 	// One SlidingWindowLimiter and one ConcurrencyLimiter, wired the same
 	// way as newMigrateClients (#573).
-	concurrencyLimiter := newConcurrencyLimiter(cfg.Concurrency, cfg.ConcurrencyExplicit, cfg.APIMaxRatePerMin, logger)
+	concurrencyLimiter := newConcurrencyLimiter(cfg.Concurrency, cfg.APIMaxRatePerMin, logger)
 	apiRateLimiter := sqapi.NewSlidingWindowLimiter(cfg.APIMaxRatePerMin)
 	clientOpts := []sqapi.Option{
 		sqapi.WithTimeout(cfg.Timeout),

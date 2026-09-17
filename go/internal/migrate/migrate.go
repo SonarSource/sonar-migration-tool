@@ -65,20 +65,19 @@ type MigrateConfig struct {
 	Edition       string // "enterprise", "developer", etc.
 	URL           string // Cloud URL (default: https://sonarcloud.io/)
 	RunID         string // Resume a prior run
-	Concurrency   int
-	// ConcurrencyExplicit records whether Concurrency was explicitly set by
-	// the caller (before applyDefaults fills in the default), i.e. whether
-	// --concurrency was passed on the CLI. When true, the Executor's
-	// ConcurrencyLimiter is fixed at Concurrency instead of dynamically
-	// adjusting to observed API latency (#573) — --concurrency is
-	// deprecated for SonarQube Cloud targets but still honored as a manual
-	// override.
-	ConcurrencyExplicit bool
+	// Concurrency, if set (via --concurrency or the config file's
+	// "concurrency" field), is only the STARTING point the dynamic
+	// ConcurrencyLimiter seeds from — it is always re-evaluated every 30s
+	// against observed API latency from the moment the run starts,
+	// regardless of whether this was set (#573). --concurrency /
+	// "concurrency" is deprecated in favor of --api_max_rate_per_min,
+	// which controls the target rate the adjustment aims for. <= 0
+	// resolves to 25 by applyDefaults.
+	Concurrency int
 	// APIMaxRatePerMin caps sustained SonarQube Cloud API calls/min via a
-	// sliding-window limiter, and (when Concurrency was not explicitly set)
-	// is the target rate the dynamic ConcurrencyLimiter aims for (#573).
-	// <= 0 is resolved to 1500 by applyDefaults. Valid range enforced by
-	// the CLI layer is [100, 1500].
+	// sliding-window limiter, and is the target rate the dynamic
+	// ConcurrencyLimiter aims for (#573). <= 0 is resolved to 1500 by
+	// applyDefaults. Valid range enforced by the CLI layer is [100, 1500].
 	APIMaxRatePerMin int
 	// BuildConcurrency bounds concurrent scanner-report CONSTRUCTION during
 	// importProjectData, independently of Concurrency. See Executor.BuildSem.
@@ -198,10 +197,10 @@ type Executor struct {
 	// Nothing in this package acquires or releases it; every reference
 	// reads ConcurrencyLimiter.Current() to size a per-task errgroup limit.
 	// Each task therefore gets its own independent limit rather than
-	// sharing one pool. Fixed --concurrency runs get a limiter whose
-	// Current() never changes; SonarQube Cloud runs otherwise get one that
-	// a background goroutine recalculates every 30s from observed API
-	// latency, targeting APIMaxRatePerMin calls/min (#573).
+	// sharing one pool. Always dynamic (#573): a background goroutine
+	// recalculates Current() every 30s from observed API latency,
+	// targeting APIMaxRatePerMin calls/min — cfg.Concurrency, if set, is
+	// only the starting value it seeds from, never a permanent fixed cap.
 	//
 	// Do not "fix" this by acquiring it. The fan-outs nest —
 	// runSyncIssueMetadata's forEachMigrateItem holds a slot for each of
@@ -475,15 +474,12 @@ type migrateClients struct {
 }
 
 // newConcurrencyLimiter builds a ConcurrencyLimiter for a Cloud-facing
-// executor (migrate, reset, sync-issues): fixed at concurrency when the
-// caller explicitly set --concurrency (deprecated for Cloud targets but
-// still honored, #573), otherwise dynamic — starting at concurrency and
-// recalculating every 30s from observed API latency to target
-// apiMaxRatePerMin calls/min.
-func newConcurrencyLimiter(concurrency int, concurrencyExplicit bool, apiMaxRatePerMin int, logger *slog.Logger) *ConcurrencyLimiter {
-	if concurrencyExplicit {
-		return NewFixedConcurrencyLimiter(concurrency)
-	}
+// executor (migrate, reset, sync-issues). Always dynamic (#573): starts at
+// concurrency (whatever --concurrency / the config file's "concurrency"
+// field resolved to, or the 25 default) and recalculates every 30s from
+// observed API latency to target apiMaxRatePerMin calls/min — concurrency
+// only seeds the starting point, it is never a permanent fixed cap.
+func newConcurrencyLimiter(concurrency int, apiMaxRatePerMin int, logger *slog.Logger) *ConcurrencyLimiter {
 	return NewDynamicConcurrencyLimiter(concurrency, apiMaxRatePerMin, logger)
 }
 
@@ -523,7 +519,7 @@ func newMigrateClients(cfg MigrateConfig, logger *slog.Logger, reqLog *requestLo
 	// both cloudClient and apiClient below: both hosts share the same
 	// egress IP and therefore the same 8000-calls/5min SonarQube Cloud
 	// budget (#573).
-	concurrencyLimiter := newConcurrencyLimiter(cfg.Concurrency, cfg.ConcurrencyExplicit, cfg.APIMaxRatePerMin, logger)
+	concurrencyLimiter := newConcurrencyLimiter(cfg.Concurrency, cfg.APIMaxRatePerMin, logger)
 	apiRateLimiter := sqapi.NewSlidingWindowLimiter(cfg.APIMaxRatePerMin)
 	clientOpts := []sqapi.Option{
 		sqapi.WithTimeout(cfg.Timeout),
@@ -739,10 +735,6 @@ func runPhase(ctx context.Context, e *Executor, taskNames []string, registry map
 }
 
 func (cfg *MigrateConfig) applyDefaults() {
-	// Captured before defaulting Concurrency below, so ConcurrencyExplicit
-	// reflects whether the caller (CLI or config file) actually set
-	// --concurrency, not whether it ended up with a positive value (#573).
-	cfg.ConcurrencyExplicit = cfg.Concurrency > 0
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 25
 	}

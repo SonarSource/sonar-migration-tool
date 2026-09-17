@@ -27,15 +27,10 @@ type ResetConfig struct {
 	EnterpriseKey string
 	Edition       string
 	URL           string
-	Concurrency   int
-	// ConcurrencyExplicit records whether Concurrency was explicitly set
-	// (before applyDefaults fills in the default) — see
-	// MigrateConfig.ConcurrencyExplicit (#573).
-	ConcurrencyExplicit bool
-	// APIMaxRatePerMin caps sustained SonarQube Cloud API calls/min and,
-	// when Concurrency was not explicitly set, is the target rate the
-	// dynamic ConcurrencyLimiter aims for (#573). See
-	// MigrateConfig.APIMaxRatePerMin.
+	// Concurrency — see MigrateConfig.Concurrency (#573): only seeds the
+	// starting point for the dynamic ConcurrencyLimiter.
+	Concurrency int
+	// APIMaxRatePerMin — see MigrateConfig.APIMaxRatePerMin (#573).
 	APIMaxRatePerMin int
 	ExportDirectory  string
 	Debug            bool
@@ -93,7 +88,7 @@ func RunReset(ctx context.Context, cfg ResetConfig) error {
 
 	// One SlidingWindowLimiter and one ConcurrencyLimiter shared across
 	// both cloudClient and apiClient below — see newMigrateClients (#573).
-	concurrencyLimiter := newConcurrencyLimiter(cfg.Concurrency, cfg.ConcurrencyExplicit, cfg.APIMaxRatePerMin, logger)
+	concurrencyLimiter := newConcurrencyLimiter(cfg.Concurrency, cfg.APIMaxRatePerMin, logger)
 	apiRateLimiter := sqapi.NewSlidingWindowLimiter(cfg.APIMaxRatePerMin)
 	clientOpts := []sqapi.Option{
 		sqapi.WithAPIRateLimiter(apiRateLimiter),
@@ -264,9 +259,6 @@ func runResetPhase(ctx context.Context, e *Executor, taskNames []string, registr
 }
 
 func (cfg *ResetConfig) applyDefaults() {
-	// Captured before defaulting Concurrency below — see
-	// MigrateConfig.applyDefaults (#573).
-	cfg.ConcurrencyExplicit = cfg.Concurrency > 0
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 25
 	}

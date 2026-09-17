@@ -99,8 +99,9 @@ func init() {
 	// Deprecated alias (#406): kept so existing scripts keep working.
 	f.String("url", "https://sonarcloud.io/", "")
 	_ = f.MarkDeprecated("url", "use --target_url instead")
-	f.Int("concurrency", 25, "Maximum number of concurrent requests. Deprecated (#573): "+
-		"still honored as a fixed value, but use --"+flagAPIMaxRatePerMin+" instead to auto-adjust to observed SonarQube Cloud API latency.")
+	f.Int("concurrency", 25, "Starting number of concurrent requests. Deprecated (#573): "+
+		"only seeds the initial value now — concurrency is always dynamically re-evaluated every 30s from observed SonarQube Cloud API latency. "+
+		"Use --"+flagAPIMaxRatePerMin+" instead to control the target rate.")
 	f.Int(flagAPIMaxRatePerMin, 0, fmt.Sprintf(
 		"Max sustained SonarQube Cloud API calls/min, as a sliding window (default: 1500, valid range [%d,%d]). "+
 			"Concurrency is dynamically adjusted to approach this rate without exceeding it (#573).",

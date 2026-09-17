@@ -82,7 +82,8 @@ func init() {
 	f.String(flagEnterpriseKey, "", scCloudName+" enterprise key (maps to target.enterprise_key, defaults to --"+flagDefaultOrg+")")
 	f.String(flagExportDir, "./migration-files/", "Working directory for intermediate files (maps to export_directory)")
 	f.Int(flagConcurrency, 0, "Max concurrent requests, applied to both source and target (default: 25). Deprecated for the "+scCloudName+" target (#573): "+
-		"still honored as a fixed value, but use --"+flagAPIMaxRatePerMin+" instead to let the target side auto-adjust to observed API latency. "+
+		"only seeds the target side's starting value now — it is always dynamically re-evaluated every 30s from observed API latency. "+
+		"Use --"+flagAPIMaxRatePerMin+" instead to control the target rate. "+
 		"Use source.concurrency / target.concurrency in the config file to set them independently.")
 	f.Int(flagAPIMaxRatePerMin, 0, fmt.Sprintf(
 		"Max sustained %s API calls/min for the target side, as a sliding window (default: 1500, valid range [%d,%d]). "+

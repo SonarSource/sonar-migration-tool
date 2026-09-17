@@ -201,7 +201,8 @@ func init() {
 	f.Bool(flagSkipProjectDataMigration, false, "Skip the entire project-data migration: importProjectData and the trailing per-issue/per-hotspot sync (#303). Defaults to false (data is migrated); pass the flag to skip.")
 	f.Bool(flagFastSync, false, "Skip tagging and back-linking hotspots/issues with zero user changes on the source (original state, no comments, no custom tags). Defaults to false (every hotspot is tagged and back-linked). #527.")
 	f.Int(flagConcurrency, 0, "Max concurrent requests, applied to both source and target (default: 25). Deprecated for the "+scCloudName+" target (#573): "+
-		"still honored as a fixed value, but use --"+flagAPIMaxRatePerMin+" instead to let the target side auto-adjust to observed API latency. "+
+		"only seeds the target side's starting value now — it is always dynamically re-evaluated every 30s from observed API latency. "+
+		"Use --"+flagAPIMaxRatePerMin+" instead to control the target rate. "+
 		"Use source.concurrency / target.concurrency in the config file to set them independently.")
 	f.Int(flagAPIMaxRatePerMin, 0, fmt.Sprintf(
 		"Max sustained %s API calls/min for the target side, as a sliding window (default: 1500, valid range [%d,%d]). "+
@@ -340,25 +341,20 @@ func validateAPIMaxRatePerMin(v int) error {
 // warnIfConcurrencyDeprecated logs once when a concurrency value is in
 // effect for a SonarQube Cloud target (#573: migrate, transfer,
 // sync-issues, reset all target Cloud) — whether it came from --concurrency
-// on the CLI or from a config file's "concurrency" field. Either source
-// puts the Executor's ConcurrencyLimiter in fixed mode (see
-// MigrateConfig.ConcurrencyExplicit, computed the same way: Concurrency >
-// 0 before applyDefaults), so this must check the same condition —
-// otherwise a config file predating #573 (the overwhelmingly common case,
-// since setting "concurrency" was the only option before this feature)
-// silently disables dynamic adjustment with no indication why, which is
-// exactly what happened in practice: a live run showed no deprecation
-// warning AND no recalculation log, both traceable to this check
-// previously looking only at the CLI flag.
+// on the CLI or from a config file's "concurrency" field. A set value no
+// longer pins concurrency: it only seeds the ConcurrencyLimiter's starting
+// point, which is dynamically re-evaluated every 30s from the moment the
+// run starts regardless (newConcurrencyLimiter is always dynamic). This
+// still warns because --api_max_rate_per_min, not --concurrency, is now
+// the supported way to influence the target throughput.
 //
 // concurrency is the resolved value (config file merged with any CLI
-// override) BEFORE applyDefaults fills in the 25 default, so 0 here
-// means "genuinely unset by the caller," matching ConcurrencyExplicit's
-// own definition exactly.
+// override) BEFORE applyDefaults fills in the 25 default, so 0 here means
+// "genuinely unset by the caller."
 func warnIfConcurrencyDeprecated(concurrency int) {
 	if concurrency > 0 {
 		slog.Default().Warn("a concurrency value (--" + flagConcurrency + " or the config file's \"concurrency\" field) is deprecated for SonarQube Cloud targets; use --" + flagAPIMaxRatePerMin +
-			" instead. The concurrency value is still honored as a fixed limit but will not auto-adjust to API latency.")
+			" instead to control the target API rate. The value is now only used as the starting concurrency — it is dynamically re-evaluated every 30s based on observed API latency regardless.")
 	}
 }
 
