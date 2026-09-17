@@ -155,10 +155,10 @@ func (l *ConcurrencyLimiter) Observe(d time.Duration) {
 // Stop is called.
 //
 // On each tick: the latency window is drained. If no samples were
-// observed this interval, DEBUG-logs that concurrency was left unchanged
+// observed this interval, INFO-logs that concurrency was left unchanged
 // and skips recalculation (it does not reset to some default). Otherwise
 // it computes desiredConcurrency(l.target, avg), stores it, and
-// DEBUG-logs the previous value, new value, avg latency (as
+// INFO-logs the previous value, new value, avg latency (as
 // milliseconds), and target rate — this log line fires on every tick that
 // had samples, even when the value didn't change.
 func (l *ConcurrencyLimiter) Start(ctx context.Context, interval time.Duration) {
@@ -187,13 +187,13 @@ func (l *ConcurrencyLimiter) Start(ctx context.Context, interval time.Duration) 
 func (l *ConcurrencyLimiter) recalculate() {
 	avg, ok := l.window.drainAverage()
 	if !ok {
-		l.logger.Debug("concurrency left unchanged: no latency samples observed this interval")
+		l.logger.Info("concurrency left unchanged: no latency samples observed this interval")
 		return
 	}
 	prev := l.Current()
 	next := desiredConcurrency(l.target, avg)
 	l.current.Store(int32(next))
-	l.logger.Debug("concurrency recalculated",
+	l.logger.Info("concurrency recalculated",
 		"previous", prev,
 		"current", next,
 		"avg_latency_ms", avg.Milliseconds(),

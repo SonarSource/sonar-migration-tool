@@ -233,9 +233,11 @@ func TestConcurrencyLimiterFixedIsANoOp(t *testing.T) {
 	}
 }
 
-func TestConcurrencyLimiterLogsDebugOnTickWithSamples(t *testing.T) {
+func TestConcurrencyLimiterLogsInfoOnTickWithSamples(t *testing.T) {
 	buf := &syncBuffer{}
-	handler := slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	// LevelInfo (not LevelDebug): the recalculation log must be visible
+	// without --debug, since operators watching a live migration need it.
+	handler := slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelInfo})
 	logger := slog.New(handler)
 
 	targetRatePerMin := 1500
@@ -256,7 +258,7 @@ func TestConcurrencyLimiterLogsDebugOnTickWithSamples(t *testing.T) {
 		return strings.Contains(buf.String(), "concurrency recalculated")
 	})
 	if !ok {
-		t.Fatalf("expected DEBUG log not found in output: %s", buf.String())
+		t.Fatalf("expected INFO log not found in output: %s", buf.String())
 	}
 
 	logged := buf.String()
