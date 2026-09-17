@@ -32,7 +32,7 @@ organization keys to organizations.csv.`,
 			return err
 		}
 		// migrate's target is always SonarQube Cloud (#573).
-		warnIfConcurrencyDeprecated(cmd)
+		warnIfConcurrencyDeprecated(cfg.Concurrency)
 		if cfg.Token == "" || cfg.EnterpriseKey == "" {
 			return fmt.Errorf("TOKEN and ENTERPRISE_KEY are required (--target_token/--enterprise_key flags or in config file)")
 		}

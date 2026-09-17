@@ -46,7 +46,7 @@ var resetCmd = &cobra.Command{
 			return err
 		}
 		// reset's target is always SonarQube Cloud (#573).
-		warnIfConcurrencyDeprecated(cmd)
+		warnIfConcurrencyDeprecated(cfg.Concurrency)
 		if cfg.Token == "" || cfg.EnterpriseKey == "" {
 			return fmt.Errorf("TOKEN and ENTERPRISE_KEY are required (either as arguments or in config file)")
 		}

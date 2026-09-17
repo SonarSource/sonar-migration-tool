@@ -337,16 +337,28 @@ func validateAPIMaxRatePerMin(v int) error {
 	return nil
 }
 
-// warnIfConcurrencyDeprecated logs once when --concurrency is passed
-// against a SonarQube Cloud target (#573: migrate, transfer, sync-issues,
-// reset all target Cloud). The value is still honored as a fixed
-// concurrency override — see MigrateConfig.ConcurrencyExplicit — this only
-// warns that it no longer auto-adjusts to observed API latency the way
-// --api_max_rate_per_min does.
-func warnIfConcurrencyDeprecated(cmd *cobra.Command) {
-	if cmd.Flags().Changed(flagConcurrency) {
-		slog.Default().Warn("--" + flagConcurrency + " is deprecated for SonarQube Cloud targets; use --" + flagAPIMaxRatePerMin +
-			" instead. --" + flagConcurrency + " is still honored as a fixed concurrency but will not auto-adjust to API latency.")
+// warnIfConcurrencyDeprecated logs once when a concurrency value is in
+// effect for a SonarQube Cloud target (#573: migrate, transfer,
+// sync-issues, reset all target Cloud) — whether it came from --concurrency
+// on the CLI or from a config file's "concurrency" field. Either source
+// puts the Executor's ConcurrencyLimiter in fixed mode (see
+// MigrateConfig.ConcurrencyExplicit, computed the same way: Concurrency >
+// 0 before applyDefaults), so this must check the same condition —
+// otherwise a config file predating #573 (the overwhelmingly common case,
+// since setting "concurrency" was the only option before this feature)
+// silently disables dynamic adjustment with no indication why, which is
+// exactly what happened in practice: a live run showed no deprecation
+// warning AND no recalculation log, both traceable to this check
+// previously looking only at the CLI flag.
+//
+// concurrency is the resolved value (config file merged with any CLI
+// override) BEFORE applyDefaults fills in the 25 default, so 0 here
+// means "genuinely unset by the caller," matching ConcurrencyExplicit's
+// own definition exactly.
+func warnIfConcurrencyDeprecated(concurrency int) {
+	if concurrency > 0 {
+		slog.Default().Warn("a concurrency value (--" + flagConcurrency + " or the config file's \"concurrency\" field) is deprecated for SonarQube Cloud targets; use --" + flagAPIMaxRatePerMin +
+			" instead. The concurrency value is still honored as a fixed limit but will not auto-adjust to API latency.")
 	}
 }
 
@@ -567,7 +579,7 @@ func runTransfer(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	// Transfer's target is always SonarQube Cloud (#573).
-	warnIfConcurrencyDeprecated(cmd)
+	warnIfConcurrencyDeprecated(cfg.targetConcurrency)
 
 	ctx := cmd.Context()
 

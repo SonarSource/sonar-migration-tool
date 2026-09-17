@@ -236,7 +236,7 @@ func runSyncIssuesCmd(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	// sync-issues's target is always SonarQube Cloud (#573).
-	warnIfConcurrencyDeprecated(cmd)
+	warnIfConcurrencyDeprecated(cfg.targetConcurrency)
 
 	ctx := cmd.Context()
 
