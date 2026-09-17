@@ -160,7 +160,10 @@ After issues are uploaded via scanner reports, this phase matches each SonarQube
 
 **What it migrates:**
 - **Issue statuses**: OPEN, CONFIRMED, FALSE_POSITIVE, WONTFIX, ACCEPTED, RESOLVED, CLOSED
-- **Issue comments**: All comments with original author attribution (`[Migrated from SonarQube Server - @author]`)
+- **Issue comments**: the most recent `max_issue_comments` comments (default `5`, max `20`) with
+  original author attribution (`[Migrated from SonarQube Server - @author]`). Older comments beyond
+  the cap are not sent, to reduce `api/issues/add_comment` pressure on SonarQube Cloud (#571). The
+  same cap applies to hotspot review comments, which are posted on the migrated issue.
 - **Issue tags**: Custom tags applied by users, written as the union of the source issue's full tag list and the tags the Cloud issue already carries (`set_tags` replaces rather than merges, so the union is what preserves both sides)
 - **Issue assignments**: User assignments mapped via `users.csv`
 - Pre-filtering skips issues with no manual changes (60-80% of typical enterprise issues), dramatically reducing API calls. A user-added tag is itself a trigger, so an **OPEN** issue that only carries a custom tag is still synced — no status change is required.

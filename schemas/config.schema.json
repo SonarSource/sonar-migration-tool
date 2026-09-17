@@ -84,6 +84,13 @@
       "default": 30,
       "description": "PoC (issue #554): minimum spacing, in days, enforced between two migrated historical snapshots when migrate_history is set. The smallest effective value is 1 (one point per day at most); 0 is indistinguishable from 'not set' in a config file and falls back to the default of 30."
     },
+    "max_issue_comments": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 20,
+      "default": 5,
+      "description": "Max most-recent source comments replayed onto each migrated issue/hotspot (default 5, max 20). Reduces SonarQube Cloud API pressure on long comment threads. Issue #571. Overridable via target.max_issue_comments."
+    },
     "source": {
       "$ref": "#/$defs/sourceBlock",
       "description": "SonarQube Server connection + extract-time options. Consumed by `extract` (and ignored by `migrate` / `reset`)."
@@ -237,6 +244,12 @@
             { "type": "string", "pattern": "^(?i)(true|false|on|off|yes|no|0|1)$" }
           ],
           "description": "PoC (issue #554): overrides the top-level migrate_history for migrate/reset. When true (or on / yes / 1), also migrate a bounded set of historical analysis snapshots (date + project-level measures only) per project's main branch, backdated on SonarQube Cloud. When absent, the top-level migrate_history applies (default false)."
+        },
+        "max_issue_comments": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 20,
+          "description": "Override the top-level max_issue_comments for migrate / transfer / sync-issues. Ignored by reset, which replays no comments. Issue #571."
         }
       }
     }

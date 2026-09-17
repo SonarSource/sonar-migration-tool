@@ -87,6 +87,7 @@ func init() {
 	f.String(flagKeyFilePath, "", "Path to client mTLS key file for the source server (maps to source.key_file_path)")
 	f.String(flagCertPassword, "", "Password for the source server mTLS client certificate (maps to source.cert_password)")
 	f.Bool(flagFastSync, false, "Skip tagging and back-linking hotspots/issues with zero user changes on the source (original state, no comments, no custom tags). Defaults to false (every hotspot is tagged and back-linked). #527.")
+	f.Int(flagMaxIssueComments, 0, fmt.Sprintf("Max most-recent source comments replayed onto each synced issue/hotspot (default %d, max %d) — reduces "+scCloudName+" API pressure on long comment threads (#571). (maps to max_issue_comments)", migrate.DefaultMaxIssueComments, migrate.MaxAllowedIssueComments))
 	// --debug is inherited from the persistent root flag; see cmd/root.go.
 }
 
@@ -112,6 +113,7 @@ type syncIssuesConfig struct {
 	certPassword        string
 	debug               bool
 	fastSync            bool
+	maxIssueComments    int
 }
 
 // loadSyncIssuesFileDefaults reads the shared --config file via the same
@@ -150,6 +152,7 @@ func loadSyncIssuesFileDefaults(path string) (syncIssuesConfig, error) {
 
 	cfg.debug = migrateCfg.Debug
 	cfg.fastSync = migrateCfg.FastSync
+	cfg.maxIssueComments = migrateCfg.MaxIssueComments
 	return cfg, nil
 }
 
@@ -183,6 +186,7 @@ func resolveSyncIssuesConfig(cmd *cobra.Command) (syncIssuesConfig, error) {
 	applyFlagString(cmd, flagCertPassword, &cfg.certPassword)
 	applyFlagBool(cmd, flagDebug, &cfg.debug)
 	applyFlagBool(cmd, flagFastSync, &cfg.fastSync)
+	applyFlagInt(cmd, flagMaxIssueComments, &cfg.maxIssueComments)
 
 	if cfg.exportDir == "" {
 		cfg.exportDir = "./migration-files/"
@@ -200,6 +204,11 @@ func validateSyncIssuesConfig(cfg syncIssuesConfig) error {
 	}
 	if cfg.targetToken == "" || cfg.defaultOrganization == "" {
 		return fmt.Errorf("%s token and organization key are required (--%s / --%s or target.token / target.default_organization in config file)", scCloudName, flagTargetToken, flagDefaultOrg)
+	}
+	// #571 — reject an out-of-range cap up front rather than silently
+	// clamping it deep inside the issue/hotspot sync.
+	if err := migrate.ValidateMaxIssueComments(cfg.maxIssueComments); err != nil {
+		return fmt.Errorf("--%s: %w", flagMaxIssueComments, err)
 	}
 	return nil
 }
@@ -254,6 +263,7 @@ func runSyncIssuesCmd(cmd *cobra.Command, _ []string) error {
 		ProjectKeys:         cfg.projectKeys,
 		Debug:               cfg.debug,
 		FastSync:            cfg.fastSync,
+		MaxIssueComments:    cfg.maxIssueComments,
 	})
 	if err != nil {
 		return fmt.Errorf("sync-issues failed: %w", err)
