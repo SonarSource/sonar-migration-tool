@@ -345,3 +345,107 @@ func copyExportDir(t *testing.T, src string) string {
 	}
 	return dst
 }
+
+// TestTier1_InsecureSkipsCertVerification covers the --insecure flag (#586):
+// a locally-hosted SonarQube Server whose TLS certificate is not signed by a
+// trusted CA. httptest.NewTLSServer reproduces that exactly — it presents a
+// certificate from its own throwaway CA, which is in no system trust store.
+//
+// Unlike the rest of Tier 1 this test needs no real source server and no
+// credentials: the fake server below answers the two endpoints extract calls
+// before anything else (version, then edition), which is all that is needed
+// to prove whether the TLS handshake succeeded.
+//
+// Both directions are asserted. The "rejected by default" half is the one
+// that matters most: it proves --insecure cannot silently become the default
+// and quietly disable certificate checking for every user.
+func TestTier1_InsecureSkipsCertVerification(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/server/version", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("2025.1.0.0"))
+	})
+	mux.HandleFunc("GET /api/system/info", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"edition": "developer"})
+	})
+	srv := httptest.NewTLSServer(mux)
+	defer srv.Close()
+
+	// The token is a throwaway string, never a real credential: the fake
+	// server above accepts any Authorization header.
+	configPath := filepath.Join(t.TempDir(), "insecure-config.json")
+	body := `{"source": {"url": "` + srv.URL + `", "token": "smoke-not-a-real-token"},
+	          "target": {"url": "https://example.invalid", "token": "smoke-not-a-real-token",
+	                     "default_organization": "smoke-org"}}`
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	// versionStepFailure is how extract reports a source connection it could
+	// not complete — initClient wraps detectVersion's error with it. Its
+	// presence or absence is the signal this test reads.
+	const versionStepFailure = "detecting server version"
+
+	// insecureWarningText is the operator-facing warning --insecure emits.
+	// It is matched on its own, and stripped before scanning for
+	// certificate errors, because the warning legitimately contains the
+	// word "certificate" and would otherwise match as a failure.
+	const insecureWarningText = "TLS certificate verification is disabled"
+
+	t.Run("rejected_by_default", func(t *testing.T) {
+		defer track(t, "1", "insecure_rejected_by_default")()
+
+		res := runCLI(t, "extract",
+			"--config", configPath,
+			"--export_directory", t.TempDir())
+		if res.exitCode == 0 {
+			t.Fatalf("extract against an untrusted certificate must fail without --insecure, got exit 0\n%s", res.combined())
+		}
+		out := res.combined()
+		if !strings.Contains(out, versionStepFailure) {
+			t.Errorf("expected the failure to come from the source connection (%q), got:\n%s", versionStepFailure, out)
+		}
+		// Either spelling is the stdlib's; assert on both rather than
+		// pinning one exact Go error string.
+		if !strings.Contains(out, "certificate") && !strings.Contains(out, "x509") {
+			t.Errorf("expected a certificate-verification error, got:\n%s", out)
+		}
+	})
+
+	t.Run("accepted_with_insecure", func(t *testing.T) {
+		defer track(t, "1", "insecure_accepted_with_flag")()
+
+		res := runCLI(t, "extract",
+			"--config", configPath,
+			"--export_directory", t.TempDir(),
+			"--insecure")
+		out := res.combined()
+		// The run is not expected to complete: the fake server serves only
+		// the first two endpoints. What must be true is that the source
+		// connection itself is no longer the thing that fails.
+		if strings.Contains(out, versionStepFailure) {
+			t.Errorf("--insecure must let the source connection through, but it still failed at %q:\n%s", versionStepFailure, out)
+		}
+		if errs := withoutInsecureWarning(out, insecureWarningText); strings.Contains(errs, "certificate") || strings.Contains(errs, "x509") {
+			t.Errorf("--insecure must suppress certificate verification, got:\n%s", out)
+		}
+		// The warning is the operator's only signal that verification is
+		// off, so it is part of the contract, not incidental logging.
+		if !strings.Contains(out, insecureWarningText) {
+			t.Errorf("expected a warning that verification is disabled, got:\n%s", out)
+		}
+	})
+}
+
+// withoutInsecureWarning drops the lines carrying --insecure's own warning,
+// so a scan for certificate errors is not satisfied by the warning text
+// itself.
+func withoutInsecureWarning(out, warning string) string {
+	lines := strings.Split(out, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if !strings.Contains(line, warning) {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
+}

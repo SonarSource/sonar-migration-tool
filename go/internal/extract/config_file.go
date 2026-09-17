@@ -35,6 +35,7 @@ type configFileShape struct {
 	PEMFilePath              string `json:"pem_file_path"`
 	KeyFilePath              string `json:"key_file_path"`
 	CertPassword             string `json:"cert_password"`
+	Insecure                 bool   `json:"insecure"` // #586
 	Concurrency              int    `json:"concurrency"`
 	Timeout                  int    `json:"timeout"`
 	ExtractID                string `json:"extract_id"`
@@ -91,6 +92,7 @@ type unifiedSourceBlock struct {
 	PEMFilePath     string `json:"pem_file_path"`
 	KeyFilePath     string `json:"key_file_path"`
 	CertPassword    string `json:"cert_password"`
+	Insecure        bool   `json:"insecure"` // #586
 	TargetTask      string `json:"target_task"`
 	ExtractID       string `json:"extract_id"`
 	EnterpriseKey   string `json:"enterprise_key"`   // provisional, ignored
@@ -161,6 +163,7 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 			cfg.PEMFilePath = s.Source.PEMFilePath
 			cfg.KeyFilePath = s.Source.KeyFilePath
 			cfg.CertPassword = s.Source.CertPassword
+			cfg.Insecure = s.Source.Insecure
 			cfg.TargetTask = s.Source.TargetTask
 			cfg.ExtractID = s.Source.ExtractID
 			cfg.Concurrency = s.Source.Concurrency
@@ -216,6 +219,7 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		cfg.PEMFilePath = s.PEMFilePath
 		cfg.KeyFilePath = s.KeyFilePath
 		cfg.CertPassword = s.CertPassword
+		cfg.Insecure = s.Insecure
 		cfg.Concurrency = s.Concurrency
 		cfg.Timeout = s.Timeout
 		cfg.ExtractID = s.ExtractID

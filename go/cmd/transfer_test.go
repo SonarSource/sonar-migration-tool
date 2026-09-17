@@ -69,6 +69,7 @@ func newTransferTestCmd() *cobra.Command {
 	f.String(flagPEMFilePath, "", "")
 	f.String(flagKeyFilePath, "", "")
 	f.String(flagCertPassword, "", "")
+	f.Bool(flagInsecure, false, "")
 	f.Bool(flagDebug, false, "")
 	f.Bool(flagFastSync, false, "")
 	// #554 — history flags. Without these registered the harness stops
@@ -765,5 +766,55 @@ func TestResolveTransferProjectKeys_NoMatchIsAnError(t *testing.T) {
 	}
 	if !contains(err.Error(), "BANKING_.+") {
 		t.Errorf("error %q should name the pattern", err.Error())
+	}
+}
+
+// #586 — --insecure flows from the config file's source block and from the
+// CLI, and (unlike the one-way --skip_* opt-outs) an explicit
+// --insecure=false on the CLI turns a config-file "insecure": true back off.
+func TestResolveTransferConfig_InsecureFlag(t *testing.T) {
+	cfgWith := func(t *testing.T, insecure string) string {
+		t.Helper()
+		return writeTransferConfig(t, `{
+			"source": {"url": "u", "token": "t", "insecure": `+insecure+`},
+			"target": {"token": "tt", "default_organization": "org"}
+		}`)
+	}
+
+	cases := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"absent everywhere", []string{}, false},
+		{"CLI only", []string{"--" + flagInsecure}, true},
+		{"config file only", []string{"-c", "CFG_TRUE"}, true},
+		{"config false, CLI true", []string{"-c", "CFG_FALSE", "--" + flagInsecure}, true},
+		{"config true, CLI false", []string{"-c", "CFG_TRUE", "--" + flagInsecure + "=false"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			args := make([]string, len(tc.args))
+			copy(args, tc.args)
+			for i, a := range args {
+				switch a {
+				case "CFG_TRUE":
+					args[i] = cfgWith(t, "true")
+				case "CFG_FALSE":
+					args[i] = cfgWith(t, "false")
+				}
+			}
+			cmd := newTransferTestCmd()
+			if err := cmd.ParseFlags(args); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := resolveTransferConfig(cmd)
+			if err != nil {
+				t.Fatalf("resolveTransferConfig: %v", err)
+			}
+			if cfg.insecure != tc.want {
+				t.Errorf("insecure = %v, want %v", cfg.insecure, tc.want)
+			}
+		})
 	}
 }
