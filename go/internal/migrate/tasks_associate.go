@@ -639,7 +639,7 @@ func (a *projectSettingsApplier) propagateGlobalsToProjects(ctx context.Context)
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(cap(e.Sem))
+	g.SetLimit(e.ConcurrencyLimiter.Current())
 	for projLookupKey, pm := range projectKeyMap {
 		bucket := bucketByOrg[pm.OrgKey]
 		if len(bucket) == 0 {

@@ -599,7 +599,7 @@ func runSetGlobalSettings(ctx context.Context, e *Executor) error {
 
 	var mu sync.Mutex
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(cap(e.Sem))
+	g.SetLimit(e.ConcurrencyLimiter.Current())
 	for _, raw := range customized {
 		g.Go(func() error {
 			if gctx.Err() != nil {

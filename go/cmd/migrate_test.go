@@ -24,6 +24,7 @@ func newMigrateTestCmd() *cobra.Command {
 	f.String("edition", "", "")
 	f.String("run_id", "", "")
 	f.Int("concurrency", 0, "")
+	f.Int(flagAPIMaxRatePerMin, 0, "")
 	f.String("export_directory", "", "")
 	f.String("target_task", "", "")
 	f.Bool("skip_profiles", false, "")

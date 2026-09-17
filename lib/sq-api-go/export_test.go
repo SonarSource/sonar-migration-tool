@@ -110,3 +110,15 @@ type RateLimitGate struct {
 
 func (g *RateLimitGate) WaitIfBlocked(ctx context.Context)    { g.inner.waitIfBlocked(ctx) }
 func (g *RateLimitGate) Extend(until time.Time) time.Duration { return g.inner.extend(until) }
+
+// NewSlidingWindowLimiterWithWindow exposes the internal window-shrinking
+// constructor so tests can exercise SlidingWindowLimiter's behavior
+// without waiting out a real 60-second window.
+func NewSlidingWindowLimiterWithWindow(maxPerMinute int, window time.Duration) *SlidingWindowLimiter {
+	return newSlidingWindowLimiter(maxPerMinute, window)
+}
+
+// NewThrottleTransport exposes throttleTransport for testing.
+func NewThrottleTransport(inner http.RoundTripper, limiter *SlidingWindowLimiter, observer LatencyObserver) http.RoundTripper {
+	return &throttleTransport{inner: inner, limiter: limiter, observer: observer}
+}

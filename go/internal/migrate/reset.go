@@ -23,13 +23,22 @@ import (
 
 // ResetConfig holds parameters for a reset run.
 type ResetConfig struct {
-	Token           string
-	EnterpriseKey   string
-	Edition         string
-	URL             string
-	Concurrency     int
-	ExportDirectory string
-	Debug           bool
+	Token         string
+	EnterpriseKey string
+	Edition       string
+	URL           string
+	Concurrency   int
+	// ConcurrencyExplicit records whether Concurrency was explicitly set
+	// (before applyDefaults fills in the default) — see
+	// MigrateConfig.ConcurrencyExplicit (#573).
+	ConcurrencyExplicit bool
+	// APIMaxRatePerMin caps sustained SonarQube Cloud API calls/min and,
+	// when Concurrency was not explicitly set, is the target rate the
+	// dynamic ConcurrencyLimiter aims for (#573). See
+	// MigrateConfig.APIMaxRatePerMin.
+	APIMaxRatePerMin int
+	ExportDirectory  string
+	Debug            bool
 
 	// ConfirmedOrgs is the operator-confirmed subset of mapped
 	// SonarCloud organizations to actually wipe (#381). Populated by
@@ -82,7 +91,14 @@ func RunReset(ctx context.Context, cfg ResetConfig) error {
 	// exit path — success or any of the validate/plan/execute errors.
 	defer common.LogCommandDuration(logger, "reset", cmdStart)
 
-	var clientOpts []sqapi.Option
+	// One SlidingWindowLimiter and one ConcurrencyLimiter shared across
+	// both cloudClient and apiClient below — see newMigrateClients (#573).
+	concurrencyLimiter := newConcurrencyLimiter(cfg.Concurrency, cfg.ConcurrencyExplicit, cfg.APIMaxRatePerMin, logger)
+	apiRateLimiter := sqapi.NewSlidingWindowLimiter(cfg.APIMaxRatePerMin)
+	clientOpts := []sqapi.Option{
+		sqapi.WithAPIRateLimiter(apiRateLimiter),
+		sqapi.WithLatencyObserver(concurrencyLimiter.Observe),
+	}
 	if cfg.Debug {
 		clientOpts = append(clientOpts, sqapi.WithDebugLogger(common.NewHTTPDebugLogger(logger)))
 	}
@@ -137,22 +153,27 @@ func RunReset(ctx context.Context, cfg ResetConfig) error {
 	store := common.NewDataStore(runDir)
 
 	executor := &Executor{
-		Cloud:     cc,
-		CloudAPI:  apiCC,
-		Raw:       raw,
-		RawAPI:    rawAPI,
-		Store:     store,
-		CloudURL:  cloudClient.BaseURL(),
-		APIURL:    apiClient.BaseURL(),
-		EntKey:    cfg.EnterpriseKey,
-		Edition:   edition,
-		ExportDir: cfg.ExportDirectory,
-		Sem:       make(chan struct{}, cfg.Concurrency),
-		Logger:    logger,
+		Cloud:              cc,
+		CloudAPI:           apiCC,
+		Raw:                raw,
+		RawAPI:             rawAPI,
+		Store:              store,
+		CloudURL:           cloudClient.BaseURL(),
+		APIURL:             apiClient.BaseURL(),
+		EntKey:             cfg.EnterpriseKey,
+		Edition:            edition,
+		ExportDir:          cfg.ExportDirectory,
+		ConcurrencyLimiter: concurrencyLimiter,
+		Logger:             logger,
 	}
 	if len(cfg.ConfirmedOrgs) > 0 {
 		executor.ResetConfirmedOrgs = toSet(cfg.ConfirmedOrgs)
 	}
+
+	// Dynamic concurrency re-evaluation (#573) — no-op when ConcurrencyLimiter
+	// is fixed (--concurrency was explicitly set).
+	executor.ConcurrencyLimiter.Start(ctx, 30*time.Second)
+	defer executor.ConcurrencyLimiter.Stop()
 
 	for i, phase := range plan {
 		logger.Info("starting phase", "phase", i+1, "tasks", len(phase))
@@ -243,8 +264,14 @@ func runResetPhase(ctx context.Context, e *Executor, taskNames []string, registr
 }
 
 func (cfg *ResetConfig) applyDefaults() {
+	// Captured before defaulting Concurrency below — see
+	// MigrateConfig.applyDefaults (#573).
+	cfg.ConcurrencyExplicit = cfg.Concurrency > 0
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 25
+	}
+	if cfg.APIMaxRatePerMin <= 0 {
+		cfg.APIMaxRatePerMin = 1500
 	}
 	if cfg.ExportDirectory == "" {
 		cfg.ExportDirectory = "/app/files/"

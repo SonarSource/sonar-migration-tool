@@ -170,9 +170,9 @@ func TestForEachMigrateItem(t *testing.T) {
 	})
 
 	e := &Executor{
-		Store:  store,
-		Sem:    make(chan struct{}, 5),
-		Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		Store:              store,
+		ConcurrencyLimiter: NewFixedConcurrencyLimiter(5),
+		Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 	}
 
 	var count atomic.Int32
@@ -207,9 +207,9 @@ func TestForEachMigrateItemSerial(t *testing.T) {
 	})
 
 	e := &Executor{
-		Store:  store,
-		Sem:    make(chan struct{}, 8),
-		Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		Store:              store,
+		ConcurrencyLimiter: NewFixedConcurrencyLimiter(8),
+		Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 	}
 
 	var (
@@ -264,9 +264,9 @@ func TestForEachMigrateItemFiltered(t *testing.T) {
 	})
 
 	e := &Executor{
-		Store:  store,
-		Sem:    make(chan struct{}, 5),
-		Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		Store:              store,
+		ConcurrencyLimiter: NewFixedConcurrencyLimiter(5),
+		Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 	}
 
 	var keys []string
@@ -296,11 +296,11 @@ func TestForEachExtractItem(t *testing.T) {
 	os.MkdirAll(filepath.Join(dir, "run-test"), 0o755)
 
 	e := &Executor{
-		Store:     store,
-		ExportDir: dir,
-		Mapping:   structure.ExtractMapping{testServerURL: "extract-01"},
-		Sem:       make(chan struct{}, 5),
-		Logger:    slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		Store:              store,
+		ExportDir:          dir,
+		Mapping:            structure.ExtractMapping{testServerURL: "extract-01"},
+		ConcurrencyLimiter: NewFixedConcurrencyLimiter(5),
+		Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 	}
 
 	var count int
@@ -459,7 +459,7 @@ func TestRunProjectSyncLoop(t *testing.T) {
 	t.Run("issue sync cadence at every 20", func(t *testing.T) {
 		var buf bytes.Buffer
 		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-		e := &Executor{Sem: make(chan struct{}, 4), Logger: logger}
+		e := &Executor{ConcurrencyLimiter: NewFixedConcurrencyLimiter(4), Logger: logger}
 
 		items := make([]int, 40)
 		var applied atomic.Int64
@@ -485,7 +485,7 @@ func TestRunProjectSyncLoop(t *testing.T) {
 	t.Run("issue sync label carries project key (#348)", func(t *testing.T) {
 		var buf bytes.Buffer
 		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-		e := &Executor{Sem: make(chan struct{}, 4), Logger: logger}
+		e := &Executor{ConcurrencyLimiter: NewFixedConcurrencyLimiter(4), Logger: logger}
 
 		const cloudKey = "myorg_some_project_key"
 		label := "Project key " + cloudKey + " issue sync:"
@@ -503,7 +503,7 @@ func TestRunProjectSyncLoop(t *testing.T) {
 	t.Run("hotspot sync cadence at every 10", func(t *testing.T) {
 		var buf bytes.Buffer
 		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-		e := &Executor{Sem: make(chan struct{}, 4), Logger: logger}
+		e := &Executor{ConcurrencyLimiter: NewFixedConcurrencyLimiter(4), Logger: logger}
 
 		items := make([]int, 30)
 		runProjectSyncLoop(context.Background(), e, items, "Hotspot sync:", 10,
@@ -521,7 +521,7 @@ func TestRunProjectSyncLoop(t *testing.T) {
 	t.Run("cancelled context short-circuits remaining work", func(t *testing.T) {
 		var buf bytes.Buffer
 		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-		e := &Executor{Sem: make(chan struct{}, 1), Logger: logger}
+		e := &Executor{ConcurrencyLimiter: NewFixedConcurrencyLimiter(1), Logger: logger}
 
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel() // pre-cancel so every goroutine sees gctx.Err() != nil
@@ -539,7 +539,7 @@ func TestRunProjectSyncLoop(t *testing.T) {
 	t.Run("empty input does not panic", func(t *testing.T) {
 		var buf bytes.Buffer
 		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-		e := &Executor{Sem: make(chan struct{}, 4), Logger: logger}
+		e := &Executor{ConcurrencyLimiter: NewFixedConcurrencyLimiter(4), Logger: logger}
 		runProjectSyncLoop(context.Background(), e, []int{}, "Issue sync:", 20,
 			func(_ context.Context, _ int) { t.Fatal("apply should not be called") })
 	})

@@ -259,7 +259,7 @@ func forEachMigrateItemFiltered(ctx context.Context, e *Executor, taskName, depT
 	fn func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error) error {
 
 	return forEachMigrateItemImpl(ctx, e, migrateItemLoop{
-		taskName: taskName, depTask: depTask, filterFn: filterFn, concurrency: cap(e.Sem),
+		taskName: taskName, depTask: depTask, filterFn: filterFn, concurrency: e.ConcurrencyLimiter.Current(),
 	}, fn)
 }
 
@@ -273,7 +273,7 @@ func forEachMigrateItemTransformed(ctx context.Context, e *Executor, taskName, d
 	fn func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error) error {
 
 	return forEachMigrateItemImpl(ctx, e, migrateItemLoop{
-		taskName: taskName, depTask: depTask, transformFn: transformFn, concurrency: cap(e.Sem),
+		taskName: taskName, depTask: depTask, transformFn: transformFn, concurrency: e.ConcurrencyLimiter.Current(),
 	}, fn)
 }
 
@@ -306,7 +306,7 @@ type migrateItemLoop struct {
 
 // forEachMigrateItemImpl is the shared body that backs the concurrent and
 // serial migrate iterators. loop.concurrency is the errgroup limit (1 to
-// serialize, cap(e.Sem) for the default fan-out).
+// serialize, e.ConcurrencyLimiter.Current() for the default fan-out).
 func forEachMigrateItemImpl(ctx context.Context, e *Executor, loop migrateItemLoop,
 	fn func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error) error {
 
@@ -382,7 +382,7 @@ func forEachExtractItem(ctx context.Context, e *Executor, taskName, extractKey s
 	}
 
 	g, ctx := errgroup.WithContext(ctx)
-	g.SetLimit(cap(e.Sem))
+	g.SetLimit(e.ConcurrencyLimiter.Current())
 	for _, item := range items {
 		g.Go(func() error {
 			if ctx.Err() != nil {
@@ -754,7 +754,7 @@ func (c *TaskCounter) LogSummary(logger *slog.Logger, duration time.Duration) {
 // helper covers both extract and migrate tasks).
 
 // runProjectSyncLoop applies fn concurrently to every item in items,
-// bounded by e.Sem, emitting a "<label> n/total - x%" progress line
+// bounded by e.ConcurrencyLimiter, emitting a "<label> n/total - x%" progress line
 // every `interval` completions (#300). Per-item errors are not
 // propagated — the caller's `apply` is responsible for logging and
 // counter bookkeeping. Used by syncProjectIssues / syncProjectHotspots
@@ -766,7 +766,7 @@ func runProjectSyncLoop[T any](
 ) {
 	prog := common.NewProgressLoggerWithInterval(e.Logger, label, len(items), interval)
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(cap(e.Sem))
+	g.SetLimit(e.ConcurrencyLimiter.Current())
 	for _, item := range items {
 		g.Go(func() error {
 			if gctx.Err() != nil {

@@ -28,6 +28,11 @@ organization keys to organizations.csv.`,
 		if err != nil {
 			return err
 		}
+		if err := validateAPIMaxRatePerMin(cfg.APIMaxRatePerMin); err != nil {
+			return err
+		}
+		// migrate's target is always SonarQube Cloud (#573).
+		warnIfConcurrencyDeprecated(cmd)
 		if cfg.Token == "" || cfg.EnterpriseKey == "" {
 			return fmt.Errorf("TOKEN and ENTERPRISE_KEY are required (--target_token/--enterprise_key flags or in config file)")
 		}
@@ -63,7 +68,12 @@ func init() {
 	_ = f.MarkDeprecated("url", "use --target_url instead")
 	_ = f.MarkDeprecated("token", "use --target_token instead")
 	f.String("run_id", "", "ID of a run to resume in case of failures")
-	f.Int("concurrency", 0, "Maximum number of concurrent requests")
+	f.Int("concurrency", 0, "Maximum number of concurrent requests. Deprecated (#573): "+
+		"still honored as a fixed value, but use --"+flagAPIMaxRatePerMin+" instead to auto-adjust to observed SonarQube Cloud API latency.")
+	f.Int(flagAPIMaxRatePerMin, 0, fmt.Sprintf(
+		"Max sustained SonarQube Cloud API calls/min, as a sliding window (default: 1500, valid range [%d,%d]). "+
+			"Concurrency is dynamically adjusted to approach this rate without exceeding it (#573).",
+		minAPIMaxRatePerMin, maxAPIMaxRatePerMin))
 	f.Int("project_data_build_concurrency", 0, "Maximum number of scanner reports built at once during project-data migration (default 4). Lower this if the migration runs out of memory on a large instance; raise it toward --concurrency if report building is the bottleneck.")
 	f.Int("timeout", 0, "Per-HTTP-request timeout in seconds (default: 60). Maps to the top-level timeout config field.")
 	f.String("export_directory", "", "Root directory containing all SonarQube exports")
@@ -110,6 +120,7 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	overrideString(cmd, "default_organization", &cfg.DefaultOrganization)
 	overrideString(cmd, "project_key_pattern", &cfg.ProjectKeyPattern)
 	overrideInt(cmd, "concurrency", &cfg.Concurrency)
+	overrideInt(cmd, flagAPIMaxRatePerMin, &cfg.APIMaxRatePerMin)
 	overrideInt(cmd, "project_data_build_concurrency", &cfg.BuildConcurrency)
 	overrideInt(cmd, "timeout", &cfg.Timeout)
 	overrideInt(cmd, flagMaxIssueComments, &cfg.MaxIssueComments)

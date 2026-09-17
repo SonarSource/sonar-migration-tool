@@ -66,6 +66,20 @@ type MigrateConfig struct {
 	URL           string // Cloud URL (default: https://sonarcloud.io/)
 	RunID         string // Resume a prior run
 	Concurrency   int
+	// ConcurrencyExplicit records whether Concurrency was explicitly set by
+	// the caller (before applyDefaults fills in the default), i.e. whether
+	// --concurrency was passed on the CLI. When true, the Executor's
+	// ConcurrencyLimiter is fixed at Concurrency instead of dynamically
+	// adjusting to observed API latency (#573) — --concurrency is
+	// deprecated for SonarQube Cloud targets but still honored as a manual
+	// override.
+	ConcurrencyExplicit bool
+	// APIMaxRatePerMin caps sustained SonarQube Cloud API calls/min via a
+	// sliding-window limiter, and (when Concurrency was not explicitly set)
+	// is the target rate the dynamic ConcurrencyLimiter aims for (#573).
+	// <= 0 is resolved to 1500 by applyDefaults. Valid range enforced by
+	// the CLI layer is [100, 1500].
+	APIMaxRatePerMin int
 	// BuildConcurrency bounds concurrent scanner-report CONSTRUCTION during
 	// importProjectData, independently of Concurrency. See Executor.BuildSem.
 	BuildConcurrency int
@@ -180,19 +194,23 @@ type Executor struct {
 	Edition   common.Edition
 	ExportDir string // Root export directory
 	Mapping   structure.ExtractMapping
-	// Sem is a capacity carrier, NOT a semaphore. Nothing in this package
-	// ever sends to or receives from it; every reference reads cap(e.Sem)
-	// to size a per-task errgroup limit. Each task therefore gets its own
-	// independent limit rather than sharing one pool.
+	// ConcurrencyLimiter provides a live capacity figure, NOT a semaphore.
+	// Nothing in this package acquires or releases it; every reference
+	// reads ConcurrencyLimiter.Current() to size a per-task errgroup limit.
+	// Each task therefore gets its own independent limit rather than
+	// sharing one pool. Fixed --concurrency runs get a limiter whose
+	// Current() never changes; SonarQube Cloud runs otherwise get one that
+	// a background goroutine recalculates every 30s from observed API
+	// latency, targeting APIMaxRatePerMin calls/min (#573).
 	//
 	// Do not "fix" this by acquiring it. The fan-outs nest —
 	// runSyncIssueMetadata's forEachMigrateItem holds a slot for each of
 	// its 25 workers, and each of those calls runProjectSyncLoop, which
 	// limits on the same capacity. On one shared counting semaphore the
 	// outer holders would take every slot and no inner work could ever
-	// acquire: a permanent deadlock. Making it real requires restructuring
-	// the nested fan-outs first.
-	Sem chan struct{}
+	// acquire: a permanent deadlock. Making it a real semaphore requires
+	// restructuring the nested fan-outs first.
+	ConcurrencyLimiter *ConcurrencyLimiter
 	// BuildSem bounds concurrent scanner-report CONSTRUCTION, which is the
 	// memory-heavy part of importProjectData: a branch's full source text,
 	// its protobufs and the packaged ZIP are all live at once.
@@ -364,7 +382,7 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 		Edition:              mp.Edition,
 		ExportDir:            cfg.ExportDirectory,
 		Mapping:              mp.Mapping,
-		Sem:                  make(chan struct{}, cfg.Concurrency),
+		ConcurrencyLimiter:   clients.ConcurrencyLimiter,
 		BuildSem:             make(chan struct{}, cfg.BuildConcurrency),
 		ExcludeBranches:      cfg.ExcludeBranches,
 		UnsupportedLanguages: cfg.UnsupportedLanguages,
@@ -398,6 +416,11 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 	executor.Progress.OnUpdate(cfg.ProgressCallback)
 	executor.Progress.Start(ctx, 10*time.Second)
 	defer executor.Progress.Stop()
+
+	// Dynamic concurrency re-evaluation (#573) — no-op when ConcurrencyLimiter
+	// is fixed (--concurrency was explicitly set).
+	executor.ConcurrencyLimiter.Start(ctx, 30*time.Second)
+	defer executor.ConcurrencyLimiter.Stop()
 
 	// Execute phases.
 	for i, phase := range phases {
@@ -441,13 +464,27 @@ func validateMigrateOrgs(ctx context.Context, cc *cloud.Client, cfg MigrateConfi
 // migrateClients bundles the Cloud API clients, raw readers, and
 // rate-limit tracker a migrate run wires together before executing tasks.
 type migrateClients struct {
-	Cloud            *cloud.Client
-	CloudAPI         *cloud.Client
-	Raw              *common.RawClient
-	RawAPI           *common.RawClient
-	CloudURL         string
-	APIURL           string
-	RateLimitTracker *RateLimitTracker
+	Cloud              *cloud.Client
+	CloudAPI           *cloud.Client
+	Raw                *common.RawClient
+	RawAPI             *common.RawClient
+	CloudURL           string
+	APIURL             string
+	RateLimitTracker   *RateLimitTracker
+	ConcurrencyLimiter *ConcurrencyLimiter
+}
+
+// newConcurrencyLimiter builds a ConcurrencyLimiter for a Cloud-facing
+// executor (migrate, reset, sync-issues): fixed at concurrency when the
+// caller explicitly set --concurrency (deprecated for Cloud targets but
+// still honored, #573), otherwise dynamic — starting at concurrency and
+// recalculating every 30s from observed API latency to target
+// apiMaxRatePerMin calls/min.
+func newConcurrencyLimiter(concurrency int, concurrencyExplicit bool, apiMaxRatePerMin int, logger *slog.Logger) *ConcurrencyLimiter {
+	if concurrencyExplicit {
+		return NewFixedConcurrencyLimiter(concurrency)
+	}
+	return NewDynamicConcurrencyLimiter(concurrency, apiMaxRatePerMin, logger)
 }
 
 // newMigrateClients builds the standard and enterprise Cloud API clients
@@ -482,11 +519,19 @@ func newMigrateClients(cfg MigrateConfig, logger *slog.Logger, reqLog *requestLo
 	rateLimitRecovery := func(_, _ string, retries int, waited time.Duration) {
 		rlEpisode.onResume(retries, waited)
 	}
+	// One SlidingWindowLimiter and one ConcurrencyLimiter shared across
+	// both cloudClient and apiClient below: both hosts share the same
+	// egress IP and therefore the same 8000-calls/5min SonarQube Cloud
+	// budget (#573).
+	concurrencyLimiter := newConcurrencyLimiter(cfg.Concurrency, cfg.ConcurrencyExplicit, cfg.APIMaxRatePerMin, logger)
+	apiRateLimiter := sqapi.NewSlidingWindowLimiter(cfg.APIMaxRatePerMin)
 	clientOpts := []sqapi.Option{
 		sqapi.WithTimeout(cfg.Timeout),
 		sqapi.WithRetryLogger(retryLog),
 		sqapi.WithRateLimitObserver(rateLimitObs),
 		sqapi.WithRateLimitRecoveryLogger(rateLimitRecovery),
+		sqapi.WithAPIRateLimiter(apiRateLimiter),
+		sqapi.WithLatencyObserver(concurrencyLimiter.Observe),
 	}
 	if reqLog != nil {
 		clientOpts = append(clientOpts, sqapi.WithRequestLogger(reqLog.Log))
@@ -498,13 +543,14 @@ func newMigrateClients(cfg MigrateConfig, logger *slog.Logger, reqLog *requestLo
 	apiClient := sqapi.NewCloudClient(apiURL, cfg.Token, clientOpts...)
 
 	return &migrateClients{
-		Cloud:            cloud.New(cloudClient),
-		CloudAPI:         cloud.New(apiClient),
-		Raw:              common.NewRawClient(cloudClient.HTTPClient(), cloudClient.BaseURL()),
-		RawAPI:           common.NewRawClient(apiClient.HTTPClient(), apiClient.BaseURL()),
-		CloudURL:         cloudClient.BaseURL(),
-		APIURL:           apiClient.BaseURL(),
-		RateLimitTracker: rateLimitTracker,
+		Cloud:              cloud.New(cloudClient),
+		CloudAPI:           cloud.New(apiClient),
+		Raw:                common.NewRawClient(cloudClient.HTTPClient(), cloudClient.BaseURL()),
+		RawAPI:             common.NewRawClient(apiClient.HTTPClient(), apiClient.BaseURL()),
+		CloudURL:           cloudClient.BaseURL(),
+		APIURL:             apiClient.BaseURL(),
+		RateLimitTracker:   rateLimitTracker,
+		ConcurrencyLimiter: concurrencyLimiter,
 	}
 }
 
@@ -634,19 +680,19 @@ func writeRateLimitArtifact(runDir string, tracker *RateLimitTracker, logger *sl
 }
 
 // maxConcurrentTasksPerPhase caps task-level fan-out within a phase.
-// Combined with the per-task limit of cap(e.Sem) this bounds total
-// in-flight requests at maxConcurrentTasksPerPhase * concurrency.
+// Combined with the per-task limit of e.ConcurrencyLimiter.Current() this
+// bounds total in-flight requests at maxConcurrentTasksPerPhase * concurrency.
 const maxConcurrentTasksPerPhase = 6
 
 func runPhase(ctx context.Context, e *Executor, taskNames []string, registry map[string]*TaskDef, phaseIdx int, tm *RunTimings) error {
 	phaseStart := time.Now()
 	g, ctx := errgroup.WithContext(ctx)
 	// Bound how many tasks in a phase run at once. Each task opens its
-	// own errgroup limited to cap(e.Sem), so an unbounded phase
-	// multiplies that by the task count — a 14-task phase at the default
-	// concurrency of 25 puts up to 350 requests in flight against one
-	// host. Tasks stay concurrent (they are few and mostly I/O bound),
-	// just not unboundedly so.
+	// own errgroup limited to e.ConcurrencyLimiter.Current(), so an
+	// unbounded phase multiplies that by the task count — a 14-task phase
+	// at the default concurrency of 25 puts up to 350 requests in flight
+	// against one host. Tasks stay concurrent (they are few and mostly
+	// I/O bound), just not unboundedly so.
 	g.SetLimit(maxConcurrentTasksPerPhase)
 	for _, name := range taskNames {
 		def := registry[name]
@@ -693,8 +739,15 @@ func runPhase(ctx context.Context, e *Executor, taskNames []string, registry map
 }
 
 func (cfg *MigrateConfig) applyDefaults() {
+	// Captured before defaulting Concurrency below, so ConcurrencyExplicit
+	// reflects whether the caller (CLI or config file) actually set
+	// --concurrency, not whether it ended up with a positive value (#573).
+	cfg.ConcurrencyExplicit = cfg.Concurrency > 0
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 25
+	}
+	if cfg.APIMaxRatePerMin <= 0 {
+		cfg.APIMaxRatePerMin = 1500
 	}
 	if cfg.BuildConcurrency <= 0 {
 		cfg.BuildConcurrency = DefaultBuildConcurrency

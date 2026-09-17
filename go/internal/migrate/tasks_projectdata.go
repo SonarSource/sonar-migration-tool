@@ -55,7 +55,7 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 	e.Progress.Registry().Register("importProjectData", prog)
 
 	g, gCtx := errgroup.WithContext(ctx)
-	g.SetLimit(cap(e.Sem))
+	g.SetLimit(e.ConcurrencyLimiter.Current())
 
 	for _, proj := range projects {
 		if isFailedMigrateRecord(proj) {
@@ -1043,30 +1043,30 @@ func classifyExternalIssue(data json.RawMessage) (scanreport.ExternalIssueInput,
 	}
 	impacts := extractImpactInputs(data, "impacts")
 	return scanreport.ExternalIssueInput{
-			EngineID:           engineID,
-			RuleID:             key,
-			Message:            extractField(data, "message"),
-			Severity:           severity,
-			Type:               issueType,
-			StartLine:          extractInt32(data, "textRange", "startLine"),
-			EndLine:            extractInt32(data, "textRange", "endLine"),
-			StartOff:           extractInt32(data, "textRange", "startOffset"),
-			EndOff:             extractInt32(data, "textRange", "endOffset"),
-			Component:          extractField(data, "component"),
-			CreationDate:       parseISODate(extractField(data, "creationDate")),
-			Effort:             effort,
-			CleanCodeAttribute: cleanCode,
-			Impacts:            impacts,
-		}, scanreport.AdHocRuleInput{
-			EngineID:           engineID,
-			RuleID:             key,
-			Name:               key,
-			Description:        fmt.Sprintf("Rule from %s plugin", engineID),
-			Severity:           severity,
-			Type:               issueType,
-			CleanCodeAttribute: cleanCode,
-			Impacts:            impacts,
-		}, true
+		EngineID:           engineID,
+		RuleID:             key,
+		Message:            extractField(data, "message"),
+		Severity:           severity,
+		Type:               issueType,
+		StartLine:          extractInt32(data, "textRange", "startLine"),
+		EndLine:            extractInt32(data, "textRange", "endLine"),
+		StartOff:           extractInt32(data, "textRange", "startOffset"),
+		EndOff:             extractInt32(data, "textRange", "endOffset"),
+		Component:          extractField(data, "component"),
+		CreationDate:       parseISODate(extractField(data, "creationDate")),
+		Effort:             effort,
+		CleanCodeAttribute: cleanCode,
+		Impacts:            impacts,
+	}, scanreport.AdHocRuleInput{
+		EngineID:           engineID,
+		RuleID:             key,
+		Name:               key,
+		Description:        fmt.Sprintf("Rule from %s plugin", engineID),
+		Severity:           severity,
+		Type:               issueType,
+		CleanCodeAttribute: cleanCode,
+		Impacts:            impacts,
+	}, true
 }
 
 // extractImpactInputs parses an MQR "impacts" array (e.g. from

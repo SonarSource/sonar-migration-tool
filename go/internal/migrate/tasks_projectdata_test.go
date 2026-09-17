@@ -458,11 +458,11 @@ func newProjectDataExecutor(t *testing.T, dir string) *Executor {
 	runDir := filepath.Join(dir, "run-test")
 	os.MkdirAll(runDir, 0o755)
 	return &Executor{
-		Store:     common.NewDataStore(runDir),
-		ExportDir: dir,
-		Mapping:   structure.ExtractMapping{testServerURL: "extract-01"},
-		Sem:       make(chan struct{}, 5),
-		Logger:    slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 1})),
+		Store:              common.NewDataStore(runDir),
+		ExportDir:          dir,
+		Mapping:            structure.ExtractMapping{testServerURL: "extract-01"},
+		ConcurrencyLimiter: NewFixedConcurrencyLimiter(5),
+		Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 1})),
 	}
 }
 

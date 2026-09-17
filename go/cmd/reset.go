@@ -42,6 +42,11 @@ var resetCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		if err := validateAPIMaxRatePerMin(cfg.APIMaxRatePerMin); err != nil {
+			return err
+		}
+		// reset's target is always SonarQube Cloud (#573).
+		warnIfConcurrencyDeprecated(cmd)
 		if cfg.Token == "" || cfg.EnterpriseKey == "" {
 			return fmt.Errorf("TOKEN and ENTERPRISE_KEY are required (either as arguments or in config file)")
 		}
@@ -94,7 +99,12 @@ func init() {
 	// Deprecated alias (#406): kept so existing scripts keep working.
 	f.String("url", "https://sonarcloud.io/", "")
 	_ = f.MarkDeprecated("url", "use --target_url instead")
-	f.Int("concurrency", 25, "Maximum number of concurrent requests")
+	f.Int("concurrency", 25, "Maximum number of concurrent requests. Deprecated (#573): "+
+		"still honored as a fixed value, but use --"+flagAPIMaxRatePerMin+" instead to auto-adjust to observed SonarQube Cloud API latency.")
+	f.Int(flagAPIMaxRatePerMin, 0, fmt.Sprintf(
+		"Max sustained SonarQube Cloud API calls/min, as a sliding window (default: 1500, valid range [%d,%d]). "+
+			"Concurrency is dynamically adjusted to approach this rate without exceeding it (#573).",
+		minAPIMaxRatePerMin, maxAPIMaxRatePerMin))
 	f.String("export_directory", DefaultExportDirectory, "Directory to place all interim files")
 	f.Bool(flagResetYes, false, "Skip the interactive confirmation prompt and reset every listed organization (intended for non-interactive / scripted use). #381.")
 	f.String(flagResetOrganization, "", "Regexp (anchored full-match) narrowing the candidate organizations to reset to those whose sonarcloud_org_key matches, applied before the confirmation prompt / --yes. E.g. \"BANKING_.+\" matches every org key starting with BANKING_. #550.")
@@ -128,6 +138,7 @@ func buildResetConfig(cmd *cobra.Command, args []string) (migrate.ResetConfig, e
 	overrideString(cmd, flagTargetURL, &cfg.URL)
 	overrideString(cmd, "export_directory", &cfg.ExportDirectory)
 	overrideInt(cmd, "concurrency", &cfg.Concurrency)
+	overrideInt(cmd, flagAPIMaxRatePerMin, &cfg.APIMaxRatePerMin)
 	if cmd.Flags().Changed("debug") {
 		cfg.Debug, _ = cmd.Flags().GetBool("debug")
 	}

@@ -45,6 +45,7 @@ const (
 	flagSkipProjectDataMigration = "skip_project_data_migration"
 	flagFastSync                 = "fast_sync"
 	flagConcurrency              = "concurrency"
+	flagAPIMaxRatePerMin         = "api_max_rate_per_min"
 	flagTimeout                  = "timeout"
 	flagPEMFilePath              = "pem_file_path"
 	flagKeyFilePath              = "key_file_path"
@@ -57,6 +58,13 @@ const (
 	flagMigrateHistory         = "migrate_history"
 	flagHistoryMaxPoints       = "history_max_points"
 	flagHistoryMinIntervalDays = "history_min_interval_days"
+
+	// #573 — SonarQube Cloud API rate limiting. minAPIMaxRatePerMin /
+	// maxAPIMaxRatePerMin bound --api_max_rate_per_min; out-of-range
+	// values abort the command (validateAPIMaxRatePerMin) rather than
+	// being clamped.
+	minAPIMaxRatePerMin = 100
+	maxAPIMaxRatePerMin = 1500
 )
 
 // transferTargetTasks is the explicit set of project-scoped "leaf" migrate
@@ -192,7 +200,13 @@ func init() {
 	f.Bool(flagSkipIssueSync, false, "Skip the final per-issue and per-hotspot metadata sync (#299). Same semantics as the skip_issue_sync config-file field — defaults to false (sync happens); pass the flag to skip.")
 	f.Bool(flagSkipProjectDataMigration, false, "Skip the entire project-data migration: importProjectData and the trailing per-issue/per-hotspot sync (#303). Defaults to false (data is migrated); pass the flag to skip.")
 	f.Bool(flagFastSync, false, "Skip tagging and back-linking hotspots/issues with zero user changes on the source (original state, no comments, no custom tags). Defaults to false (every hotspot is tagged and back-linked). #527.")
-	f.Int(flagConcurrency, 0, "Max concurrent requests, applied to both source and target (default: 25). Use source.concurrency / target.concurrency in the config file to set them independently.")
+	f.Int(flagConcurrency, 0, "Max concurrent requests, applied to both source and target (default: 25). Deprecated for the "+scCloudName+" target (#573): "+
+		"still honored as a fixed value, but use --"+flagAPIMaxRatePerMin+" instead to let the target side auto-adjust to observed API latency. "+
+		"Use source.concurrency / target.concurrency in the config file to set them independently.")
+	f.Int(flagAPIMaxRatePerMin, 0, fmt.Sprintf(
+		"Max sustained %s API calls/min for the target side, as a sliding window (default: 1500, valid range [%d,%d]). "+
+			"Concurrency on the target side is dynamically adjusted to approach this rate without exceeding it (#573).",
+		scCloudName, minAPIMaxRatePerMin, maxAPIMaxRatePerMin))
 	f.Int(flagTimeout, 0, "HTTP request timeout in seconds, applied to both source and target (default: 60). Use source.timeout / target.timeout in the config file to set them independently.")
 	f.String(flagPEMFilePath, "", "Path to client mTLS PEM file for the source server (maps to source.pem_file_path)")
 	f.String(flagKeyFilePath, "", "Path to client mTLS key file for the source server (maps to source.key_file_path)")
@@ -211,18 +225,22 @@ func init() {
 
 // transferConfig holds the resolved configuration after merging file and flag values.
 type transferConfig struct {
-	sourceURL                string
-	sourceToken              string
-	projectKey               string
-	targetURL                string
-	targetToken              string
-	defaultOrganization      string
-	projectKeyPattern        string
-	enterpriseKey            string
-	edition                  string
-	exportDir                string
-	sourceConcurrency        int
-	targetConcurrency        int
+	sourceURL           string
+	sourceToken         string
+	projectKey          string
+	targetURL           string
+	targetToken         string
+	defaultOrganization string
+	projectKeyPattern   string
+	enterpriseKey       string
+	edition             string
+	exportDir           string
+	sourceConcurrency   int
+	targetConcurrency   int
+	// targetAPIMaxRatePerMin — see MigrateConfig.APIMaxRatePerMin (#573).
+	// Only the target side is Cloud-facing; the source (extract) side has
+	// no equivalent.
+	targetAPIMaxRatePerMin   int
 	sourceTimeout            int
 	targetTimeout            int
 	pemFilePath              string
@@ -300,6 +318,35 @@ func resolveSourceTargetRates(extractCfg extract.ExtractConfig, migrateCfg migra
 func applyFlagBool(cmd *cobra.Command, name string, target *bool) {
 	if cmd.Flags().Changed(name) {
 		*target, _ = cmd.Flags().GetBool(name)
+	}
+}
+
+// validateAPIMaxRatePerMin enforces #573's [minAPIMaxRatePerMin,
+// maxAPIMaxRatePerMin] bound on --api_max_rate_per_min. 0 means "unset" —
+// migrate.MigrateConfig.applyDefaults (and its ResetConfig/SyncIssuesConfig
+// counterparts) fill in 1500 — and is not an error. An out-of-range value
+// aborts the command outright, matching the issue's "trigger a warning and
+// abort" requirement, rather than silently clamping to the nearest bound.
+func validateAPIMaxRatePerMin(v int) error {
+	if v == 0 {
+		return nil
+	}
+	if v < minAPIMaxRatePerMin || v > maxAPIMaxRatePerMin {
+		return fmt.Errorf("--%s must be between %d and %d (got %d)", flagAPIMaxRatePerMin, minAPIMaxRatePerMin, maxAPIMaxRatePerMin, v)
+	}
+	return nil
+}
+
+// warnIfConcurrencyDeprecated logs once when --concurrency is passed
+// against a SonarQube Cloud target (#573: migrate, transfer, sync-issues,
+// reset all target Cloud). The value is still honored as a fixed
+// concurrency override — see MigrateConfig.ConcurrencyExplicit — this only
+// warns that it no longer auto-adjusts to observed API latency the way
+// --api_max_rate_per_min does.
+func warnIfConcurrencyDeprecated(cmd *cobra.Command) {
+	if cmd.Flags().Changed(flagConcurrency) {
+		slog.Default().Warn("--" + flagConcurrency + " is deprecated for SonarQube Cloud targets; use --" + flagAPIMaxRatePerMin +
+			" instead. --" + flagConcurrency + " is still honored as a fixed concurrency but will not auto-adjust to API latency.")
 	}
 }
 
@@ -407,6 +454,7 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 	applyFlagString(cmd, flagEdition, &cfg.edition)
 	applyFlagString(cmd, flagExportDir, &cfg.exportDir)
 	applyFlagIntBothSides(cmd, flagConcurrency, &cfg.sourceConcurrency, &cfg.targetConcurrency)
+	applyFlagInt(cmd, flagAPIMaxRatePerMin, &cfg.targetAPIMaxRatePerMin)
 	applyFlagIntBothSides(cmd, flagTimeout, &cfg.sourceTimeout, &cfg.targetTimeout)
 	applyFlagString(cmd, flagPEMFilePath, &cfg.pemFilePath)
 	applyFlagString(cmd, flagKeyFilePath, &cfg.keyFilePath)
@@ -489,6 +537,9 @@ func validateTransferConfig(cfg transferConfig) error {
 	if err := migrate.ValidateMaxIssueComments(cfg.maxIssueComments); err != nil {
 		return fmt.Errorf("--%s: %w", flagMaxIssueComments, err)
 	}
+	if err := validateAPIMaxRatePerMin(cfg.targetAPIMaxRatePerMin); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -515,6 +566,8 @@ func runTransfer(cmd *cobra.Command, _ []string) error {
 	if err := validateTransferConfig(cfg); err != nil {
 		return err
 	}
+	// Transfer's target is always SonarQube Cloud (#573).
+	warnIfConcurrencyDeprecated(cmd)
 
 	ctx := cmd.Context()
 
@@ -704,13 +757,14 @@ func runTransferMigrate(ctx context.Context, cfg transferConfig) (string, error)
 	// cfg.defaultOrganization, so passing it again would trigger the
 	// "mapping defined, default ignored" WARN in applyOrgMapping.
 	runID, err := migrate.RunMigrate(ctx, migrate.MigrateConfig{
-		URL:             cfg.targetURL,
-		Token:           cfg.targetToken,
-		EnterpriseKey:   cfg.enterpriseKey,
-		Edition:         cfg.edition,
-		ExportDirectory: cfg.exportDir,
-		Concurrency:     cfg.targetConcurrency,
-		Timeout:         cfg.targetTimeout,
+		URL:              cfg.targetURL,
+		Token:            cfg.targetToken,
+		EnterpriseKey:    cfg.enterpriseKey,
+		Edition:          cfg.edition,
+		ExportDirectory:  cfg.exportDir,
+		Concurrency:      cfg.targetConcurrency,
+		APIMaxRatePerMin: cfg.targetAPIMaxRatePerMin,
+		Timeout:          cfg.targetTimeout,
 		// Project-scoped migration: run only the leaf tasks for the project,
 		// its quality gate/profiles, permissions, and issue/hotspot history.
 		// Their dependencies are resolved automatically.
