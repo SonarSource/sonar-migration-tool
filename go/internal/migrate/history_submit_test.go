@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -24,6 +25,15 @@ import (
 	pb "github.com/sonar-solutions/sonar-migration-tool/internal/scanreport/proto"
 	"google.golang.org/protobuf/proto"
 )
+
+// TestMain drives scanreport.CEPollInterval down to near-zero for the whole
+// package so tests that exercise PollCETask (via submitHistoricalSnapshot,
+// importBranch, ...) don't pay its real wall-clock delay on every poll
+// (#571; also see go/internal/scanreport/submit_test.go's withFastCEPoll).
+func TestMain(m *testing.M) {
+	scanreport.CEPollInterval = time.Millisecond
+	os.Exit(m.Run())
+}
 
 // --- shared fixtures for the migrate side of #554 -------------------------
 //
@@ -826,9 +836,7 @@ func histWantSuccessLog(t *testing.T, logged, wantTaskID string) {
 // with the SOURCE analysis date, not "now", and must declare the target
 // organization's own quality profile key.
 //
-// This test costs ~5s: scanreport.PollCETask sleeps 5 real seconds before its
-// first poll and has no injectable clock. It is deliberately the only
-// successful submission in this file.
+// It is deliberately the only successful submission in this file.
 func TestSubmitHistoricalSnapshotBackdatedReport(t *testing.T) {
 	rec := newHistRecorder()
 	mux := http.NewServeMux()
@@ -935,8 +943,7 @@ func TestSubmitHistoricalSnapshotSubmitFailure(t *testing.T) {
 
 // TestSubmitHistoricalSnapshotCETaskFailure pins that a report the CE accepts
 // but then fails to process is reported as an error rather than silently
-// counting as a migrated point. Costs ~5s (PollCETask's fixed first-poll
-// delay).
+// counting as a migrated point.
 func TestSubmitHistoricalSnapshotCETaskFailure(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/ce/submit", func(w http.ResponseWriter, _ *http.Request) {

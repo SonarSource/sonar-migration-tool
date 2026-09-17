@@ -728,7 +728,7 @@ func syncOneHotspotAsIssue(ctx context.Context, e *Executor, src matchableHotspo
 	syncComments := cat == hotspotCategoryEligible ||
 		(cat == hotspotCategoryAcknowledged && hotspotHasUserComment(src.Comments))
 	if syncComments && len(src.Comments) > 0 {
-		if syncIssueComments(ctx, e, target.Key, hotspotCommentsAsIssueComments(src.Comments), target.Comments) && firstErr == nil {
+		if syncIssueComments(ctx, e, target.Key, hotspotCommentsAsIssueComments(src.Comments), target.Comments, e.MaxIssueComments) && firstErr == nil {
 			firstErr = fmt.Errorf("one or more comments failed")
 		}
 	}

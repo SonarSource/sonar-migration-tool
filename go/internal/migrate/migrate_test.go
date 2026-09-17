@@ -5,12 +5,26 @@
 package migrate
 
 import (
+	"context"
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
+
+// #571 — a value above MaxAllowedIssueComments is rejected up front, before
+// any client is built or API call made, rather than silently clamped.
+func TestRunMigrateRejectsExcessiveMaxIssueComments(t *testing.T) {
+	_, err := RunMigrate(context.Background(), MigrateConfig{MaxIssueComments: MaxAllowedIssueComments + 1})
+	if err == nil {
+		t.Fatal("expected an error for max_issue_comments above the allowed maximum")
+	}
+	if !strings.Contains(err.Error(), "max_issue_comments") {
+		t.Errorf("expected the error to name max_issue_comments, got: %v", err)
+	}
+}
 
 func TestRegisterAllCountsAndDependencies(t *testing.T) {
 	all := RegisterAll()

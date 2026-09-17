@@ -59,6 +59,8 @@ type configFileShape struct {
 	// MigrateHistory opts into the project-history migration PoC (#554).
 	// Defaults to false. Same FlexibleBool semantics as skip_issue_sync.
 	MigrateHistory *FlexibleBool `json:"migrate_history"`
+	// MaxIssueComments — see MigrateConfig.MaxIssueComments (#571).
+	MaxIssueComments int `json:"max_issue_comments"`
 	// ConfirmedOrgs is reset-only: it additively pre-populates
 	// ResetConfig.ConfirmedOrgs (#550) for config-driven / programmatic
 	// callers that don't go through cmd/reset.go's interactive
@@ -139,6 +141,8 @@ type unifiedTargetBlock struct {
 	FastSync *FlexibleBool `json:"fast_sync"`
 	// MigrateHistory — see configFileShape.MigrateHistory (#554).
 	MigrateHistory *FlexibleBool `json:"migrate_history"`
+	// MaxIssueComments — see configFileShape.MaxIssueComments (#571).
+	MaxIssueComments int `json:"max_issue_comments"`
 }
 
 type sonarCloudBlock struct {
@@ -170,6 +174,8 @@ type settingsBlock struct {
 	Concurrency      int    `json:"concurrency"`
 	BuildConcurrency int    `json:"project_data_build_concurrency"`
 	Timeout          int    `json:"timeout"`
+	// MaxIssueComments — see configFileShape.MaxIssueComments (#571).
+	MaxIssueComments int `json:"max_issue_comments"`
 }
 
 func parseConfigFile(path string) (configFileShape, error) {
@@ -198,6 +204,7 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			cfg.ProjectKeyPattern = s.Target.ProjectKeyPattern
 			cfg.ExcludeBranches = s.Target.ExcludeBranches
 			cfg.UnsupportedLanguages = s.Target.UnsupportedLanguages
+			cfg.MaxIssueComments = s.Target.MaxIssueComments
 		}
 		// #474 — target.unsupported_languages wins, else the top-level field.
 		cfg.UnsupportedLanguages = resolveUnsupportedLanguages(
@@ -222,6 +229,9 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		}
 		if cfg.Timeout == 0 {
 			cfg.Timeout = s.Timeout
+		}
+		if cfg.MaxIssueComments == 0 {
+			cfg.MaxIssueComments = s.MaxIssueComments
 		}
 		cfg.ExportDirectory = s.ExportDirectory
 		// Top-level skip_issue_sync applies to every shape (#299).
@@ -296,6 +306,7 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			Concurrency:        s.Concurrency,
 			BuildConcurrency:   s.BuildConcurrency,
 			Timeout:            s.Timeout,
+			MaxIssueComments:   s.MaxIssueComments,
 			RunID:              s.RunID,
 			TargetTask:         s.TargetTask,
 			SkipProfiles:       s.SkipProfiles,
@@ -349,6 +360,7 @@ func (sc sonarCloudBlock) toMigrateConfig(settings *settingsBlock) MigrateConfig
 		cfg.Concurrency = settings.Concurrency
 		cfg.BuildConcurrency = settings.BuildConcurrency
 		cfg.Timeout = settings.Timeout
+		cfg.MaxIssueComments = settings.MaxIssueComments
 	}
 	return cfg
 }
