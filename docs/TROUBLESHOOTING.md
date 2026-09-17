@@ -241,6 +241,44 @@ curl -u "$SC_TOKEN:" \
 
 ---
 
+## A project migrated with exactly 10,000 issues
+<!-- updated: 2026-09-17_00:00:00 -->
+
+**Symptom.** A source project you know has far more than 10,000 issues arrives on SonarQube Cloud with exactly 10,000, or with some other suspiciously round shortfall. The migration report's Limitations section carries a bullet naming the project, and the `extract` run printed a warning block just before its "Extract Complete" line.
+
+**Cause.** SonarQube Server returns at most 10,000 results for any single search query — an Elasticsearch `index.max_result_window` limit, not a tool setting. Requesting a row past the 10,000th is an outright HTTP 400, so a query whose total is larger can only ever yield the first 10,000. Since [#574](https://github.com/SonarSource/sonar-migration-tool/issues/574) the tool works around this for issues by slicing the query into issue-creation-date ranges until each one fits, and it reports whatever it still could not retrieve rather than truncating in silence.
+
+**Confirm it.** The atomic-window case, the one slicing cannot fix, logs its own line from the slicer:
+
+```
+level=WARN msg="more issues share one creation second than the API will return - date slicing cannot subdivide further" project=my-project branch=main window="[2025-09-05T17:29:07+0000, 2025-09-05T17:29:08+0000)" total=17919 fetched=10000 lost=7919
+```
+
+Every other truncation is logged by the HTTP client, which names the endpoint and the reason instead of a window. This is what a component-tree ceiling looks like:
+
+```
+level=WARN msg="API response truncated - not all results were fetched" endpoint=api/measures/component_tree reason=page_limit_clamp scope="getProjectComponentTree my-project@main" total=24000 totalKnown=true fetched=10000 lost=14000
+```
+
+Either way, read the artefact the run leaves behind:
+
+```bash
+python3 -m json.tool ./files/<extract_id>/extract_truncation.json
+```
+
+Each record names the endpoint, the reason, the project and branch, and the `total` / `fetched` / `lost` counts. A run that lost nothing writes **no** `extract_truncation.json` at all, so the file's absence is the all-clear. The same numbers appear as a Limitations bullet in the migration report, and resuming with `--extract_id` merges the new run's records with the previous attempt's instead of overwriting them.
+
+**Fix.** For `api/measures/component_tree` and `api/hotspots/search` there is nothing to configure: neither endpoint accepts a creation-date parameter, so neither can be sliced, and the warning is the whole of the remedy. For issues, slicing is automatic and needs no flag — if the bullet still names `getProjectIssuesFull`, check its reason:
+
+- `page_limit_clamp` **with** `windowStart` / `windowEnd` on the record — a date window that fitted when the slicer probed it grew past the ceiling before the fetch, because issues were created on the source while the extract was running. Re-running the extract recovers them.
+- `page_limit_clamp` **without** a window, or `unknown_total` — the query could not be narrowed. On `getProjectIssuesFull` this is the slicer's own fallback record: it refused to slice (the source ignored the date filters, or the bisection hit its depth backstop) or the total came back unparseable. On any other task it simply means that task is not sliced at all. Either way the bullet tells you exactly how many rows were not fetched, so you can judge whether it matters.
+- `count_drift` — the source project's issue count changed while the extract was running. This is an accounting statement, not a claim that data is missing; re-run the extract against a quiet server to get a clean reconciliation. The residual has a sign, and the bullet says which way it went: a *surplus* means the extract holds more issues than the source's own count predicted, and nothing is missing on that account.
+- `atomic_window` — see below. This is the one case slicing cannot fix.
+
+**The one case slicing cannot fix: more than 10,000 issues sharing a single creation second.** A date range cannot be narrowed below one second (a zero-width range is rejected by the server), so if a single second holds more issues than the ceiling, the extra ones are unreachable through this API. This is not exotic: a project's **first** analysis stamps its entire pre-existing backlog with one timestamp, so any project whose first analysis found more than 10,000 issues has exactly this shape. On one measured project, 8,916 of 14,903 issues carried the identical creation timestamp. The bullet and the `atomic_window` record name the exact second and the exact number of issues left behind. If you need those issues, the practical options are to re-analyse the project on the source server so that later analyses spread the creation dates, or to accept the documented shortfall — the tool will not pretend it retrieved them.
+
+---
+
 ## CE Task "Issue whilst processing the report" (importProjectData)
 <!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 

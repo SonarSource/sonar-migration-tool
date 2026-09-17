@@ -223,6 +223,10 @@ func collectProjectKeyReport(store *common.DataStore, pattern string) *ProjectKe
 //   - Project new-code-definition types not supported on SonarQube
 //     Cloud — currently reference_branch and specific_analysis. The
 //     migrated project is left with the org default (#135).
+//   - Source responses SonarQube truncated during extraction — one
+//     bullet per (task, cause), each naming the exact count that could
+//     not be retrieved, so the loss is stated rather than implied by a
+//     short "Issues" column (#574).
 func collectLimitations(runDir, exportDir string, mapping structure.ExtractMapping) []string {
 	var out []string
 	if appCount := countExtractItems(exportDir, mapping, "getApplications"); appCount > 0 {
@@ -238,6 +242,7 @@ func collectLimitations(runDir, exportDir string, mapping structure.ExtractMappi
 	out = append(out, collectSASTCustomizationLimitation(exportDir, mapping)...)
 	out = append(out, collectUserPermissionLimitations(exportDir, mapping)...)
 	out = append(out, collectGlobalSettingMappingLimitations(exportDir, mapping)...)
+	out = append(out, collectTruncationLimitations(exportDir, mapping)...)
 	return out
 }
 

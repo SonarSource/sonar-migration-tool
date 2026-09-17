@@ -10,11 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // HTTPError represents an HTTP error response with a status code.
@@ -76,6 +78,13 @@ func IsHTTPError(err error, codes ...int) bool {
 type RawClient struct {
 	httpClient *http.Client
 	baseURL    string // normalised with trailing slash
+
+	// onTruncation receives one record per truncated paginated fetch.
+	// It lives on the client rather than in PaginatedOpts so a single
+	// installation covers every call site, including the ones nobody
+	// remembers to wire up — which is exactly where the silent
+	// truncation classes hide (#574).
+	onTruncation func(TruncationRecord)
 }
 
 // NewRawClient wraps an sqapi.Client's HTTP infrastructure.
@@ -91,6 +100,15 @@ func (r *RawClient) BaseURL() string {
 // HTTPClient returns the underlying *http.Client.
 func (r *RawClient) HTTPClient() *http.Client {
 	return r.httpClient
+}
+
+// SetTruncationObserver installs the callback that receives every
+// truncation record this client produces. Install it once, before any
+// task goroutine starts: the field is read without synchronisation on
+// the request path, and a nil observer is the supported default (the
+// unconditional Warn in recordTruncation still fires).
+func (r *RawClient) SetTruncationObserver(fn func(TruncationRecord)) {
+	r.onTruncation = fn
 }
 
 // Get performs a GET request and returns the full response body as raw JSON.
@@ -129,6 +147,30 @@ type PaginatedOpts struct {
 	SizeParam   string     // default "ps"
 	MaxPageSize int        // 0 = 500
 	PageLimit   int        // 0 = no limit
+
+	// Scope attributes any truncation record this fetch produces to the
+	// task, project and branch that asked for it. Optional: an
+	// unattributed record still beats a silent one.
+	Scope TruncationScope
+
+	// StopOnTruncation abandons the walk as soon as page 1 shows the
+	// fetch cannot complete, instead of reading PageLimit pages that
+	// will be thrown away. The issue slicer uses it so detecting "this
+	// project needs slicing" costs one request rather than twenty.
+	StopOnTruncation bool
+
+	// SamplingCap declares that PageLimit is a deliberate sample of a
+	// firehose rather than a workaround for the result ceiling — the
+	// webhook delivery log, where capping is the intent. Truncation is
+	// still reported in PageResult, but no record and therefore no
+	// report bullet is produced.
+	SamplingCap bool
+
+	// SuppressTruncationRecord keeps a clamp out of the artefact
+	// because the caller will record a more accurate reason itself.
+	// The slicer's entry fetch sets it: there, a clamp is the trigger
+	// to go and fetch the rest, not a loss.
+	SuppressTruncationRecord bool
 }
 
 func (o *PaginatedOpts) applyDefaults() {
@@ -146,8 +188,59 @@ func (o *PaginatedOpts) applyDefaults() {
 	}
 }
 
+// PageResult is the complete outcome of a paginated fetch: the items,
+// plus everything the caller needs in order to know what was NOT
+// fetched.
+//
+// PageSize and PageLimit carry the EFFECTIVE values the fetch actually
+// used, after applyDefaults. Nothing downstream should re-derive them:
+// applyDefaults has a pointer receiver and runs on a by-value copy of
+// the opts, so a caller inspecting its own PaginatedOpts sees
+// MaxPageSize == 0 and any page arithmetic built on that collapses to
+// zero pages.
+type PageResult struct {
+	Items      []json.RawMessage
+	Total      int  // paging total as reported by the server
+	TotalKnown bool // false when the total key was absent or unparseable
+	Fetched    int  // len(Items)
+	PagesRead  int  // requests that returned items, page 1 included
+	PageSize   int  // effective MaxPageSize
+	PageLimit  int  // effective PageLimit (0 = uncapped)
+	Truncated  bool // set only when Reason != ""
+	Reason     TruncationReason
+}
+
 // GetPaginated fetches all pages and returns items as []json.RawMessage.
+// It is a thin wrapper over GetPaginatedResult for the call sites that
+// only want the items.
 func (r *RawClient) GetPaginated(ctx context.Context, opts PaginatedOpts) ([]json.RawMessage, error) {
+	res, err := r.GetPaginatedResult(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return res.Items, nil
+}
+
+// GetPaginatedResult fetches all pages and reports what it could not
+// fetch. The loop is unchanged; what changed in #574 is that it no
+// longer computes the page count and then throws it away, which left
+// every clamped fetch returning a short slice indistinguishable from a
+// complete one.
+//
+// Detection happens after page 1, where the information is:
+//
+//   - no parseable total plus a completely full page: TotalPages(0, …)
+//     is zero, the loop never runs, one page comes back and pagination
+//     stops with no idea how much was left. ReasonUnknownTotal.
+//   - the PageLimit clamp fires: the pages past the cap are never read.
+//     ReasonPageLimitClamp, and with StopOnTruncation the walk is
+//     abandoned right there.
+//
+// Truncated is set ONLY when a Reason was assigned. It is deliberately
+// not derived from Fetched < Total: ExtractArray wraps an object at the
+// result key (api/rules/search "actives") as a single element, so that
+// comparison would fire on perfectly healthy responses.
+func (r *RawClient) GetPaginatedResult(ctx context.Context, opts PaginatedOpts) (PageResult, error) {
 	opts.applyDefaults()
 
 	params := CloneParams(opts.Params)
@@ -156,39 +249,112 @@ func (r *RawClient) GetPaginated(ctx context.Context, opts PaginatedOpts) ([]jso
 
 	body, err := r.doGet(ctx, opts.Path, params)
 	if err != nil {
-		return nil, err
+		return PageResult{}, err
 	}
 	items, err := ExtractArray(body, opts.ResultKey)
 	if err != nil {
-		return nil, err
+		return PageResult{}, err
 	}
-	total := ExtractTotal(body, opts.TotalKey)
+	total, totalKnown := ExtractTotalOK(body, opts.TotalKey)
 	pages := TotalPages(total, opts.MaxPageSize)
-	if opts.PageLimit > 0 && pages > opts.PageLimit {
+	clamped := opts.PageLimit > 0 && pages > opts.PageLimit
+	if clamped {
 		pages = opts.PageLimit
 	}
 
 	all := make([]json.RawMessage, 0, total)
 	all = append(all, items...)
 
+	res := PageResult{
+		Items:      all,
+		Total:      total,
+		TotalKnown: totalKnown,
+		Fetched:    len(all),
+		PagesRead:  1,
+		PageSize:   opts.MaxPageSize,
+		PageLimit:  opts.PageLimit,
+	}
+	switch {
+	case !totalKnown && len(items) == opts.MaxPageSize:
+		res.Reason = ReasonUnknownTotal
+	case clamped:
+		res.Reason = ReasonPageLimitClamp
+	}
+	if res.Reason != "" && opts.StopOnTruncation {
+		return r.finishPaginated(res, opts), nil
+	}
+
 	for page := 2; page <= pages; page++ {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return PageResult{}, err
 		}
 		params := CloneParams(opts.Params)
 		params.Set(opts.PageParam, strconv.Itoa(page))
 		params.Set(opts.SizeParam, strconv.Itoa(opts.MaxPageSize))
 		body, err := r.doGet(ctx, opts.Path, params)
 		if err != nil {
-			return nil, err
+			return PageResult{}, err
 		}
 		pageItems, err := ExtractArray(body, opts.ResultKey)
 		if err != nil {
-			return nil, err
+			return PageResult{}, err
 		}
-		all = append(all, pageItems...)
+		res.Items = append(res.Items, pageItems...)
+		res.PagesRead++
 	}
-	return all, nil
+	res.Fetched = len(res.Items)
+	return r.finishPaginated(res, opts), nil
+}
+
+// finishPaginated stamps Truncated and emits the record. Both
+// suppression flags leave Reason intact for the caller and only keep the
+// record out of the artefact, so a suppressed fetch is never a fetch
+// whose truncation the caller cannot see.
+func (r *RawClient) finishPaginated(res PageResult, opts PaginatedOpts) PageResult {
+	if res.Reason == "" {
+		return res
+	}
+	res.Truncated = true
+	if opts.SamplingCap || opts.SuppressTruncationRecord {
+		return res
+	}
+	lost := 0
+	if res.TotalKnown && res.Total > res.Fetched {
+		lost = res.Total - res.Fetched
+	}
+	r.recordTruncation(TruncationRecord{
+		Endpoint:   opts.Path,
+		Reason:     res.Reason,
+		Scope:      opts.Scope,
+		Total:      res.Total,
+		TotalKnown: res.TotalKnown,
+		Fetched:    res.Fetched,
+		Lost:       lost,
+		PageSize:   res.PageSize,
+		PageLimit:  res.PageLimit,
+	})
+	return res
+}
+
+// recordTruncation ALWAYS logs a Warn and only then offers the record to
+// the observer. The warn is unconditional on purpose: migrate and
+// regtest share this client and have no tracker installed, so the log is
+// the only thing standing between them and a silent truncation.
+func (r *RawClient) recordTruncation(rec TruncationRecord) {
+	if rec.ObservedAt.IsZero() {
+		rec.ObservedAt = time.Now().UTC()
+	}
+	slog.Default().Warn("API response truncated - not all results were fetched",
+		"endpoint", rec.Endpoint,
+		"reason", string(rec.Reason),
+		"scope", rec.Scope.Label(),
+		"total", rec.Total,
+		"totalKnown", rec.TotalKnown,
+		"fetched", rec.Fetched,
+		"lost", rec.Lost)
+	if r.onTruncation != nil {
+		r.onTruncation(rec)
+	}
 }
 
 func (r *RawClient) doGet(ctx context.Context, path string, params url.Values) ([]byte, error) {
@@ -255,31 +421,44 @@ func ExtractArray(body []byte, key string) ([]json.RawMessage, error) {
 	return arr, nil
 }
 
-// ExtractTotal extracts the total count from a JSON body using a dot-path key.
+// ExtractTotal extracts the total count from a JSON body using a
+// dot-path key, returning 0 when the total cannot be read. Kept as the
+// convenience form for the many callers that only need the number.
 func ExtractTotal(body []byte, dotPath string) int {
+	total, _ := ExtractTotalOK(body, dotPath)
+	return total
+}
+
+// ExtractTotalOK extracts the total count and reports whether it was
+// actually there. The distinction matters: a 0 from an unparseable
+// body, a 0 from a missing key and a genuine 0 are three different
+// situations, and treating the first two as "this window is empty" is
+// how a fetch silently drops everything it was supposed to return
+// (#574).
+func ExtractTotalOK(body []byte, dotPath string) (int, bool) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(body, &obj); err != nil {
-		return 0
+		return 0, false
 	}
 	parts := SplitDotPath(dotPath)
 	current := obj
 	for i, part := range parts {
 		raw, ok := current[part]
 		if !ok {
-			return 0
+			return 0, false
 		}
 		if i == len(parts)-1 {
 			var n int
 			if err := json.Unmarshal(raw, &n); err != nil {
-				return 0
+				return 0, false
 			}
-			return n
+			return n, true
 		}
 		if err := json.Unmarshal(raw, &current); err != nil {
-			return 0
+			return 0, false
 		}
 	}
-	return 0
+	return 0, false
 }
 
 // SplitDotPath splits a dot-separated path into parts.

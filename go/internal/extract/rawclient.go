@@ -14,3 +14,17 @@ var NewRawClient = common.NewRawClient
 
 // PaginatedOpts is an alias for common.PaginatedOpts.
 type PaginatedOpts = common.PaginatedOpts
+
+// TruncationScope is an alias for common.TruncationScope.
+type TruncationScope = common.TruncationScope
+
+// TruncationTracker is an alias for common.TruncationTracker.
+type TruncationTracker = common.TruncationTracker
+
+// NewTruncationTracker returns an empty truncation tracker for one
+// extract run.
+var NewTruncationTracker = common.NewTruncationTracker
+
+// TruncationEventsFile is the name of the artefact written under the
+// extract directory when a run truncated something (#574).
+const TruncationEventsFile = common.TruncationEventsFile

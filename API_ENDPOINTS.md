@@ -121,13 +121,17 @@ All endpoints are GET requests used during the `extract` phase to read data from
 
 | Endpoint | Purpose | Parameters |
 |----------|---------|------------|
-| `GET /api/issues/search` | Search issues (paginated) | `components`, `p`, `ps` |
-| `GET /api/hotspots/search` | Search security hotspots | `projectKey`, `p`, `ps` |
+| `GET /api/issues/search` | Search issues (paginated) | `componentKeys`, `branch`, `issueStatuses`, `additionalFields`, `createdAfter`, `createdBefore`, `p`, `ps` |
+| `GET /api/hotspots/search` | Search security hotspots | `projectKey`, `p`, `ps` (**no date parameters** — see note) |
 | `GET /api/measures/search` | Project measures | `projectKeys`, `metricKeys` |
 | `GET /api/measures/component_tree` | Component-level measures | varies |
 | `GET /api/sources/raw` | Source file content | varies |
 | `GET /api/sources/scm` | SCM blame data | varies |
 | `GET /api/ce/activity` | Compute engine activity | varies |
+
+> **Date parameters (`createdAfter` / `createdBefore`) exist on `api/issues/search` only.** They are used to slice a project's issues into creation-date windows when its total exceeds the server's 10,000-result ceiling ([#574](https://github.com/SonarSource/sonar-migration-tool/issues/574)). The window is half-open: `createdAfter` is inclusive, `createdBefore` is exclusive. The only accepted value formats are `yyyy-MM-dd` and `yyyy-MM-ddTHH:mm:ss±hhmm` — a trailing `Z`, milliseconds, `+00:00`, a missing offset or a space separator are all rejected with HTTP 400, so `time.RFC3339` cannot be used. Date-only bounds are accepted but double-count at the seam and must never be emitted.
+>
+> **`api/hotspots/search` declares no date parameters and silently ignores unknown ones**, answering HTTP 200 with an unchanged total. Never send `createdAfter` / `createdBefore` to it: the request will appear to succeed while filtering nothing.
 
 ### Views & Portfolios
 

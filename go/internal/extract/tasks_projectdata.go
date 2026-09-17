@@ -106,25 +106,50 @@ func projectIssuesFullTask() func(ctx context.Context, e *Executor) error {
 				} else {
 					params.Set("issueStatuses", "OPEN,CONFIRMED,FALSE_POSITIVE,ACCEPTED")
 				}
-				items, err := e.Raw.GetPaginated(ctx, PaginatedOpts{
-					Path:      issuesSearchAPI,
-					Params:    params,
-					ResultKey: "issues",
-					PageLimit: 20, // SonarQube caps at 10,000 results
-				})
-				if err != nil {
-					if isNonFatalHTTPErr(err) {
-						e.Logger.Warn("getProjectIssuesFull skipped", "project", projectKey, "branch", branch, "err", err)
-						return nil
-					}
-					return err
-				}
+				// meta is built before the fetch so the per-window sink
+				// can capture it: fetchProjectIssues hands over one
+				// window at a time precisely so each chunk is enriched
+				// and written as it arrives, rather than the whole
+				// project being held in memory at once (#574).
 				meta := map[string]any{
 					"projectKey": projectKey,
 					"branch":     branch,
 					"serverUrl":  e.ServerURL,
 				}
-				return w.WriteChunk(enrichAll(items, meta))
+				// Every parameter above is inherited, never rebuilt:
+				// fetchProjectIssues clones this set and sets only
+				// createdAfter / createdBefore, and keeps the 20-page
+				// cap on every request it makes. A project under the
+				// result ceiling costs exactly the requests it did
+				// before #574, with no date parameter on any of them.
+				err := fetchProjectIssues(ctx, e, projectKey, branch, params,
+					func(items []json.RawMessage) error {
+						return w.WriteChunk(enrichAll(items, meta))
+					})
+				if err != nil {
+					if isNonFatalHTTPErr(err) {
+						// Logged, and deliberately NOT recorded as a
+						// truncation. A 403/404 here is a permission
+						// skip: no ceiling was hit, nothing was
+						// fetched and nothing reached disk. Recording
+						// it made a run that truncated nothing write
+						// extract_truncation.json, print the
+						// end-of-run data-loss block and add a
+						// Limitations bullet whose incomplete_slice
+						// wording promises "the issues already
+						// written are on disk" when there were none.
+						// A walk that genuinely dies part-way is a
+						// different thing and still records itself,
+						// from the slicer, with real counts. This
+						// skip travels the same way as every other
+						// non-fatal per-project denial, including the
+						// per-status hotspots skip below (#574).
+						e.Logger.Warn("getProjectIssuesFull skipped", "project", projectKey, "branch", branch, "err", err)
+						return nil
+					}
+					return err
+				}
+				return nil
 			})
 	}
 }
@@ -164,6 +189,19 @@ func projectHotspotsFullTask() func(ctx context.Context, e *Executor) error {
 						Params:    params,
 						ResultKey: "hotspots",
 						PageLimit: 20,
+						// Warning only, never sliced: /api/hotspots/search
+						// declares no createdAfter/createdBefore and
+						// silently ignores unknown parameters, so a date
+						// window here returns HTTP 200 with the same
+						// truncated set forever. Detail keeps the two
+						// per-status fetches apart so a REVIEWED ceiling
+						// is not merged into the TO_REVIEW record (#574).
+						Scope: TruncationScope{
+							Task:       "getProjectHotspotsFull",
+							ProjectKey: projectKey,
+							Branch:     branch,
+							Detail:     "status=" + status,
+						},
 					})
 					if err != nil {
 						if isNonFatalHTTPErr(err) {
@@ -313,6 +351,17 @@ func projectComponentTreeTask() func(ctx context.Context, e *Executor) error {
 					Params:    params,
 					ResultKey: "components",
 					PageLimit: 20, // SonarQube caps at 10,000 results
+					// Warning only: the component tree has no date axis
+					// at all, so its natural partition is the component
+					// subtree — a different algorithm with a much wider
+					// blast radius (source and SCM blame both hang off
+					// these components). Reported, not worked around
+					// (#574).
+					Scope: TruncationScope{
+						Task:       "getProjectComponentTree",
+						ProjectKey: projectKey,
+						Branch:     branch,
+					},
 				})
 				if err != nil {
 					if isNonFatalHTTPErr(err) {
