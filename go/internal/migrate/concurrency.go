@@ -22,6 +22,32 @@ const (
 	// ConcurrencyLimiter will ever report, regardless of how high observed
 	// latency or the target rate are.
 	maxConcurrencyCeiling = 100
+
+	// maxGrowthFactor bounds how much Current() may increase in a single
+	// recalculation tick, regardless of what desiredConcurrency computes.
+	//
+	// Rising average latency is not proof that more concurrency would
+	// help — it can just as easily be a SYMPTOM of the backend already
+	// being overloaded by the current concurrency, in which case
+	// following the raw formula upward makes the overload worse, not
+	// better. Verified live against a real migrate run: two ticks took
+	// concurrency from 25 (previous=25, current=78, avg_latency_ms=3100)
+	// to the ceiling (previous=78, current=100, avg_latency_ms=4163),
+	// where it stayed pegged for 10 minutes while latency climbed to
+	// 30s — then the moment it finally dropped, ~75 projects that had
+	// been queued on DynamicGate.Acquire the whole time were all
+	// admitted within milliseconds of each other, dumping a burst of
+	// simultaneous submissions onto SonarQube Cloud's CE task queue (a
+	// shared backend resource this algorithm has no visibility into —
+	// a poll request is cheap to answer regardless of how backed up the
+	// actual analysis behind it is). That burst is what made the
+	// migration look permanently stuck long after concurrency itself
+	// had already self-corrected back down.
+	//
+	// Decreases are NOT capped by this — backing off fast when latency
+	// degrades is exactly the safety behavior worth keeping quick;
+	// only the climb needs slowing down, "slow start" style.
+	maxGrowthFactor = 1.5
 )
 
 // latencyWindow is a 30s "tumbling" accumulator of observed API call
@@ -157,10 +183,13 @@ func (l *ConcurrencyLimiter) Observe(d time.Duration) {
 // On each tick: the latency window is drained. If no samples were
 // observed this interval, INFO-logs that concurrency was left unchanged
 // and skips recalculation (it does not reset to some default). Otherwise
-// it computes desiredConcurrency(l.target, avg), stores it, and
-// INFO-logs the previous value, new value, avg latency (as
-// milliseconds), and target rate — this log line fires on every tick that
-// had samples, even when the value didn't change.
+// it computes desiredConcurrency(l.target, avg), applies capGrowth (an
+// increase is capped to at most maxGrowthFactor times the previous
+// value; a decrease is applied in full), stores the result, and
+// INFO-logs the previous value, the new (possibly capped) value, the
+// uncapped desired value, avg latency (as milliseconds), and target
+// rate — this log line fires on every tick that had samples, even when
+// the value didn't change.
 func (l *ConcurrencyLimiter) Start(ctx context.Context, interval time.Duration) {
 	if l.fixed {
 		return
@@ -183,7 +212,9 @@ func (l *ConcurrencyLimiter) Start(ctx context.Context, interval time.Duration) 
 }
 
 // recalculate drains the latency window and, if any samples were
-// observed, updates l.current and logs the transition.
+// observed, updates l.current and logs the transition. An increase is
+// capped by capGrowth (see maxGrowthFactor); a decrease is applied in
+// full, immediately.
 func (l *ConcurrencyLimiter) recalculate() {
 	avg, ok := l.window.drainAverage()
 	if !ok {
@@ -191,14 +222,35 @@ func (l *ConcurrencyLimiter) recalculate() {
 		return
 	}
 	prev := l.Current()
-	next := desiredConcurrency(l.target, avg)
+	desired := desiredConcurrency(l.target, avg)
+	next := capGrowth(prev, desired)
 	l.current.Store(int32(next))
 	l.logger.Info("concurrency recalculated",
 		"previous", prev,
 		"current", next,
+		"desired", desired,
 		"avg_latency_ms", avg.Milliseconds(),
 		"target_rate_per_min", l.target,
 	)
+}
+
+// capGrowth bounds how far prev may climb toward desired in a single
+// tick, to at most maxGrowthFactor times prev (see its doc comment for
+// why). A decrease (desired <= prev) is never capped. Always makes at
+// least +1 progress toward desired when growing, so a very small prev
+// (e.g. 1) is never stuck unable to grow at all.
+func capGrowth(prev, desired int) int {
+	if desired <= prev {
+		return desired
+	}
+	capped := int(math.Ceil(float64(prev) * maxGrowthFactor))
+	if capped <= prev {
+		capped = prev + 1
+	}
+	if capped > desired {
+		return desired
+	}
+	return capped
 }
 
 // Stop stops the recalculation loop. Idempotent, and safe to call even if

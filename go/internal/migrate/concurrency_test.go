@@ -112,6 +112,58 @@ func TestClampConcurrency(t *testing.T) {
 	}
 }
 
+// #573 follow-up — capGrowth is the fix for a live-verified runaway: two
+// recalculation ticks took a real migrate run from previous=25 current=78
+// (avg_latency_ms=3100) straight to previous=78 current=100
+// (avg_latency_ms=4163), where it stayed pegged at the ceiling for 10
+// minutes while latency climbed to 30s — rising latency was a SYMPTOM of
+// the backend already being overloaded, not proof more concurrency would
+// help. The moment concurrency dropped back down, ~75 projects that had
+// been queued on DynamicGate.Acquire the whole time were admitted almost
+// simultaneously, dumping a burst onto SonarQube Cloud's CE task queue.
+func TestCapGrowth(t *testing.T) {
+	tests := []struct {
+		name    string
+		prev    int
+		desired int
+		want    int
+	}{
+		{"decrease is applied in full, uncapped", 100, 5, 5},
+		{"equal is a no-op", 25, 25, 25},
+		{"the exact runaway case: 25 must not jump straight to 78", 25, 78, 38},
+		{"the exact runaway case: 78 must not jump straight to 100", 78, 100, 100}, // ceil(78*1.5)=117, exceeds desired 100, so desired wins
+		{"small values still make forward progress", 1, 50, 2},
+		{"desired below the 1.5x ceiling is reached directly", 10, 14, 14},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := capGrowth(tt.prev, tt.desired)
+			if got != tt.want {
+				t.Errorf("capGrowth(%d, %d) = %d, want %d", tt.prev, tt.desired, got, tt.want)
+			}
+		})
+	}
+}
+
+// A sustained high-latency signal — exactly what a real overloaded
+// backend produces — must climb toward the ceiling gradually across
+// several ticks, never in one or two, so the decrease path (which reacts
+// within a single tick, per TestConcurrencyLimiterDynamicConvergesToDesiredValue)
+// gets a real chance to catch an actual overload before a full-ceiling
+// burst is ever admitted through DynamicGate.
+func TestConcurrencyLimiterGrowthIsGradualUnderSustainedHighLatency(t *testing.T) {
+	l := NewDynamicConcurrencyLimiter(25, 1500, nil)
+	l.Observe(4 * time.Second) // desiredConcurrency(1500, 4s) = 100, the ceiling
+	l.recalculate()
+
+	if got := l.Current(); got == maxConcurrencyCeiling {
+		t.Fatalf("Current() = %d after a single tick with sustained high latency — jumped straight to the ceiling instead of climbing gradually", got)
+	}
+	if got, want := l.Current(), capGrowth(25, maxConcurrencyCeiling); got != want {
+		t.Errorf("Current() = %d after one tick, want %d (capGrowth(25, 100))", got, want)
+	}
+}
+
 func TestLatencyWindow(t *testing.T) {
 	w := &latencyWindow{}
 
@@ -242,9 +294,15 @@ func TestConcurrencyLimiterLogsInfoOnTickWithSamples(t *testing.T) {
 
 	targetRatePerMin := 1500
 	avgLatency := 2 * time.Second
-	want := desiredConcurrency(targetRatePerMin, avgLatency)
+	initial := 1
+	desired := desiredConcurrency(targetRatePerMin, avgLatency)
+	// Only one Observe call feeds the first tick, so the logged "current"
+	// is capGrowth's result for that single tick, not the fully-converged
+	// desired value (#573 follow-up: growth is capped per tick, see
+	// maxGrowthFactor) — "desired" in the log carries the uncapped figure.
+	wantCurrent := capGrowth(initial, desired)
 
-	l := NewDynamicConcurrencyLimiter(1, targetRatePerMin, logger)
+	l := NewDynamicConcurrencyLimiter(initial, targetRatePerMin, logger)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -271,8 +329,11 @@ func TestConcurrencyLimiterLogsInfoOnTickWithSamples(t *testing.T) {
 	if !strings.Contains(logged, "target_rate_per_min=1500") {
 		t.Errorf("log missing target_rate_per_min=1500, got: %s", logged)
 	}
-	if !strings.Contains(logged, "current="+strconv.Itoa(want)) {
-		t.Errorf("log missing current=%d, got: %s", want, logged)
+	if !strings.Contains(logged, "desired="+strconv.Itoa(desired)) {
+		t.Errorf("log missing desired=%d, got: %s", desired, logged)
+	}
+	if !strings.Contains(logged, "current="+strconv.Itoa(wantCurrent)) {
+		t.Errorf("log missing current=%d, got: %s", wantCurrent, logged)
 	}
 }
 
