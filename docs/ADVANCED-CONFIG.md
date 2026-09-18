@@ -55,6 +55,7 @@ Only `source.url` / `source.token` (for `extract`) and `target.url` / `target.to
 | `migrate_history` | `--migrate_history` | extract, migrate, transfer | `false` | No | **PoC.** Also migrate a bounded set of historical analysis snapshots (date + project-level measures only) per project's main branch, backdated on SonarQube Cloud (#554). Accepts `true`/`on`/`yes`/`1` (case-insensitive). Overridable via `target.migrate_history`. CLI flag is a one-way override. |
 | `history_max_points` | `--history_max_points` | extract, transfer | `0` (no cap) | No | Max historical snapshots migrated per project when `migrate_history` is set (#554). Applied at extract time; `migrate` replays whatever was extracted, so the flag does not exist there. |
 | `history_min_interval_days` | `--history_min_interval_days` | extract, transfer | `0` (no spacing rule) | No | Minimum spacing, in days, enforced between two migrated historical snapshots when `migrate_history` is set (#554). Pass `0` for no spacing rule. Applied at extract time; `migrate` replays whatever was extracted, so the flag does not exist there. |
+| `branch_analyzed_after` | `--branch_analyzed_after` | extract, migrate, transfer | (none — all branches) | No | Only select branches whose last analysis is on or after this `YYYY-MM-DD` date. The project's main branch is always selected regardless, even if it doesn't meet the date — the reports note when this force-inclusion happens. Warns if the date is more than 2 years (730 days) in the past. Overridable via `source.branch_analyzed_after` / `target.branch_analyzed_after` (each can differ, or explicitly clear the top-level value). On `transfer`, the CLI flag sets both sides at once; use the config file to give extract and migrate different cutoffs. Issue #583. |
 | `max_issue_comments` | `--max_issue_comments` | migrate, transfer, sync-issues | `5` | No | Max most-recent source comments replayed onto each migrated issue/hotspot (max `20`). Reduces SonarQube Cloud API pressure on long comment threads (#571). Overridable via `target.max_issue_comments`. |
 
 ### `source` block — SonarQube Server side (`extract`, `transfer`)
@@ -73,6 +74,7 @@ Only `source.url` / `source.token` (for `extract`) and `target.url` / `target.to
 | `source.target_task` | `--target_task` | `null` | No | Stop extract at a specific task (dependencies still run). |
 | `source.extract_id` | `--extract_id` | `null` | No | Reuse / resume an existing extract directory ID. |
 | `source.branch_regexp` | `--branch_regexp` | top-level | No | Override top-level `branch_regexp` for extract. Regexp pattern of branch names to extract, implicitly anchored (`^...$`). The main branch is always extracted regardless of match. |
+| `source.branch_analyzed_after` | `--branch_analyzed_after` | top-level | No | Override the top-level `branch_analyzed_after` for extract only. An explicit empty string clears any top-level value (extract sees every branch even if migrate is filtered). |
 | `source.enterprise_key`, `source.organization_key`, `source.edition` | — | `null` / `enterprise` | No | Provisional — accepted but ignored today; reserved for future SQC-to-SQC migration. |
 | `source.run_id` | — | `null` | No | Ignored by `extract`; present for shape symmetry with `target`. |
 
@@ -94,6 +96,7 @@ Only `source.url` / `source.token` (for `extract`) and `target.url` / `target.to
 | `target.skip_profiles` | `--skip_profiles` | `false` | No | Skip quality profile migration / provisioning. |
 | `target.exclude_branches` | `--exclude_branches` | `[]` | No | Glob patterns (Go `filepath.Match`) for non-main branches to skip. The main branch is never excluded. Repeatable on the CLI. |
 | `target.branch_regexp` | `--branch_regexp` | top-level | No | Override top-level `branch_regexp` for migrate. Regexp pattern of branch names to migrate, implicitly anchored (`^...$`). Only branches that were actually extracted can be migrated. The main branch is always migrated regardless of match. |
+| `target.branch_analyzed_after` | `--branch_analyzed_after` | top-level | No | Override the top-level `branch_analyzed_after` for migrate only. An explicit empty string clears any top-level value (migrate sees every branch even if extract was filtered). |
 | `target.organization_key` | — | `null` | No | Provisional — accepted but ignored today. |
 | `target.max_issue_comments` | `--max_issue_comments` | top-level | No | Override the top-level `max_issue_comments` for migrate / transfer / sync-issues calls. Ignored by reset, which replays no comments (#571). |
 
@@ -128,6 +131,7 @@ All optional.
 | `migrate_history` | `false` | **Proof of concept.** When `true` (or `"on"` / `"yes"` / `1`), replay a bounded set of the source project's historical analyses of its main branch as separate, backdated points in the target's analysis history, on top of the regular current-snapshot import. Each historical point carries the project-level measures only — no files, no issues. Same FlexibleBool aliases. Can be overridden per command by `target.migrate_history`. See [TRANSFER.md](TRANSFER.md#project-history-migration---migrate_history--poc). Issue #554. |
 | `history_max_points` | `0` (no cap) | Max historical snapshots migrated per project when `migrate_history` is set. When the source has more candidates than this after interval bounding, they are evenly resampled across the whole history span. Issue #554. |
 | `history_min_interval_days` | `0` (no spacing rule) | Minimum spacing, in days, enforced between two migrated historical snapshots when `migrate_history` is set. `0` is a real value meaning "no spacing rule" and is distinct from leaving the key out. Issue #554. |
+| `branch_analyzed_after` | (none — all branches) | Only select branches whose last analysis is on or after this `YYYY-MM-DD` date, during `extract`/`migrate`/`transfer`. The project's main branch is always selected regardless — if the filter would otherwise exclude every branch of a project, main is force-included and both the run log and the generated report note it. Logs a warning if the date is more than 2 years (730 days) in the past; an invalid format aborts the run. Can be overridden per command by `source.branch_analyzed_after` (extract) / `target.branch_analyzed_after` (migrate) — see those sections for the both-sides-on-`transfer` nuance. Issue #583. |
 | `max_issue_comments` | `5` | Max most-recent source comments replayed onto each migrated issue/hotspot (max `20`). Reduces SonarQube Cloud API pressure on long comment threads. Can be overridden per command by `target.max_issue_comments`. Issue #571. |
 
 `concurrency` and `timeout` can also be set inside `source` / `target` — those values override the top-level default for that command only.
@@ -152,6 +156,7 @@ The CLI flags `--skip_issue_sync` and `--skip_project_data_migration` on `migrat
 | `target_task` | | Stop extract at a specific task (dependencies still run). |
 | `extract_id` | | Reuse an existing extract directory ID instead of generating a new one — resume after a failure. |
 | `branch_regexp` | | Override top-level default. Regexp pattern of branch names to extract, implicitly anchored (`^...$`). The main branch is always extracted regardless of match. |
+| `branch_analyzed_after` | | Override the top-level `branch_analyzed_after` for extract only (`YYYY-MM-DD`). An explicit empty string here clears any top-level value, so extract sees every branch even if `migrate` is filtered. See [Top-level fields](#top-level-fields) for the full behavior. Issue #583. |
 | `enterprise_key` / `organization_key` / `edition` | | Provisional — accepted but ignored today; reserved for future SQC-to-SQC migration. |
 
 ---
@@ -174,6 +179,7 @@ The CLI flags `--skip_issue_sync` and `--skip_project_data_migration` on `migrat
 | `skip_profiles` | | Skip quality profile migration. |
 | `exclude_branches` | | Array of glob patterns (Go `filepath.Match` syntax) for non-main branches to skip during project data import. The main branch is never excluded regardless of patterns. Example: `["feature/*", "release/*"]`. |
 | `branch_regexp` | | Override top-level default. Regexp pattern of branch names to migrate, implicitly anchored (`^...$`). Only branches that were actually extracted can be migrated. The main branch is always migrated regardless of match. |
+| `branch_analyzed_after` | | Override the top-level `branch_analyzed_after` for migrate only (`YYYY-MM-DD`). An explicit empty string here clears any top-level value, so migrate sees every branch even if `extract` was filtered. On `transfer`, the single `--branch_analyzed_after` CLI flag sets `source.branch_analyzed_after` and `target.branch_analyzed_after` identically — unlike `--concurrency`/`--timeout`, there is no fallback from one side to the other, so giving the two phases genuinely different cutoffs requires the config file. See [Top-level fields](#top-level-fields). Issue #583. |
 | `organization_key` | | Provisional — accepted but ignored today. |
 | `max_issue_comments` | | Override the top-level `max_issue_comments` for migrate / transfer / sync-issues. Ignored by reset, which replays no comments. Issue #571. |
 
@@ -266,6 +272,7 @@ sonar-migration-tool extract --source_url <url> --source_token <token> [flags]
 | `--objects <list>` | Comma-separated object categories to extract (`settings`, `permission_templates`/`pt`, `quality_profiles`/`qp`, `quality_gates`/`qg`, `projects`, `portfolios`, `groups`, `license_profiles`/`lp`). Omit to extract everything. #536. |
 | `--project_key <pattern>` | Regexp of project keys to extract; only applies when `projects` is selected. A plain key matches only itself. #536. |
 | `--branch_regexp <pattern>` | Regexp of branch names to extract, implicitly anchored (`^...$`) — a plain name matches only itself. The main branch is always extracted regardless of match. #582. |
+| `--branch_analyzed_after <date>` | Only select branches analyzed on or after this `YYYY-MM-DD` date. The project's main branch is always selected regardless. Omit to select all branches (default). #583. |
 | `--exclude_branches <pattern>` | Glob pattern for non-main branches to skip during project data import. Repeatable (pass multiple times for multiple patterns). Main branch is never excluded. |
 | `--pem_file_path <path>` | mTLS PEM file. |
 | `--key_file_path <path>` | mTLS key file. |
@@ -312,6 +319,7 @@ sonar-migration-tool migrate --target_token <token> --enterprise_key <key> [flag
 | `--project_data_build_concurrency <n>` | Max number of scanner reports built at once during project-data migration (default `4`). Lower it if the migration runs out of memory on a large instance; raise it toward `--concurrency` if report building is the bottleneck. |
 | `--objects <list>` | Comma-separated object categories to migrate (`settings`, `permission_templates`/`pt`, `quality_profiles`/`qp`, `quality_gates`/`qg`, `projects`, `portfolios`, `groups`, `license_profiles`/`lp`). Omit to migrate everything. When set without `projects`, no project is created or touched. #536. |
 | `--project_key <pattern>` | Regexp of source project keys to migrate; only applies when `projects` is selected. Not to be confused with `--project_key_pattern` (the target-key rendering template). #536. |
+| `--branch_analyzed_after <date>` | Only select branches analyzed on or after this `YYYY-MM-DD` date. The project's main branch is always selected regardless. Omit to select all branches (default). #583. |
 
 `--branch_regexp` can be set independently on `extract` and `migrate` — extract every branch once and decide later which to migrate, or extract only the branches you already know you want:
 
@@ -372,6 +380,7 @@ file.
 | `--skip_project_data_migration` | top-level `skip_project_data_migration` | Skip the entire project-data migration (importProjectData + trailing syncs). #303. |
 | `--exclude_branches <pattern>` | `target.exclude_branches` | Glob pattern for non-main branches to skip during project data import. Repeatable. Main branch is never excluded. |
 | `--branch_regexp <pattern>` | `branch_regexp` | Regexp of branch names to extract/migrate, implicitly anchored (`^...$`) — a plain name matches only itself. Applies to both phases of the transfer. The main branch is always included regardless of match. #582. |
+| `--branch_analyzed_after <date>` | `source.branch_analyzed_after` + `target.branch_analyzed_after` | Only select branches analyzed on or after this `YYYY-MM-DD` date, applied to both phases at once. The project's main branch is always selected regardless. Use the config file's `source`/`target` sections to give the two phases different cutoffs. #583. |
 
 CLI flags always override the corresponding config-file value.
 

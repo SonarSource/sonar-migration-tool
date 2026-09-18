@@ -9,9 +9,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"log/slog"
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"golang.org/x/sync/errgroup"
@@ -650,7 +652,7 @@ func forEachProjectBranch(ctx context.Context, e *Executor, taskName string,
 		return fmt.Errorf("%s: reading branches: %w", taskName, err)
 	}
 
-	branchMap := buildBranchMap(branches)
+	branchMap := buildBranchMap(branches, e.BranchAnalyzedAfter, e.Logger)
 
 	w, err := e.Store.Writer(taskName)
 	if err != nil {
@@ -706,9 +708,34 @@ func iterateBranches(ctx context.Context, e *Executor, w *ChunkWriter,
 	return nil
 }
 
-// buildBranchMap builds a map of projectKey -> []branchName from extracted branch data.
-func buildBranchMap(branches []json.RawMessage) map[string][]string {
-	result := make(map[string][]string)
+// buildBranchMap builds a map of projectKey -> []branchName from extracted
+// branch data, excluding short-lived/PR branches and, when cutoff is
+// non-nil, applying the --branch_analyzed_after filter (#583): only
+// branches analyzed on or after cutoff are selected, except the project's
+// main branch, which is always kept — force-included, with a
+// common.ForcedMainBranchLogMessage warning on logger, if the date rule
+// alone would otherwise have excluded every branch of the project.
+func buildBranchMap(branches []json.RawMessage, cutoff *time.Time, logger *slog.Logger) map[string][]string {
+	metaByProject := groupBranchMeta(branches)
+	result := make(map[string][]string, len(metaByProject))
+	for projectKey, metas := range metaByProject {
+		res := common.SelectBranchesAnalyzedAfter(metas, cutoff)
+		if res.ForcedMainBranch != "" && logger != nil {
+			logger.Warn(common.ForcedMainBranchLogMessage,
+				"project", projectKey, "branch", res.ForcedMainBranch,
+				"analysisDate", res.ForcedMainDate, "cutoff", cutoff)
+		}
+		for _, b := range res.Kept {
+			result[projectKey] = append(result[projectKey], b.Name)
+		}
+	}
+	return result
+}
+
+// groupBranchMeta extracts name/isMain/analysisDate per project from raw
+// getBranches records, excluding short-lived/PR (SHORT) branches.
+func groupBranchMeta(branches []json.RawMessage) map[string][]common.BranchDateInfo {
+	result := make(map[string][]common.BranchDateInfo)
 	for _, item := range branches {
 		projectKey := extractField(item, "projectKey")
 		name := extractField(item, "name")
@@ -720,7 +747,11 @@ func buildBranchMap(branches []json.RawMessage) map[string][]string {
 		if branchType == "SHORT" {
 			continue
 		}
-		result[projectKey] = append(result[projectKey], name)
+		result[projectKey] = append(result[projectKey], common.BranchDateInfo{
+			Name:         name,
+			IsMain:       common.ExtractBool(item, "isMain"),
+			AnalysisDate: common.ParseAnalysisDate(extractField(item, "analysisDate")),
+		})
 	}
 	return result
 }

@@ -12,6 +12,7 @@
   "migrate_history": false,
   "history_max_points": 10,
   "history_min_interval_days": 30,
+  "branch_analyzed_after": null,
   "source": {
     "url": "https://sonarqube.example.com",
     "token": "squ_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
@@ -26,7 +27,8 @@
     "extract_id": null,
     "enterprise_key": null,
     "organization_key": null,
-    "edition": "enterprise"
+    "edition": "enterprise",
+    "branch_analyzed_after": null
   },
   "target": {
     "url": "https://sonarcloud.io/",
@@ -38,6 +40,7 @@
     "run_id": null,
     "target_task": null,
     "organization_key": null,
-    "project_key_pattern": "<ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>"
+    "project_key_pattern": "<ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>",
+    "branch_analyzed_after": null
   }
 }

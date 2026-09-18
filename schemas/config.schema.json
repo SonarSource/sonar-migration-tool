@@ -88,6 +88,11 @@
       "default": 30,
       "description": "PoC (issue #554): minimum spacing, in days, enforced between two migrated historical snapshots when migrate_history is set. The smallest effective value is 1 (one point per day at most); 0 is indistinguishable from 'not set' in a config file and falls back to the default of 30."
     },
+    "branch_analyzed_after": {
+      "type": ["string", "null"],
+      "pattern": "^(\\d{4}-\\d{2}-\\d{2})?$",
+      "description": "Issue #583: only select branches whose last analysis is on or after this YYYY-MM-DD date, for extract/migrate/transfer. Omit (or leave empty) to select every branch, the default. The project's main branch is always selected regardless, even if it doesn't meet this date. Warns if the date is more than 2 years (730 days) in the past. Overridable per command by source.branch_analyzed_after / target.branch_analyzed_after."
+    },
     "max_issue_comments": {
       "type": "integer",
       "minimum": 0,
@@ -172,6 +177,11 @@
         "branch_regexp": {
           "type": ["string", "null"],
           "description": "Overrides the top-level branch_regexp for extract. Regexp pattern of branch names to extract, implicitly anchored (^...$). The project's main branch is always extracted regardless of match. Issue #582."
+        },
+        "branch_analyzed_after": {
+          "type": ["string", "null"],
+          "pattern": "^(\\d{4}-\\d{2}-\\d{2})?$",
+          "description": "Issue #583: overrides the top-level branch_analyzed_after for extract only. An explicit empty string clears any top-level value, so extract sees every branch even if migrate is filtered. When absent, the top-level branch_analyzed_after applies."
         },
         "enterprise_key": {
           "type": ["string", "null"],
@@ -261,6 +271,11 @@
             { "type": "string", "pattern": "^(?i)(true|false|on|off|yes|no|0|1)$" }
           ],
           "description": "PoC (issue #554): overrides the top-level migrate_history for migrate/reset. When true (or on / yes / 1), also migrate a bounded set of historical analysis snapshots (date + project-level measures only) per project's main branch, backdated on SonarQube Cloud. When absent, the top-level migrate_history applies (default false)."
+        },
+        "branch_analyzed_after": {
+          "type": ["string", "null"],
+          "pattern": "^(\\d{4}-\\d{2}-\\d{2})?$",
+          "description": "Issue #583: overrides the top-level branch_analyzed_after for migrate only. An explicit empty string clears any top-level value, so migrate sees every branch even if extract was filtered. When absent, the top-level branch_analyzed_after applies. On transfer, the single --branch_analyzed_after CLI flag sets source.branch_analyzed_after and target.branch_analyzed_after identically; use this config field directly for independent per-phase cutoffs."
         },
         "max_issue_comments": {
           "type": ["integer", "null"],

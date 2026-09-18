@@ -1453,6 +1453,114 @@ func TestFilterBranchesByRegexp(t *testing.T) {
 	}
 }
 
+func TestFilterBranchesByAnalyzedAfter_NilCutoffIsNoOp(t *testing.T) {
+	branches := []branchInfo{
+		{Name: "main", IsMain: true, LastAnalysisDate: mustParseDate(t, "2020-01-01")},
+		{Name: "old-feature", LastAnalysisDate: mustParseDate(t, "2020-01-01")},
+	}
+	kept, forcedMain, _ := filterBranchesByAnalyzedAfter(branches, nil)
+	if len(kept) != 2 || forcedMain != "" {
+		t.Fatalf("nil cutoff must be a no-op passthrough, got kept=%v forcedMain=%q", kept, forcedMain)
+	}
+}
+
+func TestFilterBranchesByAnalyzedAfter_ExcludesOlderNonMainBranches(t *testing.T) {
+	cutoff := mustParseDate(t, "2024-01-01")
+	branches := []branchInfo{
+		{Name: "main", IsMain: true, LastAnalysisDate: mustParseDate(t, "2024-06-01")},
+		{Name: "old-feature", LastAnalysisDate: mustParseDate(t, "2023-01-01")},
+		{Name: "on-boundary", LastAnalysisDate: mustParseDate(t, "2024-01-01")},
+	}
+	kept, forcedMain, _ := filterBranchesByAnalyzedAfter(branches, &cutoff)
+	if forcedMain != "" {
+		t.Fatalf("main met the cutoff, should not be forced, got forcedMain=%q", forcedMain)
+	}
+	names := map[string]bool{}
+	for _, b := range kept {
+		names[b.Name] = true
+	}
+	if !names["main"] || !names["on-boundary"] || names["old-feature"] {
+		t.Fatalf("kept = %+v, want {main, on-boundary} (on-or-after semantics)", kept)
+	}
+}
+
+func TestFilterBranchesByAnalyzedAfter_ForcesMainWhenEverythingExcluded(t *testing.T) {
+	cutoff := mustParseDate(t, "2024-01-01")
+	branches := []branchInfo{
+		{Name: "main", IsMain: true, LastAnalysisDate: mustParseDate(t, "2020-01-01")},
+		{Name: "old-feature", LastAnalysisDate: mustParseDate(t, "2020-01-01")},
+	}
+	kept, forcedMain, forcedMainDate := filterBranchesByAnalyzedAfter(branches, &cutoff)
+	if forcedMain != "main" {
+		t.Fatalf("forcedMain = %q, want %q", forcedMain, "main")
+	}
+	if !forcedMainDate.Equal(mustParseDate(t, "2020-01-01")) {
+		t.Fatalf("forcedMainDate = %v, want 2020-01-01", forcedMainDate)
+	}
+	if len(kept) != 1 || kept[0].Name != "main" {
+		t.Fatalf("kept = %+v, want only main", kept)
+	}
+}
+
+func TestFilterBranchesByAnalyzedAfter_MainMeetingCutoffIsNotForced(t *testing.T) {
+	cutoff := mustParseDate(t, "2024-01-01")
+	branches := []branchInfo{
+		{Name: "main", IsMain: true, LastAnalysisDate: mustParseDate(t, "2024-06-01")},
+		{Name: "old-feature", LastAnalysisDate: mustParseDate(t, "2020-01-01")},
+	}
+	kept, forcedMain, _ := filterBranchesByAnalyzedAfter(branches, &cutoff)
+	if forcedMain != "" {
+		t.Fatalf("main already met the cutoff, must not be forced, got forcedMain=%q", forcedMain)
+	}
+	if len(kept) != 1 || kept[0].Name != "main" {
+		t.Fatalf("kept = %+v, want only main (unforced)", kept)
+	}
+}
+
+// TestFilterBranchesByAnalyzedAfter_ChainsAfterExcludeGlob proves the two
+// filter stages AND correctly (#583): a branch dropped by the glob filter
+// stays dropped, and a branch surviving the glob filter but failing the
+// date filter is still removed. This is the proxy test for composing with
+// a future #582 (--branches) filter, which is expected to chain the same
+// way.
+func TestFilterBranchesByAnalyzedAfter_ChainsAfterExcludeGlob(t *testing.T) {
+	cutoff := mustParseDate(t, "2024-01-01")
+	branches := []branchInfo{
+		{Name: "main", IsMain: true, LastAnalysisDate: mustParseDate(t, "2024-06-01")},
+		{Name: "feature/excluded-by-glob", LastAnalysisDate: mustParseDate(t, "2024-06-01")},
+		{Name: "feature/survives-glob-fails-date", LastAnalysisDate: mustParseDate(t, "2020-01-01")},
+		{Name: "release/1.0", LastAnalysisDate: mustParseDate(t, "2024-06-01")},
+	}
+
+	afterGlob := filterBranches(branches, []string{"feature/excluded-by-glob"})
+	kept, forcedMain, _ := filterBranchesByAnalyzedAfter(afterGlob, &cutoff)
+	if forcedMain != "" {
+		t.Fatalf("main and release/1.0 meet the cutoff, nothing should be forced, got forcedMain=%q", forcedMain)
+	}
+	names := map[string]bool{}
+	for _, b := range kept {
+		names[b.Name] = true
+	}
+	if names["feature/excluded-by-glob"] {
+		t.Errorf("glob-excluded branch must not be resurrected by the date filter")
+	}
+	if names["feature/survives-glob-fails-date"] {
+		t.Errorf("branch surviving the glob filter but failing the date filter must still be removed")
+	}
+	if !names["main"] || !names["release/1.0"] {
+		t.Fatalf("kept = %+v, want {main, release/1.0}", kept)
+	}
+}
+
+func mustParseDate(t *testing.T, s string) time.Time {
+	t.Helper()
+	d, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		t.Fatalf("mustParseDate(%q): %v", s, err)
+	}
+	return d
+}
+
 func TestMatchesAnyGlob(t *testing.T) {
 	if !matchesAnyGlob("feature/foo", []string{"feature/*"}) {
 		t.Error("expected feature/foo to match feature/*")

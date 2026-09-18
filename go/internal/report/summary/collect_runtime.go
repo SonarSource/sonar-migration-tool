@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/analysis"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/migrate"
 )
 
@@ -368,6 +369,8 @@ func (agg *eventAggregator) apply(ev logEventLine, rt *runtimeData) {
 		agg.applyTaskSubmitted(ev)
 	case ev.Message == "analysis pre-created (branch anchored on target)":
 		agg.applyAnalysisPreCreated(ev)
+	case ev.Message == common.ForcedMainBranchLogMessage:
+		agg.applyForcedMainBranch(ev, rt)
 	}
 }
 
@@ -401,6 +404,35 @@ func (agg *eventAggregator) applyBranchSkip(ev logEventLine, rt *runtimeData) {
 	bs := agg.branchFor(evStr(a, "project"), branch)
 	bs.Status = "skipped"
 	bs.SkipReason = ev.Message
+}
+
+// applyForcedMainBranch records a project whose main branch was
+// force-included despite not meeting --branch_analyzed_after (#583). Both
+// the analysisDate and cutoff attrs are logged as *time.Time (analysisDate
+// absent for a branch that was never analyzed), which slog's JSON handler
+// renders on the wire as a full RFC3339 timestamp (e.g.
+// "2024-01-01T00:00:00Z") — not the plain YYYY-MM-DD the operator passed
+// on the CLI. Both are reparsed and reformatted here so the report shows
+// the same clean date either side used; a zero/unparseable analysisDate
+// reads "never analyzed" rather than the zero-time string, and an
+// unparseable cutoff (should not happen from this tool's own logging)
+// falls back to whatever was on the wire rather than going blank.
+func (agg *eventAggregator) applyForcedMainBranch(ev logEventLine, rt *runtimeData) {
+	a := ev.Attrs
+	analysisDate := "never analyzed"
+	if parsed := common.ParseAnalysisDate(evScalarStr(a, "analysisDate")); !parsed.IsZero() {
+		analysisDate = parsed.Format("2006-01-02")
+	}
+	cutoff := evScalarStr(a, "cutoff")
+	if parsed := common.ParseAnalysisDate(cutoff); !parsed.IsZero() {
+		cutoff = parsed.Format("2006-01-02")
+	}
+	rt.Warnings.ForcedMainBranches = append(rt.Warnings.ForcedMainBranches, ForcedMainBranch{
+		Project:      evStr(a, "project"),
+		Branch:       evStr(a, "branch"),
+		AnalysisDate: analysisDate,
+		Cutoff:       cutoff,
+	})
 }
 
 func (agg *eventAggregator) applyGateConditionSkip(ev logEventLine, rt *runtimeData) {

@@ -418,7 +418,8 @@ func plural(n int, one, many string) string {
 func renderMarkdownWarnings(sb *strings.Builder, summary *MigrationSummary) {
 	w := summary.Warnings
 	if len(w.Retries) == 0 && len(w.BranchSkips) == 0 &&
-		len(w.GateConditions) == 0 && len(w.MetricRemaps) == 0 {
+		len(w.GateConditions) == 0 && len(w.MetricRemaps) == 0 &&
+		len(w.ForcedMainBranches) == 0 {
 		return
 	}
 
@@ -503,6 +504,27 @@ func renderMarkdownWarnings(sb *strings.Builder, summary *MigrationSummary) {
 		}
 		sb.WriteString(report.GenerateSection(columns, rows,
 			report.WithTitle("Metric Remaps", 3)))
+		sb.WriteString("\n")
+	}
+
+	if len(w.ForcedMainBranches) > 0 {
+		columns := []report.Column{
+			{Header: "Project", Key: "project"},
+			{Header: "Branch", Key: "branch"},
+			{Header: "Analysis Date", Key: "analysisDate"},
+			{Header: "Cutoff", Key: "cutoff"},
+		}
+		rows := make([]map[string]any, 0, len(w.ForcedMainBranches))
+		for _, f := range w.ForcedMainBranches {
+			rows = append(rows, map[string]any{
+				"project":      mdCell(f.Project),
+				"branch":       mdCell(f.Branch),
+				"analysisDate": mdCell(f.AnalysisDate),
+				"cutoff":       mdCell(f.Cutoff),
+			})
+		}
+		sb.WriteString(report.GenerateSection(columns, rows,
+			report.WithTitle("Force-Included Main Branches", 3)))
 		sb.WriteString("\n")
 	}
 }

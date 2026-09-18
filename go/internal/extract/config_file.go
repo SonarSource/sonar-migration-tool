@@ -65,6 +65,10 @@ type configFileShape struct {
 	// Pointer, unlike HistoryMaxPoints: 0 is a legal explicit value here
 	// ("no spacing rule"), so absent and 0 must stay distinguishable.
 	HistoryMinIntervalDays *int `json:"history_min_interval_days"`
+	// BranchAnalyzedAfter is the top-level branch_analyzed_after value
+	// (#583). In the unified shape it's the fallback used when the
+	// "source" block doesn't override it (see unifiedSourceBlock).
+	BranchAnalyzedAfter string `json:"branch_analyzed_after"`
 
 	// Shape 2 (command-sectioned).
 	Extract *configFileShape `json:"extract"`
@@ -106,6 +110,12 @@ type unifiedSourceBlock struct {
 	// BranchRegexp, when set, overrides the top-level "branch_regexp" for
 	// this source. #582.
 	BranchRegexp string `json:"branch_regexp"`
+	// BranchAnalyzedAfter, when present (even as an explicit empty string),
+	// overrides the top-level branch_analyzed_after for extract only
+	// (#583). nil means "not set here" — fall through to the top-level
+	// value. This is why it's a pointer, unlike the plain-string fields
+	// above: a phase must be able to explicitly clear a top-level filter.
+	BranchAnalyzedAfter *string `json:"branch_analyzed_after"`
 }
 
 // unifiedTargetBlock mirrors the "target" sub-object documented in
@@ -156,8 +166,9 @@ func (s configFileShape) applyHistoryTo(cfg *ExtractConfig) {
 // as defaults (the "target" sub-object is ignored — migrate reads that
 // one). Split out of toExtractConfig, whose cognitive complexity grew past
 // the linter's limit once this branch also had to resolve
-// source.branch_regexp (#582); mirrors how the "extract"-sectioned shape
-// below already delegates to its own recursive toExtractConfig() call.
+// source.branch_regexp (#582) and source.branch_analyzed_after (#583);
+// mirrors how the "extract"-sectioned shape below already delegates to
+// its own recursive toExtractConfig() call.
 func (s configFileShape) toExtractConfigUnified() ExtractConfig {
 	var cfg ExtractConfig
 	cfg.HistoryMinIntervalDays = HistoryUnset
@@ -195,8 +206,27 @@ func (s configFileShape) toExtractConfigUnified() ExtractConfig {
 		sourceBranchRegexp = s.Source.BranchRegexp
 	}
 	cfg.BranchRegexp = common.FirstNonEmpty(sourceBranchRegexp, s.BranchRegexp)
+	// #583: source.branch_analyzed_after wins when explicitly present
+	// (even if empty), else the top-level field.
+	var sourceBranchAnalyzedAfter *string
+	if s.Source != nil {
+		sourceBranchAnalyzedAfter = s.Source.BranchAnalyzedAfter
+	}
+	cfg.BranchAnalyzedAfter = resolveBranchAnalyzedAfter(sourceBranchAnalyzedAfter, s.BranchAnalyzedAfter)
 	s.applyHistoryTo(&cfg)
 	return cfg
+}
+
+// resolveBranchAnalyzedAfter mirrors resolveMigrateHistory/resolveFastSync
+// (in the migrate package) for the branch_analyzed_after string (#583): the
+// source block's value wins when explicitly present (even if empty,
+// meaning "no filter for extract"), else the top-level value, else "" (no
+// filter, current behavior).
+func resolveBranchAnalyzedAfter(phase *string, top string) string {
+	if phase != nil {
+		return *phase
+	}
+	return top
 }
 
 func (s configFileShape) toExtractConfig() ExtractConfig {
@@ -225,6 +255,7 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKey = s.ProjectKey
 		cfg.BranchRegexp = s.BranchRegexp
+		cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
 		s.applyHistoryTo(&cfg)
 	case s.Extract != nil:
 		cfg = s.Extract.toExtractConfig()
@@ -241,6 +272,9 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		}
 		if s.BranchRegexp != "" {
 			cfg.BranchRegexp = s.BranchRegexp
+		}
+		if s.BranchAnalyzedAfter != "" {
+			cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
 		}
 	default:
 		cfg.URL = s.URL
@@ -260,6 +294,7 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKey = s.ProjectKey
 		cfg.BranchRegexp = s.BranchRegexp
+		cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
 		s.applyHistoryTo(&cfg)
 	}
 	return cfg

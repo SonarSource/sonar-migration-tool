@@ -454,6 +454,36 @@ sonar-migration-tool migrate ... --exclude_branches "feature/*" --exclude_branch
 
 The main branch is **never** excluded, regardless of patterns. See [ADVANCED-CONFIG.md](ADVANCED-CONFIG.md) for the full config reference.
 
+### Selecting branches by last analysis date
+
+Use `--branch_analyzed_after <YYYY-MM-DD>` (or `branch_analyzed_after` in the JSON config) to only select branches whose last analysis is on or after that date, on `extract`, `migrate`, or `transfer` (issue #583):
+
+```bash
+# Only migrate branches analyzed on or after 2025-01-01
+sonar-migration-tool migrate ... --branch_analyzed_after 2025-01-01
+
+# Or in config.json
+{
+  "target": {
+    "branch_analyzed_after": "2025-01-01"
+  }
+}
+```
+
+The project's main branch is **always** selected, even when it doesn't meet the date — if the filter would otherwise exclude every branch of a project, main is force-included instead. When that happens, the run log carries a `force-including main branch: does not meet --branch_analyzed_after filter` warning, and the generated `migration_summary.md` / PDF report gets a "Force-Included Main Branches" table listing the affected projects, e.g.:
+
+```
+## Warnings
+
+### Force-Included Main Branches
+
+| Project      | Branch | Analysis Date | Cutoff     |
+|--------------|--------|----------------|------------|
+| my-project   | main   | 2022-03-14     | 2025-01-01 |
+```
+
+A malformed date aborts the run immediately with an explicit error (`invalid branch_analyzed_after value "..."`), and a cutoff more than 2 years (730 days) in the past logs a one-time warning that the filter may not exclude many branches. See [ADVANCED-CONFIG.md](ADVANCED-CONFIG.md) for the full config reference, including the `transfer`-specific note that the CLI flag sets both the extract and migrate phases at once.
+
 ### Resuming after a branch failure
 
 The tool tracks per-branch completion status. When resuming a failed migration with `--run_id`, branches that already succeeded are automatically skipped. Only failed or not-yet-attempted branches are retried.

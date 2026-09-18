@@ -323,6 +323,7 @@ Migration of non-main branches and their associated analysis data.
 - All non-main branches as long-lived branches (short-lived/PR branches are not separately recreated; everything is migrated long-lived to preserve history)
 - Configurable branch inclusion/exclusion patterns (`--exclude_branches`)
 - Regexp pattern to select which branches are extracted/migrated by name (always anchored ^...$); the main branch is always included regardless of match. (`--branch_regexp`)
+- Date-based branch selection (`--branch_analyzed_after <YYYY-MM-DD>`): only branches last analyzed on or after the given date are selected during `extract`/`migrate`/`transfer`; the project's main branch is always selected regardless, even if it doesn't meet the date (#583)
 - Branches whose source is no longer retrievable on the server are skipped with a clear message
 - Hard cap of **10 migrated branches per project** (#584): main/`master`/`develop` first, then `[Rr]elease.*` branches most-recently-analyzed first, then everything else most-recently-analyzed first. Dropped branches are named in the migration report. `extract` is unaffected.
 

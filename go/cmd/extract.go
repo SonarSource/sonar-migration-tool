@@ -95,6 +95,7 @@ func init() {
 	f.String("objects", "", "Comma-separated list of object categories to extract: "+strings.Join(common.AllObjects, ", ")+" (aliases: qp, qg, pt, lp). Omit to extract everything (default).")
 	f.String("project_key", "", "Regexp pattern of project keys to extract (only applies when the projects category is selected). A plain key matches only itself.")
 	f.String(flagBranchRegexp, "", "Regexp pattern of branch names to extract, applied to each project's own branches (also filters the getBranches task's own written records, so downstream migrate runs only see what matched here). Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"(main|master)\" matches only branches literally named main or master. The project's main branch is always extracted regardless of match. Empty means every branch is extracted (default). #582.")
+	f.String(flagBranchAnalyzedAfter, "", "Only select branches analyzed on or after this date (YYYY-MM-DD) during extract. The project's main branch is always selected, even when it doesn't meet this date. Omit to select all branches (default). #583")
 }
 
 func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfig, error) {
@@ -165,6 +166,10 @@ func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfi
 	// (CLI overrides config file).
 	overrideString(cmd, "project_key", &cfg.ProjectKey)
 	overrideString(cmd, flagBranchRegexp, &cfg.BranchRegexp)
+	overrideString(cmd, flagBranchAnalyzedAfter, &cfg.BranchAnalyzedAfter)
+	if err := validateBranchAnalyzedAfter(cfg.BranchAnalyzedAfter); err != nil {
+		return cfg, fmt.Errorf("--%s: %w", flagBranchAnalyzedAfter, err)
+	}
 
 	// Default the export directory when neither config nor flag supplied
 	// one (issue #247).
