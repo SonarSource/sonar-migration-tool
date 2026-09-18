@@ -21,6 +21,7 @@
     "pem_file_path": null,
     "key_file_path": null,
     "cert_password": null,
+    "insecure": false,
     "target_task": null,
     "extract_id": null,
     "enterprise_key": null,

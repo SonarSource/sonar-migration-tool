@@ -1081,3 +1081,69 @@ func TestProcessOrgMappingAlreadyMapped(t *testing.T) {
 		t.Fatalf("expected nil for already-mapped org, got %v", err)
 	}
 }
+
+// #586: source.insecure reaches BOTH source-side calls phaseExtract makes.
+// Before this was plumbed through, the GUI and wizard silently dropped the
+// setting and still failed certificate verification on a self-signed
+// source server, even though extract/transfer/sync-issues honoured it.
+func TestPhaseExtractThreadsInsecure(t *testing.T) {
+	var capturedExtract extract.ExtractConfig
+	origFn := runExtractFn
+	runExtractFn = func(_ context.Context, cfg extract.ExtractConfig) ([]string, error) {
+		capturedExtract = cfg
+		return nil, nil
+	}
+	defer func() { runExtractFn = origFn }()
+
+	var capturedResolve extract.ExtractConfig
+	origResolve := resolveProjectKeysFn
+	resolveProjectKeysFn = func(_ context.Context, cfg extract.ExtractConfig, _ string) ([]string, error) {
+		capturedResolve = cfg
+		return []string{"proj-a"}, nil
+	}
+	defer func() { resolveProjectKeysFn = origResolve }()
+
+	insecure := true
+	state := &WizardState{Phase: PhaseExtract, Insecure: &insecure}
+	p := &MockPrompter{
+		ExtractFormResponses: []ExtractFormResult{
+			{URL: testSQServerURL, Token: "token123", ProjectKeyPattern: "BANKING_.+", IncludeProjectData: true, IncludeIssueSync: true},
+		},
+	}
+
+	if err := phaseExtract(context.Background(), p, state, t.TempDir()); err != nil {
+		t.Fatalf("phaseExtract: %v", err)
+	}
+	if !capturedResolve.Insecure {
+		t.Error("project-key resolution must receive Insecure=true")
+	}
+	if !capturedExtract.Insecure {
+		t.Error("the extract run must receive Insecure=true")
+	}
+}
+
+// The default must stay secure: an unset Insecure resolves to false, so a
+// wizard run that never opted in still verifies certificates.
+func TestPhaseExtractInsecureDefaultsOff(t *testing.T) {
+	var captured extract.ExtractConfig
+	origFn := runExtractFn
+	runExtractFn = func(_ context.Context, cfg extract.ExtractConfig) ([]string, error) {
+		captured = cfg
+		return nil, nil
+	}
+	defer func() { runExtractFn = origFn }()
+
+	state := &WizardState{Phase: PhaseExtract}
+	p := &MockPrompter{
+		ExtractFormResponses: []ExtractFormResult{
+			{URL: testSQServerURL, Token: "token123", IncludeProjectData: true, IncludeIssueSync: true},
+		},
+	}
+
+	if err := phaseExtract(context.Background(), p, state, t.TempDir()); err != nil {
+		t.Fatalf("phaseExtract: %v", err)
+	}
+	if captured.Insecure {
+		t.Error("Insecure must default to false when the wizard state does not set it")
+	}
+}

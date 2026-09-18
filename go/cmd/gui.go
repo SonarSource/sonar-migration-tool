@@ -212,6 +212,12 @@ func resolveGUIDefaults(cmd *cobra.Command) (string, *wizard.WizardState, error)
 		v := extractCfg.CertPassword
 		seed.CertPassword = &v
 	}
+	// #586 — seeded only when true so an absent key stays "not set" and
+	// a resumed session's own choice is not overwritten with false.
+	if extractCfg.Insecure {
+		v := true
+		seed.Insecure = &v
+	}
 	if migrateCfg.DefaultOrganization != "" {
 		v := migrateCfg.DefaultOrganization
 		seed.DefaultOrganization = &v

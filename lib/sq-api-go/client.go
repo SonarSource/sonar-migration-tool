@@ -22,6 +22,12 @@
 //	    "https://sonar.example.com", "squ_mytoken", 9.9,
 //	    sqapi.WithClientCert("/path/to/cert.pem", "/path/to/key.pem", ""),
 //	)
+//
+//	// Trusted internal server with a self-signed certificate
+//	client := sqapi.NewServerClient(
+//	    "https://sonar.internal", "squ_mytoken", 10.7,
+//	    sqapi.WithInsecureSkipVerify(),
+//	)
 package sqapi
 
 import (
@@ -138,6 +144,11 @@ func buildTransport(cfg *clientConfig, token string, version float64) http.Round
 	} else if tlsCfg.MinVersion == 0 {
 		tlsCfg.MinVersion = tls.VersionTLS12
 	}
+	// #586 — opt-in via WithInsecureSkipVerify. Assigning unconditionally is
+	// safe: when the option was not used the value is false, which is the
+	// field's zero value, so the config stays byte-identical to what every
+	// existing caller already got.
+	tlsCfg.InsecureSkipVerify = cfg.insecureSkipVerify //nolint:gosec // G402: deliberate, caller opted in for a self-signed internal server
 
 	// Clone the stdlib default rather than building a bare Transport:
 	// a zero-value http.Transport has no dial, TLS-handshake or

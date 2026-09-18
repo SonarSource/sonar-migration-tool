@@ -28,6 +28,7 @@ var extractCmd = &cobra.Command{
 		if cfg.URL == "" || cfg.Token == "" {
 			return fmt.Errorf("URL and TOKEN are required (--source_url/--source_token flags or in config file)")
 		}
+		warnIfInsecure(cfg.Insecure)
 		// #536: resolve --project_key (or the config file's top-level
 		// "project_key") into concrete ProjectKeys now that URL/Token are
 		// known to be set. Skipped entirely when an active --objects
@@ -70,6 +71,7 @@ func init() {
 	f.String("pem_file_path", "", "Path to client certificate pem file")
 	f.String("key_file_path", "", "Path to client certificate key file")
 	f.String("cert_password", "", "Password for client certificate")
+	f.Bool(flagInsecure, false, insecureFlagHelp)
 	f.String("export_directory", DefaultExportDirectory, "Root directory to output the export")
 	f.String("extract_type", "", "Type of extract to run")
 	f.Int("concurrency", 0, "Maximum number of concurrent requests")
@@ -114,6 +116,10 @@ func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfi
 	overrideString(cmd, "pem_file_path", &cfg.PEMFilePath)
 	overrideString(cmd, "key_file_path", &cfg.KeyFilePath)
 	overrideString(cmd, "cert_password", &cfg.CertPassword)
+	// #586 — a plain two-way override, unlike the one-way skip_* flags:
+	// --insecure is a connection setting, so an explicit --insecure=false
+	// must be able to switch off a config-file "insecure": true.
+	applyFlagBool(cmd, flagInsecure, &cfg.Insecure)
 	overrideString(cmd, "export_directory", &cfg.ExportDirectory)
 	overrideString(cmd, "extract_type", &cfg.ExtractType)
 	overrideString(cmd, "extract_id", &cfg.ExtractID)

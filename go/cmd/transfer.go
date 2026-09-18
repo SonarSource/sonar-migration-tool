@@ -50,6 +50,7 @@ const (
 	flagPEMFilePath              = "pem_file_path"
 	flagKeyFilePath              = "key_file_path"
 	flagCertPassword             = "cert_password"
+	flagInsecure                 = "insecure"
 	flagDebug                    = "debug"
 	flagExcludeBranches          = "exclude_branches"
 	flagUnsupportedLanguages     = "unsupported_languages"
@@ -66,6 +67,28 @@ const (
 	minAPIMaxRatePerMin = 100
 	maxAPIMaxRatePerMin = 1500
 )
+
+// insecureFlagHelp is shared by extract, transfer and sync-issues so the
+// wording of this security-relevant flag stays identical on all three.
+const insecureFlagHelp = "Skip TLS certificate verification when connecting to the source " + sqServerName +
+	". Only for a trusted internal server whose certificate is self-signed or not signed by a trusted CA — " +
+	"it leaves the connection open to man-in-the-middle interception. Defaults to false. " +
+	"(maps to source.insecure) #586"
+
+// insecureWarning is printed once per run when --insecure is in effect, so
+// an operator who set it in a config file months ago still sees it.
+const insecureWarning = "--" + flagInsecure + " is set: TLS certificate verification is disabled for the source " +
+	sqServerName + " connection, which is vulnerable to man-in-the-middle interception"
+
+// warnIfInsecure emits insecureWarning when insecure is set. Called from
+// each command's run function rather than from the SDK option builder,
+// which runs more than once per command (the version-detection client is
+// built separately) and would repeat the line.
+func warnIfInsecure(insecure bool) {
+	if insecure {
+		slog.Default().Warn(insecureWarning)
+	}
+}
 
 // transferTargetTasks is the explicit set of project-scoped "leaf" migrate
 // tasks the transfer command runs. Their transitive dependencies — creating
@@ -212,6 +235,7 @@ func init() {
 	f.String(flagPEMFilePath, "", "Path to client mTLS PEM file for the source server (maps to source.pem_file_path)")
 	f.String(flagKeyFilePath, "", "Path to client mTLS key file for the source server (maps to source.key_file_path)")
 	f.String(flagCertPassword, "", "Password for the source server mTLS client certificate (maps to source.cert_password)")
+	f.Bool(flagInsecure, false, insecureFlagHelp)
 	// --debug is inherited from the persistent root flag; see cmd/root.go.
 	f.StringSlice(flagExcludeBranches, nil, "Glob patterns for non-main branches to skip during project data import (e.g. feature/*,bugfix/*)")
 	f.String(flagUnsupportedLanguages, "", "How to handle files whose language has no quality profile on the target — typically a language from a 3rd-party "+sqServerName+" plugin (#474). "+
@@ -247,6 +271,7 @@ type transferConfig struct {
 	pemFilePath              string
 	keyFilePath              string
 	certPassword             string
+	insecure                 bool
 	skipIssueSync            bool
 	skipProjectDataMigration bool
 	debug                    bool
@@ -416,6 +441,7 @@ func loadTransferFileDefaults(path string) (transferConfig, error) {
 	cfg.pemFilePath = extractCfg.PEMFilePath
 	cfg.keyFilePath = extractCfg.KeyFilePath
 	cfg.certPassword = extractCfg.CertPassword
+	cfg.insecure = extractCfg.Insecure
 
 	cfg.skipIssueSync = migrateCfg.SkipIssueSync
 	cfg.skipProjectDataMigration = migrateCfg.SkipProjectDataMigration
@@ -467,6 +493,7 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 	applyFlagString(cmd, flagPEMFilePath, &cfg.pemFilePath)
 	applyFlagString(cmd, flagKeyFilePath, &cfg.keyFilePath)
 	applyFlagString(cmd, flagCertPassword, &cfg.certPassword)
+	applyFlagBool(cmd, flagInsecure, &cfg.insecure)
 	// --skip_issue_sync is one-way: explicit true on the CLI sets
 	// skipIssueSync, but the absence of the flag does NOT undo a
 	// config-file skip_issue_sync: true.
@@ -574,6 +601,7 @@ func runTransfer(cmd *cobra.Command, _ []string) error {
 	if err := validateTransferConfig(cfg); err != nil {
 		return err
 	}
+	warnIfInsecure(cfg.insecure)
 	// Transfer's target is always SonarQube Cloud (#573).
 	warnIfConcurrencyDeprecated(cfg.targetConcurrency)
 
@@ -640,6 +668,7 @@ func resolveTransferProjectKeys(ctx context.Context, cfg transferConfig) ([]stri
 		PEMFilePath:  cfg.pemFilePath,
 		KeyFilePath:  cfg.keyFilePath,
 		CertPassword: cfg.certPassword,
+		Insecure:     cfg.insecure,
 		Debug:        cfg.debug,
 	})
 	if err != nil {
@@ -678,6 +707,7 @@ func runTransferExtract(ctx context.Context, cfg transferConfig) ([]string, erro
 		PEMFilePath:     cfg.pemFilePath,
 		KeyFilePath:     cfg.keyFilePath,
 		CertPassword:    cfg.certPassword,
+		Insecure:        cfg.insecure,
 		// Transfer extracts the project's issues and hotspots so the
 		// downstream migrate phase can replay them. Only skipped when
 		// the operator opts out of project-data migration entirely

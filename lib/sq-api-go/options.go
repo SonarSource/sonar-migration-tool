@@ -16,17 +16,21 @@ type Option func(*clientConfig)
 
 // clientConfig holds optional Client configuration assembled from Option values.
 type clientConfig struct {
-	tlsConfig      *tls.Config
-	certErr        error // deferred cert loading error, reported on first request
-	maxConns       int
-	timeoutSecs    int
-	retryLogFn     RetryLogFunc
-	recoveryLogFn  RecoveryLogFunc
-	debugLogFn     DebugLogFunc
-	requestLogFn   RequestLogFunc
-	rateLimitObsFn RateLimitObserver
-	rateLimiter    *SlidingWindowLimiter
-	latencyObsFn   LatencyObserver
+	tlsConfig *tls.Config
+	// insecureSkipVerify is kept separate from tlsConfig so that
+	// WithInsecureSkipVerify and WithClientCert compose in any order:
+	// buildTransport applies it to whichever *tls.Config it ends up with.
+	insecureSkipVerify bool
+	certErr            error // deferred cert loading error, reported on first request
+	maxConns           int
+	timeoutSecs        int
+	retryLogFn         RetryLogFunc
+	recoveryLogFn      RecoveryLogFunc
+	debugLogFn         DebugLogFunc
+	requestLogFn       RequestLogFunc
+	rateLimitObsFn     RateLimitObserver
+	rateLimiter        *SlidingWindowLimiter
+	latencyObsFn       LatencyObserver
 }
 
 // DebugLogFunc is invoked once per request/response pair with the verbatim
@@ -73,6 +77,19 @@ func WithClientCert(pemFile, keyFile, _ string) Option {
 			cfg.tlsConfig = &tls.Config{} //nolint:gosec
 		}
 		cfg.tlsConfig.Certificates = append(cfg.tlsConfig.Certificates, cert)
+	}
+}
+
+// WithInsecureSkipVerify disables TLS certificate verification for this
+// client: the server's certificate chain and host name are not checked.
+//
+// Intended only for a trusted internal server whose certificate is
+// self-signed or otherwise not signed by a trusted CA (#586). It makes the
+// connection vulnerable to man-in-the-middle interception, so never use it
+// against a public endpoint.
+func WithInsecureSkipVerify() Option {
+	return func(cfg *clientConfig) {
+		cfg.insecureSkipVerify = true
 	}
 }
 

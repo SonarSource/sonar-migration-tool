@@ -152,6 +152,11 @@
           "type": ["string", "null"],
           "description": "Password for the client certificate, if any."
         },
+        "insecure": {
+          "type": "boolean",
+          "default": false,
+          "description": "Skip TLS certificate verification for the SonarQube Server connection. For a trusted internal server whose certificate is self-signed or not signed by a trusted CA. Leaves the connection open to man-in-the-middle interception; never use against a public endpoint."
+        },
         "target_task": {
           "type": ["string", "null"],
           "description": "Stop extract at a specific task (all its dependencies are still run)."

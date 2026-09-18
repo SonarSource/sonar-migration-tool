@@ -266,6 +266,38 @@ func TestLoadExtractConfigFileUnifiedShape_SourceOverridesGlobals(t *testing.T) 
 	}
 }
 
+// #586: "insecure" lives next to the mTLS fields — under "source" in the
+// unified shape, top-level in the flat shape — and must default to false
+// when absent so an existing config file keeps verifying certificates.
+func TestLoadExtractConfigFileInsecure(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"unified source block", `{"source": {"url": "u", "token": "t", "insecure": true}}`, true},
+		{"unified absent", `{"source": {"url": "u", "token": "t"}}`, false},
+		{"flat shape", `{"url": "u", "token": "t", "insecure": true}`, true},
+		{"flat absent", `{"url": "u", "token": "t"}`, false},
+		{"command-sectioned", `{"extract": {"url": "u", "token": "t", "insecure": true}}`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := t.TempDir() + "/insecure.json"
+			if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadExtractConfigFile(path)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if cfg.Insecure != tc.want {
+				t.Errorf("Insecure = %v, want %v", cfg.Insecure, tc.want)
+			}
+		})
+	}
+}
+
 // #536: "objects" and "project_key" are top-level-only fields, present in
 // every documented shape. These tests round-trip them the same way the
 // TestLoadExtractConfigFileUnifiedShape* tests above round-trip the rest

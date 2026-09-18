@@ -29,6 +29,7 @@ func newExtractTestCmd() *cobra.Command {
 	f.String("pem_file_path", "", "")
 	f.String("key_file_path", "", "")
 	f.String("cert_password", "", "")
+	f.Bool(flagInsecure, false, "")
 	f.String("export_directory", DefaultExportDirectory, "")
 	f.String("extract_type", "", "")
 	f.Int("concurrency", 0, "")
@@ -185,6 +186,75 @@ func TestBuildExtractConfigProjectKeyFlag(t *testing.T) {
 		}
 		if cfg.ProjectKey != "FROM_CLI" {
 			t.Errorf("expected CLI project_key to win, got %q", cfg.ProjectKey)
+		}
+	})
+}
+
+// #586 — --insecure is a plain two-way override, unlike the one-way
+// --skip_* opt-outs: an operator who inherited a config file with
+// "insecure": true must be able to turn verification back on from the CLI.
+func TestBuildExtractConfigInsecureFlag(t *testing.T) {
+	writeCfg := func(t *testing.T, insecure bool) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "cfg.json")
+		body := `{"url": "http://sq.example.com", "token": "tok", "insecure": ` +
+			map[bool]string{true: "true", false: "false"}[insecure] + `}`
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	t.Run("defaults to false", func(t *testing.T) {
+		cfg, err := buildExtractConfig(newExtractTestCmd(), nil)
+		if err != nil {
+			t.Fatalf("buildExtractConfig: %v", err)
+		}
+		if cfg.Insecure {
+			t.Error("Insecure must default to false")
+		}
+	})
+
+	t.Run("set from CLI", func(t *testing.T) {
+		cmd := newExtractTestCmd()
+		if err := cmd.ParseFlags([]string{"--" + flagInsecure}); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := buildExtractConfig(cmd, nil)
+		if err != nil {
+			t.Fatalf("buildExtractConfig: %v", err)
+		}
+		if !cfg.Insecure {
+			t.Error("expected --insecure to set Insecure")
+		}
+	})
+
+	t.Run("set from config file", func(t *testing.T) {
+		cmd := newExtractTestCmd()
+		if err := cmd.ParseFlags([]string{"--config", writeCfg(t, true)}); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := buildExtractConfig(cmd, nil)
+		if err != nil {
+			t.Fatalf("buildExtractConfig: %v", err)
+		}
+		if !cfg.Insecure {
+			t.Error("expected config-file insecure:true to set Insecure")
+		}
+	})
+
+	t.Run("CLI false overrides config file true", func(t *testing.T) {
+		cmd := newExtractTestCmd()
+		args := []string{"--config", writeCfg(t, true), "--" + flagInsecure + "=false"}
+		if err := cmd.ParseFlags(args); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := buildExtractConfig(cmd, nil)
+		if err != nil {
+			t.Fatalf("buildExtractConfig: %v", err)
+		}
+		if cfg.Insecure {
+			t.Error("expected --insecure=false to override config-file insecure:true")
 		}
 	})
 }

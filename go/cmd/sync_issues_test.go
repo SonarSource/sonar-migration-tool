@@ -34,6 +34,7 @@ func newSyncIssuesTestCmd() *cobra.Command {
 	f.String(flagPEMFilePath, "", "")
 	f.String(flagKeyFilePath, "", "")
 	f.String(flagCertPassword, "", "")
+	f.Bool(flagInsecure, false, "")
 	f.Bool(flagDebug, false, "")
 	f.Bool(flagFastSync, false, "")
 	return cmd
@@ -355,4 +356,67 @@ func TestValidateSyncIssuesConfig_HappyPathNoProjectKey(t *testing.T) {
 	if err := validateSyncIssuesConfig(cfg); err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
+}
+
+// #586 — same two-way --insecure semantics as extract and transfer.
+func TestResolveSyncIssuesConfig_InsecureFlag(t *testing.T) {
+	cfgWith := func(t *testing.T, insecure string) string {
+		t.Helper()
+		return writeSyncIssuesConfig(t, `{
+			"source": {"url": "u", "token": "t", "insecure": `+insecure+`},
+			"target": {"token": "tt", "default_organization": "org"}
+		}`)
+	}
+
+	t.Run("absent defaults to false", func(t *testing.T) {
+		cfg, err := resolveSyncIssuesConfig(newSyncIssuesTestCmd())
+		if err != nil {
+			t.Fatalf("resolveSyncIssuesConfig: %v", err)
+		}
+		if cfg.insecure {
+			t.Error("insecure must default to false")
+		}
+	})
+
+	t.Run("set from CLI", func(t *testing.T) {
+		cmd := newSyncIssuesTestCmd()
+		if err := cmd.ParseFlags([]string{"--" + flagInsecure}); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := resolveSyncIssuesConfig(cmd)
+		if err != nil {
+			t.Fatalf("resolveSyncIssuesConfig: %v", err)
+		}
+		if !cfg.insecure {
+			t.Error("expected --insecure to set insecure")
+		}
+	})
+
+	t.Run("set from config file", func(t *testing.T) {
+		cmd := newSyncIssuesTestCmd()
+		if err := cmd.ParseFlags([]string{"-c", cfgWith(t, "true")}); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := resolveSyncIssuesConfig(cmd)
+		if err != nil {
+			t.Fatalf("resolveSyncIssuesConfig: %v", err)
+		}
+		if !cfg.insecure {
+			t.Error("expected config-file source.insecure:true to set insecure")
+		}
+	})
+
+	t.Run("CLI false overrides config file true", func(t *testing.T) {
+		cmd := newSyncIssuesTestCmd()
+		if err := cmd.ParseFlags([]string{"-c", cfgWith(t, "true"), "--" + flagInsecure + "=false"}); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := resolveSyncIssuesConfig(cmd)
+		if err != nil {
+			t.Fatalf("resolveSyncIssuesConfig: %v", err)
+		}
+		if cfg.insecure {
+			t.Error("expected --insecure=false to override config-file insecure:true")
+		}
+	})
 }

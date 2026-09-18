@@ -68,6 +68,7 @@ Only `source.url` / `source.token` (for `extract`) and `target.url` / `target.to
 | `source.pem_file_path` | `--pem_file_path` | `null` | No | mTLS client-certificate PEM file. |
 | `source.key_file_path` | `--key_file_path` | `null` | No | mTLS private key matching the PEM. |
 | `source.cert_password` | `--cert_password` | `null` | No | mTLS certificate password, if any. |
+| `source.insecure` | `--insecure` | `false` | No | Skip TLS certificate verification for the SonarQube Server connection — for a trusted internal server whose certificate is self-signed or not signed by a trusted CA. Leaves the connection open to man-in-the-middle interception; never use it against a public endpoint. #586 |
 | `source.target_task` | `--target_task` | `null` | No | Stop extract at a specific task (dependencies still run). |
 | `source.extract_id` | `--extract_id` | `null` | No | Reuse / resume an existing extract directory ID. |
 | `source.enterprise_key`, `source.organization_key`, `source.edition` | — | `null` / `enterprise` | No | Provisional — accepted but ignored today; reserved for future SQC-to-SQC migration. |
@@ -143,6 +144,7 @@ The CLI flags `--skip_issue_sync` and `--skip_project_data_migration` on `migrat
 | `pem_file_path` | | Client-side mTLS PEM file (optional). |
 | `key_file_path` | | Client-side mTLS key file (optional). |
 | `cert_password` | | Client-side mTLS password (optional). |
+| `insecure` | | Skip TLS certificate verification for the SonarQube Server connection (optional, default `false`). For a trusted internal server with a self-signed certificate only. #586 |
 | `target_task` | | Stop extract at a specific task (dependencies still run). |
 | `extract_id` | | Reuse an existing extract directory ID instead of generating a new one — resume after a failure. |
 | `enterprise_key` / `organization_key` / `edition` | | Provisional — accepted but ignored today; reserved for future SQC-to-SQC migration. |
@@ -261,6 +263,7 @@ sonar-migration-tool extract --source_url <url> --source_token <token> [flags]
 | `--pem_file_path <path>` | mTLS PEM file. |
 | `--key_file_path <path>` | mTLS key file. |
 | `--cert_password <pw>` | mTLS password. |
+| `--insecure` | Skip TLS certificate verification for the SonarQube Server connection. For a trusted internal server with a self-signed certificate only. #586 |
 
 ### `structure` / `mappings` / `predictive-report`
 
@@ -348,6 +351,7 @@ file.
 | `--pem_file_path <path>` | `source.pem_file_path` | Client mTLS PEM file. |
 | `--key_file_path <path>` | `source.key_file_path` | Client mTLS key file. |
 | `--cert_password <pw>` | `source.cert_password` | Client mTLS password. |
+| `--insecure` | `source.insecure` | Skip TLS certificate verification for the source SonarQube Server connection. For a trusted internal server with a self-signed certificate only. #586 |
 | `--skip_issue_sync` | top-level `skip_issue_sync` | Skip the final per-issue / per-hotspot metadata sync (#299). |
 | `--skip_project_data_migration` | top-level `skip_project_data_migration` | Skip the entire project-data migration (importProjectData + trailing syncs). #303. |
 | `--exclude_branches <pattern>` | `target.exclude_branches` | Glob pattern for non-main branches to skip during project data import. Repeatable. Main branch is never excluded. |
