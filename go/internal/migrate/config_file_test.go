@@ -364,6 +364,96 @@ func TestLoadMigrateConfigFile_FastSync_MigrateSectionedShape(t *testing.T) {
 	}
 }
 
+// Issue #583: branch_analyzed_after resolves with the same
+// target-wins-else-top-level precedence as fast_sync/migrate_history, but
+// as a tri-state string: an explicit empty string at the target level must
+// still override a non-empty top-level value (distinguishing "target
+// didn't set this" from "target explicitly wants no filter").
+func TestLoadMigrateConfigFile_BranchAnalyzedAfter_UnifiedShape(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"absent (default)", `{"target": {"url": "u", "token": "t"}}`, ""},
+		{"top-level only", `{"branch_analyzed_after": "2024-01-01", "target": {"url": "u", "token": "t"}}`, "2024-01-01"},
+		{
+			"target overrides top-level with a different date",
+			`{"branch_analyzed_after": "2024-01-01", "target": {"url": "u", "token": "t", "branch_analyzed_after": "2025-06-01"}}`,
+			"2025-06-01",
+		},
+		{
+			"target explicitly clears a non-empty top-level value",
+			`{"branch_analyzed_after": "2024-01-01", "target": {"url": "u", "token": "t", "branch_analyzed_after": ""}}`,
+			"",
+		},
+		{
+			"target unset falls back to top-level",
+			`{"branch_analyzed_after": "2024-01-01", "target": {"url": "u", "token": "t"}}`,
+			"2024-01-01",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := dir + "/branch_analyzed_after.json"
+			if err := os.WriteFile(path, []byte(c.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadMigrateConfigFile(path)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if cfg.BranchAnalyzedAfter != c.want {
+				t.Errorf("BranchAnalyzedAfter: got %q, want %q", cfg.BranchAnalyzedAfter, c.want)
+			}
+		})
+	}
+}
+
+// Issue #583: branch_analyzed_after also parses in the "migrate"-sectioned
+// shape, with the outer (command-sectioned) field winning when both are
+// set — mirroring fast_sync's outer-wins-else-inner precedence there.
+func TestLoadMigrateConfigFile_BranchAnalyzedAfter_MigrateSectionedShape(t *testing.T) {
+	body := `{
+  "branch_analyzed_after": "2024-01-01",
+  "migrate": {
+    "url": "u", "token": "t",
+    "branch_analyzed_after": "2020-01-01"
+  }
+}`
+	dir := t.TempDir()
+	path := dir + "/branch_analyzed_after_sectioned.json"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadMigrateConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchAnalyzedAfter != "2024-01-01" {
+		t.Errorf("BranchAnalyzedAfter: got %q, want %q (outer wins)", cfg.BranchAnalyzedAfter, "2024-01-01")
+	}
+}
+
+// Issue #583: branch_analyzed_after passes through unchanged on the flat
+// (shape 1) config.
+func TestLoadMigrateConfigFile_BranchAnalyzedAfter_FlatShape(t *testing.T) {
+	body := `{"url": "u", "token": "t", "branch_analyzed_after": "2024-01-01"}`
+	dir := t.TempDir()
+	path := dir + "/branch_analyzed_after_flat.json"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadMigrateConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchAnalyzedAfter != "2024-01-01" {
+		t.Errorf("BranchAnalyzedAfter: got %q, want %q", cfg.BranchAnalyzedAfter, "2024-01-01")
+	}
+}
+
 // Issue #281: target.default_organization parses into
 // MigrateConfig.DefaultOrganization.
 func TestLoadMigrateConfigFileUnifiedShape_DefaultOrganization(t *testing.T) {

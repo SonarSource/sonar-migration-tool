@@ -2221,10 +2221,74 @@ func TestCollectSummaryRuntimeAbsent(t *testing.T) {
 		t.Errorf("Branches: want 0, got %d", len(summary.Branches))
 	}
 	if len(summary.Warnings.Retries) != 0 || len(summary.Warnings.BranchSkips) != 0 ||
-		len(summary.Warnings.GateConditions) != 0 || len(summary.Warnings.MetricRemaps) != 0 {
+		len(summary.Warnings.GateConditions) != 0 || len(summary.Warnings.MetricRemaps) != 0 ||
+		len(summary.Warnings.ForcedMainBranches) != 0 {
 		t.Errorf("WarningLedger must be empty, got %+v", summary.Warnings)
 	}
 	if summary.Throughput != (ThroughputStats{}) {
 		t.Errorf("Throughput must be zero-valued, got %+v", summary.Throughput)
+	}
+}
+
+// TestCollectSummaryForcedMainBranch checks that a
+// common.ForcedMainBranchLogMessage event in run_events.jsonl (#583) is
+// aggregated into Warnings.ForcedMainBranches, and that a branch analyzed
+// on the wire (a real analysisDate attr) is formatted rather than left as
+// the raw RFC3339 string, while an absent analysisDate reads "never
+// analyzed" rather than the zero-time string. It also covers cutoff:
+// the real logging call passes it as a *time.Time, which slog's JSON
+// handler renders on the wire as a full RFC3339 timestamp (projC below) —
+// not the plain YYYY-MM-DD the operator passed on the CLI — so cutoff must
+// be reformatted the same way analysisDate is, not taken verbatim.
+func TestCollectSummaryForcedMainBranch(t *testing.T) {
+	runDir := t.TempDir()
+
+	writeRunEvents(t, runDir, []map[string]any{
+		{
+			"time": "2026-06-05T12:00:40Z", "level": "WARN",
+			"message": common.ForcedMainBranchLogMessage,
+			"attrs": map[string]any{
+				"project": "projA", "branch": "master",
+				"analysisDate": "2020-01-15T10:00:00Z", "cutoff": "2024-01-01",
+			},
+		},
+		{
+			"time": "2026-06-05T12:00:41Z", "level": "WARN",
+			"message": common.ForcedMainBranchLogMessage,
+			"attrs": map[string]any{
+				"project": "projB", "branch": "main", "cutoff": "2024-01-01",
+			},
+		},
+		{
+			"time": "2026-06-05T12:00:42Z", "level": "WARN",
+			"message": common.ForcedMainBranchLogMessage,
+			"attrs": map[string]any{
+				"project": "projC", "branch": "main",
+				"analysisDate": "2019-03-01T00:00:00Z", "cutoff": "2024-01-01T00:00:00Z",
+			},
+		},
+	})
+
+	summary, err := CollectSummary(runDir, "")
+	if err != nil {
+		t.Fatalf("CollectSummary: %v", err)
+	}
+
+	if len(summary.Warnings.ForcedMainBranches) != 3 {
+		t.Fatalf("Warnings.ForcedMainBranches: want 3, got %d (%+v)",
+			len(summary.Warnings.ForcedMainBranches), summary.Warnings.ForcedMainBranches)
+	}
+	byProject := map[string]ForcedMainBranch{}
+	for _, f := range summary.Warnings.ForcedMainBranches {
+		byProject[f.Project] = f
+	}
+	if got := byProject["projA"]; got.Branch != "master" || got.AnalysisDate != "2020-01-15" || got.Cutoff != "2024-01-01" {
+		t.Errorf("projA ForcedMainBranch: want master/2020-01-15/2024-01-01, got %+v", got)
+	}
+	if got := byProject["projB"]; got.Branch != "main" || got.AnalysisDate != "never analyzed" {
+		t.Errorf("projB ForcedMainBranch: want main/'never analyzed', got %+v", got)
+	}
+	if got := byProject["projC"]; got.Cutoff != "2024-01-01" {
+		t.Errorf("projC ForcedMainBranch: cutoff logged as a full RFC3339 timestamp (the real *time.Time wire format) must still render as 2024-01-01, got %+v", got)
 	}
 }

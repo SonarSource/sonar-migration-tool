@@ -79,6 +79,7 @@ func init() {
 	f.String("objects", "", "Comma-separated list of object categories to migrate: "+strings.Join(common.AllObjects, ", ")+" (aliases: qp, qg, pt, lp). Omit to migrate everything (default). #536")
 	f.String(flagProjectKey, "", "Regexp pattern of source project keys to migrate (only applies when the projects category is selected via --objects). Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"BANKING_.+\" matches every key starting with BANKING_, not just a key containing that substring. A plain key like \"my-project\" matches only itself. #536")
 	f.Int(flagMaxIssueComments, 0, fmt.Sprintf("Max most-recent source comments replayed onto each migrated issue/hotspot (default %d, max %d) — reduces SonarQube Cloud API pressure on long comment threads (#571).", migrate.DefaultMaxIssueComments, migrate.MaxAllowedIssueComments))
+	f.String(flagBranchAnalyzedAfter, "", "Only select branches analyzed on or after this date (YYYY-MM-DD) during migrate. The project's main branch is always selected, even when it doesn't meet this date. Omit to select all branches (default). #583")
 }
 
 func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfig, error) {
@@ -146,6 +147,10 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	// clamping it deep inside the issue/hotspot sync.
 	if err := migrate.ValidateMaxIssueComments(cfg.MaxIssueComments); err != nil {
 		return cfg, fmt.Errorf("--%s: %w", flagMaxIssueComments, err)
+	}
+	overrideString(cmd, flagBranchAnalyzedAfter, &cfg.BranchAnalyzedAfter)
+	if err := validateBranchAnalyzedAfter(cfg.BranchAnalyzedAfter); err != nil {
+		return cfg, fmt.Errorf("--%s: %w", flagBranchAnalyzedAfter, err)
 	}
 
 	// Default the export directory when neither config nor flag supplied

@@ -241,12 +241,23 @@ type MetricRemap struct {
 	TargetMetric string
 }
 
+// ForcedMainBranch records one project whose main branch was force-included
+// despite not meeting --branch_analyzed_after, because the filter would
+// otherwise have excluded every branch of the project (#583).
+type ForcedMainBranch struct {
+	Project      string
+	Branch       string
+	AnalysisDate string // formatted, or "never analyzed" if the branch has no analysis date
+	Cutoff       string
+}
+
 // WarningLedger collects the non-fatal advisories surfaced during a run.
 type WarningLedger struct {
-	Retries        []RetryStat
-	BranchSkips    []BranchSkip
-	GateConditions []GateConditionSkip
-	MetricRemaps   []MetricRemap
+	Retries            []RetryStat
+	BranchSkips        []BranchSkip
+	GateConditions     []GateConditionSkip
+	MetricRemaps       []MetricRemap
+	ForcedMainBranches []ForcedMainBranch
 }
 
 // BranchStat captures per-branch packaging/submission stats.

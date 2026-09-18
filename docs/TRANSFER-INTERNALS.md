@@ -237,6 +237,8 @@ statement of `runTransfer`.
   |         |                                                                  |
   |         collectBranchInfo (LONG only) -> sortBranchesMainFirst             |
   |           -> filterBranches(ExcludeBranches globs; main never excluded)    |
+  |           -> filterBranchesByAnalyzedAfter(BranchAnalyzedAfter cutoff;     |
+  |                main force-included if it alone would fail the date; #583)  |
   |         |                                                                  |
   |         MAIN branch first = BLOCKING GATE  (fail -> non-main "skipped")    |
   |         |                                                                  |

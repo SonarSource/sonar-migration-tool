@@ -85,6 +85,7 @@ func init() {
 	f.Int(flagHistoryMinIntervalDays, extract.HistoryUnset, "Minimum spacing, in days, enforced between two selected historical snapshots when --migrate_history is set (default 0 — no spacing rule, every analysis in the source history becomes a candidate).")
 	f.String("objects", "", "Comma-separated list of object categories to extract: "+strings.Join(common.AllObjects, ", ")+" (aliases: qp, qg, pt, lp). Omit to extract everything (default).")
 	f.String("project_key", "", "Regexp pattern of project keys to extract (only applies when the projects category is selected). A plain key matches only itself.")
+	f.String(flagBranchAnalyzedAfter, "", "Only select branches analyzed on or after this date (YYYY-MM-DD) during extract. The project's main branch is always selected, even when it doesn't meet this date. Omit to select all branches (default). #583")
 }
 
 func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfig, error) {
@@ -154,6 +155,10 @@ func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfi
 	// capture the pattern here, same precedence as every other flag
 	// (CLI overrides config file).
 	overrideString(cmd, "project_key", &cfg.ProjectKey)
+	overrideString(cmd, flagBranchAnalyzedAfter, &cfg.BranchAnalyzedAfter)
+	if err := validateBranchAnalyzedAfter(cfg.BranchAnalyzedAfter); err != nil {
+		return cfg, fmt.Errorf("--%s: %w", flagBranchAnalyzedAfter, err)
+	}
 
 	// Default the export directory when neither config nor flag supplied
 	// one (issue #247).

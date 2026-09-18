@@ -2134,7 +2134,8 @@ func renderFailureCauses(pdf *fpdf.Fpdf, summary *MigrationSummary) {
 func renderWarningsLedger(pdf *fpdf.Fpdf, summary *MigrationSummary) {
 	w := summary.Warnings
 	if len(w.Retries) == 0 && len(w.BranchSkips) == 0 &&
-		len(w.GateConditions) == 0 && len(w.MetricRemaps) == 0 {
+		len(w.GateConditions) == 0 && len(w.MetricRemaps) == 0 &&
+		len(w.ForcedMainBranches) == 0 {
 		return
 	}
 	renderSectionHeading(pdf, "Warnings ledger")
@@ -2197,6 +2198,21 @@ func renderWarningsLedger(pdf *fpdf.Fpdf, summary *MigrationSummary) {
 		[]string{"Gate", "Source Metric", "Target Metric"},
 		[]float64{50, 60, 60},
 		remapRows)
+
+	// Force-included main branches.
+	forcedMainRows := make([][]string, 0, len(w.ForcedMainBranches))
+	for _, f := range w.ForcedMainBranches {
+		forcedMainRows = append(forcedMainRows, []string{
+			f.Project,
+			f.Branch,
+			f.AnalysisDate,
+			f.Cutoff,
+		})
+	}
+	renderKVTable(pdf, "Force-Included Main Branches",
+		[]string{"Project", "Branch", "Analysis Date", "Cutoff"},
+		[]float64{45, 45, 35, 35},
+		forcedMainRows)
 }
 
 // renderBranchProjectData renders the "Branch project data" section: one
