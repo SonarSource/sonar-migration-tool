@@ -638,8 +638,11 @@ func (a *projectSettingsApplier) propagateGlobalsToProjects(ctx context.Context)
 		return nil
 	}
 
+	// DynamicGate, not errgroup.SetLimit — see the doc comment on
+	// DynamicGate (#573): SetLimit freezes at whatever Current() is right
+	// now for this errgroup's entire lifetime.
+	gate := NewDynamicGate(e.ConcurrencyLimiter)
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(cap(e.Sem))
 	for projLookupKey, pm := range projectKeyMap {
 		bucket := bucketByOrg[pm.OrgKey]
 		if len(bucket) == 0 {
@@ -650,7 +653,11 @@ func (a *projectSettingsApplier) propagateGlobalsToProjects(ctx context.Context)
 			if a.skipPropagation(pm, entry, coverSet) {
 				continue
 			}
+			if err := gate.Acquire(gctx); err != nil {
+				return g.Wait()
+			}
 			g.Go(func() error {
+				defer gate.Release()
 				if gctx.Err() != nil {
 					return gctx.Err()
 				}

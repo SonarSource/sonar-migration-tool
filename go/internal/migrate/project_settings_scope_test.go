@@ -85,15 +85,15 @@ func TestRunSetProjectSettingsAbandonsKeyAfterProjectScopeRejection(t *testing.T
 	// by the project count. Without memoisation this is exactly `projects`
 	// (and was 858 per key in the field).
 	got := attempts[rejectedKey]
-	maxExpected := cap(e.Sem) + 2 // fan-out width plus scheduling slack
+	maxExpected := e.ConcurrencyLimiter.Current() + 2 // fan-out width plus scheduling slack
 	if got > maxExpected {
 		t.Errorf("rejected key attempted %d times for %d projects (fan-out %d) — the verdict was not memoised",
-			got, projects, cap(e.Sem))
+			got, projects, e.ConcurrencyLimiter.Current())
 	}
 	if got == 0 {
 		t.Errorf("rejected key was never attempted; the runtime classifier cannot learn without one attempt")
 	}
-	t.Logf("rejected key attempted %d/%d times (fan-out %d)", got, projects, cap(e.Sem))
+	t.Logf("rejected key attempted %d/%d times (fan-out %d)", got, projects, e.ConcurrencyLimiter.Current())
 
 	// Legitimate per-project overrides must be entirely unaffected.
 	if want := projects; attempts["sonar.exclusions"] != want {
@@ -291,10 +291,10 @@ func TestRunSetProjectSettingsSharesRejectionMemoWithGlobalPropagation(t *testin
 	mu.Lock()
 	defer mu.Unlock()
 	got := attempts[rejected]
-	maxExpected := cap(e.Sem) + 2 // in-flight width plus scheduling slack
+	maxExpected := e.ConcurrencyLimiter.Current() + 2 // in-flight width plus scheduling slack
 	if got > maxExpected {
 		t.Errorf("rejected key attempted %d times across %d projects (fan-out %d) — the post-pass does not share the memo",
-			got, projects, cap(e.Sem))
+			got, projects, e.ConcurrencyLimiter.Current())
 	}
 	if got == 0 {
 		t.Error("the key was never attempted, so the memo cannot have been learned")

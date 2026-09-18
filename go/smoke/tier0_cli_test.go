@@ -72,7 +72,8 @@ var commandFlags = map[string][]string{
 	"gui":      {"--addr", "--config", "--export_directory", "--no-browser"},
 	"mappings": {"--config", "--export_directory"},
 	"migrate": {
-		"--concurrency", "--config", "--default_organization", "--edition",
+		"--api_max_rate_per_min", "--concurrency", "--config",
+		"--default_organization", "--edition",
 		"--enterprise_key", "--exclude_branches", "--export_directory",
 		"--fast_sync", "--migrate_history", "--objects",
 		"--project_data_build_concurrency", "--project_key",
@@ -84,19 +85,22 @@ var commandFlags = map[string][]string{
 	"regtest":           {"--concurrency", "--config", "--format", "--project_key", "--verbose"},
 	"report":            {"--export_directory", "--filename", "--report_type"},
 	"reset": {
-		"--concurrency", "--config", "--dry-run", "--edition",
-		"--export_directory", "--organization", "--target_url", "--yes",
+		"--api_max_rate_per_min", "--concurrency", "--config", "--dry-run",
+		"--edition", "--export_directory", "--organization", "--target_url",
+		"--yes",
 	},
 	"structure": {"--config", "--export_directory"},
 	"sync-issues": {
-		"--cert_password", "--concurrency", "--config", "--default_organization",
+		"--api_max_rate_per_min", "--cert_password", "--concurrency",
+		"--config", "--default_organization",
 		"--enterprise_key", "--export_dir", "--fast_sync", "--key_file_path",
 		"--pem_file_path", "--project_key", "--project_key_pattern",
 		"--source_token", "--source_url", "--target_token", "--target_url",
 		"--timeout",
 	},
 	"transfer": {
-		"--cert_password", "--concurrency", "--config", "--default_organization",
+		"--api_max_rate_per_min", "--cert_password", "--concurrency",
+		"--config", "--default_organization",
 		"--edition", "--enterprise_key", "--exclude_branches", "--export_dir",
 		"--fast_sync", "--history_max_points", "--history_min_interval_days",
 		"--key_file_path", "--migrate_history", "--pem_file_path",
@@ -296,6 +300,16 @@ func TestTier0_ExitCodeMatrix(t *testing.T) {
 			args:         []string{"analysis_report"},
 			wantExit:     1,
 			wantContains: "accepts 1 arg(s), received 0",
+		},
+		{
+			// #573: --api_max_rate_per_min must abort outright when out of
+			// its [100, 1500] range, not clamp silently. Checked before the
+			// TOKEN/ENTERPRISE_KEY requirement, so it fires even without
+			// credentials.
+			name:         "migrate_with_out_of_range_api_max_rate_per_min",
+			args:         []string{"migrate", "--target_token", "x", "--enterprise_key", "y", "--api_max_rate_per_min", "50"},
+			wantExit:     1,
+			wantContains: "--api_max_rate_per_min must be between 100 and 1500",
 		},
 	}
 

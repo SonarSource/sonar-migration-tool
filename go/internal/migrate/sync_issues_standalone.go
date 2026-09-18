@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
@@ -29,8 +30,12 @@ type SyncIssuesConfig struct {
 	EnterpriseKey string
 
 	ExportDirectory string
-	Concurrency     int
-	Timeout         int
+	// Concurrency — see MigrateConfig.Concurrency (#573): only seeds the
+	// starting point for the dynamic ConcurrencyLimiter.
+	Concurrency int
+	// APIMaxRatePerMin — see MigrateConfig.APIMaxRatePerMin (#573).
+	APIMaxRatePerMin int
+	Timeout          int
 
 	// ProjectKeyPattern must match the pattern used when the target
 	// projects were created, so the rendered keys resolve to the same
@@ -58,6 +63,9 @@ type SyncIssuesConfig struct {
 func (cfg *SyncIssuesConfig) applyDefaults() {
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 25
+	}
+	if cfg.APIMaxRatePerMin <= 0 {
+		cfg.APIMaxRatePerMin = 1500
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 60
@@ -137,7 +145,15 @@ func RunSyncIssues(ctx context.Context, cfg SyncIssuesConfig) (SyncIssuesSummary
 	}
 
 	cloudURL := cfg.URL
-	clientOpts := []sqapi.Option{sqapi.WithTimeout(cfg.Timeout)}
+	// One SlidingWindowLimiter and one ConcurrencyLimiter, wired the same
+	// way as newMigrateClients (#573).
+	concurrencyLimiter := newConcurrencyLimiter(cfg.Concurrency, cfg.APIMaxRatePerMin, logger)
+	apiRateLimiter := sqapi.NewSlidingWindowLimiter(cfg.APIMaxRatePerMin)
+	clientOpts := []sqapi.Option{
+		sqapi.WithTimeout(cfg.Timeout),
+		sqapi.WithAPIRateLimiter(apiRateLimiter),
+		sqapi.WithLatencyObserver(concurrencyLimiter.Observe),
+	}
 	if cfg.Debug {
 		clientOpts = append(clientOpts, sqapi.WithDebugLogger(common.NewHTTPDebugLogger(logger)))
 	}
@@ -176,16 +192,21 @@ func RunSyncIssues(ctx context.Context, cfg SyncIssuesConfig) (SyncIssuesSummary
 	}
 
 	e := &Executor{
-		Cloud:             cc,
-		Raw:               raw,
-		ExportDir:         cfg.ExportDirectory,
-		Mapping:           mapping,
-		Sem:               make(chan struct{}, cfg.Concurrency),
-		ProjectKeyPattern: cfg.ProjectKeyPattern,
-		FastSync:          cfg.FastSync,
-		MaxIssueComments:  cfg.MaxIssueComments,
-		Logger:            logger,
+		Cloud:              cc,
+		Raw:                raw,
+		ExportDir:          cfg.ExportDirectory,
+		Mapping:            mapping,
+		ConcurrencyLimiter: concurrencyLimiter,
+		ProjectKeyPattern:  cfg.ProjectKeyPattern,
+		FastSync:           cfg.FastSync,
+		MaxIssueComments:   cfg.MaxIssueComments,
+		Logger:             logger,
 	}
+
+	// Dynamic concurrency re-evaluation (#573) — no-op when ConcurrencyLimiter
+	// is fixed (--concurrency was explicitly set).
+	e.ConcurrencyLimiter.Start(ctx, 30*time.Second)
+	defer e.ConcurrencyLimiter.Stop()
 
 	ruleDefaults := loadRuleTagDefaults(e)
 	counter := NewTaskCounter("syncIssues")
