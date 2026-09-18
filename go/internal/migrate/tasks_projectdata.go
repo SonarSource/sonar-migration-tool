@@ -78,18 +78,7 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 				return gCtx.Err()
 			}
 
-			sqBranches := collectBranchInfo(e, serverURL, serverKey)
-			if len(sqBranches) == 0 {
-				sqBranches = []branchInfo{{Name: "main", IsMain: true}}
-			}
-			sortBranchesMainFirst(sqBranches)
-			sqBranches = filterBranches(sqBranches, e.ExcludeBranches)
-
-			var droppedBranches []branchInfo
-			sqBranches, droppedBranches = capBranches(sqBranches, MaxBranchesPerProject)
-			for _, d := range droppedBranches {
-				recordBranchLimitSkip(w, cloudKey, d.Name)
-			}
+			sqBranches := resolveProjectBranches(e, w, cloudKey, serverURL, serverKey)
 
 			scMainBranch := fetchSCMainBranch(gCtx, e, cloudKey)
 
@@ -103,6 +92,28 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 		})
 	}
 	return g.Wait()
+}
+
+// resolveProjectBranches builds the final list of branches to import for
+// one project: collect from the source (defaulting to a synthetic main
+// branch when extract has no branch data), sort main first, apply the
+// glob exclude filter, then enforce the hard per-project branch cap
+// (#584) — recording any branches the cap drops so the migration report
+// can name them.
+func resolveProjectBranches(e *Executor, w *common.ChunkWriter, cloudKey, serverURL, serverKey string) []branchInfo {
+	sqBranches := collectBranchInfo(e, serverURL, serverKey)
+	if len(sqBranches) == 0 {
+		sqBranches = []branchInfo{{Name: "main", IsMain: true}}
+	}
+	sortBranchesMainFirst(sqBranches)
+	sqBranches = filterBranches(sqBranches, e.ExcludeBranches)
+
+	var dropped []branchInfo
+	sqBranches, dropped = capBranches(sqBranches, MaxBranchesPerProject)
+	for _, d := range dropped {
+		recordBranchLimitSkip(w, cloudKey, d.Name)
+	}
+	return sqBranches
 }
 
 // fetchSCMainBranch queries SonarCloud for the main branch name of a project.
@@ -903,10 +914,11 @@ func isPriorityBranchName(name string) bool {
 // Branches are kept in priority order: the main branch and any branch
 // literally named "master" or "develop" first, then branches matching
 // releaseBranchPattern most-recently-analyzed first, then everything else
-// most-recently-analyzed first. Returns the branches to keep (at most max)
-// and the branches the cap dropped, so the caller can report them.
-func capBranches(branches []branchInfo, max int) (kept, dropped []branchInfo) {
-	if len(branches) <= max {
+// most-recently-analyzed first. Returns the branches to keep (at most
+// maxBranches) and the branches the cap dropped, so the caller can report
+// them.
+func capBranches(branches []branchInfo, maxBranches int) (kept, dropped []branchInfo) {
+	if len(branches) <= maxBranches {
 		return branches, nil
 	}
 
@@ -925,7 +937,7 @@ func capBranches(branches []branchInfo, max int) (kept, dropped []branchInfo) {
 	sortBranchesByRecency(rest)
 
 	ordered := append(append(primary, release...), rest...)
-	return ordered[:max], ordered[max:]
+	return ordered[:maxBranches], ordered[maxBranches:]
 }
 
 // sortBranchesByRecency orders branches most-recently-analyzed first
