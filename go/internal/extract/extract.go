@@ -23,13 +23,18 @@ import (
 
 // ExtractConfig holds all parameters for an extract run.
 type ExtractConfig struct {
-	URL                      string
-	Token                    string
-	ExportDirectory          string
-	ExtractType              string // "all" or report type
-	PEMFilePath              string
-	KeyFilePath              string
-	CertPassword             string
+	URL             string
+	Token           string
+	ExportDirectory string
+	ExtractType     string // "all" or report type
+	PEMFilePath     string
+	KeyFilePath     string
+	CertPassword    string
+	// Insecure skips TLS certificate verification on the source
+	// SonarQube Server connection (#586) — for a trusted internal server
+	// whose certificate is self-signed or not signed by a trusted CA.
+	// Defaults to false; nothing about the connection changes unless set.
+	Insecure                 bool
 	Concurrency              int
 	Timeout                  int
 	ExtractID                string
@@ -454,13 +459,16 @@ func detectVersion(ctx context.Context, cfg ExtractConfig) (common.Version, erro
 }
 
 // baseSDKOptions assembles the SDK option set shared by every extract API
-// client: timeout, optional mTLS, and (when --debug is set) the HTTP
-// request/response debug logger that surfaces every API call as a Debug
-// slog entry.
+// client: timeout, optional mTLS, optionally skipping TLS verification, and
+// (when --debug is set) the HTTP request/response debug logger that surfaces
+// every API call as a Debug slog entry.
 func baseSDKOptions(cfg ExtractConfig) []sqapi.Option {
 	opts := []sqapi.Option{sqapi.WithTimeout(cfg.Timeout)}
 	if cfg.PEMFilePath != "" {
 		opts = append(opts, sqapi.WithClientCert(cfg.PEMFilePath, cfg.KeyFilePath, cfg.CertPassword))
+	}
+	if cfg.Insecure {
+		opts = append(opts, sqapi.WithInsecureSkipVerify())
 	}
 	if cfg.Debug {
 		opts = append(opts, sqapi.WithDebugLogger(common.NewHTTPDebugLogger(slog.Default())))

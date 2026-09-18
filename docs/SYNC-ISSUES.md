@@ -119,6 +119,7 @@ sonar-migration-tool sync-issues -c config.json
 | `--pem_file_path` | `source.pem_file_path` | Client mTLS PEM file for the source server |
 | `--key_file_path` | `source.key_file_path` | Client mTLS key file for the source server |
 | `--cert_password` | `source.cert_password` | Password for the source server mTLS client certificate |
+| `--insecure` | `source.insecure` | Skip TLS certificate verification for the source SonarQube Server connection. For a trusted internal server whose certificate is self-signed or not signed by a trusted CA; leaves the connection open to man-in-the-middle interception. Defaults to off. Issue #586. |
 | `--max_issue_comments` | `max_issue_comments` | Max most-recent source comments replayed onto each synced issue/hotspot (default: `5`, max: `20`). Reduces SonarQube Cloud API pressure on long comment threads (#571). |
 | `--debug` | — | Verbose troubleshooting logs |
 

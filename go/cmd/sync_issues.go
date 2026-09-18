@@ -86,6 +86,7 @@ func init() {
 	f.String(flagPEMFilePath, "", "Path to client mTLS PEM file for the source server (maps to source.pem_file_path)")
 	f.String(flagKeyFilePath, "", "Path to client mTLS key file for the source server (maps to source.key_file_path)")
 	f.String(flagCertPassword, "", "Password for the source server mTLS client certificate (maps to source.cert_password)")
+	f.Bool(flagInsecure, false, insecureFlagHelp)
 	f.Bool(flagFastSync, false, "Skip tagging and back-linking hotspots/issues with zero user changes on the source (original state, no comments, no custom tags). Defaults to false (every hotspot is tagged and back-linked). #527.")
 	f.Int(flagMaxIssueComments, 0, fmt.Sprintf("Max most-recent source comments replayed onto each synced issue/hotspot (default %d, max %d) — reduces "+scCloudName+" API pressure on long comment threads (#571). (maps to max_issue_comments)", migrate.DefaultMaxIssueComments, migrate.MaxAllowedIssueComments))
 	// --debug is inherited from the persistent root flag; see cmd/root.go.
@@ -111,6 +112,7 @@ type syncIssuesConfig struct {
 	pemFilePath         string
 	keyFilePath         string
 	certPassword        string
+	insecure            bool
 	debug               bool
 	fastSync            bool
 	maxIssueComments    int
@@ -149,6 +151,7 @@ func loadSyncIssuesFileDefaults(path string) (syncIssuesConfig, error) {
 	cfg.pemFilePath = extractCfg.PEMFilePath
 	cfg.keyFilePath = extractCfg.KeyFilePath
 	cfg.certPassword = extractCfg.CertPassword
+	cfg.insecure = extractCfg.Insecure
 
 	cfg.debug = migrateCfg.Debug
 	cfg.fastSync = migrateCfg.FastSync
@@ -184,6 +187,7 @@ func resolveSyncIssuesConfig(cmd *cobra.Command) (syncIssuesConfig, error) {
 	applyFlagString(cmd, flagPEMFilePath, &cfg.pemFilePath)
 	applyFlagString(cmd, flagKeyFilePath, &cfg.keyFilePath)
 	applyFlagString(cmd, flagCertPassword, &cfg.certPassword)
+	applyFlagBool(cmd, flagInsecure, &cfg.insecure)
 	applyFlagBool(cmd, flagDebug, &cfg.debug)
 	applyFlagBool(cmd, flagFastSync, &cfg.fastSync)
 	applyFlagInt(cmd, flagMaxIssueComments, &cfg.maxIssueComments)
@@ -223,6 +227,7 @@ func runSyncIssuesCmd(cmd *cobra.Command, _ []string) error {
 	if err := validateSyncIssuesConfig(cfg); err != nil {
 		return err
 	}
+	warnIfInsecure(cfg.insecure)
 
 	ctx := cmd.Context()
 
@@ -237,6 +242,7 @@ func runSyncIssuesCmd(cmd *cobra.Command, _ []string) error {
 		PEMFilePath:        cfg.pemFilePath,
 		KeyFilePath:        cfg.keyFilePath,
 		CertPassword:       cfg.certPassword,
+		Insecure:           cfg.insecure,
 		IncludeProjectData: true,
 		Debug:              cfg.debug,
 	})

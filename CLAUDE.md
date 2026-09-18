@@ -75,13 +75,13 @@ When the trigger fires, you **MUST** run Vortex analysis on the full set of file
 **Preferred:** pass every path you modified this turn in a single invocation (repeat `--file` for each path). Use paths **relative to the project root** (e.g. `src/foo.ts`). For end-of-turn analysis, **always** pass `--depth DEEP` — even when you changed only one file — so cross-file findings are included.
 
 ```bash
-sonar analyze agentic --project SonarSource_sonar-migration-tool --depth DEEP --file <path/to/file1> --file <path/to/file2>
+sonar analyze agentic --depth DEEP --file <path/to/file1> --file <path/to/file2>
 ```
 
 **Fallback:** when you cannot reliably list every modified path (e.g. you did not track them, or git state is the only source of truth), use the git change set with DEEP analysis:
 
 ```bash
-sonar analyze agentic --project SonarSource_sonar-migration-tool --depth DEEP
+sonar analyze agentic --depth DEEP
 ```
 
 Per-edit hooks run faster STANDARD analysis. End-of-turn analysis must always use `--depth DEEP` (including a single `--file`). Use `--depth STANDARD` only for optional faster passes — never for the mandatory end-of-turn run.

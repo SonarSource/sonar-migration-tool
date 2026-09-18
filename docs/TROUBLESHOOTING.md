@@ -62,7 +62,23 @@ sonar-migration-tool extract --source_url <URL> --source_token <TOKEN> --timeout
 **Solution**:
 
 1. Verify the SonarQube URL is accessible (try opening it in a browser or using `curl`).
-2. For self-signed certificates, use mTLS options:
+2. An `x509: certificate signed by unknown authority` error means the **server's own
+   certificate** is not signed by a CA your machine trusts — typically a self-signed
+   certificate on an internally hosted SonarQube Server. Either install that certificate
+   into the machine's trust store, or skip verification for the connection with
+   `--insecure` / `source.insecure` (#586). Only do this for a server you trust: it leaves
+   the connection open to man-in-the-middle interception.
+
+```bash
+sonar-migration-tool extract --source_url <URL> --source_token <TOKEN> \
+  --insecure \
+  --export_directory ./files/
+```
+
+3. If instead the server requires a **client certificate** to authenticate you (mutual
+   TLS), use the mTLS options. These prove your identity to the server; they do not make
+   the tool trust an untrusted server certificate, so they will not resolve the x509 error
+   above:
 
 ```bash
 sonar-migration-tool extract --source_url <URL> --source_token <TOKEN> \
