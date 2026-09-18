@@ -362,8 +362,10 @@ func forEachMigrateItemImpl(ctx context.Context, e *Executor, loop migrateItemLo
 	} else {
 		g.SetLimit(loop.concurrency)
 	}
+	var admitErr error
 	for _, item := range filtered {
 		if err := admit(ctx); err != nil {
+			admitErr = err
 			break
 		}
 		g.Go(func() error {
@@ -376,7 +378,10 @@ func forEachMigrateItemImpl(ctx context.Context, e *Executor, loop migrateItemLo
 			return err
 		})
 	}
-	return g.Wait()
+	if err := g.Wait(); err != nil {
+		return err
+	}
+	return admitErr
 }
 
 // forEachExtractItem reads items from an extract task and calls fn for each,
@@ -408,8 +413,10 @@ func forEachExtractItem(ctx context.Context, e *Executor, taskName, extractKey s
 	// now for this errgroup's entire lifetime.
 	gate := NewDynamicGate(e.ConcurrencyLimiter)
 	g, ctx := errgroup.WithContext(ctx)
+	var admitErr error
 	for _, item := range items {
 		if err := gate.Acquire(ctx); err != nil {
+			admitErr = err
 			break
 		}
 		g.Go(func() error {
@@ -422,7 +429,10 @@ func forEachExtractItem(ctx context.Context, e *Executor, taskName, extractKey s
 			return err
 		})
 	}
-	return g.Wait()
+	if err := g.Wait(); err != nil {
+		return err
+	}
+	return admitErr
 }
 
 // buildOrgKeyLookup loads organizations.csv and returns a map from

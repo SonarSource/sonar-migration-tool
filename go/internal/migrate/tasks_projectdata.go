@@ -62,6 +62,7 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 	gate := NewDynamicGate(e.ConcurrencyLimiter)
 	g, gCtx := errgroup.WithContext(ctx)
 
+	var admitErr error
 	for _, proj := range projects {
 		if isFailedMigrateRecord(proj) {
 			continue
@@ -78,6 +79,7 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 		e.Logger.Debug("importing project data", "project", cloudKey)
 
 		if err := gate.Acquire(gCtx); err != nil {
+			admitErr = err
 			break
 		}
 		g.Go(func() error {
@@ -104,7 +106,10 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 			return nil
 		})
 	}
-	return g.Wait()
+	if err := g.Wait(); err != nil {
+		return err
+	}
+	return admitErr
 }
 
 // fetchSCMainBranch queries SonarCloud for the main branch name of a project.

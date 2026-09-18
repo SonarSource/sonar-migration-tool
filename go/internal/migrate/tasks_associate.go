@@ -654,7 +654,10 @@ func (a *projectSettingsApplier) propagateGlobalsToProjects(ctx context.Context)
 				continue
 			}
 			if err := gate.Acquire(gctx); err != nil {
-				return g.Wait()
+				if waitErr := g.Wait(); waitErr != nil {
+					return waitErr
+				}
+				return err
 			}
 			g.Go(func() error {
 				defer gate.Release()

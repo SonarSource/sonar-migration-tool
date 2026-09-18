@@ -87,10 +87,21 @@ func (w *latencyWindow) drainAverage() (avg time.Duration, ok bool) {
 // then clamps the result via clampConcurrency. The arithmetic is carried
 // out in float64 seconds to avoid integer-division bugs (e.g. avgLatency
 // values below one second would otherwise floor to zero).
+//
+// targetRatePerMin targets the configured rate for the WHOLE run, not
+// per fan-out site: nested fan-outs multiply the per-site limit (see
+// maxConcurrentTasksPerPhase in migrate.go), so the aggregate figure is
+// divided by that known multiplier before clamping — otherwise the
+// resulting per-site limit lets aggregate in-flight demand run
+// maxConcurrentTasksPerPhase times higher than the target rate, pushing
+// queue delay from throttleTransport's rate limiter into the 60s HTTP
+// client timeout instead of staying well inside it.
+const fanOutMultiplier = maxConcurrentTasksPerPhase
+
 func desiredConcurrency(targetRatePerMin int, avgLatency time.Duration) int {
 	avgLatencySeconds := avgLatency.Seconds()
 	raw := float64(targetRatePerMin) * avgLatencySeconds / 60.0
-	return clampConcurrency(int(math.Ceil(raw)))
+	return clampConcurrency(int(math.Ceil(raw / float64(fanOutMultiplier))))
 }
 
 // clampConcurrency clamps n to [minConcurrency, maxConcurrencyCeiling].

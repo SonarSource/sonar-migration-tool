@@ -603,8 +603,10 @@ func runSetGlobalSettings(ctx context.Context, e *Executor) error {
 	// now for this errgroup's entire lifetime.
 	gate := NewDynamicGate(e.ConcurrencyLimiter)
 	g, gctx := errgroup.WithContext(ctx)
+	var admitErr error
 	for _, raw := range customized {
 		if err := gate.Acquire(gctx); err != nil {
+			admitErr = err
 			break
 		}
 		g.Go(func() error {
@@ -621,6 +623,9 @@ func runSetGlobalSettings(ctx context.Context, e *Executor) error {
 	}
 	if err := g.Wait(); err != nil {
 		return err
+	}
+	if admitErr != nil {
+		return admitErr
 	}
 
 	// #249: migrate sonar.dbcleaner.branchesToKeepWhenInactive as a

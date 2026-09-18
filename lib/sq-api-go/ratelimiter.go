@@ -31,8 +31,9 @@ const defaultSlidingWindow = 60 * time.Second
 type SlidingWindowLimiter struct {
 	mu           sync.Mutex
 	maxPerMinute int
-	window       time.Duration // always defaultSlidingWindow via the public constructor
-	timestamps   []time.Time   // granted-call timestamps within window, oldest-first
+	window       time.Duration   // always defaultSlidingWindow via the public constructor
+	timestamps   []time.Time     // granted-call timestamps within window, oldest-first
+	queue        []chan struct{} // FIFO of waiters blocked in Wait, oldest-first
 }
 
 // NewSlidingWindowLimiter constructs a SlidingWindowLimiter that admits
@@ -61,14 +62,21 @@ func newSlidingWindowLimiter(maxPerMinute int, window time.Duration) *SlidingWin
 // ctx is done, returning ctx.Err() in the latter case. On success it
 // records the new call's timestamp before returning.
 //
-// Wait never busy-loops: when it must wait, it sleeps until the oldest
-// granted timestamp is due to age out of the window, then re-checks —
-// recomputing from scratch, since a concurrent Wait may have granted (or
-// aged out) timestamps in the meantime.
+// Wait is FIFO-fair: a caller that finds no slot available joins a
+// queue and is only ever admitted once it reaches the head, rather
+// than every blocked waiter racing the mutex whenever any timestamp
+// ages out. Without that, a "thundering herd" of waiters all wake on
+// the same event and whichever happens to win the mutex race takes
+// the slot — which lets a waiter that arrived later repeatedly jump
+// ahead of one that has been waiting longer, starving it indefinitely
+// under sustained load.
 func (l *SlidingWindowLimiter) Wait(ctx context.Context) error {
+	ch := l.enqueue()
+	defer l.dequeue(ch)
+
 	for {
-		granted, wait := l.tryAcquire()
-		if granted {
+		wait := l.tryAcquire(ch)
+		if wait <= 0 {
 			return nil
 		}
 
@@ -77,16 +85,40 @@ func (l *SlidingWindowLimiter) Wait(ctx context.Context) error {
 		case <-ctx.Done():
 			timer.Stop()
 			return ctx.Err()
+		case <-ch:
+			timer.Stop()
+			// Woken because we reached the head of the queue and a
+			// slot is believed to be available; re-check to claim it.
 		case <-timer.C:
+			// Our own deadline elapsed; re-check from scratch, since
+			// we may or may not be at the head yet.
 		}
 	}
 }
 
-// tryAcquire purges timestamps that have aged out of the window and
-// either grants a new slot (recording the timestamp and returning
-// granted=true) or reports how long to sleep before the oldest
-// surviving timestamp ages out and a slot should next be available.
-func (l *SlidingWindowLimiter) tryAcquire() (granted bool, wait time.Duration) {
+// enqueue appends a new waiter to the tail of the FIFO queue and
+// returns its notification channel. wake sends on this channel
+// (non-blocking, buffered by 1) once the waiter reaches the head of
+// the queue and a slot is believed to be free.
+func (l *SlidingWindowLimiter) enqueue() chan struct{} {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	ch := make(chan struct{}, 1)
+	l.queue = append(l.queue, ch)
+	return ch
+}
+
+// tryAcquire purges timestamps that have aged out of the window and,
+// if ch is at the head of the FIFO queue and a slot is free, grants
+// it: pops ch off the queue, records the new call's timestamp, and
+// returns wait<=0. Otherwise it wakes the (possibly new) head of the
+// queue if a slot just freed up, and returns how long the caller
+// should sleep before re-checking.
+//
+// Only the head of the queue may ever be granted a slot here — that
+// is what enforces FIFO order and prevents later arrivals from
+// jumping ahead of a waiter that has been queued longer.
+func (l *SlidingWindowLimiter) tryAcquire(ch chan struct{}) (wait time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -100,18 +132,61 @@ func (l *SlidingWindowLimiter) tryAcquire() (granted bool, wait time.Duration) {
 	}
 	l.timestamps = l.timestamps[i:]
 
-	if len(l.timestamps) < l.maxPerMinute {
+	if len(l.timestamps) < l.maxPerMinute && len(l.queue) > 0 && l.queue[0] == ch {
 		l.timestamps = append(l.timestamps, now)
-		return true, 0
+		l.queue = l.queue[1:]
+		l.wakeHead()
+		return 0
 	}
 
+	// If a slot is free but ch isn't (yet) at the head, make sure the
+	// actual head gets a chance to notice and claim it, rather than
+	// leaving it asleep until its own timer happens to fire.
+	if len(l.timestamps) < l.maxPerMinute {
+		l.wakeHead()
+	}
+
+	if len(l.timestamps) == 0 {
+		return time.Millisecond
+	}
 	wait = l.timestamps[0].Add(l.window).Sub(now)
 	if wait <= 0 {
 		// Another goroutine's purge is due; retry almost immediately
 		// rather than computing a zero/negative timer duration.
 		wait = time.Millisecond
 	}
-	return false, wait
+	return wait
+}
+
+// wakeHead notifies the current head of the queue, if any, that it
+// should re-check for a free slot. Must be called with l.mu held.
+// Non-blocking: the channel is buffered by 1, and if it's already
+// pending a notification this is a harmless no-op.
+func (l *SlidingWindowLimiter) wakeHead() {
+	if len(l.queue) == 0 {
+		return
+	}
+	select {
+	case l.queue[0] <- struct{}{}:
+	default:
+	}
+}
+
+// dequeue removes ch from the queue, e.g. because its Wait call is
+// returning (granted or giving up via context cancellation). No-op if
+// ch is already removed. Wakes the new head so a slot freed by this
+// departure (relevant when ch was removed without being granted, i.e.
+// on cancellation) isn't left unnoticed.
+func (l *SlidingWindowLimiter) dequeue(ch chan struct{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for i, c := range l.queue {
+		if c == ch {
+			l.queue = append(l.queue[:i], l.queue[i+1:]...)
+			l.wakeHead()
+			return
+		}
+	}
 }
 
 // throttleTransport proactively rate-limits and times physical HTTP
