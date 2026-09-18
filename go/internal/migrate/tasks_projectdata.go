@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -83,6 +84,7 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 			}
 			sortBranchesMainFirst(sqBranches)
 			sqBranches = filterBranches(sqBranches, e.ExcludeBranches)
+			sqBranches = filterBranchesByRegexp(sqBranches, e.BranchRe)
 
 			scMainBranch := fetchSCMainBranch(gCtx, e, cloudKey)
 
@@ -855,6 +857,28 @@ func filterBranches(branches []branchInfo, excludePatterns []string) []branchInf
 			continue
 		}
 		if matchesAnyGlob(b.Name, excludePatterns) {
+			continue
+		}
+		filtered = append(filtered, b)
+	}
+	return filtered
+}
+
+// filterBranchesByRegexp keeps only branches whose name matches re,
+// except the main branch which is always kept regardless of match (same
+// bypass as filterBranches). re == nil means "no filter, keep everything".
+// #582.
+func filterBranchesByRegexp(branches []branchInfo, re *regexp.Regexp) []branchInfo {
+	if re == nil {
+		return branches
+	}
+	var filtered []branchInfo
+	for _, b := range branches {
+		if b.IsMain {
+			filtered = append(filtered, b)
+			continue
+		}
+		if !re.MatchString(b.Name) {
 			continue
 		}
 		filtered = append(filtered, b)

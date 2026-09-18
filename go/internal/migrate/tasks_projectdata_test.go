@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -1404,6 +1405,50 @@ func TestFilterBranches(t *testing.T) {
 	}
 	if !found {
 		t.Error("main branch should never be excluded")
+	}
+}
+
+func TestFilterBranchesByRegexp(t *testing.T) {
+	branches := []branchInfo{
+		{Name: "main", IsMain: true},
+		{Name: "develop"},
+		{Name: "feature/foo"},
+		{Name: "release/1.0"},
+	}
+
+	// nil regex — no filter, everything kept.
+	result := filterBranchesByRegexp(branches, nil)
+	if len(result) != 4 {
+		t.Errorf("nil regex: expected 4, got %d", len(result))
+	}
+
+	// Only "feature/*" branches match; non-matching non-main branches dropped,
+	// matching branch kept, main kept despite not matching.
+	re := regexp.MustCompile(`^feature/.*$`)
+	result = filterBranchesByRegexp(branches, re)
+	var names []string
+	for _, b := range result {
+		names = append(names, b.Name)
+	}
+	if len(result) != 2 {
+		t.Errorf("regex feature/.*: expected 2 branches, got %d (%v)", len(result), names)
+	}
+	foundMain, foundFeature := false, false
+	for _, b := range result {
+		switch b.Name {
+		case "main":
+			foundMain = true
+		case "feature/foo":
+			foundFeature = true
+		case "develop", "release/1.0":
+			t.Errorf("non-matching non-main branch should be dropped: %s", b.Name)
+		}
+	}
+	if !foundMain {
+		t.Error("main branch should always be kept regardless of match")
+	}
+	if !foundFeature {
+		t.Error("matching branch should be kept")
 	}
 }
 

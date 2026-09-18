@@ -76,6 +76,7 @@ func init() {
 	f.String("default_organization", "", "SonarQube Cloud organization to migrate every project into when organizations.csv has no mapping defined. Ignored if any mapping is present.")
 	f.String("project_key_pattern", "", "Template for target project keys, built from <ORIGINAL_PROJECT_KEY> and <ORGANIZATION_KEY> (default: <ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>). #138")
 	f.StringSlice("exclude_branches", nil, "Glob patterns for non-main branches to skip during project data import (e.g. feature/*,bugfix/*)")
+	f.String(flagBranchRegexp, "", "Regexp pattern of branch names to migrate, applied on top of whatever the extract phase already limited getBranches to. Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"(main|master)\" matches only branches literally named main or master. The project's main branch is always migrated regardless of match. Empty means every extracted branch is migrated (default). #582.")
 	f.String("objects", "", "Comma-separated list of object categories to migrate: "+strings.Join(common.AllObjects, ", ")+" (aliases: qp, qg, pt, lp). Omit to migrate everything (default). #536")
 	f.String(flagProjectKey, "", "Regexp pattern of source project keys to migrate (only applies when the projects category is selected via --objects). Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"BANKING_.+\" matches every key starting with BANKING_, not just a key containing that substring. A plain key like \"my-project\" matches only itself. #536")
 	f.Int(flagMaxIssueComments, 0, fmt.Sprintf("Max most-recent source comments replayed onto each migrated issue/hotspot (default %d, max %d) — reduces SonarQube Cloud API pressure on long comment threads (#571).", migrate.DefaultMaxIssueComments, migrate.MaxAllowedIssueComments))
@@ -131,6 +132,7 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	if cmd.Flags().Changed("exclude_branches") {
 		cfg.ExcludeBranches, _ = cmd.Flags().GetStringSlice("exclude_branches")
 	}
+	overrideString(cmd, flagBranchRegexp, &cfg.BranchRegexp)
 	applyFlagBool(cmd, flagFastSync, &cfg.FastSync)
 	applyFlagBool(cmd, flagMigrateHistory, &cfg.MigrateHistory)
 	applyFlagInt(cmd, flagMaxIssueComments, &cfg.MaxIssueComments)

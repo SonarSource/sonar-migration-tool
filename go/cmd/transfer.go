@@ -51,8 +51,10 @@ const (
 	flagCertPassword             = "cert_password"
 	flagDebug                    = "debug"
 	flagExcludeBranches          = "exclude_branches"
-	flagUnsupportedLanguages     = "unsupported_languages"
-	flagMaxIssueComments         = "max_issue_comments"
+	// flagBranchRegexp — #582: regexp of branch names to extract/migrate.
+	flagBranchRegexp         = "branch_regexp"
+	flagUnsupportedLanguages = "unsupported_languages"
+	flagMaxIssueComments     = "max_issue_comments"
 	// #554 — PoC project-history migration flags.
 	flagMigrateHistory         = "migrate_history"
 	flagHistoryMaxPoints       = "history_max_points"
@@ -199,6 +201,7 @@ func init() {
 	f.String(flagCertPassword, "", "Password for the source server mTLS client certificate (maps to source.cert_password)")
 	// --debug is inherited from the persistent root flag; see cmd/root.go.
 	f.StringSlice(flagExcludeBranches, nil, "Glob patterns for non-main branches to skip during project data import (e.g. feature/*,bugfix/*)")
+	f.String(flagBranchRegexp, "", "Regexp of branch names to extract and migrate (maps to source.branch_regexp / target.branch_regexp, or the top-level branch_regexp). Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"(main|master)\" matches only branches literally named main or master. The project's main branch is always included regardless of match. Applied to both the extract and migrate phases. #582.")
 	f.String(flagUnsupportedLanguages, "", "How to handle files whose language has no quality profile on the target — typically a language from a 3rd-party "+sqServerName+" plugin (#474). "+
 		"\"exclude\" (default) drops those files from the analysis report so the rest of the project still migrates; "+
 		"\"skip\" does not migrate the project's issues/branches at all; "+
@@ -232,9 +235,16 @@ type transferConfig struct {
 	skipProjectDataMigration bool
 	debug                    bool
 	excludeBranches          []string
-	unsupportedLanguages     string
-	fastSync                 bool
-	maxIssueComments         int
+	// sourceBranchRegexp / targetBranchRegexp — #582. A single --branch_regexp
+	// CLI flag sets both at once (transfer runs extract then migrate for one
+	// project in a single invocation), but the config file can still set
+	// source.branch_regexp / target.branch_regexp independently, mirroring
+	// how extract and migrate resolve the field on their own.
+	sourceBranchRegexp   string
+	targetBranchRegexp   string
+	unsupportedLanguages string
+	fastSync             bool
+	maxIssueComments     int
 	// #554 — PoC project-history migration.
 	migrateHistory         bool
 	historyMaxPoints       int
@@ -261,6 +271,19 @@ func applyFlagInt(cmd *cobra.Command, name string, target *int) {
 func applyFlagIntBothSides(cmd *cobra.Command, name string, source, target *int) {
 	if cmd.Flags().Changed(name) {
 		v, _ := cmd.Flags().GetInt(name)
+		*source, *target = v, v
+	}
+}
+
+// applyFlagStringBothSides sets both source and target to the CLI flag's
+// value when it was passed — the string-flag counterpart of
+// applyFlagIntBothSides, used for --branch_regexp (#582), which transfer
+// applies to both the extract and migrate phases of its single invocation.
+// The config file remains the only way to give the two sides different
+// patterns.
+func applyFlagStringBothSides(cmd *cobra.Command, name string, source, target *string) {
+	if cmd.Flags().Changed(name) {
+		v, _ := cmd.Flags().GetString(name)
 		*source, *target = v, v
 	}
 }
@@ -366,6 +389,13 @@ func loadTransferFileDefaults(path string) (transferConfig, error) {
 	cfg.skipProjectDataMigration = migrateCfg.SkipProjectDataMigration
 	cfg.debug = migrateCfg.Debug
 	cfg.excludeBranches = migrateCfg.ExcludeBranches
+	// #582 — each side keeps its own independently-resolved config-file
+	// value (extractCfg.BranchRegexp already applied source.branch_regexp
+	// vs top-level precedence; migrateCfg.BranchRegexp did the same for
+	// target.branch_regexp). --branch_regexp on the CLI overrides both at
+	// once via applyFlagStringBothSides in resolveTransferConfig.
+	cfg.sourceBranchRegexp = extractCfg.BranchRegexp
+	cfg.targetBranchRegexp = migrateCfg.BranchRegexp
 	cfg.unsupportedLanguages = migrateCfg.UnsupportedLanguages
 	cfg.fastSync = migrateCfg.FastSync
 	cfg.maxIssueComments = migrateCfg.MaxIssueComments
@@ -432,6 +462,7 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 	if cmd.Flags().Changed(flagExcludeBranches) {
 		cfg.excludeBranches, _ = cmd.Flags().GetStringSlice(flagExcludeBranches)
 	}
+	applyFlagStringBothSides(cmd, flagBranchRegexp, &cfg.sourceBranchRegexp, &cfg.targetBranchRegexp)
 	applyFlagString(cmd, flagUnsupportedLanguages, &cfg.unsupportedLanguages)
 	applyFlagBool(cmd, flagFastSync, &cfg.fastSync)
 	applyFlagInt(cmd, flagMaxIssueComments, &cfg.maxIssueComments)
@@ -478,6 +509,18 @@ func validateTransferConfig(cfg transferConfig) error {
 	// invalid pattern up front rather than failing deep in extract.
 	if _, err := anchoredProjectKeyPattern(cfg.projectKey); err != nil {
 		return fmt.Errorf("invalid --%s pattern %q: %w", flagProjectKey, cfg.projectKey, err)
+	}
+	// #582 — reject an invalid --branch_regexp pattern up front, same
+	// rationale as --project_key above.
+	if cfg.sourceBranchRegexp != "" {
+		if _, err := anchoredProjectKeyPattern(cfg.sourceBranchRegexp); err != nil {
+			return fmt.Errorf("invalid branch regexp pattern %q: %w", cfg.sourceBranchRegexp, err)
+		}
+	}
+	if cfg.targetBranchRegexp != "" && cfg.targetBranchRegexp != cfg.sourceBranchRegexp {
+		if _, err := anchoredProjectKeyPattern(cfg.targetBranchRegexp); err != nil {
+			return fmt.Errorf("invalid branch regexp pattern %q: %w", cfg.targetBranchRegexp, err)
+		}
 	}
 	// #474 — reject an unknown handling mode up front rather than silently
 	// falling back to the default after the extract phase has already run.
@@ -617,6 +660,7 @@ func runTransferExtract(ctx context.Context, cfg transferConfig) ([]string, erro
 		PEMFilePath:     cfg.pemFilePath,
 		KeyFilePath:     cfg.keyFilePath,
 		CertPassword:    cfg.certPassword,
+		BranchRegexp:    cfg.sourceBranchRegexp,
 		// Transfer extracts the project's issues and hotspots so the
 		// downstream migrate phase can replay them. Only skipped when
 		// the operator opts out of project-data migration entirely
@@ -720,6 +764,7 @@ func runTransferMigrate(ctx context.Context, cfg transferConfig) (string, error)
 		SkipProjectDataMigration: cfg.skipProjectDataMigration,
 		Debug:                    cfg.debug,
 		ExcludeBranches:          cfg.excludeBranches,
+		BranchRegexp:             cfg.targetBranchRegexp,
 		UnsupportedLanguages:     cfg.unsupportedLanguages,
 		FastSync:                 cfg.fastSync,
 		ProjectKeyPattern:        cfg.projectKeyPattern,
