@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -77,12 +78,7 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 				return gCtx.Err()
 			}
 
-			sqBranches := collectBranchInfo(e, serverURL, serverKey)
-			if len(sqBranches) == 0 {
-				sqBranches = []branchInfo{{Name: "main", IsMain: true}}
-			}
-			sortBranchesMainFirst(sqBranches)
-			sqBranches = filterBranches(sqBranches, e.ExcludeBranches)
+			sqBranches := resolveProjectBranches(e, w, cloudKey, serverURL, serverKey)
 
 			scMainBranch := fetchSCMainBranch(gCtx, e, cloudKey)
 
@@ -96,6 +92,28 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 		})
 	}
 	return g.Wait()
+}
+
+// resolveProjectBranches builds the final list of branches to import for
+// one project: collect from the source (defaulting to a synthetic main
+// branch when extract has no branch data), sort main first, apply the
+// glob exclude filter, then enforce the hard per-project branch cap
+// (#584) — recording any branches the cap drops so the migration report
+// can name them.
+func resolveProjectBranches(e *Executor, w *common.ChunkWriter, cloudKey, serverURL, serverKey string) []branchInfo {
+	sqBranches := collectBranchInfo(e, serverURL, serverKey)
+	if len(sqBranches) == 0 {
+		sqBranches = []branchInfo{{Name: "main", IsMain: true}}
+	}
+	sortBranchesMainFirst(sqBranches)
+	sqBranches = filterBranches(sqBranches, e.ExcludeBranches)
+
+	var dropped []branchInfo
+	sqBranches, dropped = capBranches(sqBranches, MaxBranchesPerProject)
+	for _, d := range dropped {
+		recordBranchLimitSkip(w, cloudKey, d.Name)
+	}
+	return sqBranches
 }
 
 // fetchSCMainBranch queries SonarCloud for the main branch name of a project.
@@ -869,6 +887,91 @@ func matchesAnyGlob(name string, patterns []string) bool {
 		}
 	}
 	return false
+}
+
+// releaseBranchPattern identifies long-lived release branches (#584):
+// "Release" or "release" followed by anything, e.g. "release/2.0",
+// "Release-1.0".
+var releaseBranchPattern = regexp.MustCompile(`^[Rr]elease`)
+
+// isPriorityBranchName reports whether name is one of the branch names
+// always prioritized ahead of release branches and everything else
+// (#584). Exact-case match: the main branch itself is already covered by
+// branchInfo.IsMain regardless of its name, so this only needs to catch
+// additional long-lived branches literally named "master" or "develop".
+func isPriorityBranchName(name string) bool {
+	switch name {
+	case "main", "master", "develop":
+		return true
+	}
+	return false
+}
+
+// capBranches enforces MaxBranchesPerProject (#584): a hard safeguard on
+// how many long-lived branches one project migrates, regardless of how
+// many survive main-first sorting and glob/regexp/date filtering upstream.
+//
+// Branches are kept in priority order: the main branch and any branch
+// literally named "master" or "develop" first, then branches matching
+// releaseBranchPattern most-recently-analyzed first, then everything else
+// most-recently-analyzed first. Returns the branches to keep (at most
+// maxBranches) and the branches the cap dropped, so the caller can report
+// them.
+func capBranches(branches []branchInfo, maxBranches int) (kept, dropped []branchInfo) {
+	if len(branches) <= maxBranches {
+		return branches, nil
+	}
+
+	var primary, release, rest []branchInfo
+	for _, b := range branches {
+		switch {
+		case b.IsMain || isPriorityBranchName(b.Name):
+			primary = append(primary, b)
+		case releaseBranchPattern.MatchString(b.Name):
+			release = append(release, b)
+		default:
+			rest = append(rest, b)
+		}
+	}
+	sortBranchesByRecency(release)
+	sortBranchesByRecency(rest)
+
+	ordered := append(append(primary, release...), rest...)
+	return ordered[:maxBranches], ordered[maxBranches:]
+}
+
+// sortBranchesByRecency orders branches most-recently-analyzed first
+// (#584's tie-break within the release and catch-all tiers). A branch
+// that was never analyzed (zero LastAnalysisDate) sorts last.
+func sortBranchesByRecency(branches []branchInfo) {
+	slices.SortStableFunc(branches, func(a, b branchInfo) int {
+		switch {
+		case a.LastAnalysisDate.After(b.LastAnalysisDate):
+			return -1
+		case a.LastAnalysisDate.Before(b.LastAnalysisDate):
+			return 1
+		default:
+			return 0
+		}
+	})
+}
+
+// recordBranchLimitSkip records that a branch was dropped by the
+// per-project branch cap (#584) before any import was attempted. Written
+// as its own record — deliberately NOT through recordBranchResult's
+// status field — so the cap never contributes a "skipped"/"failed" status
+// to collectProjectData's worst-outcome-wins per-project result
+// (go/internal/report/summary/collect.go): trimming a long tail of
+// branches must not make an otherwise fully-successful project report as
+// Skipped or Failed.
+func recordBranchLimitSkip(w *common.ChunkWriter, cloudKey, branchName string) {
+	record, _ := json.Marshal(map[string]any{
+		"cloud_project_key":     cloudKey,
+		"branch":                branchName,
+		"status":                "capped",
+		"branch_limit_exceeded": true,
+	})
+	w.WriteOne(record) //nolint:errcheck
 }
 
 func loadCompletedBranches(store *common.DataStore) map[string]bool {

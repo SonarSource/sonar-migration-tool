@@ -237,6 +237,11 @@ statement of `runTransfer`.
   |         |                                                                  |
   |         collectBranchInfo (LONG only) -> sortBranchesMainFirst             |
   |           -> filterBranches(ExcludeBranches globs; main never excluded)    |
+  |           -> capBranches(max=10, #584): main/master/develop first,         |
+  |                then [Rr]elease.* by recency, then rest by recency ;        |
+  |                dropped branches recorded (branch_limit_exceeded) and       |
+  |                named in the migration report, NOT counted as skipped/     |
+  |                failed for the project's overall outcome                    |
   |         |                                                                  |
   |         MAIN branch first = BLOCKING GATE  (fail -> non-main "skipped")    |
   |         |                                                                  |

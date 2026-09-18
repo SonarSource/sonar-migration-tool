@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1421,6 +1422,154 @@ func TestMatchesAnyGlob(t *testing.T) {
 		// filepath.Match: * does not match /
 		// So release/* does NOT match release/1.0 with filepath.Match
 		// This is expected Go behavior — adjust test accordingly
+	}
+}
+
+// capBranchesTestRefDate anchors the relative dates built by
+// capBranchesDaysAgo, so TestCapBranches* cases stay stable regardless of
+// when they run.
+var capBranchesTestRefDate = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+func capBranchesDaysAgo(n int) time.Time {
+	return capBranchesTestRefDate.AddDate(0, 0, -n)
+}
+
+func branchNames(branches []branchInfo) []string {
+	names := make([]string, len(branches))
+	for i, b := range branches {
+		names[i] = b.Name
+	}
+	return names
+}
+
+func TestCapBranches_UnderLimitReturnsEverythingUnchanged(t *testing.T) {
+	branches := []branchInfo{
+		{Name: "main", IsMain: true},
+		{Name: "develop"},
+		{Name: "feature/foo"},
+	}
+	kept, dropped := capBranches(branches, 10)
+	if len(kept) != 3 || len(dropped) != 0 {
+		t.Errorf("expected 3 kept, 0 dropped; got %d kept, %d dropped", len(kept), len(dropped))
+	}
+}
+
+func TestCapBranches_PriorityNamesAlwaysKept(t *testing.T) {
+	branches := []branchInfo{
+		{Name: "main", IsMain: true, LastAnalysisDate: capBranchesDaysAgo(100)},
+		{Name: "master", LastAnalysisDate: capBranchesDaysAgo(100)},
+		{Name: "develop", LastAnalysisDate: capBranchesDaysAgo(100)},
+		{Name: "release/1.0", LastAnalysisDate: capBranchesDaysAgo(1)},
+		{Name: "release/2.0", LastAnalysisDate: capBranchesDaysAgo(2)},
+		{Name: "feature/a", LastAnalysisDate: capBranchesDaysAgo(1)},
+		{Name: "feature/b", LastAnalysisDate: capBranchesDaysAgo(2)},
+	}
+	kept, dropped := capBranches(branches, 3)
+	if len(kept) != 3 || len(dropped) != 4 {
+		t.Fatalf("expected 3 kept, 4 dropped; got %d kept, %d dropped", len(kept), len(dropped))
+	}
+	keptNames := branchNames(kept)
+	for _, want := range []string{"main", "master", "develop"} {
+		if !slices.Contains(keptNames, want) {
+			t.Errorf("expected %s to be kept, kept=%v", want, keptNames)
+		}
+	}
+}
+
+func TestCapBranches_ReleaseBranchesPrioritizedByRecency(t *testing.T) {
+	branches := []branchInfo{
+		{Name: "main", IsMain: true, LastAnalysisDate: capBranchesDaysAgo(100)},
+		{Name: "release/1.0", LastAnalysisDate: capBranchesDaysAgo(10)},
+		{Name: "release/2.0", LastAnalysisDate: capBranchesDaysAgo(1)},
+		{Name: "Release-legacy", LastAnalysisDate: capBranchesDaysAgo(20)},
+		{Name: "feature/newest", LastAnalysisDate: capBranchesDaysAgo(2)},
+		{Name: "feature/older", LastAnalysisDate: capBranchesDaysAgo(5)},
+	}
+	kept, dropped := capBranches(branches, 4)
+	if len(kept) != 4 || len(dropped) != 2 {
+		t.Fatalf("expected 4 kept, 2 dropped; got %d kept, %d dropped", len(kept), len(dropped))
+	}
+	want := []string{"main", "release/2.0", "release/1.0", "Release-legacy"}
+	if got := branchNames(kept); !slices.Equal(got, want) {
+		t.Errorf("expected order %v, got %v", want, got)
+	}
+	droppedNames := branchNames(dropped)
+	if !slices.Contains(droppedNames, "feature/newest") || !slices.Contains(droppedNames, "feature/older") {
+		t.Errorf("expected both feature branches to be dropped, dropped=%v", droppedNames)
+	}
+}
+
+func TestCapBranches_OtherBranchesPrioritizedByRecency(t *testing.T) {
+	branches := []branchInfo{
+		{Name: "main", IsMain: true},
+		{Name: "feature/oldest", LastAnalysisDate: capBranchesDaysAgo(30)},
+		{Name: "feature/newest", LastAnalysisDate: capBranchesDaysAgo(1)},
+		{Name: "feature/never-analyzed"},
+	}
+	kept, dropped := capBranches(branches, 2)
+	if len(kept) != 2 || len(dropped) != 2 {
+		t.Fatalf("expected 2 kept, 2 dropped; got %d kept, %d dropped", len(kept), len(dropped))
+	}
+	if want := []string{"main", "feature/newest"}; !slices.Equal(branchNames(kept), want) {
+		t.Errorf("expected %v, got %v", want, branchNames(kept))
+	}
+}
+
+func TestIsPriorityBranchName(t *testing.T) {
+	for _, name := range []string{"main", "master", "develop"} {
+		if !isPriorityBranchName(name) {
+			t.Errorf("expected %q to be a priority branch name", name)
+		}
+	}
+	for _, name := range []string{"Main", "MASTER", "Develop", "release/1.0", "feature/x"} {
+		if isPriorityBranchName(name) {
+			t.Errorf("expected %q NOT to be a priority branch name (exact-case only)", name)
+		}
+	}
+}
+
+func TestReleaseBranchPattern(t *testing.T) {
+	for _, name := range []string{"release/1.0", "Release-1.0", "release", "Release"} {
+		if !releaseBranchPattern.MatchString(name) {
+			t.Errorf("expected %q to match the release branch pattern", name)
+		}
+	}
+	for _, name := range []string{"prerelease/1.0", "feature/release-notes", "main"} {
+		if releaseBranchPattern.MatchString(name) {
+			t.Errorf("expected %q NOT to match the release branch pattern", name)
+		}
+	}
+}
+
+func TestRecordBranchLimitSkip(t *testing.T) {
+	dir := t.TempDir()
+	store := common.NewDataStore(dir)
+	w, _ := store.Writer("importProjectData")
+
+	recordBranchLimitSkip(w, "cloud-proj1", "feature/dropped")
+
+	items, err := store.ReadAll("importProjectData")
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(items))
+	}
+	if key := extractField(items[0], "cloud_project_key"); key != "cloud-proj1" {
+		t.Errorf("cloud_project_key: expected cloud-proj1, got %s", key)
+	}
+	if branch := extractField(items[0], "branch"); branch != "feature/dropped" {
+		t.Errorf("branch: expected feature/dropped, got %s", branch)
+	}
+	// Deliberately NOT "skipped"/"failed": recordBranchLimitSkip must not
+	// contribute to collectProjectData's worst-outcome-wins status so that
+	// a project with other successfully-migrated branches still reports
+	// as Succeeded (#584).
+	if status := extractField(items[0], "status"); status == "skipped" || status == "failed" || status == "success" {
+		t.Errorf("status %q must not be one of the statuses collectProjectData interprets", status)
+	}
+	if !common.ExtractBool(items[0], "branch_limit_exceeded") {
+		t.Error("expected branch_limit_exceeded=true")
 	}
 }
 
