@@ -61,6 +61,10 @@ type configFileShape struct {
 	// Pointer, unlike HistoryMaxPoints: 0 is a legal explicit value here
 	// ("no spacing rule"), so absent and 0 must stay distinguishable.
 	HistoryMinIntervalDays *int `json:"history_min_interval_days"`
+	// BranchAnalyzedAfter is the top-level branch_analyzed_after value
+	// (#583). In the unified shape it's the fallback used when the
+	// "source" block doesn't override it (see unifiedSourceBlock).
+	BranchAnalyzedAfter string `json:"branch_analyzed_after"`
 
 	// Shape 2 (command-sectioned).
 	Extract *configFileShape `json:"extract"`
@@ -99,6 +103,12 @@ type unifiedSourceBlock struct {
 	OrganizationKey string `json:"organization_key"` // provisional, ignored
 	Edition         string `json:"edition"`          // provisional, ignored
 	RunID           string `json:"run_id"`           // ignored by extract
+	// BranchAnalyzedAfter, when present (even as an explicit empty string),
+	// overrides the top-level branch_analyzed_after for extract only
+	// (#583). nil means "not set here" — fall through to the top-level
+	// value. This is why it's a pointer, unlike the plain-string fields
+	// above: a phase must be able to explicitly clear a top-level filter.
+	BranchAnalyzedAfter *string `json:"branch_analyzed_after"`
 }
 
 // unifiedTargetBlock mirrors the "target" sub-object documented in
@@ -144,6 +154,18 @@ func (s configFileShape) applyHistoryTo(cfg *ExtractConfig) {
 	}
 }
 
+// resolveBranchAnalyzedAfter mirrors resolveMigrateHistory/resolveFastSync
+// (in the migrate package) for the branch_analyzed_after string (#583): the
+// source block's value wins when explicitly present (even if empty,
+// meaning "no filter for extract"), else the top-level value, else "" (no
+// filter, current behavior).
+func resolveBranchAnalyzedAfter(phase *string, top string) string {
+	if phase != nil {
+		return *phase
+	}
+	return top
+}
+
 func (s configFileShape) toExtractConfig() ExtractConfig {
 	var cfg ExtractConfig
 	// Start the spacing at the "caller said nothing" sentinel so an absent
@@ -184,6 +206,11 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		cfg.SkipIssueSync = s.SkipIssueSync
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKey = s.ProjectKey
+		var sourceBranchAnalyzedAfter *string
+		if s.Source != nil {
+			sourceBranchAnalyzedAfter = s.Source.BranchAnalyzedAfter
+		}
+		cfg.BranchAnalyzedAfter = resolveBranchAnalyzedAfter(sourceBranchAnalyzedAfter, s.BranchAnalyzedAfter)
 		s.applyHistoryTo(&cfg)
 	case s.SonarQube != nil:
 		cfg.URL = s.SonarQube.URL
@@ -197,6 +224,7 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		cfg.SkipIssueSync = s.SkipIssueSync
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKey = s.ProjectKey
+		cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
 		s.applyHistoryTo(&cfg)
 	case s.Extract != nil:
 		cfg = s.Extract.toExtractConfig()
@@ -210,6 +238,9 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		}
 		if s.ProjectKey != "" {
 			cfg.ProjectKey = s.ProjectKey
+		}
+		if s.BranchAnalyzedAfter != "" {
+			cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
 		}
 	default:
 		cfg.URL = s.URL
@@ -228,6 +259,7 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		cfg.SkipIssueSync = s.SkipIssueSync
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKey = s.ProjectKey
+		cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
 		s.applyHistoryTo(&cfg)
 	}
 	return cfg

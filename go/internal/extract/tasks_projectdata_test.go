@@ -8,6 +8,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -30,7 +32,7 @@ func TestBuildBranchMap(t *testing.T) {
 		json.RawMessage(`{"projectKey":"p3","name":"","type":"LONG"}`),
 	}
 
-	result := buildBranchMap(branches)
+	result := buildBranchMap(branches, nil, nil)
 
 	if len(result["p1"]) != 2 {
 		t.Errorf("p1: expected 2 branches, got %d", len(result["p1"]))
@@ -50,7 +52,7 @@ func TestBuildBranchMap(t *testing.T) {
 }
 
 func TestBuildBranchMapEmpty(t *testing.T) {
-	result := buildBranchMap(nil)
+	result := buildBranchMap(nil, nil, nil)
 	if len(result) != 0 {
 		t.Errorf("expected empty map, got %v", result)
 	}
@@ -61,9 +63,69 @@ func TestBuildBranchMapShortFiltered(t *testing.T) {
 		json.RawMessage(`{"projectKey":"p1","name":"pr-123","type":"short"}`),
 		json.RawMessage(`{"projectKey":"p1","name":"pr-456","type":"SHORT"}`),
 	}
-	result := buildBranchMap(branches)
+	result := buildBranchMap(branches, nil, nil)
 	if len(result["p1"]) != 0 {
 		t.Errorf("expected no branches (all short), got %v", result["p1"])
+	}
+}
+
+// TestBuildBranchMapNilCutoffIsUnchanged is a regression guard (#583):
+// buildBranchMap's behavior with no --branch_analyzed_after must be
+// identical to before the filter existed.
+func TestBuildBranchMapNilCutoffIsUnchanged(t *testing.T) {
+	branches := []json.RawMessage{
+		json.RawMessage(`{"projectKey":"p1","name":"main","isMain":true,"analysisDate":"2020-01-01T00:00:00+0000","type":"LONG"}`),
+		json.RawMessage(`{"projectKey":"p1","name":"develop","analysisDate":"2020-01-01T00:00:00+0000","type":"LONG"}`),
+	}
+	result := buildBranchMap(branches, nil, nil)
+	if len(result["p1"]) != 2 {
+		t.Fatalf("nil cutoff must select every long-lived branch, got %v", result["p1"])
+	}
+}
+
+// TestBuildBranchMapExcludesOlderNonMainBranches verifies --branch_analyzed_after
+// (#583) filters out non-main branches analyzed before the cutoff.
+func TestBuildBranchMapExcludesOlderNonMainBranches(t *testing.T) {
+	branches := []json.RawMessage{
+		json.RawMessage(`{"projectKey":"p1","name":"main","isMain":true,"analysisDate":"2024-06-01T00:00:00+0000","type":"LONG"}`),
+		json.RawMessage(`{"projectKey":"p1","name":"old-feature","analysisDate":"2020-01-01T00:00:00+0000","type":"LONG"}`),
+		json.RawMessage(`{"projectKey":"p1","name":"new-feature","analysisDate":"2024-06-01T00:00:00+0000","type":"LONG"}`),
+	}
+	cutoff := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	result := buildBranchMap(branches, &cutoff, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	got := map[string]bool{}
+	for _, name := range result["p1"] {
+		got[name] = true
+	}
+	if !got["main"] || !got["new-feature"] || got["old-feature"] {
+		t.Fatalf("p1: got %v, want {main, new-feature} only", result["p1"])
+	}
+}
+
+// TestBuildBranchMapForcesMainAndLogsWarning verifies that when
+// --branch_analyzed_after (#583) would exclude every branch of a project,
+// the main branch is force-included and a warning is logged.
+func TestBuildBranchMapForcesMainAndLogsWarning(t *testing.T) {
+	branches := []json.RawMessage{
+		json.RawMessage(`{"projectKey":"p1","name":"main","isMain":true,"analysisDate":"2020-01-01T00:00:00+0000","type":"LONG"}`),
+		json.RawMessage(`{"projectKey":"p1","name":"old-feature","analysisDate":"2020-01-01T00:00:00+0000","type":"LONG"}`),
+	}
+	cutoff := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	var logBuf strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	result := buildBranchMap(branches, &cutoff, logger)
+	if len(result["p1"]) != 1 || result["p1"][0] != "main" {
+		t.Fatalf("p1: got %v, want [main] only (force-included)", result["p1"])
+	}
+	logged := logBuf.String()
+	if !strings.Contains(logged, common.ForcedMainBranchLogMessage) {
+		t.Errorf("log output missing force-main warning: %s", logged)
+	}
+	if !strings.Contains(logged, "project=p1") || !strings.Contains(logged, "branch=main") {
+		t.Errorf("log output missing project/branch attrs: %s", logged)
 	}
 }
 

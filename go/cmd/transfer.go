@@ -58,6 +58,7 @@ const (
 	flagMigrateHistory         = "migrate_history"
 	flagHistoryMaxPoints       = "history_max_points"
 	flagHistoryMinIntervalDays = "history_min_interval_days"
+	flagBranchAnalyzedAfter    = "branch_analyzed_after"
 )
 
 // insecureFlagHelp is shared by extract, transfer and sync-issues so the
@@ -231,6 +232,7 @@ func init() {
 	f.Int(flagHistoryMaxPoints, 0, "Max historical snapshots migrated per project when --"+flagMigrateHistory+" is set (default: no cap, every analysis is a candidate). Pass a positive number to bound it. (maps to history_max_points)")
 	f.Int(flagHistoryMinIntervalDays, extract.HistoryUnset, "Minimum spacing, in days, enforced between two migrated historical snapshots when --"+flagMigrateHistory+" is set (default 0 — no spacing rule, every analysis in the source history becomes a candidate). (maps to history_min_interval_days)")
 	f.Int(flagMaxIssueComments, 0, fmt.Sprintf("Max most-recent source comments replayed onto each migrated issue/hotspot (default %d, max %d) — reduces "+scCloudName+" API pressure on long comment threads (#571). (maps to max_issue_comments)", migrate.DefaultMaxIssueComments, migrate.MaxAllowedIssueComments))
+	f.String(flagBranchAnalyzedAfter, "", "Only select branches analyzed on or after this date (YYYY-MM-DD), applied to both source (extract) and target (migrate) phases at once (maps to both source.branch_analyzed_after and target.branch_analyzed_after; use the config file to set them independently). The project's main branch is always selected, even when it doesn't meet this date. #583")
 }
 
 // transferConfig holds the resolved configuration after merging file and flag values.
@@ -264,6 +266,10 @@ type transferConfig struct {
 	migrateHistory         bool
 	historyMaxPoints       int
 	historyMinIntervalDays int
+	// #583 — independently resolved per phase; deliberately not merged or
+	// OR'd across sides like migrateHistory (see loadTransferFileDefaults).
+	branchAnalyzedAfterSource string
+	branchAnalyzedAfterTarget string
 }
 
 func applyFlagString(cmd *cobra.Command, name string, target *string) {
@@ -286,6 +292,18 @@ func applyFlagInt(cmd *cobra.Command, name string, target *int) {
 func applyFlagIntBothSides(cmd *cobra.Command, name string, source, target *int) {
 	if cmd.Flags().Changed(name) {
 		v, _ := cmd.Flags().GetInt(name)
+		*source, *target = v, v
+	}
+}
+
+// applyFlagStringBothSides mirrors applyFlagIntBothSides for a single CLI
+// flag that sets both the extract-phase and migrate-phase value at once
+// (#583) — the config file's source/target sections are the only way to
+// give the two phases different --branch_analyzed_after values on a
+// transfer run, exactly like --concurrency / --timeout.
+func applyFlagStringBothSides(cmd *cobra.Command, name string, source, target *string) {
+	if cmd.Flags().Changed(name) {
+		v, _ := cmd.Flags().GetString(name)
 		*source, *target = v, v
 	}
 }
@@ -407,6 +425,15 @@ func loadTransferFileDefaults(path string) (transferConfig, error) {
 	cfg.migrateHistory = extractCfg.MigrateHistory || migrateCfg.MigrateHistory
 	cfg.historyMaxPoints = extractCfg.HistoryMaxPoints
 	cfg.historyMinIntervalDays = extractCfg.HistoryMinIntervalDays
+	// #583 — unlike migrateHistory, branch_analyzed_after is NOT merged or
+	// OR'd across sides: an unset filter ("select every branch") is itself
+	// a meaningful, deliberate value, and the issue's own examples rely on
+	// extract and migrate being allowed different cutoffs. Each loader has
+	// already resolved its own top-level-vs-section precedence, so take
+	// each phase's resolved value independently, with no fallback to the
+	// other side.
+	cfg.branchAnalyzedAfterSource = extractCfg.BranchAnalyzedAfter
+	cfg.branchAnalyzedAfterTarget = migrateCfg.BranchAnalyzedAfter
 	return cfg, nil
 }
 
@@ -471,6 +498,10 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 	}
 	applyFlagInt(cmd, flagHistoryMaxPoints, &cfg.historyMaxPoints)
 	applyFlagInt(cmd, flagHistoryMinIntervalDays, &cfg.historyMinIntervalDays)
+	// #583 — the single transfer flag sets both phases identically when
+	// passed; differing per-phase values are only reachable via the config
+	// file's source/target sections.
+	applyFlagStringBothSides(cmd, flagBranchAnalyzedAfter, &cfg.branchAnalyzedAfterSource, &cfg.branchAnalyzedAfterTarget)
 
 	if cfg.exportDir == "" {
 		cfg.exportDir = "./migration-files/"
@@ -515,6 +546,14 @@ func validateTransferConfig(cfg transferConfig) error {
 	// clamping it deep inside the issue/hotspot sync.
 	if err := migrate.ValidateMaxIssueComments(cfg.maxIssueComments); err != nil {
 		return fmt.Errorf("--%s: %w", flagMaxIssueComments, err)
+	}
+	// #583 — validate both independently resolved cutoffs; each can carry
+	// its own bad-format error or staleness warning.
+	if err := validateBranchAnalyzedAfter(cfg.branchAnalyzedAfterSource); err != nil {
+		return fmt.Errorf("--%s (source): %w", flagBranchAnalyzedAfter, err)
+	}
+	if err := validateBranchAnalyzedAfter(cfg.branchAnalyzedAfterTarget); err != nil {
+		return fmt.Errorf("--%s (target): %w", flagBranchAnalyzedAfter, err)
 	}
 	return nil
 }
@@ -657,6 +696,8 @@ func runTransferExtract(ctx context.Context, cfg transferConfig) ([]string, erro
 		MigrateHistory:         cfg.migrateHistory,
 		HistoryMaxPoints:       cfg.historyMaxPoints,
 		HistoryMinIntervalDays: cfg.historyMinIntervalDays,
+		// #583 — a no-op unless set; independent of the target-side cutoff.
+		BranchAnalyzedAfter: cfg.branchAnalyzedAfterSource,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("extract failed: %w", err)
@@ -755,6 +796,8 @@ func runTransferMigrate(ctx context.Context, cfg transferConfig) (string, error)
 		ProjectKeyPattern:        cfg.projectKeyPattern,
 		MigrateHistory:           cfg.migrateHistory,
 		MaxIssueComments:         cfg.maxIssueComments,
+		// #583 — a no-op unless set; independent of the source-side cutoff.
+		BranchAnalyzedAfter: cfg.branchAnalyzedAfterTarget,
 	})
 	if err != nil {
 		return "", fmt.Errorf("migrate failed: %w", err)

@@ -164,6 +164,12 @@ type MigrateConfig struct {
 	// resolves to DefaultMaxIssueComments; values above MaxAllowedIssueComments
 	// are rejected by ValidateMaxIssueComments at the CLI layer.
 	MaxIssueComments int
+
+	// BranchAnalyzedAfter is the raw --branch_analyzed_after value (or the
+	// resolved target.branch_analyzed_after / top-level branch_analyzed_after
+	// from the config file), in YYYY-MM-DD form. "" means unset — every
+	// branch is selected, the pre-#583 behavior.
+	BranchAnalyzedAfter string
 }
 
 // Executor is the runtime context passed to every migrate task function.
@@ -247,6 +253,10 @@ type Executor struct {
 	// MaxIssueComments — see MigrateConfig.MaxIssueComments (#571).
 	MaxIssueComments int
 
+	// BranchAnalyzedAfter — see MigrateConfig.BranchAnalyzedAfter (#583).
+	// Nil means no filter: every branch is selected.
+	BranchAnalyzedAfter *time.Time
+
 	// ResetConfirmedOrgs is populated only by RunReset after the
 	// operator has interactively confirmed which SonarCloud orgs to
 	// wipe (#381). When set (non-nil), loadCSVToJSONL rewrites the
@@ -282,6 +292,15 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 			return "", fmt.Errorf("invalid project_key pattern %q: %w", cfg.ProjectKeyFilter, err)
 		}
 		projectKeyRe = re
+	}
+
+	// #583: parse --branch_analyzed_after defensively even though
+	// cmd/migrate.go and cmd/transfer.go already validate it at
+	// build-config time — a config-file-only caller (e.g. the GUI wizard)
+	// may reach RunMigrate without going through that validation.
+	branchAnalyzedAfter, err := common.ParseBranchAnalyzedAfter(cfg.BranchAnalyzedAfter)
+	if err != nil {
+		return "", err
 	}
 
 	tm := &RunTimings{StartedAt: time.Now()}
@@ -374,6 +393,7 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 		Objects:              cfg.Objects,
 		ProjectKeyRe:         projectKeyRe,
 		MigrateHistory:       cfg.MigrateHistory,
+		BranchAnalyzedAfter:  branchAnalyzedAfter,
 		Logger:               logger,
 	}
 

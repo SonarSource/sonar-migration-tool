@@ -322,6 +322,7 @@ Migration of non-main branches and their associated analysis data.
 - Per-branch issues, hotspots, and measures (each branch's full project data)
 - All non-main branches as long-lived branches (short-lived/PR branches are not separately recreated; everything is migrated long-lived to preserve history)
 - Configurable branch inclusion/exclusion patterns (`--exclude_branches`)
+- Date-based branch selection (`--branch_analyzed_after <YYYY-MM-DD>`): only branches last analyzed on or after the given date are selected during `extract`/`migrate`/`transfer`; the project's main branch is always selected regardless, even if it doesn't meet the date (#583)
 - Branches whose source is no longer retrievable on the server are skipped with a clear message
 
 ### Phase 4: Verification, Reporting & User Experience (P1/P2/P3)

@@ -295,6 +295,48 @@ func TestRenderMarkdownStructuralContract(t *testing.T) {
 	}
 }
 
+// TestRenderMarkdownForcedMainBranches checks the "Force-Included Main
+// Branches" sub-table (#583): present with its data when
+// Warnings.ForcedMainBranches is non-empty, and the whole Warnings section
+// absent when the ledger is otherwise empty. Kept as its own minimal summary
+// rather than added to fullySeededSummary/the golden fixture, so this test
+// doesn't require regenerating the golden file.
+func TestRenderMarkdownForcedMainBranches(t *testing.T) {
+	withForced := &MigrationSummary{
+		Warnings: WarningLedger{
+			ForcedMainBranches: []ForcedMainBranch{
+				{Project: "org1_api", Branch: "master", AnalysisDate: "2020-01-15", Cutoff: "2024-01-01"},
+			},
+		},
+	}
+	out, err := RenderMarkdown(withForced)
+	if err != nil {
+		t.Fatalf("RenderMarkdown: %v", err)
+	}
+	got := string(out)
+	if !strings.Contains(got, "## Warnings, Retries & Skips") {
+		t.Errorf("expected the Warnings section header when ForcedMainBranches is non-empty")
+	}
+	if !strings.Contains(got, "Force-Included Main Branches") {
+		t.Errorf("expected the 'Force-Included Main Branches' sub-table title")
+	}
+	for _, want := range []string{"org1_api", "master", "2020-01-15", "2024-01-01"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in rendered output, got:\n%s", want, got)
+		}
+	}
+
+	empty := &MigrationSummary{}
+	out, err = RenderMarkdown(empty)
+	if err != nil {
+		t.Fatalf("RenderMarkdown: %v", err)
+	}
+	got = string(out)
+	if strings.Contains(got, "## Warnings, Retries & Skips") || strings.Contains(got, "Force-Included Main Branches") {
+		t.Errorf("did not expect the Warnings section with an entirely empty ledger, got:\n%s", got)
+	}
+}
+
 // TestRenderMarkdownGolden is gated behind -update. By default it compares the
 // rendered bytes to the golden file IF it exists; when -update is set it
 // (re)writes the golden. With no golden present and no -update flag, the test

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/extract"
 	"testing"
@@ -80,6 +81,7 @@ func newTransferTestCmd() *cobra.Command {
 	f.Int(flagHistoryMaxPoints, 0, "")
 	// Mirrors transferCmd's real default: the sentinel, not 0.
 	f.Int(flagHistoryMinIntervalDays, extract.HistoryUnset, "")
+	f.String(flagBranchAnalyzedAfter, "", "")
 	return cmd
 }
 
@@ -329,6 +331,136 @@ func TestResolveTransferConfig_SingleSideConcurrencyTimeoutFallsBackToOtherSide(
 	}
 	if cfg.sourceTimeout != 30 {
 		t.Errorf("sourceTimeout: got %d, want 30 (borrowed from target)", cfg.sourceTimeout)
+	}
+}
+
+// Issue #583: unlike concurrency/timeout, --branch_analyzed_after must NOT
+// fall back from one side to the other — an unset filter ("select every
+// branch") is itself a meaningful, deliberate value, and the issue's own
+// examples rely on extract and migrate being allowed different cutoffs.
+// Setting only source.branch_analyzed_after in the config file must leave
+// the target side unset, not borrow source's value.
+func TestResolveTransferConfig_BranchAnalyzedAfterNoLeakageBetweenSides(t *testing.T) {
+	path := writeTransferConfig(t, `{
+		"source": {
+			"url": "https://sq.example.com",
+			"token": "sq-token",
+			"branch_analyzed_after": "2024-01-01"
+		},
+		"target": {
+			"url": "https://sonarcloud.io/",
+			"token": "sc-token",
+			"default_organization": "my-org"
+		}
+	}`)
+
+	cmd := newTransferTestCmd()
+	if err := cmd.ParseFlags([]string{"-c", path}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := resolveTransferConfig(cmd)
+	if err != nil {
+		t.Fatalf("resolveTransferConfig: %v", err)
+	}
+
+	if cfg.branchAnalyzedAfterSource != "2024-01-01" {
+		t.Errorf("branchAnalyzedAfterSource: got %q, want %q", cfg.branchAnalyzedAfterSource, "2024-01-01")
+	}
+	if cfg.branchAnalyzedAfterTarget != "" {
+		t.Errorf("branchAnalyzedAfterTarget: got %q, want \"\" (must not leak from source)", cfg.branchAnalyzedAfterTarget)
+	}
+}
+
+// Issue #583: source and target must be able to carry genuinely different
+// --branch_analyzed_after cutoffs from the config file, per the issue's own
+// worked examples (extract broad or unset, migrate narrower, or vice versa).
+func TestResolveTransferConfig_BranchAnalyzedAfterBothSidesDiffer(t *testing.T) {
+	path := writeTransferConfig(t, `{
+		"source": {
+			"url": "https://sq.example.com",
+			"token": "sq-token",
+			"branch_analyzed_after": "2024-01-01"
+		},
+		"target": {
+			"url": "https://sonarcloud.io/",
+			"token": "sc-token",
+			"default_organization": "my-org",
+			"branch_analyzed_after": "2025-06-01"
+		}
+	}`)
+
+	cmd := newTransferTestCmd()
+	if err := cmd.ParseFlags([]string{"-c", path}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := resolveTransferConfig(cmd)
+	if err != nil {
+		t.Fatalf("resolveTransferConfig: %v", err)
+	}
+
+	if cfg.branchAnalyzedAfterSource != "2024-01-01" {
+		t.Errorf("branchAnalyzedAfterSource: got %q, want %q", cfg.branchAnalyzedAfterSource, "2024-01-01")
+	}
+	if cfg.branchAnalyzedAfterTarget != "2025-06-01" {
+		t.Errorf("branchAnalyzedAfterTarget: got %q, want %q", cfg.branchAnalyzedAfterTarget, "2025-06-01")
+	}
+}
+
+// Issue #583: the single transfer CLI flag sets both phases identically
+// when passed, overriding whatever the config file had for either side —
+// mirroring how --concurrency/--timeout behave via applyFlagIntBothSides.
+func TestResolveTransferConfig_BranchAnalyzedAfterCLIFlagSetsBothSides(t *testing.T) {
+	path := writeTransferConfig(t, `{
+		"source": {
+			"url": "https://sq.example.com",
+			"token": "sq-token",
+			"branch_analyzed_after": "2020-01-01"
+		},
+		"target": {
+			"url": "https://sonarcloud.io/",
+			"token": "sc-token",
+			"default_organization": "my-org"
+		}
+	}`)
+
+	cmd := newTransferTestCmd()
+	args := []string{"-c", path, "--" + flagBranchAnalyzedAfter, "2026-01-01"}
+	if err := cmd.ParseFlags(args); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := resolveTransferConfig(cmd)
+	if err != nil {
+		t.Fatalf("resolveTransferConfig: %v", err)
+	}
+
+	if cfg.branchAnalyzedAfterSource != "2026-01-01" {
+		t.Errorf("branchAnalyzedAfterSource: got %q, want %q", cfg.branchAnalyzedAfterSource, "2026-01-01")
+	}
+	if cfg.branchAnalyzedAfterTarget != "2026-01-01" {
+		t.Errorf("branchAnalyzedAfterTarget: got %q, want %q", cfg.branchAnalyzedAfterTarget, "2026-01-01")
+	}
+}
+
+// Issue #583: validateTransferConfig must reject a malformed cutoff on
+// either side with an explicit, side-labeled error.
+func TestValidateTransferConfig_InvalidBranchAnalyzedAfter(t *testing.T) {
+	cfg := transferConfig{
+		sourceURL:                 "https://sq.example.com",
+		sourceToken:               "sq-token",
+		targetToken:               "sc-token",
+		defaultOrganization:       "my-org",
+		projectKey:                "my-project",
+		branchAnalyzedAfterSource: "not-a-date",
+	}
+	err := validateTransferConfig(cfg)
+	if err == nil {
+		t.Fatal("expected an error for an invalid source-side branch_analyzed_after")
+	}
+	if !strings.Contains(err.Error(), flagBranchAnalyzedAfter) || !strings.Contains(err.Error(), "source") {
+		t.Errorf("error %q does not clearly identify the source-side --%s flag", err.Error(), flagBranchAnalyzedAfter)
 	}
 }
 
