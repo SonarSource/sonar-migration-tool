@@ -58,6 +58,15 @@ func ValidateMaxIssueComments(n int) error {
 	return nil
 }
 
+// MaxBranchesPerProject is the hard cap on the number of long-lived
+// branches migrated per project (#584) — a safeguard against projects with
+// too many branches (little branch housekeeping, or a branch selection
+// filter that casts too wide a net) making a migrate/transfer run too slow
+// and putting too much API pressure on SonarQube Cloud. Not user-facing by
+// design: a single constant, easy to revisit in one place. Applies only to
+// migrate/transfer; extract has no such limit.
+const MaxBranchesPerProject = 10
+
 // MigrateConfig holds all parameters for a migrate run.
 type MigrateConfig struct {
 	Token         string

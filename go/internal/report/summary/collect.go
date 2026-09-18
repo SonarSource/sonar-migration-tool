@@ -45,6 +45,7 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 	ncdBranchOverrideSet := collectNCDBranchOverrides(store)
 	syncStatsMap := collectSyncStats(store)
 	branchSourcePurgedMap := collectBranchSourcePurged(store)
+	branchLimitSkippedMap := collectBranchLimitSkips(store)
 	extractMapping, _ := structure.GetUniqueExtracts(exportDir)
 	// #353 — per-object dropped-user-permission counts: SonarQube Cloud
 	// has no API to grant permissions to individual users, so any user
@@ -98,6 +99,13 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 			attachBranchSourcePurged(section.Succeeded, branchSourcePurgedMap)
 			attachBranchSourcePurged(section.NearPerfect, branchSourcePurgedMap)
 			attachBranchSourcePurged(section.Partial, branchSourcePurgedMap)
+			// #584 — note branches dropped by the per-project hard branch
+			// cap in each affected project's Details column. Applied to
+			// all routed buckets; the outcome itself is unchanged (the
+			// branches within the cap still migrate normally).
+			attachBranchLimitSkips(section.Succeeded, branchLimitSkippedMap)
+			attachBranchLimitSkips(section.NearPerfect, branchLimitSkippedMap)
+			attachBranchLimitSkips(section.Partial, branchLimitSkippedMap)
 		}
 		// #353 — attach the dropped-user-permission count marker to
 		// every entity in every routed bucket so the per-row Details
@@ -1505,6 +1513,59 @@ func attachBranchSourcePurged(projects []EntityItem, purgedMap map[string][]stri
 			continue
 		}
 		projects[i].Detail = projects[i].Detail + "|srcPurged:" + strings.Join(branches, ",")
+	}
+}
+
+// collectBranchLimitSkips reads importProjectData JSONL and returns, per
+// cloud project key, the ordered list of branch names dropped by the
+// per-project hard branch cap (issue #584) rather than migrated. Branches
+// are de-duplicated and kept in first-seen order.
+func collectBranchLimitSkips(store *common.DataStore) map[string][]string {
+	items, err := store.ReadAll("importProjectData")
+	if err != nil || len(items) == 0 {
+		return nil
+	}
+	result := make(map[string][]string)
+	seen := make(map[string]bool)
+	for _, item := range items {
+		if !jsonBool(item, "branch_limit_exceeded") {
+			continue
+		}
+		key := jsonStr(item, "cloud_project_key")
+		branch := jsonStr(item, "branch")
+		if key == "" || branch == "" {
+			continue
+		}
+		dedupKey := key + "\x00" + branch
+		if seen[dedupKey] {
+			continue
+		}
+		seen[dedupKey] = true
+		result[key] = append(result[key], branch)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+// attachBranchLimitSkips appends a "|branchLimit:branchA,branchB" marker
+// to each affected project's Detail field. The renderer turns it into a
+// one-line note that this project has more long-lived branches than the
+// migration's hard cap, naming the branches that were not migrated
+// (issue #584). The project's outcome is unchanged — the branches within
+// the cap still migrate normally.
+func attachBranchLimitSkips(projects []EntityItem, droppedMap map[string][]string) {
+	if len(droppedMap) == 0 || len(projects) == 0 {
+		return
+	}
+	for i := range projects {
+		key := projectCloudKey(projects[i].Detail)
+		branches, ok := droppedMap[key]
+		if !ok || len(branches) == 0 {
+			continue
+		}
+		projects[i].Detail = projects[i].Detail + "|branchLimit:" + strings.Join(branches, ",")
 	}
 }
 
