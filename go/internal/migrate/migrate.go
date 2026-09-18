@@ -33,7 +33,67 @@ import (
 // The phase's wall clock is dominated by PollCETask, which polls every few
 // seconds for minutes, so throttling construction costs little while
 // cutting peak memory by roughly the ratio between the two.
+//
+// This is also the floor and the non-Linux/undetectable fallback for
+// AdaptiveBuildConcurrency — the value used when memory can't be
+// detected, or is too small to safely justify going higher (#541).
 const DefaultBuildConcurrency = 4
+
+const (
+	// buildMemoryBudgetPerWorker is a conservative per-concurrent-build
+	// memory assumption, in bytes. BenchmarkLoadBranchSourceData measured
+	// ~915 MiB allocated for one branch of even a small synthetic
+	// project (scoped_extract_alloc_test.go) before the #541 streaming
+	// fix that cut it to ~405 MiB allocated / ~3 MiB retained — and that
+	// fix is what let BuildSem exist at all without still risking the
+	// OOM. There is no benchmark for a large real project's branch
+	// (protobuf + ZIP packaging included, not just source loading), so
+	// this rounds up from the largest number that IS measured rather
+	// than guess low.
+	buildMemoryBudgetPerWorker = 1 << 30 // 1 GiB
+
+	// buildConcurrencyBudgetShare reserves the rest of the detected
+	// memory budget for everything else the process needs during this
+	// phase — the general request pool's own transient allocations,
+	// the Go runtime, OS overhead the cgroup accounting doesn't capture
+	// — rather than letting build concurrency alone claim the whole
+	// budget.
+	buildConcurrencyBudgetShare = 0.5
+
+	// maxAdaptiveBuildConcurrency caps how far detected memory can push
+	// this. Issue #541's OOM happened at an effectively unbounded 25 (no
+	// separate build limit existed yet) on a 32 GB VM, so this stays
+	// below that even on a very large host until real large-project
+	// measurements justify raising it.
+	maxAdaptiveBuildConcurrency = 20
+)
+
+// AdaptiveBuildConcurrency derives a --project_data_build_concurrency
+// default from the memory actually available to this process — the same
+// cgroup/meminfo detection common.ApplyMemoryLimit uses for GOMEMLIMIT —
+// instead of the single fixed guess DefaultBuildConcurrency was on its
+// own. Falls back to DefaultBuildConcurrency when the budget can't be
+// determined (non-Linux, or detection failed), so nothing changes for
+// local/dev runs (#573 follow-up).
+func AdaptiveBuildConcurrency() int {
+	budget, _ := common.MemoryBudget()
+	return adaptiveBuildConcurrency(budget)
+}
+
+// adaptiveBuildConcurrency is the testable core of AdaptiveBuildConcurrency.
+func adaptiveBuildConcurrency(budgetBytes int64) int {
+	if budgetBytes <= 0 {
+		return DefaultBuildConcurrency
+	}
+	n := int(float64(budgetBytes) * buildConcurrencyBudgetShare / buildMemoryBudgetPerWorker)
+	if n < DefaultBuildConcurrency {
+		return DefaultBuildConcurrency
+	}
+	if n > maxAdaptiveBuildConcurrency {
+		return maxAdaptiveBuildConcurrency
+	}
+	return n
+}
 
 // DefaultMaxIssueComments is the number of most-recent comments migrated
 // onto each Cloud issue/hotspot when --max_issue_comments is unset (#571).
@@ -81,6 +141,9 @@ type MigrateConfig struct {
 	APIMaxRatePerMin int
 	// BuildConcurrency bounds concurrent scanner-report CONSTRUCTION during
 	// importProjectData, independently of Concurrency. See Executor.BuildSem.
+	// <= 0 resolves via AdaptiveBuildConcurrency, not a single fixed
+	// default — sized from memory actually available to this process
+	// when it can be detected.
 	BuildConcurrency int
 	// Timeout is the per-HTTP-request timeout in seconds applied to
 	// every SonarQube Cloud call the migrate phase makes (#383). When
@@ -742,7 +805,7 @@ func (cfg *MigrateConfig) applyDefaults() {
 		cfg.APIMaxRatePerMin = 1500
 	}
 	if cfg.BuildConcurrency <= 0 {
-		cfg.BuildConcurrency = DefaultBuildConcurrency
+		cfg.BuildConcurrency = AdaptiveBuildConcurrency()
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 60

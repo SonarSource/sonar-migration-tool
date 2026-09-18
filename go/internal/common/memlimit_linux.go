@@ -25,3 +25,15 @@ import (
 func ApplyMemoryLimit(logger *slog.Logger) (int64, string) {
 	return applyMemoryLimit("/", os.Getenv, setMemoryLimit, logger)
 }
+
+// MemoryBudget returns the memory available to this process — the same
+// cgroup v2/v1/total-system-memory detection ApplyMemoryLimit uses for
+// GOMEMLIMIT — without applying anything. Callers that need to size their
+// own concurrency to available memory (e.g. migrate's adaptive
+// --project_data_build_concurrency, #573) use this instead of duplicating
+// the detection. Returns (0, "") when it cannot be determined.
+//
+// Linux only, mirroring ApplyMemoryLimit: see its doc for why.
+func MemoryBudget() (int64, string) {
+	return detectMemoryBudget("/")
+}
