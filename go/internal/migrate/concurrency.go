@@ -293,11 +293,12 @@ const dynamicGatePollInterval = 25 * time.Millisecond
 type DynamicGate struct {
 	limiter *ConcurrencyLimiter
 	active  atomic.Int32
+	freed   chan struct{} // buffered(1), signalled by Release
 }
 
 // NewDynamicGate constructs a gate bounded by limiter's live Current().
 func NewDynamicGate(limiter *ConcurrencyLimiter) *DynamicGate {
-	return &DynamicGate{limiter: limiter}
+	return &DynamicGate{limiter: limiter, freed: make(chan struct{}, 1)}
 }
 
 // Acquire blocks until fewer than limiter.Current() units are currently
@@ -310,6 +311,7 @@ func (g *DynamicGate) Acquire(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-g.freed:
 		case <-time.After(dynamicGatePollInterval):
 		}
 	}
@@ -334,4 +336,8 @@ func (g *DynamicGate) tryAcquire() bool {
 // successful Acquire.
 func (g *DynamicGate) Release() {
 	g.active.Add(-1)
+	select {
+	case g.freed <- struct{}{}:
+	default:
+	}
 }
