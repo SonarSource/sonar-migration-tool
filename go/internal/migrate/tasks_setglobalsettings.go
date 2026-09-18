@@ -598,10 +598,17 @@ func runSetGlobalSettings(ctx context.Context, e *Executor) error {
 	}
 
 	var mu sync.Mutex
+	// DynamicGate, not errgroup.SetLimit — see the doc comment on
+	// DynamicGate (#573): SetLimit freezes at whatever Current() is right
+	// now for this errgroup's entire lifetime.
+	gate := NewDynamicGate(e.ConcurrencyLimiter)
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(e.ConcurrencyLimiter.Current())
 	for _, raw := range customized {
+		if err := gate.Acquire(gctx); err != nil {
+			break
+		}
 		g.Go(func() error {
+			defer gate.Release()
 			if gctx.Err() != nil {
 				return gctx.Err()
 			}

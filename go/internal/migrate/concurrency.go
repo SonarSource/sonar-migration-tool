@@ -213,3 +213,73 @@ func (l *ConcurrencyLimiter) Stop() {
 		}
 	})
 }
+
+// dynamicGatePollInterval is how often a blocked Acquire re-checks
+// Current(). Current() only changes every 30s (or is static), so this
+// coarse a poll costs nothing meaningful while staying responsive.
+const dynamicGatePollInterval = 25 * time.Millisecond
+
+// DynamicGate bounds concurrent work to limiter.Current() at the moment
+// each unit is admitted, rather than a value fixed once for the
+// lifetime of the fan-out — which is what errgroup.Group.SetLimit gives
+// you, since its documented contract forbids changing the limit after
+// any Go() call. A fan-out whose errgroup lives longer than one 30s
+// recalculation tick would otherwise never see an updated value: verified
+// live against a real migrate run where a single 50-minute
+// importProjectData task stayed locked at whatever Current() was the
+// instant it started, even though the background recalculation kept
+// computing new values the entire time (#573).
+//
+// Each independent fan-out site must construct its own gate, mirroring
+// today's independent per-site Current() reads. Never share one gate
+// across nested fan-outs — that would reintroduce exactly the deadlock
+// Executor.ConcurrencyLimiter's own doc comment warns against: nested
+// fan-outs (e.g. runSyncIssueMetadata's forEachMigrateItem holding a
+// slot for each of its workers, each of which calls runProjectSyncLoop)
+// would have the outer holders take every slot, leaving no room for
+// inner work to ever acquire.
+type DynamicGate struct {
+	limiter *ConcurrencyLimiter
+	active  atomic.Int32
+}
+
+// NewDynamicGate constructs a gate bounded by limiter's live Current().
+func NewDynamicGate(limiter *ConcurrencyLimiter) *DynamicGate {
+	return &DynamicGate{limiter: limiter}
+}
+
+// Acquire blocks until fewer than limiter.Current() units are currently
+// admitted, then admits one. Returns ctx.Err() if ctx is done first.
+func (g *DynamicGate) Acquire(ctx context.Context) error {
+	for {
+		if g.tryAcquire() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(dynamicGatePollInterval):
+		}
+	}
+}
+
+// tryAcquire admits one unit via CAS when under the current limit,
+// racing safely against concurrent Acquire/Release calls.
+func (g *DynamicGate) tryAcquire() bool {
+	limit := int32(g.limiter.Current())
+	for {
+		cur := g.active.Load()
+		if cur >= limit {
+			return false
+		}
+		if g.active.CompareAndSwap(cur, cur+1) {
+			return true
+		}
+	}
+}
+
+// Release frees one admitted unit. Must be called exactly once per
+// successful Acquire.
+func (g *DynamicGate) Release() {
+	g.active.Add(-1)
+}

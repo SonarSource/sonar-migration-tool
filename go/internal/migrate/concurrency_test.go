@@ -294,3 +294,91 @@ func TestConcurrencyLimiterSkipsRecalculationWithNoSamples(t *testing.T) {
 		t.Fatalf("Current() = %d after ticks with no samples, want unchanged %d", got, clampConcurrency(initial))
 	}
 }
+
+// #573 — a live migrate run showed a 50-minute importProjectData task
+// stayed locked at whatever ConcurrencyLimiter.Current() was the instant
+// its errgroup called SetLimit, even though the background recalculation
+// kept computing new values every 30s the entire time: errgroup's
+// documented contract forbids changing SetLimit after any Go() call.
+// DynamicGate exists to re-read Current() on every admission instead.
+// These tests guard against that regression returning.
+
+func TestDynamicGateNeverExceedsCurrentLimit(t *testing.T) {
+	limiter := NewFixedConcurrencyLimiter(2)
+	gate := NewDynamicGate(limiter)
+	ctx := context.Background()
+
+	if err := gate.Acquire(ctx); err != nil {
+		t.Fatalf("first Acquire: %v", err)
+	}
+	if err := gate.Acquire(ctx); err != nil {
+		t.Fatalf("second Acquire: %v", err)
+	}
+
+	// At the limit: a third Acquire must block.
+	thirdDone := make(chan error, 1)
+	go func() { thirdDone <- gate.Acquire(ctx) }()
+	select {
+	case err := <-thirdDone:
+		t.Fatalf("third Acquire returned (err=%v) while already at the limit", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	gate.Release()
+	select {
+	case err := <-thirdDone:
+		if err != nil {
+			t.Fatalf("third Acquire after a Release: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("third Acquire did not succeed after a Release freed a slot")
+	}
+	gate.Release()
+}
+
+// TestDynamicGateRespondsToLiveLimitChange is the core #573 regression
+// guard: a gate built on a limiter whose value changes mid-flight must
+// admit more work as soon as the limit rises, without needing to be
+// reconstructed — exactly what errgroup.SetLimit cannot do once Go() has
+// been called.
+func TestDynamicGateRespondsToLiveLimitChange(t *testing.T) {
+	limiter := NewFixedConcurrencyLimiter(1)
+	gate := NewDynamicGate(limiter)
+	ctx := context.Background()
+
+	if err := gate.Acquire(ctx); err != nil {
+		t.Fatalf("first Acquire: %v", err)
+	}
+
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- gate.Acquire(ctx) }()
+	select {
+	case err := <-secondDone:
+		t.Fatalf("second Acquire returned (err=%v) before the limit was raised", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Raise the limit live — no Release, no new gate, no restart of
+	// whatever fan-out is using it.
+	limiter.current.Store(2)
+
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatalf("second Acquire after the limit was raised: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("second Acquire did not succeed after the live limit was raised to 2")
+	}
+}
+
+func TestDynamicGateAcquireRespectsContextCancellation(t *testing.T) {
+	limiter := NewFixedConcurrencyLimiter(0) // never admits
+	gate := NewDynamicGate(limiter)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := gate.Acquire(ctx); err == nil {
+		t.Fatal("expected Acquire to return an error for an already-canceled context")
+	}
+}

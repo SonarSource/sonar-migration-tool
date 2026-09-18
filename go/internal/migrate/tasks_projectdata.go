@@ -54,8 +54,13 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 	prog := common.NewProgressLogger(e.Logger, "importProjectData", len(projects))
 	e.Progress.Registry().Register("importProjectData", prog)
 
+	// A plain errgroup.SetLimit here would freeze at whatever
+	// e.ConcurrencyLimiter.Current() happens to be right now for this
+	// task's entire run — which can be tens of minutes for a large
+	// instance — silently ignoring every later recalculation (#573).
+	// DynamicGate re-reads Current() on each admission instead.
+	gate := NewDynamicGate(e.ConcurrencyLimiter)
 	g, gCtx := errgroup.WithContext(ctx)
-	g.SetLimit(e.ConcurrencyLimiter.Current())
 
 	for _, proj := range projects {
 		if isFailedMigrateRecord(proj) {
@@ -72,7 +77,11 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 
 		e.Logger.Debug("importing project data", "project", cloudKey)
 
+		if err := gate.Acquire(gCtx); err != nil {
+			break
+		}
 		g.Go(func() error {
+			defer gate.Release()
 			if gCtx.Err() != nil {
 				return gCtx.Err()
 			}
