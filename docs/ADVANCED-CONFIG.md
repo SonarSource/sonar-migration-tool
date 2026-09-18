@@ -51,6 +51,7 @@ Only `source.url` / `source.token` (for `extract`) and `target.url` / `target.to
 | `skip_project_data_migration` | `--skip_project_data_migration` | extract, migrate, transfer | `false` | No | Skip the entire project-data migration (import + trailing sync). Implies `skip_issue_sync` (#303). |
 | `objects` | `--objects` | extract, migrate | every category | No | Comma-separated (CLI) or array (config file) list of object categories to process: `settings`, `permission_templates`, `quality_profiles` (`qp`), `quality_gates` (`qg`), `projects`, `portfolios`, `groups`, `license_profiles` (`lp`, accepted but not yet implemented). Omit to process everything. When set without `projects`, no project is created/extracted/migrated. #536. |
 | `project_key` | `--project_key` | extract, migrate, transfer | every project | Yes (transfer only) | Regexp pattern of project keys to process, implicitly anchored (`^...$`) — a plain key matches only itself. **Required on `transfer`** (project-scoped by design, #529); optional on `extract`/`migrate`, where it only applies when `projects` is selected (or `objects` is unset) (#536). |
+| `branch_regexp` | `--branch_regexp` | extract, migrate, transfer | every branch | No | Regexp pattern of branch names to process, implicitly anchored (`^...$`) — a plain name matches only itself. Settable independently for `extract` (source side) and `migrate` (target side); if `migrate` doesn't set it, it implicitly operates on whatever branches were actually extracted. The main branch is always included regardless of match. Overridable via `source.branch_regexp` / `target.branch_regexp` (#582). |
 | `migrate_history` | `--migrate_history` | extract, migrate, transfer | `false` | No | **PoC.** Also migrate a bounded set of historical analysis snapshots (date + project-level measures only) per project's main branch, backdated on SonarQube Cloud (#554). Accepts `true`/`on`/`yes`/`1` (case-insensitive). Overridable via `target.migrate_history`. CLI flag is a one-way override. |
 | `history_max_points` | `--history_max_points` | extract, transfer | `0` (no cap) | No | Max historical snapshots migrated per project when `migrate_history` is set (#554). Applied at extract time; `migrate` replays whatever was extracted, so the flag does not exist there. |
 | `history_min_interval_days` | `--history_min_interval_days` | extract, transfer | `0` (no spacing rule) | No | Minimum spacing, in days, enforced between two migrated historical snapshots when `migrate_history` is set (#554). Pass `0` for no spacing rule. Applied at extract time; `migrate` replays whatever was extracted, so the flag does not exist there. |
@@ -71,6 +72,7 @@ Only `source.url` / `source.token` (for `extract`) and `target.url` / `target.to
 | `source.insecure` | `--insecure` | `false` | No | Skip TLS certificate verification for the SonarQube Server connection — for a trusted internal server whose certificate is self-signed or not signed by a trusted CA. Leaves the connection open to man-in-the-middle interception; never use it against a public endpoint. #586 |
 | `source.target_task` | `--target_task` | `null` | No | Stop extract at a specific task (dependencies still run). |
 | `source.extract_id` | `--extract_id` | `null` | No | Reuse / resume an existing extract directory ID. |
+| `source.branch_regexp` | `--branch_regexp` | top-level | No | Override top-level `branch_regexp` for extract. Regexp pattern of branch names to extract, implicitly anchored (`^...$`). The main branch is always extracted regardless of match. |
 | `source.enterprise_key`, `source.organization_key`, `source.edition` | — | `null` / `enterprise` | No | Provisional — accepted but ignored today; reserved for future SQC-to-SQC migration. |
 | `source.run_id` | — | `null` | No | Ignored by `extract`; present for shape symmetry with `target`. |
 
@@ -91,6 +93,7 @@ Only `source.url` / `source.token` (for `extract`) and `target.url` / `target.to
 | `target.project_key_pattern` | `--project_key_pattern` | `<ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>` | No | Template for target project keys (#138). See [Project key renaming strategy](#project-key-renaming-strategy). |
 | `target.skip_profiles` | `--skip_profiles` | `false` | No | Skip quality profile migration / provisioning. |
 | `target.exclude_branches` | `--exclude_branches` | `[]` | No | Glob patterns (Go `filepath.Match`) for non-main branches to skip. The main branch is never excluded. Repeatable on the CLI. |
+| `target.branch_regexp` | `--branch_regexp` | top-level | No | Override top-level `branch_regexp` for migrate. Regexp pattern of branch names to migrate, implicitly anchored (`^...$`). Only branches that were actually extracted can be migrated. The main branch is always migrated regardless of match. |
 | `target.organization_key` | — | `null` | No | Provisional — accepted but ignored today. |
 | `target.max_issue_comments` | `--max_issue_comments` | top-level | No | Override the top-level `max_issue_comments` for migrate / transfer / sync-issues calls. Ignored by reset, which replays no comments (#571). |
 
@@ -121,6 +124,7 @@ All optional.
 | `skip_project_data_migration` | `false` | When `true` (or `"on"` / `"yes"` / `1`), skip the entire project-data migration: the project-data import AND the trailing issue + hotspot sync. Useful when customers cut over to SonarQube Cloud by re-scanning rather than importing historical state. Implies `skip_issue_sync` — there's nothing to sync against. Same FlexibleBool aliases. Issue #303. |
 | `objects` | every category | Array of object categories to `extract`/`migrate`: `settings`, `permission_templates` (`pt`), `quality_profiles` (`qp`), `quality_gates` (`qg`), `projects`, `portfolios`, `groups`, `license_profiles` (`lp`, accepted but not yet implemented — logs a warning and is otherwise ignored). Omit or leave empty to process everything (today's behavior). When set without `projects`, no project is created, extracted, or migrated — a setting that would otherwise need project-scope data (e.g. one SonarQube Cloud falsely reports as org-settable) is instead reported `Skipped`. Issue #536. |
 | `project_key` | every project | Regexp pattern of project keys to `extract`/`migrate`, implicitly anchored (`^...$`) — a plain key matches only itself. Only applies when `projects` is selected via `objects` (or `objects` is unset). Mirrors `transfer`'s `--project_key` (#529), extended here to `extract`/`migrate` (#536). |
+| `branch_regexp` | every branch | Regexp pattern of branch names to `extract`/`migrate`, implicitly anchored (`^...$`) — a plain name matches only itself. Settable independently for `extract` (source side) and `migrate` (target side) via `source.branch_regexp` / `target.branch_regexp`; if `migrate` doesn't set it, it implicitly operates on whatever branches were actually extracted, so a branch excluded at extract time can never be migrated. The project's main branch is always included regardless of match — a too-restrictive pattern can never drop it. Issue #582. |
 | `migrate_history` | `false` | **Proof of concept.** When `true` (or `"on"` / `"yes"` / `1`), replay a bounded set of the source project's historical analyses of its main branch as separate, backdated points in the target's analysis history, on top of the regular current-snapshot import. Each historical point carries the project-level measures only — no files, no issues. Same FlexibleBool aliases. Can be overridden per command by `target.migrate_history`. See [TRANSFER.md](TRANSFER.md#project-history-migration---migrate_history--poc). Issue #554. |
 | `history_max_points` | `0` (no cap) | Max historical snapshots migrated per project when `migrate_history` is set. When the source has more candidates than this after interval bounding, they are evenly resampled across the whole history span. Issue #554. |
 | `history_min_interval_days` | `0` (no spacing rule) | Minimum spacing, in days, enforced between two migrated historical snapshots when `migrate_history` is set. `0` is a real value meaning "no spacing rule" and is distinct from leaving the key out. Issue #554. |
@@ -147,6 +151,7 @@ The CLI flags `--skip_issue_sync` and `--skip_project_data_migration` on `migrat
 | `insecure` | | Skip TLS certificate verification for the SonarQube Server connection (optional, default `false`). For a trusted internal server with a self-signed certificate only. #586 |
 | `target_task` | | Stop extract at a specific task (dependencies still run). |
 | `extract_id` | | Reuse an existing extract directory ID instead of generating a new one — resume after a failure. |
+| `branch_regexp` | | Override top-level default. Regexp pattern of branch names to extract, implicitly anchored (`^...$`). The main branch is always extracted regardless of match. |
 | `enterprise_key` / `organization_key` / `edition` | | Provisional — accepted but ignored today; reserved for future SQC-to-SQC migration. |
 
 ---
@@ -168,6 +173,7 @@ The CLI flags `--skip_issue_sync` and `--skip_project_data_migration` on `migrat
 | `project_key_pattern` | | Template for target project keys, built from `<ORIGINAL_PROJECT_KEY>` and `<ORGANIZATION_KEY>`. Default `<ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>`. CLI `--project_key_pattern` wins. See [Project key renaming strategy](#project-key-renaming-strategy). |
 | `skip_profiles` | | Skip quality profile migration. |
 | `exclude_branches` | | Array of glob patterns (Go `filepath.Match` syntax) for non-main branches to skip during project data import. The main branch is never excluded regardless of patterns. Example: `["feature/*", "release/*"]`. |
+| `branch_regexp` | | Override top-level default. Regexp pattern of branch names to migrate, implicitly anchored (`^...$`). Only branches that were actually extracted can be migrated. The main branch is always migrated regardless of match. |
 | `organization_key` | | Provisional — accepted but ignored today. |
 | `max_issue_comments` | | Override the top-level `max_issue_comments` for migrate / transfer / sync-issues. Ignored by reset, which replays no comments. Issue #571. |
 
@@ -259,6 +265,7 @@ sonar-migration-tool extract --source_url <url> --source_token <token> [flags]
 | `--skip_issue_sync` | Drop the per-issue / per-hotspot sync metadata from the extract (no `additionalFields=_all`, no per-hotspot detail). Pair with migrate-side `--skip_issue_sync`. #398. |
 | `--objects <list>` | Comma-separated object categories to extract (`settings`, `permission_templates`/`pt`, `quality_profiles`/`qp`, `quality_gates`/`qg`, `projects`, `portfolios`, `groups`, `license_profiles`/`lp`). Omit to extract everything. #536. |
 | `--project_key <pattern>` | Regexp of project keys to extract; only applies when `projects` is selected. A plain key matches only itself. #536. |
+| `--branch_regexp <pattern>` | Regexp of branch names to extract, implicitly anchored (`^...$`) — a plain name matches only itself. The main branch is always extracted regardless of match. #582. |
 | `--exclude_branches <pattern>` | Glob pattern for non-main branches to skip during project data import. Repeatable (pass multiple times for multiple patterns). Main branch is never excluded. |
 | `--pem_file_path <path>` | mTLS PEM file. |
 | `--key_file_path <path>` | mTLS key file. |
@@ -298,12 +305,21 @@ sonar-migration-tool migrate --target_token <token> --enterprise_key <key> [flag
 | `--skip_issue_sync` | Skip the final per-issue / per-hotspot metadata sync (#299). One-way: setting this on the CLI forces the sync off, overriding the `skip_issue_sync` config field. |
 | `--skip_project_data_migration` | Skip the entire project-data migration: `importProjectData` plus the trailing sync pair. Implies `--skip_issue_sync`. One-way override of the `skip_project_data_migration` config field. Issue #303. |
 | `--exclude_branches <pattern>` | Glob pattern for non-main branches to skip during project data import. Repeatable. Main branch is never excluded. |
+| `--branch_regexp <pattern>` | Regexp of branch names to migrate, implicitly anchored (`^...$`) — a plain name matches only itself. If not set, implicitly operates on whatever branches were actually extracted. The main branch is always migrated regardless of match. #582. |
 | `--default_organization <key>` | SonarCloud org applied to every project when `organizations.csv` has no mapping defined. |
 | `--project_key_pattern <pattern>` | Template for target project keys (`<ORIGINAL_PROJECT_KEY>` / `<ORGANIZATION_KEY>`). Default `<ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>`. See [Project key renaming strategy](#project-key-renaming-strategy). |
 | `--concurrency <n>` | Max concurrent requests. |
 | `--project_data_build_concurrency <n>` | Max number of scanner reports built at once during project-data migration (default `4`). Lower it if the migration runs out of memory on a large instance; raise it toward `--concurrency` if report building is the bottleneck. |
 | `--objects <list>` | Comma-separated object categories to migrate (`settings`, `permission_templates`/`pt`, `quality_profiles`/`qp`, `quality_gates`/`qg`, `projects`, `portfolios`, `groups`, `license_profiles`/`lp`). Omit to migrate everything. When set without `projects`, no project is created or touched. #536. |
 | `--project_key <pattern>` | Regexp of source project keys to migrate; only applies when `projects` is selected. Not to be confused with `--project_key_pattern` (the target-key rendering template). #536. |
+
+`--branch_regexp` can be set independently on `extract` and `migrate` — extract every branch once and decide later which to migrate, or extract only the branches you already know you want:
+
+```bash
+# Extract every branch, but only migrate main/master/develop/release branches
+sonar-migration-tool extract
+sonar-migration-tool migrate --branch_regexp "(master|main|develop|release.*)"
+```
 
 ### `reset`
 
@@ -355,6 +371,7 @@ file.
 | `--skip_issue_sync` | top-level `skip_issue_sync` | Skip the final per-issue / per-hotspot metadata sync (#299). |
 | `--skip_project_data_migration` | top-level `skip_project_data_migration` | Skip the entire project-data migration (importProjectData + trailing syncs). #303. |
 | `--exclude_branches <pattern>` | `target.exclude_branches` | Glob pattern for non-main branches to skip during project data import. Repeatable. Main branch is never excluded. |
+| `--branch_regexp <pattern>` | `branch_regexp` | Regexp of branch names to extract/migrate, implicitly anchored (`^...$`) — a plain name matches only itself. Applies to both phases of the transfer. The main branch is always included regardless of match. #582. |
 
 CLI flags always override the corresponding config-file value.
 

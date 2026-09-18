@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"sync"
 	"time"
@@ -59,6 +60,14 @@ type ExtractConfig struct {
 	// into ProjectKeys via ResolveProjectKeys before calling RunExtract
 	// (#536, mirrors #529's transfer-side flag).
 	ProjectKey string
+	// BranchRegexp, when non-empty, limits which branches of each project get
+	// extracted (both the getBranches task's own written records and every
+	// downstream per-branch task that fans out from them — issues, hotspots,
+	// source, SCM, versions, history). Always compiled as a full-match regex
+	// implicitly anchored with ^ and $ (mirrors ProjectKey/CompileProjectKeyPattern,
+	// #529/#536). The project's main branch is always kept regardless of
+	// whether it matches. Empty means "extract every branch" (#582).
+	BranchRegexp string
 	// Objects, when non-nil, limits extraction to the selected object
 	// categories (settings, permission_templates, quality_profiles,
 	// quality_gates, projects, portfolios, groups, license_profiles —
@@ -111,6 +120,10 @@ type Executor struct {
 	ProjectKeys   []string        // non-empty → limit extraction to these project keys
 	SkipIssueSync bool            // drop additionalFields=_all + hotspot detail enrichment. #398.
 	Progress      *common.Tracker // run-wide progress/ETA estimator (#520)
+
+	// BranchRe is the compiled form of ExtractConfig.BranchRegexp, or nil
+	// when unset (meaning "no branch filtering"). #582.
+	BranchRe *regexp.Regexp
 
 	// Truncation collects every truncated API response observed during
 	// the run, for the end-of-run console block and the
@@ -202,6 +215,14 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 	executor.MigrateHistory = cfg.MigrateHistory
 	executor.HistoryMaxPoints = cfg.HistoryMaxPoints
 	executor.HistoryMinIntervalDays = cfg.HistoryMinIntervalDays
+
+	if cfg.BranchRegexp != "" {
+		branchRe, err := CompileProjectKeyPattern(cfg.BranchRegexp)
+		if err != nil {
+			return nil, fmt.Errorf("invalid branch regexp pattern %q: %w", cfg.BranchRegexp, err)
+		}
+		executor.BranchRe = branchRe
+	}
 
 	// Truncation tracking (#574). The observer is installed on the raw
 	// client — one installation covering all of its call sites,

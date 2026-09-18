@@ -406,6 +406,72 @@ func TestLoadMigrateConfigFileUnifiedShape_TargetOverridesGlobals(t *testing.T) 
 	}
 }
 
+// #582: unified shape's target.branch_regexp wins over the top-level field.
+func TestLoadMigrateConfigFileUnifiedShape_BranchRegexpTargetOverridesTopLevel(t *testing.T) {
+	body := `{
+  "branch_regexp": "^top-level$",
+  "target": {
+    "url": "u", "token": "t",
+    "branch_regexp": "^release/.*$"
+  }
+}`
+	dir := t.TempDir()
+	path := dir + "/unified.json"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadMigrateConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchRegexp != "^release/.*$" {
+		t.Errorf("BranchRegexp: got %q, want ^release/.*$", cfg.BranchRegexp)
+	}
+}
+
+// #582: unified shape falls back to the top-level branch_regexp when the
+// target block doesn't set one.
+func TestLoadMigrateConfigFileUnifiedShape_BranchRegexpFallsBackToTopLevel(t *testing.T) {
+	body := `{
+  "branch_regexp": "^main$",
+  "target": {
+    "url": "u", "token": "t"
+  }
+}`
+	dir := t.TempDir()
+	path := dir + "/unified.json"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadMigrateConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchRegexp != "^main$" {
+		t.Errorf("BranchRegexp: got %q, want ^main$", cfg.BranchRegexp)
+	}
+}
+
+// #582: flat shape reads branch_regexp directly.
+func TestLoadMigrateConfigFile_BranchRegexpFlatShape(t *testing.T) {
+	body := `{
+  "url": "u", "token": "t",
+  "branch_regexp": "^develop$"
+}`
+	dir := t.TempDir()
+	path := dir + "/flat.json"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadMigrateConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchRegexp != "^develop$" {
+		t.Errorf("BranchRegexp: got %q, want ^develop$", cfg.BranchRegexp)
+	}
+}
+
 // #383: Timeout must flow into MigrateConfig from every documented
 // config-file shape so the migrate phase honors the operator's value
 // instead of falling back to the SDK default (60s). The unified

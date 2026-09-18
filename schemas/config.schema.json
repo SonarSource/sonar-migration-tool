@@ -63,6 +63,10 @@
       "type": ["string", "null"],
       "description": "Regexp pattern of source project keys to extract / migrate — extract and migrate only; only applies when \"projects\" is selected via objects (or objects is unset). Implicitly anchored (^...$); a plain key with no regex metacharacters matches only itself. Issue #536."
     },
+    "branch_regexp": {
+      "type": ["string", "null"],
+      "description": "Regexp pattern of branch names to extract / migrate, implicitly anchored (^...$); a plain name with no regex metacharacters matches only itself. Applies to both source (extract) and target (migrate) unless overridden by source.branch_regexp / target.branch_regexp. If migrate does not set it, migrate implicitly operates on whatever branches were actually extracted. The project's main branch is always included regardless of match. Omit to process every branch (default). Issue #582."
+    },
     "migrate_history": {
       "oneOf": [
         { "type": "boolean" },
@@ -165,6 +169,10 @@
           "type": ["string", "null"],
           "description": "Reuse an existing extract directory ID instead of generating a new one."
         },
+        "branch_regexp": {
+          "type": ["string", "null"],
+          "description": "Overrides the top-level branch_regexp for extract. Regexp pattern of branch names to extract, implicitly anchored (^...$). The project's main branch is always extracted regardless of match. Issue #582."
+        },
         "enterprise_key": {
           "type": ["string", "null"],
           "description": "PROVISIONAL — ignored today; reserved for future SQC-to-SQC migration source side."
@@ -228,6 +236,10 @@
         "target_task": {
           "type": ["string", "null"],
           "description": "Stop migrate at a specific task (all its dependencies are still run)."
+        },
+        "branch_regexp": {
+          "type": ["string", "null"],
+          "description": "Overrides the top-level branch_regexp for migrate. Regexp pattern of branch names to migrate, implicitly anchored (^...$). Only branches that were actually extracted can be migrated; when unset, migrate implicitly operates on whatever branches were actually extracted. The project's main branch is always migrated regardless of match. Issue #582."
         },
         "organization_key": {
           "type": ["string", "null"],

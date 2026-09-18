@@ -214,6 +214,14 @@ func isNonFatalHTTPErr(err error) bool {
 
 // perProjectArray runs a per-project task that fetches an array from an endpoint.
 func perProjectArray(taskName, path, resultKey, paramKey, metaKey string) func(ctx context.Context, e *Executor) error {
+	return perProjectArrayFiltered(taskName, path, resultKey, paramKey, metaKey, nil)
+}
+
+// perProjectArrayFiltered is perProjectArray with an optional per-item keep
+// predicate, applied to each fetched array item before it's written. keep
+// == nil means "keep everything" (perProjectArray's behavior). #582.
+func perProjectArrayFiltered(taskName, path, resultKey, paramKey, metaKey string,
+	keep func(e *Executor, item json.RawMessage) bool) func(ctx context.Context, e *Executor) error {
 	return func(ctx context.Context, e *Executor) error {
 		return forEachDep(ctx, e, taskName, "getProjects",
 			func(ctx context.Context, item json.RawMessage, w *ChunkWriter) error {
@@ -227,6 +235,15 @@ func perProjectArray(taskName, path, resultKey, paramKey, metaKey string) func(c
 						return nil
 					}
 					return err
+				}
+				if keep != nil {
+					filtered := items[:0]
+					for _, it := range items {
+						if keep(e, it) {
+							filtered = append(filtered, it)
+						}
+					}
+					items = filtered
 				}
 				return w.WriteChunk(enrichAll(items, map[string]any{metaKey: key, "serverUrl": e.ServerURL}))
 			})

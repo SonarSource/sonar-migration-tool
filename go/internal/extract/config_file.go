@@ -52,6 +52,10 @@ type configFileShape struct {
 	// global value win but still falling back to the command-scoped one.
 	Objects    []string `json:"objects"`
 	ProjectKey string   `json:"project_key"`
+	// BranchRegexp is the top-level "branch_regexp" value. In the unified
+	// shape (4), source.branch_regexp wins when both are set — see
+	// unifiedSourceBlock. #582.
+	BranchRegexp string `json:"branch_regexp"`
 	// MigrateHistory / HistoryMaxPoints / HistoryMinIntervalDays — see
 	// ExtractConfig doc comments. #554. Top-level only: like
 	// skip_project_data_migration / skip_issue_sync, this is a plain bool
@@ -99,6 +103,9 @@ type unifiedSourceBlock struct {
 	OrganizationKey string `json:"organization_key"` // provisional, ignored
 	Edition         string `json:"edition"`          // provisional, ignored
 	RunID           string `json:"run_id"`           // ignored by extract
+	// BranchRegexp, when set, overrides the top-level "branch_regexp" for
+	// this source. #582.
+	BranchRegexp string `json:"branch_regexp"`
 }
 
 // unifiedTargetBlock mirrors the "target" sub-object documented in
@@ -184,6 +191,12 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		cfg.SkipIssueSync = s.SkipIssueSync
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKey = s.ProjectKey
+		// #582: source.branch_regexp wins, else the top-level field.
+		var sourceBranchRegexp string
+		if s.Source != nil {
+			sourceBranchRegexp = s.Source.BranchRegexp
+		}
+		cfg.BranchRegexp = common.FirstNonEmpty(sourceBranchRegexp, s.BranchRegexp)
 		s.applyHistoryTo(&cfg)
 	case s.SonarQube != nil:
 		cfg.URL = s.SonarQube.URL
@@ -197,6 +210,7 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		cfg.SkipIssueSync = s.SkipIssueSync
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKey = s.ProjectKey
+		cfg.BranchRegexp = s.BranchRegexp
 		s.applyHistoryTo(&cfg)
 	case s.Extract != nil:
 		cfg = s.Extract.toExtractConfig()
@@ -210,6 +224,9 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		}
 		if s.ProjectKey != "" {
 			cfg.ProjectKey = s.ProjectKey
+		}
+		if s.BranchRegexp != "" {
+			cfg.BranchRegexp = s.BranchRegexp
 		}
 	default:
 		cfg.URL = s.URL
@@ -228,6 +245,7 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		cfg.SkipIssueSync = s.SkipIssueSync
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKey = s.ProjectKey
+		cfg.BranchRegexp = s.BranchRegexp
 		s.applyHistoryTo(&cfg)
 	}
 	return cfg

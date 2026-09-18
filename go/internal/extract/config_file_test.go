@@ -444,6 +444,70 @@ func TestLoadExtractConfigFileObjectsAndProjectKey_NoObjectsMeansEverything(t *t
 	}
 }
 
+// #582: "branch_regexp" round-trips for the flat shape, same as
+// "project_key" above.
+func TestLoadExtractConfigFileBranchRegexp_FlatShape(t *testing.T) {
+	body := `{
+  "url": "http://sq.example.com",
+  "token": "tok",
+  "branch_regexp": "release/.+"
+}`
+	path := filepath.Join(t.TempDir(), "flat-branch-regexp.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchRegexp != "release/.+" {
+		t.Errorf("BranchRegexp: got %q", cfg.BranchRegexp)
+	}
+}
+
+// #582: in the unified shape, "source.branch_regexp" wins over the
+// top-level "branch_regexp" when both are set.
+func TestLoadExtractConfigFileBranchRegexp_UnifiedShape_SourceOverridesTopLevel(t *testing.T) {
+	body := `{
+  "branch_regexp": "top-level-.+",
+  "source": {
+    "url": "u", "token": "t",
+    "branch_regexp": "source-.+"
+  }
+}`
+	path := filepath.Join(t.TempDir(), "unified-branch-regexp-override.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchRegexp != "source-.+" {
+		t.Errorf("expected source.branch_regexp to win, got %q", cfg.BranchRegexp)
+	}
+}
+
+// #582: in the unified shape, the top-level "branch_regexp" is used when
+// the "source" block doesn't set its own.
+func TestLoadExtractConfigFileBranchRegexp_UnifiedShape_FallsBackToTopLevel(t *testing.T) {
+	body := `{
+  "branch_regexp": "top-level-.+",
+  "source": { "url": "u", "token": "t" }
+}`
+	path := filepath.Join(t.TempDir(), "unified-branch-regexp-fallback.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchRegexp != "top-level-.+" {
+		t.Errorf("expected fallback to top-level branch_regexp, got %q", cfg.BranchRegexp)
+	}
+}
+
 func TestLoadExtractConfigFileObjectsAndProjectKey_InvalidObjectsValueErrors(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bad-objects.json")
 	if err := os.WriteFile(path, []byte(`{"url": "u", "token": "t", "objects": ["not_a_real_category"]}`), 0o644); err != nil {
