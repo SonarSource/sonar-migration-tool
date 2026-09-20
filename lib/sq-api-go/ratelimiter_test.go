@@ -136,15 +136,14 @@ func TestSlidingWindowLimiterContextCancellation(t *testing.T) {
 // queued, not scrambled by every blocked goroutine racing the mutex
 // whenever a timestamp ages out.
 //
-// The window (60ms) is kept much longer than the enqueue stagger (5ms
-// steps) so every waiter has joined the queue long before the first slot
-// reopens — otherwise a grant could race an as-yet-unqueued later waiter
-// and the ordering assertion would be meaningless.
+// Enqueue order is pinned deterministically via QueueLenForTest: each
+// waiter is only started once the previous one has actually joined the
+// queue, so ordering never depends on goroutine scheduling or sleep
+// timing.
 func TestSlidingWindowLimiterWaitIsFIFO(t *testing.T) {
 	const (
-		window  = 60 * time.Millisecond
-		n       = 6
-		stagger = 5 * time.Millisecond
+		window = 60 * time.Millisecond
+		n      = 6
 	)
 	limiter := sqapi.NewSlidingWindowLimiterWithWindow(1, window)
 
@@ -159,7 +158,6 @@ func TestSlidingWindowLimiterWaitIsFIFO(t *testing.T) {
 	for i := 0; i < n; i++ {
 		i := i
 		wg.Add(1)
-		time.Sleep(stagger) // deterministic enqueue order: 0, 1, 2, ...
 		go func() {
 			defer wg.Done()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -169,6 +167,9 @@ func TestSlidingWindowLimiterWaitIsFIFO(t *testing.T) {
 			order = append(order, i)
 			mu.Unlock()
 		}()
+		require.Eventually(t, func() bool {
+			return limiter.QueueLenForTest() == i+1
+		}, time.Second, time.Millisecond, "waiter %d never queued", i)
 	}
 
 	done := make(chan struct{})

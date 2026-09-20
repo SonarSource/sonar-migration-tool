@@ -118,6 +118,15 @@ func NewSlidingWindowLimiterWithWindow(maxPerMinute int, window time.Duration) *
 	return newSlidingWindowLimiter(maxPerMinute, window)
 }
 
+// QueueLenForTest exposes the FIFO waiter queue length so tests can
+// deterministically wait for a goroutine to have enqueued in
+// SlidingWindowLimiter.Wait instead of relying on sleep-based staggering.
+func (l *SlidingWindowLimiter) QueueLenForTest() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.queue)
+}
+
 // NewThrottleTransport exposes throttleTransport for testing.
 func NewThrottleTransport(inner http.RoundTripper, limiter *SlidingWindowLimiter, observer LatencyObserver) http.RoundTripper {
 	return &throttleTransport{inner: inner, limiter: limiter, observer: observer}
