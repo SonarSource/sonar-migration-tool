@@ -129,6 +129,103 @@ func TestSlidingWindowLimiterContextCancellation(t *testing.T) {
 	})
 }
 
+// TestSlidingWindowLimiterWaitIsFIFO guards the fairness fix added
+// alongside this test (an automated review pass introduced the FIFO
+// waiter queue with no test coverage of its own — this closes that gap):
+// under sustained contention, waiters must be granted in the order they
+// queued, not scrambled by every blocked goroutine racing the mutex
+// whenever a timestamp ages out.
+//
+// The window (60ms) is kept much longer than the enqueue stagger (5ms
+// steps) so every waiter has joined the queue long before the first slot
+// reopens — otherwise a grant could race an as-yet-unqueued later waiter
+// and the ordering assertion would be meaningless.
+func TestSlidingWindowLimiterWaitIsFIFO(t *testing.T) {
+	const (
+		window  = 60 * time.Millisecond
+		n       = 6
+		stagger = 5 * time.Millisecond
+	)
+	limiter := sqapi.NewSlidingWindowLimiterWithWindow(1, window)
+
+	// Consume the only slot up front so every waiter below queues.
+	require.NoError(t, limiter.Wait(context.Background()))
+
+	var (
+		mu    sync.Mutex
+		order []int
+	)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		i := i
+		wg.Add(1)
+		time.Sleep(stagger) // deterministic enqueue order: 0, 1, 2, ...
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			require.NoError(t, limiter.Wait(ctx))
+			mu.Lock()
+			order = append(order, i)
+			mu.Unlock()
+		}()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for all queued Wait calls to be granted")
+	}
+
+	want := make([]int, n)
+	for i := range want {
+		want[i] = i
+	}
+	assert.Equal(t, want, order, "waiters must be granted in the order they queued")
+}
+
+// TestSlidingWindowLimiterCancelledWaiterDoesNotBlockQueue guards
+// dequeue's wakeHead call on early removal: a waiter that gives up via
+// context cancellation while queued (not yet at the head, or at the head
+// but not yet granted) must not leave the waiter behind it stuck forever
+// waiting for a slot that already reopened.
+func TestSlidingWindowLimiterCancelledWaiterDoesNotBlockQueue(t *testing.T) {
+	const window = 200 * time.Millisecond
+	limiter := sqapi.NewSlidingWindowLimiterWithWindow(1, window)
+
+	// Consume the only slot so both waiters below must queue.
+	require.NoError(t, limiter.Wait(context.Background()))
+
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel1()
+	errCh1 := make(chan error, 1)
+	go func() { errCh1 <- limiter.Wait(ctx1) }()
+
+	time.Sleep(10 * time.Millisecond) // ensure waiter 1 enqueues first
+
+	errCh2 := make(chan error, 1)
+	go func() { errCh2 <- limiter.Wait(context.Background()) }()
+
+	select {
+	case err1 := <-errCh1:
+		assert.True(t, errors.Is(err1, context.DeadlineExceeded), "waiter 1 should give up via its own deadline, got %v", err1)
+	case <-time.After(2 * time.Second):
+		t.Fatal("waiter 1 never returned")
+	}
+
+	select {
+	case err2 := <-errCh2:
+		assert.NoError(t, err2, "waiter 2 should still be granted a slot once it reopens")
+	case <-time.After(2 * time.Second):
+		t.Fatal("waiter 2 never granted a slot after waiter 1 gave up — queue is stuck behind the cancelled waiter")
+	}
+}
+
 // TestThrottleTransportLatencyAndRateLimit drives a throttleTransport
 // against a real httptest server whose handler sleeps a small
 // configurable duration before responding. It asserts that the

@@ -88,20 +88,28 @@ func (w *latencyWindow) drainAverage() (avg time.Duration, ok bool) {
 // out in float64 seconds to avoid integer-division bugs (e.g. avgLatency
 // values below one second would otherwise floor to zero).
 //
-// targetRatePerMin targets the configured rate for the WHOLE run, not
-// per fan-out site: nested fan-outs multiply the per-site limit (see
-// maxConcurrentTasksPerPhase in migrate.go), so the aggregate figure is
-// divided by that known multiplier before clamping — otherwise the
-// resulting per-site limit lets aggregate in-flight demand run
-// maxConcurrentTasksPerPhase times higher than the target rate, pushing
-// queue delay from throttleTransport's rate limiter into the 60s HTTP
-// client timeout instead of staying well inside it.
-const fanOutMultiplier = maxConcurrentTasksPerPhase
-
+// Deliberately NOT divided by maxConcurrentTasksPerPhase: an automated
+// review pass (Gitar) proposed dividing the result by that constant on
+// the theory that up to that many tasks in one phase could each run
+// their own fan-out at Current() simultaneously, letting aggregate
+// in-flight demand run several times higher than the target rate. That
+// reasoning doesn't hold up:
+//   - SlidingWindowLimiter is what actually enforces the real cap —
+//     calls beyond api_max_rate_per_min queue inside Wait() regardless
+//     of how much concurrency requests them, so this was never needed
+//     to avoid exceeding the configured rate.
+//   - In practice only one task tends to dominate a phase's fan-out at
+//     any given time (importProjectData, the long pole in every real
+//     run analyzed for #573) — dividing by up to 6 systematically
+//     under-drives concurrency in exactly that common case, working
+//     against the whole point of the feature.
+//   - It silently contradicted the issue's own worked examples
+//     (200ms→5, 2s→50 at 1500/min) and shipped with no test updates;
+//     TestDesiredConcurrency's existing cases caught it immediately.
 func desiredConcurrency(targetRatePerMin int, avgLatency time.Duration) int {
 	avgLatencySeconds := avgLatency.Seconds()
 	raw := float64(targetRatePerMin) * avgLatencySeconds / 60.0
-	return clampConcurrency(int(math.Ceil(raw / float64(fanOutMultiplier))))
+	return clampConcurrency(int(math.Ceil(raw)))
 }
 
 // clampConcurrency clamps n to [minConcurrency, maxConcurrencyCeiling].
