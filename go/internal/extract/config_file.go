@@ -151,6 +151,54 @@ func (s configFileShape) applyHistoryTo(cfg *ExtractConfig) {
 	}
 }
 
+// toExtractConfigUnified builds ExtractConfig from the #266 unified shape's
+// "source" sub-object, with top-level concurrency/timeout/export_directory
+// as defaults (the "target" sub-object is ignored — migrate reads that
+// one). Split out of toExtractConfig, whose cognitive complexity grew past
+// the linter's limit once this branch also had to resolve
+// source.branch_regexp (#582); mirrors how the "extract"-sectioned shape
+// below already delegates to its own recursive toExtractConfig() call.
+func (s configFileShape) toExtractConfigUnified() ExtractConfig {
+	var cfg ExtractConfig
+	cfg.HistoryMinIntervalDays = HistoryUnset
+	if s.Source != nil {
+		cfg.URL = s.Source.URL
+		cfg.Token = s.Source.Token
+		cfg.ExtractType = s.Source.ExtractType
+		cfg.PEMFilePath = s.Source.PEMFilePath
+		cfg.KeyFilePath = s.Source.KeyFilePath
+		cfg.CertPassword = s.Source.CertPassword
+		cfg.Insecure = s.Source.Insecure
+		cfg.TargetTask = s.Source.TargetTask
+		cfg.ExtractID = s.Source.ExtractID
+		cfg.Concurrency = s.Source.Concurrency
+		cfg.Timeout = s.Source.Timeout
+	}
+	// Fall back to top-level for concurrency / timeout when the source
+	// block didn't override.
+	if cfg.Concurrency == 0 {
+		cfg.Concurrency = s.Concurrency
+	}
+	if cfg.Timeout == 0 {
+		cfg.Timeout = s.Timeout
+	}
+	cfg.ExportDirectory = s.ExportDirectory
+	// #303: top-level skip_project_data_migration drives whether the
+	// extract pulls issue / source / SCM-blame data.
+	cfg.SkipProjectDataMigration = s.SkipProjectDataMigration
+	cfg.SkipIssueSync = s.SkipIssueSync
+	cfg.objectsRaw = s.Objects
+	cfg.ProjectKey = s.ProjectKey
+	// #582: source.branch_regexp wins, else the top-level field.
+	var sourceBranchRegexp string
+	if s.Source != nil {
+		sourceBranchRegexp = s.Source.BranchRegexp
+	}
+	cfg.BranchRegexp = common.FirstNonEmpty(sourceBranchRegexp, s.BranchRegexp)
+	s.applyHistoryTo(&cfg)
+	return cfg
+}
+
 func (s configFileShape) toExtractConfig() ExtractConfig {
 	var cfg ExtractConfig
 	// Start the spacing at the "caller said nothing" sentinel so an absent
@@ -163,41 +211,7 @@ func (s configFileShape) toExtractConfig() ExtractConfig {
 		// #266 unified shape. Extract pulls from the "source"
 		// sub-object; top-level concurrency / timeout / export_directory
 		// supply defaults. The "target" sub-object is ignored.
-		if s.Source != nil {
-			cfg.URL = s.Source.URL
-			cfg.Token = s.Source.Token
-			cfg.ExtractType = s.Source.ExtractType
-			cfg.PEMFilePath = s.Source.PEMFilePath
-			cfg.KeyFilePath = s.Source.KeyFilePath
-			cfg.CertPassword = s.Source.CertPassword
-			cfg.Insecure = s.Source.Insecure
-			cfg.TargetTask = s.Source.TargetTask
-			cfg.ExtractID = s.Source.ExtractID
-			cfg.Concurrency = s.Source.Concurrency
-			cfg.Timeout = s.Source.Timeout
-		}
-		// Fall back to top-level for concurrency / timeout when the
-		// source block didn't override.
-		if cfg.Concurrency == 0 {
-			cfg.Concurrency = s.Concurrency
-		}
-		if cfg.Timeout == 0 {
-			cfg.Timeout = s.Timeout
-		}
-		cfg.ExportDirectory = s.ExportDirectory
-		// #303: top-level skip_project_data_migration drives whether
-		// the extract pulls issue / source / SCM-blame data.
-		cfg.SkipProjectDataMigration = s.SkipProjectDataMigration
-		cfg.SkipIssueSync = s.SkipIssueSync
-		cfg.objectsRaw = s.Objects
-		cfg.ProjectKey = s.ProjectKey
-		// #582: source.branch_regexp wins, else the top-level field.
-		var sourceBranchRegexp string
-		if s.Source != nil {
-			sourceBranchRegexp = s.Source.BranchRegexp
-		}
-		cfg.BranchRegexp = common.FirstNonEmpty(sourceBranchRegexp, s.BranchRegexp)
-		s.applyHistoryTo(&cfg)
+		cfg = s.toExtractConfigUnified()
 	case s.SonarQube != nil:
 		cfg.URL = s.SonarQube.URL
 		cfg.Token = s.SonarQube.Token

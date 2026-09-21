@@ -236,18 +236,26 @@ func perProjectArrayFiltered(taskName, path, resultKey, paramKey, metaKey string
 					}
 					return err
 				}
-				if keep != nil {
-					filtered := items[:0]
-					for _, it := range items {
-						if keep(e, it) {
-							filtered = append(filtered, it)
-						}
-					}
-					items = filtered
-				}
+				items = filterItems(e, items, keep)
 				return w.WriteChunk(enrichAll(items, map[string]any{metaKey: key, "serverUrl": e.ServerURL}))
 			})
 	}
+}
+
+// filterItems keeps only the items keep approves of, or returns items
+// unchanged when keep is nil ("keep everything"). Split out of
+// perProjectArrayFiltered to keep that closure's cognitive complexity down.
+func filterItems(e *Executor, items []json.RawMessage, keep func(e *Executor, item json.RawMessage) bool) []json.RawMessage {
+	if keep == nil {
+		return items
+	}
+	filtered := items[:0]
+	for _, it := range items {
+		if keep(e, it) {
+			filtered = append(filtered, it)
+		}
+	}
+	return filtered
 }
 
 // perProjectSingle runs a per-project task that fetches a single object.

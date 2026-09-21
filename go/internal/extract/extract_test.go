@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
@@ -395,6 +396,47 @@ func TestRunExtractIntegration(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(extractDir, task)); os.IsNotExist(err) {
 			t.Errorf("expected %s output directory", task)
 		}
+	}
+}
+
+// TestRunExtractInvalidBranchRegexp asserts RunExtract compiles
+// BranchRegexp defensively and fails fast on an invalid pattern (#582),
+// mirroring RunMigrate's equivalent defensive compile of ProjectKeyFilter —
+// a config-file-only caller that bypasses cmd/extract.go's own validation
+// (e.g. the GUI wizard) must still get a clear error instead of a panic or
+// a silently-ignored filter.
+func TestRunExtractInvalidBranchRegexp(t *testing.T) {
+	srv := newMockServer()
+	defer srv.Close()
+
+	cfg := ExtractConfig{
+		URL: srv.URL, Token: testToken, ExportDirectory: t.TempDir(),
+		BranchRegexp: "(",
+	}
+
+	_, err := RunExtract(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected an error for an unparseable BranchRegexp, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid branch regexp pattern") {
+		t.Errorf("expected an 'invalid branch regexp pattern' error, got: %v", err)
+	}
+}
+
+// TestRunExtractValidBranchRegexp asserts a well-formed BranchRegexp compiles
+// without error and the run completes normally (#582).
+func TestRunExtractValidBranchRegexp(t *testing.T) {
+	srv := newMockServer()
+	defer srv.Close()
+
+	dir := t.TempDir()
+	cfg := ExtractConfig{
+		URL: srv.URL, Token: testToken, ExportDirectory: dir,
+		BranchRegexp: "(main|master)",
+	}
+
+	if _, err := RunExtract(context.Background(), cfg); err != nil {
+		t.Fatalf("RunExtract failed with a valid BranchRegexp: %v", err)
 	}
 }
 

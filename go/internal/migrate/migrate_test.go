@@ -26,6 +26,47 @@ func TestRunMigrateRejectsExcessiveMaxIssueComments(t *testing.T) {
 	}
 }
 
+// #582 — an invalid --branch_regexp pattern is rejected up front, before any
+// client is built or API call made, the same way ProjectKeyFilter already
+// is above — a config-file-only caller that bypasses cmd/migrate.go's own
+// validation (e.g. the GUI wizard) must still get a clear error.
+func TestRunMigrateRejectsInvalidBranchRegexp(t *testing.T) {
+	_, err := RunMigrate(context.Background(), MigrateConfig{BranchRegexp: "("})
+	if err == nil {
+		t.Fatal("expected an error for an unparseable BranchRegexp")
+	}
+	if !strings.Contains(err.Error(), "invalid branch regexp pattern") {
+		t.Errorf("expected an 'invalid branch regexp pattern' error, got: %v", err)
+	}
+}
+
+// TestRunMigrateAcceptsValidBranchRegexp asserts a well-formed BranchRegexp
+// compiles without error and the run completes normally (#582).
+func TestRunMigrateAcceptsValidBranchRegexp(t *testing.T) {
+	cloudSrv := newMockCloudServer()
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+	dir := t.TempDir()
+	setupExtractData(dir)
+	setupCSVs(t, dir)
+
+	cfg := MigrateConfig{
+		Token:           "test-token",
+		EnterpriseKey:   "test-enterprise",
+		Edition:         "enterprise",
+		URL:             cloudSrv.URL + "/",
+		Concurrency:     5,
+		ExportDirectory: dir,
+		TargetTask:      "createProjects", // Only run one task + deps.
+		BranchRegexp:    "(main|master)",
+	}
+
+	if _, err := RunMigrate(context.Background(), cfg); err != nil {
+		t.Fatalf("RunMigrate failed with a valid BranchRegexp: %v", err)
+	}
+}
+
 func TestRegisterAllCountsAndDependencies(t *testing.T) {
 	all := RegisterAll()
 	if len(all) < 30 {

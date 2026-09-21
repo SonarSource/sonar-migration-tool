@@ -886,6 +886,42 @@ func TestLoadMigrateConfigFileObjectsAndProjectKey_CommandSectionedFallsBackToNe
 	}
 }
 
+// #582 — command-sectioned shape: outer-level branch_regexp wins over the
+// same field nested inside "migrate", mirroring project_key's precedence
+// above.
+func TestLoadMigrateConfigFileBranchRegexp_CommandSectionedOuterWins(t *testing.T) {
+	body := `{
+  "branch_regexp": "outer-pattern",
+  "migrate": {
+    "token": "tok", "url": "https://sonarcloud.io/", "enterprise_key": "ent",
+    "branch_regexp": "inner-pattern"
+  }
+}`
+	cfg, err := LoadMigrateConfigFile(writeConfigFixture(t, body))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchRegexp != "outer-pattern" {
+		t.Errorf("expected outer branch_regexp to win, got %q", cfg.BranchRegexp)
+	}
+}
+
+func TestLoadMigrateConfigFileBranchRegexp_CommandSectionedFallsBackToNested(t *testing.T) {
+	body := `{
+  "migrate": {
+    "token": "tok", "url": "https://sonarcloud.io/", "enterprise_key": "ent",
+    "branch_regexp": "inner-pattern"
+  }
+}`
+	cfg, err := LoadMigrateConfigFile(writeConfigFixture(t, body))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchRegexp != "inner-pattern" {
+		t.Errorf("expected nested branch_regexp to be used, got %q", cfg.BranchRegexp)
+	}
+}
+
 func TestLoadMigrateConfigFileObjectsAndProjectKey_SideSectionedShape(t *testing.T) {
 	body := `{
   "sonarcloud": { "url": "https://sonarcloud.io/", "token": "tok", "enterprise_key": "ent" },
