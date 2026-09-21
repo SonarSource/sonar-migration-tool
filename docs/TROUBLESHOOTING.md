@@ -470,16 +470,16 @@ sonar-migration-tool migrate ... --branch_analyzed_after 2025-01-01
 }
 ```
 
-The project's main branch is **always** selected, even when it doesn't meet the date — if the filter would otherwise exclude every branch of a project, main is force-included instead. When that happens, the run log carries a `force-including main branch: does not meet --branch_analyzed_after filter` warning, and the generated `migration_summary.md` / PDF report gets a "Force-Included Main Branches" table listing the affected projects, e.g.:
+The project's main branch is **always** selected, even when it doesn't meet the date — if the filter would otherwise exclude every branch of a project, main is force-included instead. When that happens, the run log carries a `force-including main branch: does not meet --branch_analyzed_after filter` warning. During `migrate` (and the `migrate` phase of `transfer`), the generated `migration_summary.md` / PDF report also gets a "Force-Included Main Branches" table listing the affected projects, e.g.; during `extract`, the warning is only visible on stderr, since the report pipeline reads the events `migrate` writes, not extract's log output:
 
 ```
-## Warnings
+## Warnings, Retries & Skips
 
 ### Force-Included Main Branches
 
 | Project      | Branch | Analysis Date | Cutoff     |
-|--------------|--------|----------------|------------|
-| my-project   | main   | 2022-03-14     | 2025-01-01 |
+|--------------|--------|---------------|------------|
+| my-project   | main   | 2022-03-14    | 2025-01-01 |
 ```
 
 A malformed date aborts the run immediately with an explicit error (`invalid branch_analyzed_after value "..."`), and a cutoff more than 2 years (730 days) in the past logs a one-time warning that the filter may not exclude many branches. See [ADVANCED-CONFIG.md](ADVANCED-CONFIG.md) for the full config reference, including the `transfer`-specific note that the CLI flag sets both the extract and migrate phases at once.

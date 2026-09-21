@@ -25,6 +25,11 @@ const BranchAnalyzedAfterWarnAgeDays = 730
 // the report pipeline that parses run logs (report/summary's
 // eventAggregator) key off this exact string, so it lives here once
 // rather than being duplicated/hand-copied at each site.
+//
+// NOTE: only the migrate-phase emission reaches the report. run_events.jsonl
+// — the file report/summary's collectRunEvents reads — is written solely by
+// RunMigrate's teeing event handler; extract logs to slog.Default() with no
+// collector, so an extract-only force-inclusion appears on stderr only.
 const ForcedMainBranchLogMessage = "force-including main branch: does not meet --branch_analyzed_after filter"
 
 // ParseBranchAnalyzedAfter parses the --branch_analyzed_after flag or the

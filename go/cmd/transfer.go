@@ -639,11 +639,12 @@ func validateTransferConfig(cfg transferConfig) error {
 		return err
 	}
 	// #583 — validate both independently resolved cutoffs; each can carry
-	// its own bad-format error or staleness warning.
-	if err := validateBranchAnalyzedAfter(cfg.branchAnalyzedAfterSource); err != nil {
+	// its own bad-format error or staleness warning. Each side is labeled
+	// so the two advisories are distinguishable in the log.
+	if err := validateBranchAnalyzedAfterSide(cfg.branchAnalyzedAfterSource, "source"); err != nil {
 		return fmt.Errorf("--%s (source): %w", flagBranchAnalyzedAfter, err)
 	}
-	if err := validateBranchAnalyzedAfter(cfg.branchAnalyzedAfterTarget); err != nil {
+	if err := validateBranchAnalyzedAfterSide(cfg.branchAnalyzedAfterTarget, "target"); err != nil {
 		return fmt.Errorf("--%s (target): %w", flagBranchAnalyzedAfter, err)
 	}
 	return nil

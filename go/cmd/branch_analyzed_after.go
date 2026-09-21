@@ -18,13 +18,23 @@ import (
 // extract, migrate, and transfer's cmd-layer config builders so the
 // warning is only ever logged from one place.
 func validateBranchAnalyzedAfter(raw string) error {
+	return validateBranchAnalyzedAfterSide(raw, "")
+}
+
+// validateBranchAnalyzedAfterSide is validateBranchAnalyzedAfter with a
+// phase label ("source" / "target") so transfer's two independently
+// resolved cutoffs produce distinguishable advisories (#583).
+func validateBranchAnalyzedAfterSide(raw, side string) error {
 	cutoff, err := common.ParseBranchAnalyzedAfter(raw)
 	if err != nil {
 		return err
 	}
 	if cutoff != nil && common.IsBranchAnalyzedAfterStale(*cutoff, time.Now()) {
-		slog.Default().Warn("--branch_analyzed_after is more than 2 years in the past; it may not filter out many branches",
-			"branch_analyzed_after", raw)
+		attrs := []any{"branch_analyzed_after", raw}
+		if side != "" {
+			attrs = append(attrs, "phase", side)
+		}
+		slog.Default().Warn("--branch_analyzed_after is more than 2 years in the past; it may not filter out many branches", attrs...)
 	}
 	return nil
 }
