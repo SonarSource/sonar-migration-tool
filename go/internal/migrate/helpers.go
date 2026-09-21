@@ -259,7 +259,7 @@ func forEachMigrateItemFiltered(ctx context.Context, e *Executor, taskName, depT
 	fn func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error) error {
 
 	return forEachMigrateItemImpl(ctx, e, migrateItemLoop{
-		taskName: taskName, depTask: depTask, filterFn: filterFn, concurrency: cap(e.Sem),
+		taskName: taskName, depTask: depTask, filterFn: filterFn, gate: NewDynamicGate(e.ConcurrencyLimiter),
 	}, fn)
 }
 
@@ -273,7 +273,7 @@ func forEachMigrateItemTransformed(ctx context.Context, e *Executor, taskName, d
 	fn func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error) error {
 
 	return forEachMigrateItemImpl(ctx, e, migrateItemLoop{
-		taskName: taskName, depTask: depTask, transformFn: transformFn, concurrency: cap(e.Sem),
+		taskName: taskName, depTask: depTask, transformFn: transformFn, gate: NewDynamicGate(e.ConcurrencyLimiter),
 	}, fn)
 }
 
@@ -301,17 +301,26 @@ type migrateItemLoop struct {
 	depTask     string
 	filterFn    func(json.RawMessage) bool
 	transformFn func([]json.RawMessage) []json.RawMessage
+	// concurrency is used only when gate is nil — forEachMigrateItemSerial's
+	// hardcoded 1 is a correctness constraint (avoiding a duplicate quality-
+	// profile name race), not a throughput knob, so it must never move with
+	// ConcurrencyLimiter's recalculation.
 	concurrency int
+	// gate, when set, re-reads ConcurrencyLimiter.Current() on each
+	// admission instead of freezing a value for this call's entire
+	// (potentially long) run — see DynamicGate's doc comment (#573).
+	gate *DynamicGate
 }
 
 // forEachMigrateItemImpl is the shared body that backs the concurrent and
-// serial migrate iterators. loop.concurrency is the errgroup limit (1 to
-// serialize, cap(e.Sem) for the default fan-out).
+// serial migrate iterators. loop.gate (default fan-out) re-reads live
+// concurrency per admission; loop.concurrency (serial iterators) is a
+// fixed errgroup limit instead.
 func forEachMigrateItemImpl(ctx context.Context, e *Executor, loop migrateItemLoop,
 	fn func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error) error {
 
 	taskName, depTask := loop.taskName, loop.depTask
-	filterFn, concurrency := loop.filterFn, loop.concurrency
+	filterFn := loop.filterFn
 
 	items, err := e.Store.ReadAll(depTask)
 	if err != nil {
@@ -343,9 +352,24 @@ func forEachMigrateItemImpl(ctx context.Context, e *Executor, loop migrateItemLo
 	}
 
 	g, ctx := errgroup.WithContext(ctx)
-	g.SetLimit(concurrency)
+	// admit/release default to gate-based (dynamic, #573); the serial
+	// iterator (loop.gate == nil) instead sets a fixed errgroup limit of
+	// 1, a correctness constraint that must never move.
+	admit := func(context.Context) error { return nil }
+	release := func() {}
+	if loop.gate != nil {
+		admit, release = loop.gate.Acquire, loop.gate.Release
+	} else {
+		g.SetLimit(loop.concurrency)
+	}
+	var admitErr error
 	for _, item := range filtered {
+		if err := admit(ctx); err != nil {
+			admitErr = err
+			break
+		}
 		g.Go(func() error {
+			defer release()
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -354,7 +378,10 @@ func forEachMigrateItemImpl(ctx context.Context, e *Executor, loop migrateItemLo
 			return err
 		})
 	}
-	return g.Wait()
+	if err := g.Wait(); err != nil {
+		return err
+	}
+	return admitErr
 }
 
 // forEachExtractItem reads items from an extract task and calls fn for each,
@@ -381,10 +408,19 @@ func forEachExtractItem(ctx context.Context, e *Executor, taskName, extractKey s
 		return err
 	}
 
+	// DynamicGate, not errgroup.SetLimit — see the doc comment on
+	// DynamicGate (#573): SetLimit freezes at whatever Current() is right
+	// now for this errgroup's entire lifetime.
+	gate := NewDynamicGate(e.ConcurrencyLimiter)
 	g, ctx := errgroup.WithContext(ctx)
-	g.SetLimit(cap(e.Sem))
+	var admitErr error
 	for _, item := range items {
+		if err := gate.Acquire(ctx); err != nil {
+			admitErr = err
+			break
+		}
 		g.Go(func() error {
+			defer gate.Release()
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -393,7 +429,10 @@ func forEachExtractItem(ctx context.Context, e *Executor, taskName, extractKey s
 			return err
 		})
 	}
-	return g.Wait()
+	if err := g.Wait(); err != nil {
+		return err
+	}
+	return admitErr
 }
 
 // buildOrgKeyLookup loads organizations.csv and returns a map from
@@ -754,7 +793,7 @@ func (c *TaskCounter) LogSummary(logger *slog.Logger, duration time.Duration) {
 // helper covers both extract and migrate tasks).
 
 // runProjectSyncLoop applies fn concurrently to every item in items,
-// bounded by e.Sem, emitting a "<label> n/total - x%" progress line
+// bounded by e.ConcurrencyLimiter, emitting a "<label> n/total - x%" progress line
 // every `interval` completions (#300). Per-item errors are not
 // propagated — the caller's `apply` is responsible for logging and
 // counter bookkeeping. Used by syncProjectIssues / syncProjectHotspots
@@ -764,11 +803,59 @@ func runProjectSyncLoop[T any](
 	items []T, label string, interval int64,
 	apply func(ctx context.Context, item T),
 ) {
+	runProjectSyncLoopBounded(ctx, e, items, label, interval, 0, apply)
+}
+
+// nestedSyncLoopConcurrency bounds a runProjectSyncLoop that is itself
+// invoked from inside another fan-out — syncProjectIssues and
+// syncProjectHotspots are called per project by runSyncIssueMetadata's
+// and runSyncHotspotMetadata's own forEachMigrateItem loops, so both
+// levels reading the live ConcurrencyLimiter.Current() would put
+// Current()² requests in flight for a single task (up to 10,000 at the
+// ceiling of 100).
+//
+// That aggregate matters because throttleTransport's SlidingWindowLimiter
+// makes excess callers WAIT inside the round trip, and sqapi sets
+// http.Client.Timeout (60s), which the stdlib turns into a deadline on
+// the request context for a layered transport stack like ours. Queue
+// long enough and requests fail with "waiting for API rate limit slot:
+// context deadline exceeded" instead of merely being slowed down —
+// proactive throttling turning into request failures.
+//
+// A small constant, not a fraction of Current(): the inner loop's unit
+// is one fast Cloud call, the outer per-project loop is what genuinely
+// benefits from tracking observed latency, and bounding the inner level
+// is enough to keep aggregate demand sane. The top-level
+// runProjectSyncLoop call in sync_issues_standalone.go is NOT nested and
+// deliberately keeps the dynamic limit.
+const nestedSyncLoopConcurrency = 10
+
+// runProjectSyncLoopBounded is runProjectSyncLoop with an explicit
+// concurrency bound. concurrency <= 0 means "use the live dynamic
+// ConcurrencyLimiter" (the top-level, non-nested case); a positive value
+// pins a fixed bound for this loop only — see nestedSyncLoopConcurrency.
+func runProjectSyncLoopBounded[T any](
+	ctx context.Context, e *Executor,
+	items []T, label string, interval int64, concurrency int,
+	apply func(ctx context.Context, item T),
+) {
 	prog := common.NewProgressLoggerWithInterval(e.Logger, label, len(items), interval)
+	// DynamicGate, not errgroup.SetLimit — see the doc comment on
+	// DynamicGate (#573): SetLimit freezes at whatever Current() is right
+	// now for this errgroup's entire lifetime, and this loop runs across
+	// every project's issues/hotspots, easily spanning many minutes.
+	limiter := e.ConcurrencyLimiter
+	if concurrency > 0 {
+		limiter = NewFixedConcurrencyLimiter(concurrency)
+	}
+	gate := NewDynamicGate(limiter)
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(cap(e.Sem))
 	for _, item := range items {
+		if err := gate.Acquire(gctx); err != nil {
+			break
+		}
 		g.Go(func() error {
+			defer gate.Release()
 			if gctx.Err() != nil {
 				return nil
 			}

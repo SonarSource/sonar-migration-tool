@@ -593,7 +593,9 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 	resolveParams := hotspotResolveParams{CloudKey: input.CloudKey, BaseURL: baseURL, SourceKey: input.ServerKey}
 	var a, b, c atomic.Int64
 	label := "Project key " + input.CloudKey + " hotspot sync:"
-	runProjectSyncLoop(ctx, e, items, label, 10,
+	// Bounded, not dynamic: nested inside runSyncHotspotMetadata's own
+	// per-project fan-out — see nestedSyncLoopConcurrency.
+	runProjectSyncLoopBounded(ctx, e, items, label, 10, nestedSyncLoopConcurrency,
 		func(gctx context.Context, it classifiedHotspot) {
 			if failedBranches[it.h.Branch] {
 				return

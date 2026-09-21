@@ -81,7 +81,14 @@ func init() {
 	f.String(flagProjectKeyPattern, "", "Template used to resolve each project's already-migrated target key, built from <ORIGINAL_PROJECT_KEY> and <ORGANIZATION_KEY> (maps to target.project_key_pattern; default: <ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>) — must match the pattern used when the projects were created")
 	f.String(flagEnterpriseKey, "", scCloudName+" enterprise key (maps to target.enterprise_key, defaults to --"+flagDefaultOrg+")")
 	f.String(flagExportDir, "./migration-files/", "Working directory for intermediate files (maps to export_directory)")
-	f.Int(flagConcurrency, 0, "Max concurrent requests, applied to both source and target (default: 25). Use source.concurrency / target.concurrency in the config file to set them independently.")
+	f.Int(flagConcurrency, 0, "Max concurrent requests, applied to both source and target (default: 25). Deprecated for the "+scCloudName+" target (#573): "+
+		"only seeds the target side's starting value now — it is always dynamically re-evaluated every 30s from observed API latency. "+
+		"Use --"+flagAPIMaxRatePerMin+" instead to control the target rate. "+
+		"Use source.concurrency / target.concurrency in the config file to set them independently.")
+	f.Int(flagAPIMaxRatePerMin, 0, fmt.Sprintf(
+		"Max sustained %s API calls/min for the target side, as a sliding window (default: 1500, valid range [%d,%d]). "+
+			"Concurrency on the target side is dynamically adjusted to approach this rate without exceeding it (#573).",
+		scCloudName, minAPIMaxRatePerMin, maxAPIMaxRatePerMin))
 	f.Int(flagTimeout, 0, "HTTP request timeout in seconds, applied to both source and target (default: 60). Use source.timeout / target.timeout in the config file to set them independently.")
 	f.String(flagPEMFilePath, "", "Path to client mTLS PEM file for the source server (maps to source.pem_file_path)")
 	f.String(flagKeyFilePath, "", "Path to client mTLS key file for the source server (maps to source.key_file_path)")
@@ -107,15 +114,17 @@ type syncIssuesConfig struct {
 	exportDir           string
 	sourceConcurrency   int
 	targetConcurrency   int
-	sourceTimeout       int
-	targetTimeout       int
-	pemFilePath         string
-	keyFilePath         string
-	certPassword        string
-	insecure            bool
-	debug               bool
-	fastSync            bool
-	maxIssueComments    int
+	// targetAPIMaxRatePerMin — see MigrateConfig.APIMaxRatePerMin (#573).
+	targetAPIMaxRatePerMin int
+	sourceTimeout          int
+	targetTimeout          int
+	pemFilePath            string
+	keyFilePath            string
+	certPassword           string
+	insecure               bool
+	debug                  bool
+	fastSync               bool
+	maxIssueComments       int
 }
 
 // loadSyncIssuesFileDefaults reads the shared --config file via the same
@@ -183,6 +192,7 @@ func resolveSyncIssuesConfig(cmd *cobra.Command) (syncIssuesConfig, error) {
 	applyFlagString(cmd, flagEnterpriseKey, &cfg.enterpriseKey)
 	applyFlagString(cmd, flagExportDir, &cfg.exportDir)
 	applyFlagIntBothSides(cmd, flagConcurrency, &cfg.sourceConcurrency, &cfg.targetConcurrency)
+	applyFlagInt(cmd, flagAPIMaxRatePerMin, &cfg.targetAPIMaxRatePerMin)
 	applyFlagIntBothSides(cmd, flagTimeout, &cfg.sourceTimeout, &cfg.targetTimeout)
 	applyFlagString(cmd, flagPEMFilePath, &cfg.pemFilePath)
 	applyFlagString(cmd, flagKeyFilePath, &cfg.keyFilePath)
@@ -214,6 +224,9 @@ func validateSyncIssuesConfig(cfg syncIssuesConfig) error {
 	if err := migrate.ValidateMaxIssueComments(cfg.maxIssueComments); err != nil {
 		return fmt.Errorf("--%s: %w", flagMaxIssueComments, err)
 	}
+	if err := validateAPIMaxRatePerMin(cfg.targetAPIMaxRatePerMin); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -228,6 +241,8 @@ func runSyncIssuesCmd(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	warnIfInsecure(cfg.insecure)
+	// sync-issues's target is always SonarQube Cloud (#573).
+	warnIfConcurrencyDeprecated(cfg.targetConcurrency)
 
 	ctx := cmd.Context()
 
@@ -263,6 +278,7 @@ func runSyncIssuesCmd(cmd *cobra.Command, _ []string) error {
 		EnterpriseKey:       cfg.enterpriseKey,
 		ExportDirectory:     cfg.exportDir,
 		Concurrency:         cfg.targetConcurrency,
+		APIMaxRatePerMin:    cfg.targetAPIMaxRatePerMin,
 		Timeout:             cfg.targetTimeout,
 		ProjectKeyPattern:   cfg.projectKeyPattern,
 		DefaultOrganization: cfg.defaultOrganization,

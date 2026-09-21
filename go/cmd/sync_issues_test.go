@@ -29,6 +29,7 @@ func newSyncIssuesTestCmd() *cobra.Command {
 	f.String(flagEnterpriseKey, "", "")
 	f.String(flagExportDir, "./migration-files/", "")
 	f.Int(flagConcurrency, 0, "")
+	f.Int(flagAPIMaxRatePerMin, 0, "")
 	f.Int(flagTimeout, 0, "")
 	f.String(flagPEMFilePath, "", "")
 	f.String(flagKeyFilePath, "", "")

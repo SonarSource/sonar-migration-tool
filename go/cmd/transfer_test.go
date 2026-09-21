@@ -65,6 +65,7 @@ func newTransferTestCmd() *cobra.Command {
 	f.String(flagEdition, "", "")
 	f.String(flagExportDir, "./migration-files/", "")
 	f.Int(flagConcurrency, 0, "")
+	f.Int(flagAPIMaxRatePerMin, 0, "")
 	f.Int(flagTimeout, 0, "")
 	f.String(flagPEMFilePath, "", "")
 	f.String(flagKeyFilePath, "", "")

@@ -598,10 +598,19 @@ func runSetGlobalSettings(ctx context.Context, e *Executor) error {
 	}
 
 	var mu sync.Mutex
+	// DynamicGate, not errgroup.SetLimit — see the doc comment on
+	// DynamicGate (#573): SetLimit freezes at whatever Current() is right
+	// now for this errgroup's entire lifetime.
+	gate := NewDynamicGate(e.ConcurrencyLimiter)
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(cap(e.Sem))
+	var admitErr error
 	for _, raw := range customized {
+		if err := gate.Acquire(gctx); err != nil {
+			admitErr = err
+			break
+		}
 		g.Go(func() error {
+			defer gate.Release()
 			if gctx.Err() != nil {
 				return gctx.Err()
 			}
@@ -614,6 +623,9 @@ func runSetGlobalSettings(ctx context.Context, e *Executor) error {
 	}
 	if err := g.Wait(); err != nil {
 		return err
+	}
+	if admitErr != nil {
+		return admitErr
 	}
 
 	// #249: migrate sonar.dbcleaner.branchesToKeepWhenInactive as a

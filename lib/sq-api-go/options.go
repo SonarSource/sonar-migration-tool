@@ -29,6 +29,8 @@ type clientConfig struct {
 	debugLogFn         DebugLogFunc
 	requestLogFn       RequestLogFunc
 	rateLimitObsFn     RateLimitObserver
+	rateLimiter        *SlidingWindowLimiter
+	latencyObsFn       LatencyObserver
 }
 
 // DebugLogFunc is invoked once per request/response pair with the verbatim
@@ -151,5 +153,28 @@ func WithRateLimitObserver(fn RateLimitObserver) Option {
 func WithRequestLogger(fn RequestLogFunc) Option {
 	return func(c *clientConfig) {
 		c.requestLogFn = fn
+	}
+}
+
+// WithAPIRateLimiter installs a proactive rate limiter that throttles
+// every physical HTTP attempt (including retries) to at most the
+// limiter's configured calls-per-minute, before the request ever hits
+// the wire. This complements retryTransport's reactive 429 handling by
+// avoiding the rate limit in the first place. nil (the default) leaves
+// throttling disabled.
+func WithAPIRateLimiter(limiter *SlidingWindowLimiter) Option {
+	return func(cfg *clientConfig) {
+		cfg.rateLimiter = limiter
+	}
+}
+
+// WithLatencyObserver installs a callback that fires once per physical
+// HTTP round trip (every attempt including retries) with that attempt's
+// wall-clock duration. The migration tool uses this to sample per-call
+// API latency, e.g. to seed ETA estimation. The callback is invoked from
+// arbitrary goroutines and must be safe for concurrent use.
+func WithLatencyObserver(fn LatencyObserver) Option {
+	return func(cfg *clientConfig) {
+		cfg.latencyObsFn = fn
 	}
 }

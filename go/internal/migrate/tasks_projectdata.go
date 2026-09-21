@@ -55,9 +55,15 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 	prog := common.NewProgressLogger(e.Logger, "importProjectData", len(projects))
 	e.Progress.Registry().Register("importProjectData", prog)
 
+	// A plain errgroup.SetLimit here would freeze at whatever
+	// e.ConcurrencyLimiter.Current() happens to be right now for this
+	// task's entire run — which can be tens of minutes for a large
+	// instance — silently ignoring every later recalculation (#573).
+	// DynamicGate re-reads Current() on each admission instead.
+	gate := NewDynamicGate(e.ConcurrencyLimiter)
 	g, gCtx := errgroup.WithContext(ctx)
-	g.SetLimit(cap(e.Sem))
 
+	var admitErr error
 	for _, proj := range projects {
 		if isFailedMigrateRecord(proj) {
 			continue
@@ -73,7 +79,12 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 
 		e.Logger.Debug("importing project data", "project", cloudKey)
 
+		if err := gate.Acquire(gCtx); err != nil {
+			admitErr = err
+			break
+		}
 		g.Go(func() error {
+			defer gate.Release()
 			if gCtx.Err() != nil {
 				return gCtx.Err()
 			}
@@ -91,7 +102,10 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 			return nil
 		})
 	}
-	return g.Wait()
+	if err := g.Wait(); err != nil {
+		return err
+	}
+	return admitErr
 }
 
 // resolveProjectBranches builds the final list of branches to import for
@@ -1146,30 +1160,30 @@ func classifyExternalIssue(data json.RawMessage) (scanreport.ExternalIssueInput,
 	}
 	impacts := extractImpactInputs(data, "impacts")
 	return scanreport.ExternalIssueInput{
-			EngineID:           engineID,
-			RuleID:             key,
-			Message:            extractField(data, "message"),
-			Severity:           severity,
-			Type:               issueType,
-			StartLine:          extractInt32(data, "textRange", "startLine"),
-			EndLine:            extractInt32(data, "textRange", "endLine"),
-			StartOff:           extractInt32(data, "textRange", "startOffset"),
-			EndOff:             extractInt32(data, "textRange", "endOffset"),
-			Component:          extractField(data, "component"),
-			CreationDate:       parseISODate(extractField(data, "creationDate")),
-			Effort:             effort,
-			CleanCodeAttribute: cleanCode,
-			Impacts:            impacts,
-		}, scanreport.AdHocRuleInput{
-			EngineID:           engineID,
-			RuleID:             key,
-			Name:               key,
-			Description:        fmt.Sprintf("Rule from %s plugin", engineID),
-			Severity:           severity,
-			Type:               issueType,
-			CleanCodeAttribute: cleanCode,
-			Impacts:            impacts,
-		}, true
+		EngineID:           engineID,
+		RuleID:             key,
+		Message:            extractField(data, "message"),
+		Severity:           severity,
+		Type:               issueType,
+		StartLine:          extractInt32(data, "textRange", "startLine"),
+		EndLine:            extractInt32(data, "textRange", "endLine"),
+		StartOff:           extractInt32(data, "textRange", "startOffset"),
+		EndOff:             extractInt32(data, "textRange", "endOffset"),
+		Component:          extractField(data, "component"),
+		CreationDate:       parseISODate(extractField(data, "creationDate")),
+		Effort:             effort,
+		CleanCodeAttribute: cleanCode,
+		Impacts:            impacts,
+	}, scanreport.AdHocRuleInput{
+		EngineID:           engineID,
+		RuleID:             key,
+		Name:               key,
+		Description:        fmt.Sprintf("Rule from %s plugin", engineID),
+		Severity:           severity,
+		Type:               issueType,
+		CleanCodeAttribute: cleanCode,
+		Impacts:            impacts,
+	}, true
 }
 
 // extractImpactInputs parses an MQR "impacts" array (e.g. from

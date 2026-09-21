@@ -580,7 +580,11 @@ func syncProjectIssues(ctx context.Context, e *Executor, cloudKey, orgKey, serve
 
 	var a, b, c atomic.Int64
 	label := "Project key " + cloudKey + " issue sync:"
-	runProjectSyncLoop(ctx, e, actionable, label, 20,
+	// Bounded, not dynamic: this loop is nested inside
+	// runSyncIssueMetadata's own per-project fan-out, so both levels
+	// reading Current() would put Current()² calls in flight — see
+	// nestedSyncLoopConcurrency.
+	runProjectSyncLoopBounded(ctx, e, actionable, label, 20, nestedSyncLoopConcurrency,
 		func(gctx context.Context, src matchableIssue) {
 			outcome := resolveAndSyncIssue(gctx, e, cloudKey, orgKey, baseURL, serverKey, src, counter)
 			switch outcome {

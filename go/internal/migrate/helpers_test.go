@@ -170,9 +170,9 @@ func TestForEachMigrateItem(t *testing.T) {
 	})
 
 	e := &Executor{
-		Store:  store,
-		Sem:    make(chan struct{}, 5),
-		Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		Store:              store,
+		ConcurrencyLimiter: NewFixedConcurrencyLimiter(5),
+		Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 	}
 
 	var count atomic.Int32
@@ -207,9 +207,9 @@ func TestForEachMigrateItemSerial(t *testing.T) {
 	})
 
 	e := &Executor{
-		Store:  store,
-		Sem:    make(chan struct{}, 8),
-		Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		Store:              store,
+		ConcurrencyLimiter: NewFixedConcurrencyLimiter(8),
+		Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 	}
 
 	var (
@@ -264,9 +264,9 @@ func TestForEachMigrateItemFiltered(t *testing.T) {
 	})
 
 	e := &Executor{
-		Store:  store,
-		Sem:    make(chan struct{}, 5),
-		Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		Store:              store,
+		ConcurrencyLimiter: NewFixedConcurrencyLimiter(5),
+		Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 	}
 
 	var keys []string
@@ -296,11 +296,11 @@ func TestForEachExtractItem(t *testing.T) {
 	os.MkdirAll(filepath.Join(dir, "run-test"), 0o755)
 
 	e := &Executor{
-		Store:     store,
-		ExportDir: dir,
-		Mapping:   structure.ExtractMapping{testServerURL: "extract-01"},
-		Sem:       make(chan struct{}, 5),
-		Logger:    slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		Store:              store,
+		ExportDir:          dir,
+		Mapping:            structure.ExtractMapping{testServerURL: "extract-01"},
+		ConcurrencyLimiter: NewFixedConcurrencyLimiter(5),
+		Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 	}
 
 	var count int
@@ -459,7 +459,7 @@ func TestRunProjectSyncLoop(t *testing.T) {
 	t.Run("issue sync cadence at every 20", func(t *testing.T) {
 		var buf bytes.Buffer
 		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-		e := &Executor{Sem: make(chan struct{}, 4), Logger: logger}
+		e := &Executor{ConcurrencyLimiter: NewFixedConcurrencyLimiter(4), Logger: logger}
 
 		items := make([]int, 40)
 		var applied atomic.Int64
@@ -485,7 +485,7 @@ func TestRunProjectSyncLoop(t *testing.T) {
 	t.Run("issue sync label carries project key (#348)", func(t *testing.T) {
 		var buf bytes.Buffer
 		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-		e := &Executor{Sem: make(chan struct{}, 4), Logger: logger}
+		e := &Executor{ConcurrencyLimiter: NewFixedConcurrencyLimiter(4), Logger: logger}
 
 		const cloudKey = "myorg_some_project_key"
 		label := "Project key " + cloudKey + " issue sync:"
@@ -503,7 +503,7 @@ func TestRunProjectSyncLoop(t *testing.T) {
 	t.Run("hotspot sync cadence at every 10", func(t *testing.T) {
 		var buf bytes.Buffer
 		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-		e := &Executor{Sem: make(chan struct{}, 4), Logger: logger}
+		e := &Executor{ConcurrencyLimiter: NewFixedConcurrencyLimiter(4), Logger: logger}
 
 		items := make([]int, 30)
 		runProjectSyncLoop(context.Background(), e, items, "Hotspot sync:", 10,
@@ -521,7 +521,7 @@ func TestRunProjectSyncLoop(t *testing.T) {
 	t.Run("cancelled context short-circuits remaining work", func(t *testing.T) {
 		var buf bytes.Buffer
 		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-		e := &Executor{Sem: make(chan struct{}, 1), Logger: logger}
+		e := &Executor{ConcurrencyLimiter: NewFixedConcurrencyLimiter(1), Logger: logger}
 
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel() // pre-cancel so every goroutine sees gctx.Err() != nil
@@ -539,9 +539,83 @@ func TestRunProjectSyncLoop(t *testing.T) {
 	t.Run("empty input does not panic", func(t *testing.T) {
 		var buf bytes.Buffer
 		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-		e := &Executor{Sem: make(chan struct{}, 4), Logger: logger}
+		e := &Executor{ConcurrencyLimiter: NewFixedConcurrencyLimiter(4), Logger: logger}
 		runProjectSyncLoop(context.Background(), e, []int{}, "Issue sync:", 20,
 			func(_ context.Context, _ int) { t.Fatal("apply should not be called") })
+	})
+}
+
+// #573 follow-up — runProjectSyncLoopBounded's explicit bound is what
+// keeps the NESTED sync loops (syncProjectIssues / syncProjectHotspots,
+// each called per-project from inside their task's own fan-out) from
+// putting Current()² requests in flight. See nestedSyncLoopConcurrency:
+// that aggregate matters because excess callers queue inside
+// throttleTransport's round trip, against the 60s HTTP client timeout.
+func TestRunProjectSyncLoopBounded(t *testing.T) {
+	// observeMaxInFlight runs the loop and reports the highest number of
+	// apply calls that were ever executing simultaneously.
+	observeMaxInFlight := func(t *testing.T, e *Executor, concurrency int, items int) int64 {
+		t.Helper()
+		var inFlight, maxInFlight atomic.Int64
+		runProjectSyncLoopBounded(context.Background(), e, make([]int, items), "sync:", 1000, concurrency,
+			func(_ context.Context, _ int) {
+				cur := inFlight.Add(1)
+				for {
+					prev := maxInFlight.Load()
+					if cur <= prev || maxInFlight.CompareAndSwap(prev, cur) {
+						break
+					}
+				}
+				// Hold the slot briefly so overlap is observable.
+				time.Sleep(2 * time.Millisecond)
+				inFlight.Add(-1)
+			})
+		return maxInFlight.Load()
+	}
+
+	t.Run("a positive bound caps in-flight work below the dynamic limit", func(t *testing.T) {
+		logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		// The executor's own limiter is deliberately much higher than the
+		// bound, so a regression that ignored the bound would show up as
+		// in-flight work far above it.
+		e := &Executor{ConcurrencyLimiter: NewFixedConcurrencyLimiter(50), Logger: logger}
+
+		const bound = 3
+		got := observeMaxInFlight(t, e, bound, 30)
+		if got > bound {
+			t.Errorf("max in-flight = %d, want <= the explicit bound %d", got, bound)
+		}
+		if got == 0 {
+			t.Fatal("apply was never called")
+		}
+	})
+
+	t.Run("a non-positive bound falls back to the executor's dynamic limiter", func(t *testing.T) {
+		logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		const dynamic = 4
+		e := &Executor{ConcurrencyLimiter: NewFixedConcurrencyLimiter(dynamic), Logger: logger}
+
+		got := observeMaxInFlight(t, e, 0, 30)
+		if got > dynamic {
+			t.Errorf("max in-flight = %d, want <= the executor's limit %d", got, dynamic)
+		}
+		if got == 0 {
+			t.Fatal("apply was never called")
+		}
+	})
+
+	t.Run("every item is still applied exactly once under a bound", func(t *testing.T) {
+		logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		e := &Executor{ConcurrencyLimiter: NewFixedConcurrencyLimiter(50), Logger: logger}
+
+		const items = 25
+		var applied atomic.Int64
+		runProjectSyncLoopBounded(context.Background(), e, make([]int, items), "sync:", 1000, 2,
+			func(_ context.Context, _ int) { applied.Add(1) })
+
+		if applied.Load() != items {
+			t.Errorf("apply called %d times, want %d", applied.Load(), items)
+		}
 	})
 }
 
