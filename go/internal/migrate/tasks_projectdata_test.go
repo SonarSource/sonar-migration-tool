@@ -1899,7 +1899,7 @@ func TestImportProjectBranchesMainCEFailAborts(t *testing.T) {
 		{Name: "develop", IsMain: false},
 	}
 
-	err := importProjectBranches(context.Background(), e, proj, branches, "", nil, w)
+	err := importProjectBranches(context.Background(), e, proj, branches, nil, nil, w)
 	if err == nil {
 		t.Fatal("expected error when main branch CE fails")
 	}
@@ -1971,7 +1971,7 @@ func TestImportProjectBranchesMainFirst(t *testing.T) {
 	}
 	sortBranchesMainFirst(branches)
 
-	err := importProjectBranches(context.Background(), e, proj, branches, "", nil, w)
+	err := importProjectBranches(context.Background(), e, proj, branches, nil, nil, w)
 	if err != nil {
 		t.Fatalf("importProjectBranches: %v", err)
 	}
@@ -2015,7 +2015,7 @@ func TestImportSkipsCompletedBranches(t *testing.T) {
 		{Name: "develop", IsMain: false},
 	}
 
-	err := importProjectBranches(context.Background(), e, proj, branches, "", completed, w)
+	err := importProjectBranches(context.Background(), e, proj, branches, nil, completed, w)
 	if err != nil {
 		t.Fatalf("importProjectBranches: %v", err)
 	}

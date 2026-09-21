@@ -19,6 +19,7 @@ import (
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/scanreport"
 	pb "github.com/sonar-solutions/sonar-migration-tool/internal/scanreport/proto"
+	"github.com/sonar-solutions/sq-api-go/types"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -142,34 +143,68 @@ func importProjectDataOne(ctx context.Context, e *Executor, proj json.RawMessage
 
 	sqBranches := resolveProjectBranches(e, w, cloudKey, serverURL, serverKey)
 
-	scMainBranch := fetchSCMainBranch(ctx, e, cloudKey)
+	// One list call per project: it yields both the target's main
+	// branch name and, for #588, the analysis date the target
+	// already holds for each branch.
+	scBranches := fetchTargetBranches(ctx, e, cloudKey)
 
 	// #474 — a rejected report used to be a Warn that left the task
 	// summary reporting nothing at all, so a transfer that migrated
 	// zero issues and zero branches still looked clean.
 	recordImportOutcome(e, counter, cloudKey,
-		importProjectBranches(ctx, e, proj, sqBranches, scMainBranch, completed, w))
+		importProjectBranches(ctx, e, proj, sqBranches, scBranches, completed, w))
 	prog.Increment()
 	return nil
 }
 
-// fetchSCMainBranch queries SonarCloud for the main branch name of a project.
-// Returns empty string if unavailable.
-func fetchSCMainBranch(ctx context.Context, e *Executor, cloudKey string) string {
+// fetchTargetBranches lists the project's branches on SonarCloud. Returns nil
+// when the Cloud client is unavailable or the call fails; both callers treat an
+// unknown target as "nothing is there yet", which is the safe default for the
+// main-branch-name lookup and for the up-to-date check in importAndRecordBranch.
+func fetchTargetBranches(ctx context.Context, e *Executor, cloudKey string) []types.Branch {
 	if e.Cloud == nil || e.Cloud.Branches == nil {
-		return ""
+		return nil
 	}
 	scBranches, err := e.Cloud.Branches.List(ctx, cloudKey)
 	if err != nil {
 		e.Logger.Warn("failed to fetch SC branches, using SQ branch names", "project", cloudKey, "err", err)
-		return ""
+		return nil
 	}
-	for _, b := range scBranches {
+	return scBranches
+}
+
+// mainBranchName returns the main branch's name in a SonarCloud branch list,
+// or "" when the list carries no main branch.
+func mainBranchName(branches []types.Branch) string {
+	for _, b := range branches {
 		if b.IsMain {
 			return b.Name
 		}
 	}
 	return ""
+}
+
+// targetAnalysisDates maps each SonarCloud branch name to the date of the
+// analysis the target already holds for it. Branches with no analysis yet, or
+// with a date in a layout parseISODate does not recognise, are left out — an
+// absent entry reads as "never analyzed on the target".
+func targetAnalysisDates(branches []types.Branch) map[string]time.Time {
+	if len(branches) == 0 {
+		return nil
+	}
+	dates := make(map[string]time.Time, len(branches))
+	for _, b := range branches {
+		if d := parseISODate(b.AnalysisDate); !d.IsZero() {
+			dates[b.Name] = d
+		}
+	}
+	return dates
+}
+
+// fetchSCMainBranch queries SonarCloud for the main branch name of a project.
+// Returns empty string if unavailable.
+func fetchSCMainBranch(ctx context.Context, e *Executor, cloudKey string) string {
+	return mainBranchName(fetchTargetBranches(ctx, e, cloudKey))
 }
 
 // renameSCMainBranchToSource renames the project's SonarCloud main branch to
@@ -199,21 +234,24 @@ func renameSCMainBranchToSource(ctx context.Context, e *Executor, cloudKey, sour
 // importProjectBranches imports project data for every branch of one project.
 // Main branch is imported first; if it fails, remaining branches are skipped.
 func importProjectBranches(ctx context.Context, e *Executor, proj json.RawMessage,
-	sqBranches []branchInfo, scMainBranch string, completed map[string]bool, w *common.ChunkWriter) error {
+	sqBranches []branchInfo, scBranches []types.Branch, completed map[string]bool, w *common.ChunkWriter) error {
 
 	cloudKey := extractField(proj, "cloud_project_key")
 	orgKey := extractField(proj, "sonarcloud_org_key")
 	serverURL := extractField(proj, "server_url")
 	serverKey := extractField(proj, "key")
 
+	scMainBranch := mainBranchName(scBranches)
+
 	bctx := branchImportContext{
-		CloudKey:     cloudKey,
-		OrgKey:       orgKey,
-		ServerURL:    serverURL,
-		ServerKey:    serverKey,
-		SCMainBranch: scMainBranch,
-		Completed:    completed,
-		Writer:       w,
+		CloudKey:            cloudKey,
+		OrgKey:              orgKey,
+		ServerURL:           serverURL,
+		ServerKey:           serverKey,
+		SCMainBranch:        scMainBranch,
+		TargetAnalysisDates: targetAnalysisDates(scBranches),
+		Completed:           completed,
+		Writer:              w,
 	}
 
 	var mainBranch *branchInfo
@@ -290,8 +328,49 @@ type branchImportContext struct {
 	// #428; the SC main branch name only when no source main is known). Non-main
 	// branches use it as their reference/merge branch on submit.
 	MainTargetName string
-	Completed      map[string]bool
-	Writer         *common.ChunkWriter
+	// TargetAnalysisDates holds, per SonarCloud branch name, the date of the
+	// analysis the target already carries. Read by targetBranchUpToDate to
+	// decide whether this run has anything left to submit for a branch (#588).
+	// Nil when the target project is new or its branch list could not be read,
+	// which reads as "nothing migrated yet" and imports everything.
+	TargetAnalysisDates map[string]time.Time
+	Completed           map[string]bool
+	Writer              *common.ChunkWriter
+}
+
+// branchStatusUpToDate is the importProjectData record status for a branch the
+// target already holds at the date this run would have submitted (#588). It is
+// deliberately neither "success" nor "skipped": the branch IS migrated, so the
+// migration report must not degrade the project to Skipped, yet this run did
+// not import it. report/summary's collectProjectData treats it as a success.
+const branchStatusUpToDate = "up_to_date"
+
+// targetBranchUpToDate reports whether SonarCloud already holds an analysis for
+// targetBranch that is at least as recent as the one this run would submit, and
+// returns that existing date.
+//
+// #588 — the current-snapshot import backdates its report to the source
+// branch's real last-analysis date (#557). Re-running transfer against an
+// unchanged source therefore rebuilds a report carrying the SAME date, and the
+// Compute Engine refuses it: "a newer report has already been processed, and
+// processing older reports is not supported". The report would have been
+// identical anyway, so skip it. Nudging the date forward instead would push a
+// duplicate analysis onto the branch's Activity on every re-run and lose the
+// true source date that #557 deliberately preserves.
+//
+// A source branch that was never analyzed (zero lastAnalysis) is never up to
+// date: buildBranchReport stamps such a report with "now", which always beats
+// whatever the target holds. A target date equal to the source's also counts as
+// up to date — the CE rejects an equal date as firmly as an older one.
+func targetBranchUpToDate(dates map[string]time.Time, targetBranch string, lastAnalysis time.Time) (time.Time, bool) {
+	if lastAnalysis.IsZero() {
+		return time.Time{}, false
+	}
+	existing, ok := dates[targetBranch]
+	if !ok {
+		return time.Time{}, false
+	}
+	return existing, !existing.Before(lastAnalysis)
 }
 
 func importAndRecordBranch(ctx context.Context, e *Executor, bctx branchImportContext, branch branchInfo) error {
@@ -303,6 +382,18 @@ func importAndRecordBranch(ctx context.Context, e *Executor, bctx branchImportCo
 	targetBranch := branch.Name
 	if branch.IsMain && bctx.SCMainBranch != "" {
 		targetBranch = bctx.SCMainBranch
+	}
+
+	// #588 — nothing new to submit for this branch. Must sit ahead of
+	// migrateBranchHistory: every history point is older still, so replaying
+	// them onto an already-populated branch would be rejected the same way.
+	if existing, ok := targetBranchUpToDate(bctx.TargetAnalysisDates, targetBranch, branch.LastAnalysisDate); ok {
+		e.Logger.Info("branch already up to date on the target, nothing to re-import",
+			"project", bctx.CloudKey, "branch", branch.Name, "target_branch", targetBranch,
+			"target_analysis_date", existing.Format(time.RFC3339),
+			"source_last_analysis_date", branch.LastAnalysisDate.Format(time.RFC3339))
+		recordBranchResult(bctx.Writer, bctx.CloudKey, branch.Name, &importResult{Status: branchStatusUpToDate})
+		return nil
 	}
 
 	// #554 (PoC) — replay bounded project history before the regular
