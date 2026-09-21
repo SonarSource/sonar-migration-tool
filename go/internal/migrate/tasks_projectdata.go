@@ -111,9 +111,10 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 // resolveProjectBranches builds the final list of branches to import for
 // one project: collect from the source (defaulting to a synthetic main
 // branch when extract has no branch data), sort main first, apply the
-// glob exclude filter, then enforce the hard per-project branch cap
-// (#584) — recording any branches the cap drops so the migration report
-// can name them.
+// glob exclude filter and the --branch_regexp include filter (#582), then
+// enforce the hard per-project branch cap (#584) on whatever survives
+// those filters — recording any branches the cap drops so the migration
+// report can name them.
 func resolveProjectBranches(e *Executor, w *common.ChunkWriter, cloudKey, serverURL, serverKey string) []branchInfo {
 	sqBranches := collectBranchInfo(e, serverURL, serverKey)
 	if len(sqBranches) == 0 {
@@ -121,6 +122,7 @@ func resolveProjectBranches(e *Executor, w *common.ChunkWriter, cloudKey, server
 	}
 	sortBranchesMainFirst(sqBranches)
 	sqBranches = filterBranches(sqBranches, e.ExcludeBranches)
+	sqBranches = filterBranchesByRegexp(sqBranches, e.BranchRe)
 
 	var dropped []branchInfo
 	sqBranches, dropped = capBranches(sqBranches, MaxBranchesPerProject)
@@ -887,6 +889,28 @@ func filterBranches(branches []branchInfo, excludePatterns []string) []branchInf
 			continue
 		}
 		if matchesAnyGlob(b.Name, excludePatterns) {
+			continue
+		}
+		filtered = append(filtered, b)
+	}
+	return filtered
+}
+
+// filterBranchesByRegexp keeps only branches whose name matches re,
+// except the main branch which is always kept regardless of match (same
+// bypass as filterBranches). re == nil means "no filter, keep everything".
+// #582.
+func filterBranchesByRegexp(branches []branchInfo, re *regexp.Regexp) []branchInfo {
+	if re == nil {
+		return branches
+	}
+	var filtered []branchInfo
+	for _, b := range branches {
+		if b.IsMain {
+			filtered = append(filtered, b)
+			continue
+		}
+		if !re.MatchString(b.Name) {
 			continue
 		}
 		filtered = append(filtered, b)

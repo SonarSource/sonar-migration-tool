@@ -26,6 +26,47 @@ func TestRunMigrateRejectsExcessiveMaxIssueComments(t *testing.T) {
 	}
 }
 
+// #582 — an invalid --branch_regexp pattern is rejected up front, before any
+// client is built or API call made, the same way ProjectKeyFilter already
+// is above — a config-file-only caller that bypasses cmd/migrate.go's own
+// validation (e.g. the GUI wizard) must still get a clear error.
+func TestRunMigrateRejectsInvalidBranchRegexp(t *testing.T) {
+	_, err := RunMigrate(context.Background(), MigrateConfig{BranchRegexp: "("})
+	if err == nil {
+		t.Fatal("expected an error for an unparseable BranchRegexp")
+	}
+	if !strings.Contains(err.Error(), "invalid branch regexp pattern") {
+		t.Errorf("expected an 'invalid branch regexp pattern' error, got: %v", err)
+	}
+}
+
+// TestRunMigrateAcceptsValidBranchRegexp asserts a well-formed BranchRegexp
+// compiles without error and the run completes normally (#582).
+func TestRunMigrateAcceptsValidBranchRegexp(t *testing.T) {
+	cloudSrv := newMockCloudServer()
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+	dir := t.TempDir()
+	setupExtractData(dir)
+	setupCSVs(t, dir)
+
+	cfg := MigrateConfig{
+		Token:           "test-token",
+		EnterpriseKey:   "test-enterprise",
+		Edition:         "enterprise",
+		URL:             cloudSrv.URL + "/",
+		Concurrency:     5,
+		ExportDirectory: dir,
+		TargetTask:      "createProjects", // Only run one task + deps.
+		BranchRegexp:    "(main|master)",
+	}
+
+	if _, err := RunMigrate(context.Background(), cfg); err != nil {
+		t.Fatalf("RunMigrate failed with a valid BranchRegexp: %v", err)
+	}
+}
+
 func TestRegisterAllCountsAndDependencies(t *testing.T) {
 	all := RegisterAll()
 	if len(all) < 30 {
@@ -337,38 +378,36 @@ func TestPlanPhasesObjectsSettingsOnlyExcludesProjectDataTasks(t *testing.T) {
 func TestPlanPhasesEveryObjectsCombinationProducesAValidPlan(t *testing.T) {
 	reg := BuildMigrateRegistry(RegisterAll())
 	for _, cat := range common.AllObjects {
-		objects, err := common.ParseObjects([]string{cat})
-		if err != nil {
-			t.Fatalf("ParseObjects(%s): %v", cat, err)
-		}
-		targets := MigrateTargetTasks(reg, "", MigrateTargetTasksFlags{SkipProfiles: false, IncludeProjectData: true, SkipIssueSync: false, SkipProjectDataMigration: false}, nil, objects)
-		excluded := excludedMigrateTasks(objects)
-		taskSet := ResolveDependenciesExcluding(targets, reg, excluded)
-		if taskSet == nil {
-			t.Errorf("objects=%s: ResolveDependenciesExcluding returned nil", cat)
-			continue
-		}
-		if _, err := PlanPhasesExcluding(taskSet, reg, excluded); err != nil {
-			t.Errorf("objects=%s: PlanPhasesExcluding: %v", cat, err)
-		}
+		assertValidPlanForCategories(t, reg, cat, cat)
 	}
 	for i, a := range common.AllObjects {
 		for _, b := range common.AllObjects[i+1:] {
-			objects, err := common.ParseObjects([]string{a, b})
-			if err != nil {
-				t.Fatalf("ParseObjects(%s,%s): %v", a, b, err)
-			}
-			targets := MigrateTargetTasks(reg, "", MigrateTargetTasksFlags{SkipProfiles: false, IncludeProjectData: true, SkipIssueSync: false, SkipProjectDataMigration: false}, nil, objects)
-			excluded := excludedMigrateTasks(objects)
-			taskSet := ResolveDependenciesExcluding(targets, reg, excluded)
-			if taskSet == nil {
-				t.Errorf("objects=%s,%s: ResolveDependenciesExcluding returned nil", a, b)
-				continue
-			}
-			if _, err := PlanPhasesExcluding(taskSet, reg, excluded); err != nil {
-				t.Errorf("objects=%s,%s: PlanPhasesExcluding: %v", a, b, err)
-			}
+			assertValidPlanForCategories(t, reg, a+","+b, a, b)
 		}
+	}
+}
+
+// assertValidPlanForCategories resolves and plans the migrate task set for
+// the given --objects category selection, failing the test with the exact
+// combination named if any step errors. Split out of
+// TestPlanPhasesEveryObjectsCombinationProducesAValidPlan to keep its
+// cognitive complexity down — the two sweeps (single-category, pairwise)
+// only differ in which categories they pass in.
+func assertValidPlanForCategories(t *testing.T, reg map[string]*TaskDef, label string, cats ...string) {
+	t.Helper()
+	objects, err := common.ParseObjects(cats)
+	if err != nil {
+		t.Fatalf("ParseObjects(%s): %v", label, err)
+	}
+	targets := MigrateTargetTasks(reg, "", MigrateTargetTasksFlags{SkipProfiles: false, IncludeProjectData: true, SkipIssueSync: false, SkipProjectDataMigration: false}, nil, objects)
+	excluded := excludedMigrateTasks(objects)
+	taskSet := ResolveDependenciesExcluding(targets, reg, excluded)
+	if taskSet == nil {
+		t.Errorf("objects=%s: ResolveDependenciesExcluding returned nil", label)
+		return
+	}
+	if _, err := PlanPhasesExcluding(taskSet, reg, excluded); err != nil {
+		t.Errorf("objects=%s: PlanPhasesExcluding: %v", label, err)
 	}
 }
 

@@ -77,6 +77,20 @@ func ExtractBool(raw json.RawMessage, key string) bool {
 	return b
 }
 
+// FirstNonEmpty returns the first non-empty string in values, letting a
+// more-specific setting (e.g. a config file's source/target block) win over
+// a less-specific one (e.g. its top-level default) without needing a
+// tri-state type — an empty string always means "not set" for these
+// string-valued config fields. Returns "" when every value is empty.
+func FirstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // Expansion defines a set of values for cross-product iteration.
 type Expansion struct {
 	Key    string

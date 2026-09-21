@@ -96,6 +96,21 @@ func TestExtractBool(t *testing.T) {
 	}
 }
 
+func TestFirstNonEmpty(t *testing.T) {
+	if got := FirstNonEmpty("", "second", "third"); got != "second" {
+		t.Errorf("expected the first non-empty value, got %q", got)
+	}
+	if got := FirstNonEmpty("first", "second"); got != "first" {
+		t.Errorf("expected the earlier value to win over a later non-empty one, got %q", got)
+	}
+	if got := FirstNonEmpty("", ""); got != "" {
+		t.Errorf("expected empty string when every value is empty, got %q", got)
+	}
+	if got := FirstNonEmpty(); got != "" {
+		t.Errorf("expected empty string for no arguments, got %q", got)
+	}
+}
+
 func TestExpandCombinations(t *testing.T) {
 	expansions := []Expansion{
 		{Key: "type", Values: []string{"A", "B"}},

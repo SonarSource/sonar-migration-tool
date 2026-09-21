@@ -29,6 +29,15 @@ var extractCmd = &cobra.Command{
 			return fmt.Errorf("URL and TOKEN are required (--source_url/--source_token flags or in config file)")
 		}
 		warnIfInsecure(cfg.Insecure)
+		// #582 — reject an invalid --branch_regexp pattern up front, before
+		// any network call, rather than failing deep inside RunExtract (which
+		// still compiles it defensively for callers that skip this RunE,
+		// e.g. the GUI wizard).
+		if cfg.BranchRegexp != "" {
+			if _, err := extract.CompileProjectKeyPattern(cfg.BranchRegexp); err != nil {
+				return fmt.Errorf("invalid branch regexp pattern %q: %w", cfg.BranchRegexp, err)
+			}
+		}
 		// #536: resolve --project_key (or the config file's top-level
 		// "project_key") into concrete ProjectKeys now that URL/Token are
 		// known to be set. Skipped entirely when an active --objects
@@ -85,6 +94,7 @@ func init() {
 	f.Int(flagHistoryMinIntervalDays, extract.HistoryUnset, "Minimum spacing, in days, enforced between two selected historical snapshots when --migrate_history is set (default 0 — no spacing rule, every analysis in the source history becomes a candidate).")
 	f.String("objects", "", "Comma-separated list of object categories to extract: "+strings.Join(common.AllObjects, ", ")+" (aliases: qp, qg, pt, lp). Omit to extract everything (default).")
 	f.String("project_key", "", "Regexp pattern of project keys to extract (only applies when the projects category is selected). A plain key matches only itself.")
+	f.String(flagBranchRegexp, "", "Regexp pattern of branch names to extract, applied to each project's own branches (also filters the getBranches task's own written records, so downstream migrate runs only see what matched here). Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"(main|master)\" matches only branches literally named main or master. The project's main branch is always extracted regardless of match. Empty means every branch is extracted (default). #582.")
 }
 
 func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfig, error) {
@@ -154,6 +164,7 @@ func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfi
 	// capture the pattern here, same precedence as every other flag
 	// (CLI overrides config file).
 	overrideString(cmd, "project_key", &cfg.ProjectKey)
+	overrideString(cmd, flagBranchRegexp, &cfg.BranchRegexp)
 
 	// Default the export directory when neither config nor flag supplied
 	// one (issue #247).

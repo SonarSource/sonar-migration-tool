@@ -225,6 +225,15 @@ type MigrateConfig struct {
 	// selected (cmd/migrate.go no-ops the flag otherwise, per the issue).
 	ProjectKeyFilter string
 
+	// BranchRegexp, when non-empty, limits which branches importProjectData
+	// migrates for each project, on top of whatever the extract phase already
+	// limited getBranches to. Always compiled as a full-match regex
+	// implicitly anchored with ^ and $ (mirrors ProjectKeyFilter,
+	// extract.CompileProjectKeyPattern). The project's main branch is always
+	// migrated regardless of match (same bypass as ExcludeBranches). Empty
+	// means "migrate every extracted branch" (#582).
+	BranchRegexp string
+
 	// ProgressCallback, when set, is invoked with the same run-wide
 	// percent/ETA snapshot as the #520 log line, on every tick and once
 	// more at completion. Nil for CLI callers (go/cmd/migrate.go); the
@@ -324,6 +333,9 @@ type Executor struct {
 	// other project-scoped task scopes off createProjects's own output,
 	// so filtering there is sufficient.
 	ProjectKeyRe *regexp.Regexp
+	// BranchRe is the compiled form of MigrateConfig.BranchRegexp, or nil
+	// when unset. #582.
+	BranchRe *regexp.Regexp
 	// MigrateHistory — see MigrateConfig.MigrateHistory (#554).
 	MigrateHistory bool
 	// HistoryProgress tracks project-history replay (#554) as its own
@@ -372,6 +384,18 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 			return "", fmt.Errorf("invalid project_key pattern %q: %w", cfg.ProjectKeyFilter, err)
 		}
 		projectKeyRe = re
+	}
+
+	// #582: compile --branch_regexp defensively for the same reason as
+	// --project_key above — a config-file-only caller may reach RunMigrate
+	// without going through cmd/migrate.go's own validation.
+	var branchRe *regexp.Regexp
+	if cfg.BranchRegexp != "" {
+		re, err := extract.CompileProjectKeyPattern(cfg.BranchRegexp)
+		if err != nil {
+			return "", fmt.Errorf("invalid branch regexp pattern %q: %w", cfg.BranchRegexp, err)
+		}
+		branchRe = re
 	}
 
 	tm := &RunTimings{StartedAt: time.Now()}
@@ -463,6 +487,7 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 		ProjectKeyPattern:    cfg.ProjectKeyPattern,
 		Objects:              cfg.Objects,
 		ProjectKeyRe:         projectKeyRe,
+		BranchRe:             branchRe,
 		MigrateHistory:       cfg.MigrateHistory,
 		Logger:               logger,
 	}

@@ -83,6 +83,10 @@ type configFileShape struct {
 	// concrete key list; createProjects filters locally).
 	Objects    []string `json:"objects"`
 	ProjectKey string   `json:"project_key"`
+	// BranchRegexp is the top-level regexp pattern restricting which
+	// branches extract/migrate/transfer process (#582). Mirrors
+	// ProjectKey's top-level/shape semantics.
+	BranchRegexp string `json:"branch_regexp"`
 
 	// Shape 2 (command-sectioned).
 	Migrate *configFileShape `json:"migrate"`
@@ -143,6 +147,8 @@ type unifiedTargetBlock struct {
 	MigrateHistory *FlexibleBool `json:"migrate_history"`
 	// MaxIssueComments — see configFileShape.MaxIssueComments (#571).
 	MaxIssueComments int `json:"max_issue_comments"`
+	// BranchRegexp — see MigrateConfig.BranchRegexp (#582).
+	BranchRegexp string `json:"branch_regexp"`
 }
 
 type sonarCloudBlock struct {
@@ -205,10 +211,13 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			cfg.ExcludeBranches = s.Target.ExcludeBranches
 			cfg.UnsupportedLanguages = s.Target.UnsupportedLanguages
 			cfg.MaxIssueComments = s.Target.MaxIssueComments
+			cfg.BranchRegexp = s.Target.BranchRegexp
 		}
 		// #474 — target.unsupported_languages wins, else the top-level field.
 		cfg.UnsupportedLanguages = resolveUnsupportedLanguages(
 			cfg.UnsupportedLanguages, s.UnsupportedLanguages)
+		// #582 — target.branch_regexp wins, else the top-level field.
+		cfg.BranchRegexp = common.FirstNonEmpty(cfg.BranchRegexp, s.BranchRegexp)
 		// #527 — target.fast_sync wins, else the top-level field, else false.
 		var targetFastSync *FlexibleBool
 		if s.Target != nil {
@@ -250,6 +259,10 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		cfg := s.SonarCloud.toMigrateConfig(s.Settings)
 		cfg.UnsupportedLanguages = resolveUnsupportedLanguages(
 			cfg.UnsupportedLanguages, s.UnsupportedLanguages)
+		// #582 — sonarCloudBlock.toMigrateConfig never sets BranchRegexp, so
+		// this is just the top-level field, but written with FirstNonEmpty
+		// for consistency with the unified-shape resolution above.
+		cfg.BranchRegexp = common.FirstNonEmpty(cfg.BranchRegexp, s.BranchRegexp)
 		if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
 			cfg.SkipIssueSync = s.SkipIssueSync.Value
 		}
@@ -295,6 +308,10 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		if s.ProjectKey != "" {
 			cfg.ProjectKeyFilter = s.ProjectKey
 		}
+		// #582: same outer-wins-else-nested semantics for branch_regexp.
+		if s.BranchRegexp != "" {
+			cfg.BranchRegexp = s.BranchRegexp
+		}
 		return cfg
 	default:
 		cfg := MigrateConfig{
@@ -315,6 +332,7 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			ExcludeBranches:    s.ExcludeBranches,
 			// #474 — flat shape reads the field directly.
 			UnsupportedLanguages: s.UnsupportedLanguages,
+			BranchRegexp:         s.BranchRegexp,
 		}
 		if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
 			cfg.SkipIssueSync = s.SkipIssueSync.Value

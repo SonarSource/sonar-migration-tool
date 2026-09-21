@@ -114,6 +114,7 @@ sonar-migration-tool extract --source_url <URL> --source_token <TOKEN> --export_
 | `--extract_type` | Type of extract to run |
 | `--export_directory` | Output directory (default: `./migration-files`) |
 | `--skip_project_data_migration` | Skip the issue / source / SCM-blame extract (project data is extracted by default) |
+| `--branch_regexp` | Regexp pattern of branch names to extract, implicitly anchored (`^...$`) — a plain name matches only itself. Omit to extract every branch. The main branch is always extracted regardless of match. |
 | `--pem_file_path` | Client certificate PEM file (mTLS) |
 | `--key_file_path` | Client certificate key file (mTLS) |
 | `--cert_password` | Client certificate password (mTLS) |
@@ -193,6 +194,7 @@ sonar-migration-tool migrate --target_token <TOKEN> --enterprise_key <ENTERPRISE
 | `--skip_profiles` | Skip quality profile migration/provisioning |
 | `--default_organization` | SonarQube Cloud organization key applied to every project when `organizations.csv` has no mapping. Ignored (with a WARN) if any row already carries a `sonarcloud_org_key`. Useful for small instances where every SQS project migrates into one SQC org. |
 | `--edition` | SonarQube Cloud license edition |
+| `--branch_regexp` | Regexp pattern of branch names to migrate, implicitly anchored (`^...$`) — a plain name matches only itself. If not set, implicitly operates on whatever branches were actually extracted. The main branch is always migrated regardless of match. |
 | `--target_url` | SonarQube Cloud URL (default: `https://sonarcloud.io/`) |
 | `--concurrency` | Max concurrent requests |
 | `--export_directory` | Directory containing SonarQube exports (default: `./migration-files`) |
