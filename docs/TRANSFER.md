@@ -234,8 +234,11 @@ Omit `--project_key` to transfer **every** project visible to the token (in whic
 | `--migrate_history` | top-level `migrate_history` | **PoC.** Also migrate a bounded set of historical analysis snapshots (date + project-level measures only) per project's main branch, backdated on SonarQube Cloud. Defaults to off — no change to existing behavior unless set. Issue #554. |
 | `--history_max_points` | top-level `history_max_points` | Max historical snapshots migrated per project when `--migrate_history` is set (default: `0`, no cap — every analysis is a candidate). |
 | `--history_min_interval_days` | top-level `history_min_interval_days` | Minimum spacing, in days, enforced between two migrated historical snapshots when `--migrate_history` is set (default: `0`, no spacing rule). |
+| `--branch_analyzed_after` | `source.branch_analyzed_after` + `target.branch_analyzed_after` | Only select branches analyzed on or after this `YYYY-MM-DD` date. The project's main branch is always selected regardless. Omit to select all branches (default). Issue #583. |
 
 CLI flags override values from the config file when both are provided.
+
+`--branch_analyzed_after` is applied to **both** the extract and migrate phases at once when passed on the CLI — unlike `--exclude_branches` (migrate-only), a transfer talks to both sides in one invocation. Giving the two phases genuinely different cutoffs (per one of the worked examples in [ADVANCED-CONFIG.md](ADVANCED-CONFIG.md#top-level-fields)) requires the config file's `source.branch_analyzed_after` / `target.branch_analyzed_after`; there is deliberately no fallback from one side to the other, so setting only one leaves the other phase unfiltered.
 
 ### Unsupported programming languages (`--unsupported_languages`)
 <!-- updated: 2026-07-27_23:05:00 -->

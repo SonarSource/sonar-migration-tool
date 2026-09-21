@@ -65,6 +65,10 @@ type configFileShape struct {
 	// Pointer, unlike HistoryMaxPoints: 0 is a legal explicit value here
 	// ("no spacing rule"), so absent and 0 must stay distinguishable.
 	HistoryMinIntervalDays *int `json:"history_min_interval_days"`
+	// BranchAnalyzedAfter is the top-level branch_analyzed_after value
+	// (#583). In the unified shape it's the fallback used when the
+	// "source" block doesn't override it (see unifiedSourceBlock).
+	BranchAnalyzedAfter string `json:"branch_analyzed_after"`
 
 	// Shape 2 (command-sectioned).
 	Extract *configFileShape `json:"extract"`
@@ -106,6 +110,12 @@ type unifiedSourceBlock struct {
 	// BranchRegexp, when set, overrides the top-level "branch_regexp" for
 	// this source. #582.
 	BranchRegexp string `json:"branch_regexp"`
+	// BranchAnalyzedAfter, when present (even as an explicit empty string),
+	// overrides the top-level branch_analyzed_after for extract only
+	// (#583). nil means "not set here" — fall through to the top-level
+	// value. This is why it's a pointer, unlike the plain-string fields
+	// above: a phase must be able to explicitly clear a top-level filter.
+	BranchAnalyzedAfter *string `json:"branch_analyzed_after"`
 }
 
 // unifiedTargetBlock mirrors the "target" sub-object documented in
@@ -151,16 +161,43 @@ func (s configFileShape) applyHistoryTo(cfg *ExtractConfig) {
 	}
 }
 
-// toExtractConfigUnified builds ExtractConfig from the #266 unified shape's
-// "source" sub-object, with top-level concurrency/timeout/export_directory
-// as defaults (the "target" sub-object is ignored — migrate reads that
-// one). Split out of toExtractConfig, whose cognitive complexity grew past
-// the linter's limit once this branch also had to resolve
-// source.branch_regexp (#582); mirrors how the "extract"-sectioned shape
-// below already delegates to its own recursive toExtractConfig() call.
-func (s configFileShape) toExtractConfigUnified() ExtractConfig {
+// resolveBranchAnalyzedAfter mirrors resolveMigrateHistory/resolveFastSync
+// (in the migrate package) for the branch_analyzed_after string (#583): the
+// source block's value wins when explicitly present (even if empty,
+// meaning "no filter for extract"), else the top-level value, else "" (no
+// filter, current behavior).
+func resolveBranchAnalyzedAfter(phase *string, top string) string {
+	if phase != nil {
+		return *phase
+	}
+	return top
+}
+
+func (s configFileShape) toExtractConfig() ExtractConfig {
 	var cfg ExtractConfig
+	// Start the spacing at the "caller said nothing" sentinel so an absent
+	// history_min_interval_days resolves through applyDefaults (now also 0)
+	// the same as an explicit 0. Every shape branch below overwrites it only
+	// when the key was actually present in the JSON.
 	cfg.HistoryMinIntervalDays = HistoryUnset
+	switch {
+	case s.Source != nil || s.Target != nil:
+		s.applyUnifiedShapeTo(&cfg)
+	case s.SonarQube != nil:
+		s.applyLegacySonarQubeShapeTo(&cfg)
+	case s.Extract != nil:
+		s.applySectionedShapeTo(&cfg)
+	default:
+		s.applyFlatShapeTo(&cfg)
+	}
+	return cfg
+}
+
+// applyUnifiedShapeTo populates cfg from the #266 unified "source"/"target"
+// shape. Extract pulls from the "source" sub-object; top-level concurrency /
+// timeout / export_directory supply defaults. The "target" sub-object is
+// ignored.
+func (s configFileShape) applyUnifiedShapeTo(cfg *ExtractConfig) {
 	if s.Source != nil {
 		cfg.URL = s.Source.URL
 		cfg.Token = s.Source.Token
@@ -174,8 +211,8 @@ func (s configFileShape) toExtractConfigUnified() ExtractConfig {
 		cfg.Concurrency = s.Source.Concurrency
 		cfg.Timeout = s.Source.Timeout
 	}
-	// Fall back to top-level for concurrency / timeout when the source
-	// block didn't override.
+	// Fall back to top-level for concurrency / timeout when the
+	// source block didn't override.
 	if cfg.Concurrency == 0 {
 		cfg.Concurrency = s.Concurrency
 	}
@@ -183,8 +220,8 @@ func (s configFileShape) toExtractConfigUnified() ExtractConfig {
 		cfg.Timeout = s.Timeout
 	}
 	cfg.ExportDirectory = s.ExportDirectory
-	// #303: top-level skip_project_data_migration drives whether the
-	// extract pulls issue / source / SCM-blame data.
+	// #303: top-level skip_project_data_migration drives whether
+	// the extract pulls issue / source / SCM-blame data.
 	cfg.SkipProjectDataMigration = s.SkipProjectDataMigration
 	cfg.SkipIssueSync = s.SkipIssueSync
 	cfg.objectsRaw = s.Objects
@@ -195,74 +232,75 @@ func (s configFileShape) toExtractConfigUnified() ExtractConfig {
 		sourceBranchRegexp = s.Source.BranchRegexp
 	}
 	cfg.BranchRegexp = common.FirstNonEmpty(sourceBranchRegexp, s.BranchRegexp)
-	s.applyHistoryTo(&cfg)
-	return cfg
+	var sourceBranchAnalyzedAfter *string
+	if s.Source != nil {
+		sourceBranchAnalyzedAfter = s.Source.BranchAnalyzedAfter
+	}
+	cfg.BranchAnalyzedAfter = resolveBranchAnalyzedAfter(sourceBranchAnalyzedAfter, s.BranchAnalyzedAfter)
+	s.applyHistoryTo(cfg)
 }
 
-func (s configFileShape) toExtractConfig() ExtractConfig {
-	var cfg ExtractConfig
-	// Start the spacing at the "caller said nothing" sentinel so an absent
-	// history_min_interval_days resolves through applyDefaults (now also 0)
-	// the same as an explicit 0. Every shape branch below overwrites it only
-	// when the key was actually present in the JSON.
-	cfg.HistoryMinIntervalDays = HistoryUnset
-	switch {
-	case s.Source != nil || s.Target != nil:
-		// #266 unified shape. Extract pulls from the "source"
-		// sub-object; top-level concurrency / timeout / export_directory
-		// supply defaults. The "target" sub-object is ignored.
-		cfg = s.toExtractConfigUnified()
-	case s.SonarQube != nil:
-		cfg.URL = s.SonarQube.URL
-		cfg.Token = s.SonarQube.Token
-		if s.Settings != nil {
-			cfg.ExportDirectory = s.Settings.ExportDirectory
-			cfg.Concurrency = s.Settings.Concurrency
-			cfg.Timeout = s.Settings.Timeout
-		}
-		cfg.SkipProjectDataMigration = s.SkipProjectDataMigration
-		cfg.SkipIssueSync = s.SkipIssueSync
-		cfg.objectsRaw = s.Objects
-		cfg.ProjectKey = s.ProjectKey
-		cfg.BranchRegexp = s.BranchRegexp
-		s.applyHistoryTo(&cfg)
-	case s.Extract != nil:
-		cfg = s.Extract.toExtractConfig()
-		// #536: "objects" / "project_key" set at the outermost (global)
-		// level of a command-sectioned config win over the same fields
-		// nested inside "extract" — but fall back to the nested value
-		// (already captured above by the recursive call) when the outer
-		// level didn't set them.
-		if len(s.Objects) > 0 {
-			cfg.objectsRaw = s.Objects
-		}
-		if s.ProjectKey != "" {
-			cfg.ProjectKey = s.ProjectKey
-		}
-		if s.BranchRegexp != "" {
-			cfg.BranchRegexp = s.BranchRegexp
-		}
-	default:
-		cfg.URL = s.URL
-		cfg.Token = s.Token
-		cfg.ExportDirectory = s.ExportDirectory
-		cfg.ExtractType = s.ExtractType
-		cfg.PEMFilePath = s.PEMFilePath
-		cfg.KeyFilePath = s.KeyFilePath
-		cfg.CertPassword = s.CertPassword
-		cfg.Insecure = s.Insecure
-		cfg.Concurrency = s.Concurrency
-		cfg.Timeout = s.Timeout
-		cfg.ExtractID = s.ExtractID
-		cfg.TargetTask = s.TargetTask
-		cfg.SkipProjectDataMigration = s.SkipProjectDataMigration
-		cfg.SkipIssueSync = s.SkipIssueSync
-		cfg.objectsRaw = s.Objects
-		cfg.ProjectKey = s.ProjectKey
-		cfg.BranchRegexp = s.BranchRegexp
-		s.applyHistoryTo(&cfg)
+// applyLegacySonarQubeShapeTo populates cfg from the legacy "sonarqube"
+// sub-object shape.
+func (s configFileShape) applyLegacySonarQubeShapeTo(cfg *ExtractConfig) {
+	cfg.URL = s.SonarQube.URL
+	cfg.Token = s.SonarQube.Token
+	if s.Settings != nil {
+		cfg.ExportDirectory = s.Settings.ExportDirectory
+		cfg.Concurrency = s.Settings.Concurrency
+		cfg.Timeout = s.Settings.Timeout
 	}
-	return cfg
+	cfg.SkipProjectDataMigration = s.SkipProjectDataMigration
+	cfg.SkipIssueSync = s.SkipIssueSync
+	cfg.objectsRaw = s.Objects
+	cfg.ProjectKey = s.ProjectKey
+	cfg.BranchRegexp = s.BranchRegexp
+	cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
+	s.applyHistoryTo(cfg)
+}
+
+// applySectionedShapeTo populates cfg from the command-sectioned "extract"
+// sub-object shape. #536: "objects" / "project_key" set at the outermost
+// (global) level of a command-sectioned config win over the same fields
+// nested inside "extract" — but fall back to the nested value (already
+// captured by the recursive call) when the outer level didn't set them.
+func (s configFileShape) applySectionedShapeTo(cfg *ExtractConfig) {
+	*cfg = s.Extract.toExtractConfig()
+	if len(s.Objects) > 0 {
+		cfg.objectsRaw = s.Objects
+	}
+	if s.ProjectKey != "" {
+		cfg.ProjectKey = s.ProjectKey
+	}
+	if s.BranchRegexp != "" {
+		cfg.BranchRegexp = s.BranchRegexp
+	}
+	if s.BranchAnalyzedAfter != "" {
+		cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
+	}
+}
+
+// applyFlatShapeTo populates cfg from the original flat (pre-#266) shape.
+func (s configFileShape) applyFlatShapeTo(cfg *ExtractConfig) {
+	cfg.URL = s.URL
+	cfg.Token = s.Token
+	cfg.ExportDirectory = s.ExportDirectory
+	cfg.ExtractType = s.ExtractType
+	cfg.PEMFilePath = s.PEMFilePath
+	cfg.KeyFilePath = s.KeyFilePath
+	cfg.CertPassword = s.CertPassword
+	cfg.Insecure = s.Insecure
+	cfg.Concurrency = s.Concurrency
+	cfg.Timeout = s.Timeout
+	cfg.ExtractID = s.ExtractID
+	cfg.TargetTask = s.TargetTask
+	cfg.SkipProjectDataMigration = s.SkipProjectDataMigration
+	cfg.SkipIssueSync = s.SkipIssueSync
+	cfg.objectsRaw = s.Objects
+	cfg.ProjectKey = s.ProjectKey
+	cfg.BranchRegexp = s.BranchRegexp
+	cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
+	s.applyHistoryTo(cfg)
 }
 
 // LoadExtractConfigFile parses a JSON config file in any of the four

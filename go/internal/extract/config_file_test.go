@@ -521,3 +521,79 @@ func TestLoadExtractConfigFileObjectsAndProjectKey_InvalidObjectsValueErrors(t *
 		t.Errorf("expected error to name the invalid token, got: %v", err)
 	}
 }
+
+// #583: branch_analyzed_after precedence tests, one per documented shape,
+// mirroring the objects/project_key precedence tests above.
+
+func TestLoadExtractConfigFileBranchAnalyzedAfter_FlatShape(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "flat.json")
+	body := `{"url": "u", "token": "t", "branch_analyzed_after": "2024-01-01"}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchAnalyzedAfter != "2024-01-01" {
+		t.Errorf("BranchAnalyzedAfter = %q, want %q", cfg.BranchAnalyzedAfter, "2024-01-01")
+	}
+}
+
+func TestLoadExtractConfigFileBranchAnalyzedAfter_UnifiedShapeTopLevelOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "unified.json")
+	body := `{
+  "branch_analyzed_after": "2024-01-01",
+  "source": {"url": "u", "token": "t"}
+}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchAnalyzedAfter != "2024-01-01" {
+		t.Errorf("BranchAnalyzedAfter = %q, want top-level fallback %q", cfg.BranchAnalyzedAfter, "2024-01-01")
+	}
+}
+
+func TestLoadExtractConfigFileBranchAnalyzedAfter_SourceOverridesTopLevel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "unified.json")
+	body := `{
+  "branch_analyzed_after": "2024-01-01",
+  "source": {"url": "u", "token": "t", "branch_analyzed_after": "2025-06-01"}
+}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchAnalyzedAfter != "2025-06-01" {
+		t.Errorf("BranchAnalyzedAfter = %q, want source override %q", cfg.BranchAnalyzedAfter, "2025-06-01")
+	}
+}
+
+// TestLoadExtractConfigFileBranchAnalyzedAfter_SourceExplicitEmptyOverridesTopLevel
+// proves the tri-state pointer design (#583): an explicit
+// "source.branch_analyzed_after": "" clears a non-empty top-level filter for
+// extract, rather than being treated as "not set" and falling through.
+func TestLoadExtractConfigFileBranchAnalyzedAfter_SourceExplicitEmptyOverridesTopLevel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "unified.json")
+	body := `{
+  "branch_analyzed_after": "2024-01-01",
+  "source": {"url": "u", "token": "t", "branch_analyzed_after": ""}
+}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchAnalyzedAfter != "" {
+		t.Errorf("BranchAnalyzedAfter = %q, want explicit empty override to clear the top-level filter", cfg.BranchAnalyzedAfter)
+	}
+}

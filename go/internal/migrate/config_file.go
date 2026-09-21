@@ -61,6 +61,12 @@ type configFileShape struct {
 	MigrateHistory *FlexibleBool `json:"migrate_history"`
 	// MaxIssueComments — see MigrateConfig.MaxIssueComments (#571).
 	MaxIssueComments int `json:"max_issue_comments"`
+	// BranchAnalyzedAfter — see MigrateConfig.BranchAnalyzedAfter (#583).
+	// Applies to shapes that have no source/target split (SonarCloud,
+	// command-sectioned, flat); the unified shape resolves it via
+	// unifiedTargetBlock.BranchAnalyzedAfter / resolveBranchAnalyzedAfter
+	// instead, since that shape can override it per-phase.
+	BranchAnalyzedAfter string `json:"branch_analyzed_after"`
 	// ConfirmedOrgs is reset-only: it additively pre-populates
 	// ResetConfig.ConfirmedOrgs (#550) for config-driven / programmatic
 	// callers that don't go through cmd/reset.go's interactive
@@ -149,6 +155,12 @@ type unifiedTargetBlock struct {
 	MaxIssueComments int `json:"max_issue_comments"`
 	// BranchRegexp — see MigrateConfig.BranchRegexp (#582).
 	BranchRegexp string `json:"branch_regexp"`
+	// BranchAnalyzedAfter — see configFileShape.BranchAnalyzedAfter (#583).
+	// Pointer (not a plain string) so an explicit "" here can override a
+	// non-empty top-level value, distinguishing "target didn't set this"
+	// (nil, fall through to top-level) from "target explicitly wants no
+	// filter" (non-nil, even when the pointed-to value is "").
+	BranchAnalyzedAfter *string `json:"branch_analyzed_after"`
 }
 
 type sonarCloudBlock struct {
@@ -230,6 +242,14 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			targetMigrateHistory = s.Target.MigrateHistory
 		}
 		cfg.MigrateHistory = resolveMigrateHistory(targetMigrateHistory, s.MigrateHistory)
+		// #583 — target.branch_analyzed_after wins when explicitly present
+		// (even if empty, meaning "no filter for migrate"), else the
+		// top-level field, else "" (no filter).
+		var targetBranchAnalyzedAfter *string
+		if s.Target != nil {
+			targetBranchAnalyzedAfter = s.Target.BranchAnalyzedAfter
+		}
+		cfg.BranchAnalyzedAfter = resolveBranchAnalyzedAfter(targetBranchAnalyzedAfter, s.BranchAnalyzedAfter)
 		if cfg.Concurrency == 0 {
 			cfg.Concurrency = s.Concurrency
 		}
@@ -277,6 +297,7 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		}
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKeyFilter = s.ProjectKey
+		cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
 		return cfg
 	case s.Migrate != nil:
 		cfg := s.Migrate.toMigrateConfig()
@@ -312,6 +333,10 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		if s.BranchRegexp != "" {
 			cfg.BranchRegexp = s.BranchRegexp
 		}
+		// Same outer-wins-else-inner semantics for branch_analyzed_after (#583).
+		if s.BranchAnalyzedAfter != "" {
+			cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
+		}
 		return cfg
 	default:
 		cfg := MigrateConfig{
@@ -333,6 +358,8 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			// #474 — flat shape reads the field directly.
 			UnsupportedLanguages: s.UnsupportedLanguages,
 			BranchRegexp:         s.BranchRegexp,
+			// #583 — flat shape reads the field directly.
+			BranchAnalyzedAfter: s.BranchAnalyzedAfter,
 		}
 		if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
 			cfg.SkipIssueSync = s.SkipIssueSync.Value

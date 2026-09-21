@@ -418,93 +418,136 @@ func plural(n int, one, many string) string {
 func renderMarkdownWarnings(sb *strings.Builder, summary *MigrationSummary) {
 	w := summary.Warnings
 	if len(w.Retries) == 0 && len(w.BranchSkips) == 0 &&
-		len(w.GateConditions) == 0 && len(w.MetricRemaps) == 0 {
+		len(w.GateConditions) == 0 && len(w.MetricRemaps) == 0 &&
+		len(w.ForcedMainBranches) == 0 {
 		return
 	}
 
 	sb.WriteString("## Warnings, Retries & Skips\n\n")
 
-	if len(w.Retries) > 0 {
-		columns := []report.Column{
-			{Header: "Method", Key: "method"},
-			{Header: "Endpoint", Key: "endpoint"},
-			{Header: "Count", Key: "count"},
-			{Header: "Max Attempt", Key: "maxAttempt"},
-			{Header: "Last Status", Key: "lastStatus"},
-		}
-		rows := make([]map[string]any, 0, len(w.Retries))
-		for _, r := range w.Retries {
-			rows = append(rows, map[string]any{
-				"method":     mdCell(r.Method),
-				"endpoint":   mdCell(r.Endpoint),
-				"count":      r.Count,
-				"maxAttempt": r.MaxAttempt,
-				"lastStatus": mdCell(r.LastStatus),
-			})
-		}
-		sb.WriteString(report.GenerateSection(columns, rows,
-			report.WithTitle("Retries", 3)))
-		sb.WriteString("\n")
-	}
+	renderMarkdownRetries(sb, w.Retries)
+	renderMarkdownBranchSkips(sb, w.BranchSkips)
+	renderMarkdownGateConditions(sb, w.GateConditions)
+	renderMarkdownMetricRemaps(sb, w.MetricRemaps)
+	renderMarkdownForcedMainBranches(sb, w.ForcedMainBranches)
+}
 
-	if len(w.BranchSkips) > 0 {
-		columns := []report.Column{
-			{Header: "Branch", Key: "branch"},
-			{Header: "Findings", Key: "findings"},
-			{Header: "Reason", Key: "reason"},
-		}
-		rows := make([]map[string]any, 0, len(w.BranchSkips))
-		for _, s := range w.BranchSkips {
-			rows = append(rows, map[string]any{
-				"branch":   mdCell(s.Branch),
-				"findings": s.Findings,
-				"reason":   mdCell(s.Reason),
-			})
-		}
-		sb.WriteString(report.GenerateSection(columns, rows,
-			report.WithTitle("Branch Skips", 3)))
-		sb.WriteString("\n")
+func renderMarkdownRetries(sb *strings.Builder, retries []RetryStat) {
+	if len(retries) == 0 {
+		return
 	}
+	columns := []report.Column{
+		{Header: "Method", Key: "method"},
+		{Header: "Endpoint", Key: "endpoint"},
+		{Header: "Count", Key: "count"},
+		{Header: "Max Attempt", Key: "maxAttempt"},
+		{Header: "Last Status", Key: "lastStatus"},
+	}
+	rows := make([]map[string]any, 0, len(retries))
+	for _, r := range retries {
+		rows = append(rows, map[string]any{
+			"method":     mdCell(r.Method),
+			"endpoint":   mdCell(r.Endpoint),
+			"count":      r.Count,
+			"maxAttempt": r.MaxAttempt,
+			"lastStatus": mdCell(r.LastStatus),
+		})
+	}
+	sb.WriteString(report.GenerateSection(columns, rows,
+		report.WithTitle("Retries", 3)))
+	sb.WriteString("\n")
+}
 
-	if len(w.GateConditions) > 0 {
-		columns := []report.Column{
-			{Header: "Gate", Key: "gate"},
-			{Header: "Metric", Key: "metric"},
-			{Header: "Action", Key: "action"},
-			{Header: "Note", Key: "note"},
-		}
-		rows := make([]map[string]any, 0, len(w.GateConditions))
-		for _, g := range w.GateConditions {
-			rows = append(rows, map[string]any{
-				"gate":   mdCell(g.Gate),
-				"metric": mdCell(g.Metric),
-				"action": mdCell(g.Action),
-				"note":   mdCell(g.Note),
-			})
-		}
-		sb.WriteString(report.GenerateSection(columns, rows,
-			report.WithTitle("Gate Condition Skips", 3)))
-		sb.WriteString("\n")
+func renderMarkdownBranchSkips(sb *strings.Builder, skips []BranchSkip) {
+	if len(skips) == 0 {
+		return
 	}
+	columns := []report.Column{
+		{Header: "Branch", Key: "branch"},
+		{Header: "Findings", Key: "findings"},
+		{Header: "Reason", Key: "reason"},
+	}
+	rows := make([]map[string]any, 0, len(skips))
+	for _, s := range skips {
+		rows = append(rows, map[string]any{
+			"branch":   mdCell(s.Branch),
+			"findings": s.Findings,
+			"reason":   mdCell(s.Reason),
+		})
+	}
+	sb.WriteString(report.GenerateSection(columns, rows,
+		report.WithTitle("Branch Skips", 3)))
+	sb.WriteString("\n")
+}
 
-	if len(w.MetricRemaps) > 0 {
-		columns := []report.Column{
-			{Header: "Gate", Key: "gate"},
-			{Header: "Source Metric", Key: "sourceMetric"},
-			{Header: "Target Metric", Key: "targetMetric"},
-		}
-		rows := make([]map[string]any, 0, len(w.MetricRemaps))
-		for _, m := range w.MetricRemaps {
-			rows = append(rows, map[string]any{
-				"gate":         mdCell(m.Gate),
-				"sourceMetric": mdCell(m.SourceMetric),
-				"targetMetric": mdCell(m.TargetMetric),
-			})
-		}
-		sb.WriteString(report.GenerateSection(columns, rows,
-			report.WithTitle("Metric Remaps", 3)))
-		sb.WriteString("\n")
+func renderMarkdownGateConditions(sb *strings.Builder, conditions []GateConditionSkip) {
+	if len(conditions) == 0 {
+		return
 	}
+	columns := []report.Column{
+		{Header: "Gate", Key: "gate"},
+		{Header: "Metric", Key: "metric"},
+		{Header: "Action", Key: "action"},
+		{Header: "Note", Key: "note"},
+	}
+	rows := make([]map[string]any, 0, len(conditions))
+	for _, g := range conditions {
+		rows = append(rows, map[string]any{
+			"gate":   mdCell(g.Gate),
+			"metric": mdCell(g.Metric),
+			"action": mdCell(g.Action),
+			"note":   mdCell(g.Note),
+		})
+	}
+	sb.WriteString(report.GenerateSection(columns, rows,
+		report.WithTitle("Gate Condition Skips", 3)))
+	sb.WriteString("\n")
+}
+
+func renderMarkdownMetricRemaps(sb *strings.Builder, remaps []MetricRemap) {
+	if len(remaps) == 0 {
+		return
+	}
+	columns := []report.Column{
+		{Header: "Gate", Key: "gate"},
+		{Header: "Source Metric", Key: "sourceMetric"},
+		{Header: "Target Metric", Key: "targetMetric"},
+	}
+	rows := make([]map[string]any, 0, len(remaps))
+	for _, m := range remaps {
+		rows = append(rows, map[string]any{
+			"gate":         mdCell(m.Gate),
+			"sourceMetric": mdCell(m.SourceMetric),
+			"targetMetric": mdCell(m.TargetMetric),
+		})
+	}
+	sb.WriteString(report.GenerateSection(columns, rows,
+		report.WithTitle("Metric Remaps", 3)))
+	sb.WriteString("\n")
+}
+
+func renderMarkdownForcedMainBranches(sb *strings.Builder, forced []ForcedMainBranch) {
+	if len(forced) == 0 {
+		return
+	}
+	columns := []report.Column{
+		{Header: "Project", Key: "project"},
+		{Header: "Branch", Key: "branch"},
+		{Header: "Analysis Date", Key: "analysisDate"},
+		{Header: "Cutoff", Key: "cutoff"},
+	}
+	rows := make([]map[string]any, 0, len(forced))
+	for _, f := range forced {
+		rows = append(rows, map[string]any{
+			"project":      mdCell(f.Project),
+			"branch":       mdCell(f.Branch),
+			"analysisDate": mdCell(f.AnalysisDate),
+			"cutoff":       mdCell(f.Cutoff),
+		})
+	}
+	sb.WriteString(report.GenerateSection(columns, rows,
+		report.WithTitle("Force-Included Main Branches", 3)))
+	sb.WriteString("\n")
 }
 
 // renderMarkdownBranchProjectData writes the "## Branch Project Data" table.

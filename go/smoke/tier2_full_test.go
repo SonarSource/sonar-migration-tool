@@ -209,6 +209,10 @@ func TestTier2_PathB_FullPipeline(t *testing.T) {
 			"--config", cfg.path,
 			"--export_directory", exportDir,
 			"--project_key", projectKey,
+			// #583 — a deliberately permissive cutoff: exercises the
+			// --branch_analyzed_after code path live without excluding this
+			// project's actual branches.
+			"--branch_analyzed_after", "2000-01-01",
 		)
 		requireExit(t, res, 0, "extract")
 	})
@@ -267,6 +271,9 @@ func TestTier2_PathB_FullPipeline(t *testing.T) {
 			"--config", cfg.path,
 			"--export_directory", exportDir,
 			"--project_key", projectKey,
+			// #583 — same permissive cutoff as extract; exercises the
+			// migrate-side filter live.
+			"--branch_analyzed_after", "2000-01-01",
 		)
 		requireExit(t, res, 0, "migrate")
 		assertNoPanics(t, res.combined())
@@ -381,6 +388,34 @@ func assertReportAccuracy(t *testing.T, mdPath string, observedWallClock time.Du
 	// the fix's own example, 47.9s of work inside a 26.7s run) instead of
 	// measuring the wall-clock union.
 	assertTotalDurationSane(t, lines, observedWallClock)
+
+	// Assertion D (#583) is best-effort: this run's --branch_analyzed_after
+	// cutoff (2000-01-01, see TestTier2_PathB_FullPipeline) is deliberately
+	// permissive, so the test project's real branches are not expected to
+	// trigger a force-included main branch. It only checks that IF the
+	// section is present, it renders the exact heading the report package
+	// emits — never fails when the section is absent.
+	assertForcedMainBranchSectionWellFormed(t, string(raw))
+}
+
+// assertForcedMainBranchSectionWellFormed implements Assertion D (#583): if
+// migration_summary.md contains a "Force-Included Main Branches" section
+// (WarningLedger.ForcedMainBranches, go/internal/report/summary), it must
+// use the exact heading text the report package renders. Logs and returns
+// without failing when the section is absent — a live run's real branch
+// dates aren't controlled by this test, so force-inclusion is not
+// guaranteed to occur.
+func assertForcedMainBranchSectionWellFormed(t *testing.T, raw string) {
+	t.Helper()
+
+	const heading = "Force-Included Main Branches"
+	if !strings.Contains(raw, heading) {
+		t.Logf("assertForcedMainBranchSectionWellFormed: no %q section found in migration_summary.md — this run's branches did not trigger --branch_analyzed_after force-inclusion, skipping", heading)
+		return
+	}
+	if !strings.Contains(raw, "Analysis Date") || !strings.Contains(raw, "Cutoff") {
+		t.Errorf("migration_summary.md has a %q section but is missing the expected Analysis Date / Cutoff columns", heading)
+	}
 }
 
 // assertAttemptedRowsBalance implements Assertion A: it looks for a Markdown

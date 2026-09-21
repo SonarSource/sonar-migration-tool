@@ -85,21 +85,7 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 		}
 		g.Go(func() error {
 			defer gate.Release()
-			if gCtx.Err() != nil {
-				return gCtx.Err()
-			}
-
-			sqBranches := resolveProjectBranches(e, w, cloudKey, serverURL, serverKey)
-
-			scMainBranch := fetchSCMainBranch(gCtx, e, cloudKey)
-
-			// #474 — a rejected report used to be a Warn that left the task
-			// summary reporting nothing at all, so a transfer that migrated
-			// zero issues and zero branches still looked clean.
-			recordImportOutcome(e, counter, cloudKey,
-				importProjectBranches(gCtx, e, proj, sqBranches, scMainBranch, completed, w))
-			prog.Increment()
-			return nil
+			return importProjectDataOne(gCtx, e, proj, cloudKey, serverURL, serverKey, completed, w, counter, prog)
 		})
 	}
 	if err := g.Wait(); err != nil {
@@ -111,10 +97,13 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 // resolveProjectBranches builds the final list of branches to import for
 // one project: collect from the source (defaulting to a synthetic main
 // branch when extract has no branch data), sort main first, apply the
-// glob exclude filter and the --branch_regexp include filter (#582), then
-// enforce the hard per-project branch cap (#584) on whatever survives
-// those filters — recording any branches the cap drops so the migration
-// report can name them.
+// glob exclude filter, the --branch_regexp include filter (#582), and
+// --branch_analyzed_after (#583) — logging a warning when the date filter
+// force-includes main — then enforce the hard per-project branch cap
+// (#584) on whatever survives those filters, recording any branches the
+// cap drops so the migration report can name them. Each stage
+// independently guarantees main survives it, so chaining them this way
+// still always leaves main in.
 func resolveProjectBranches(e *Executor, w *common.ChunkWriter, cloudKey, serverURL, serverKey string) []branchInfo {
 	sqBranches := collectBranchInfo(e, serverURL, serverKey)
 	if len(sqBranches) == 0 {
@@ -124,12 +113,44 @@ func resolveProjectBranches(e *Executor, w *common.ChunkWriter, cloudKey, server
 	sqBranches = filterBranches(sqBranches, e.ExcludeBranches)
 	sqBranches = filterBranchesByRegexp(sqBranches, e.BranchRe)
 
+	var forcedMain string
+	var forcedMainDate time.Time
+	sqBranches, forcedMain, forcedMainDate = filterBranchesByAnalyzedAfter(sqBranches, e.BranchAnalyzedAfter)
+	if forcedMain != "" {
+		e.Logger.Warn(common.ForcedMainBranchLogMessage,
+			"project", cloudKey, "branch", forcedMain,
+			"analysisDate", forcedMainDate, "cutoff", e.BranchAnalyzedAfter)
+	}
+
 	var dropped []branchInfo
 	sqBranches, dropped = capBranches(sqBranches, MaxBranchesPerProject)
 	for _, d := range dropped {
 		recordBranchLimitSkip(w, cloudKey, d.Name)
 	}
 	return sqBranches
+}
+
+// importProjectDataOne imports project data for a single project's branches.
+// Split out of runImportProjectData so the per-project work (branch
+// discovery, the #583 analyzed-after filter, and outcome recording) isn't
+// nested inside the fan-out loop and goroutine.
+func importProjectDataOne(ctx context.Context, e *Executor, proj json.RawMessage, cloudKey, serverURL, serverKey string,
+	completed map[string]bool, w *common.ChunkWriter, counter *TaskCounter, prog *common.ProgressLogger) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	sqBranches := resolveProjectBranches(e, w, cloudKey, serverURL, serverKey)
+
+	scMainBranch := fetchSCMainBranch(ctx, e, cloudKey)
+
+	// #474 — a rejected report used to be a Warn that left the task
+	// summary reporting nothing at all, so a transfer that migrated
+	// zero issues and zero branches still looked clean.
+	recordImportOutcome(e, counter, cloudKey,
+		importProjectBranches(ctx, e, proj, sqBranches, scMainBranch, completed, w))
+	prog.Increment()
+	return nil
 }
 
 // fetchSCMainBranch queries SonarCloud for the main branch name of a project.
@@ -1010,6 +1031,35 @@ func recordBranchLimitSkip(w *common.ChunkWriter, cloudKey, branchName string) {
 		"branch_limit_exceeded": true,
 	})
 	w.WriteOne(record) //nolint:errcheck
+}
+
+// filterBranchesByAnalyzedAfter applies --branch_analyzed_after (#583) to
+// branches already resolved for one project. Kept as an independent stage
+// from filterBranches (the --exclude_branches glob filter) so the two
+// compose by simple chaining, and so a future #582 (--branches) filter can
+// chain the same way. A nil cutoff is a no-op. Returns the kept branches
+// and, when non-empty, the name/date of a main branch that was
+// force-included despite not meeting the cutoff, for the caller to log and
+// surface in the report.
+func filterBranchesByAnalyzedAfter(branches []branchInfo, cutoff *time.Time) (kept []branchInfo, forcedMain string, forcedMainDate time.Time) {
+	if cutoff == nil {
+		return branches, "", time.Time{}
+	}
+	infos := make([]common.BranchDateInfo, len(branches))
+	for i, b := range branches {
+		infos[i] = common.BranchDateInfo{Name: b.Name, IsMain: b.IsMain, AnalysisDate: b.LastAnalysisDate}
+	}
+	res := common.SelectBranchesAnalyzedAfter(infos, cutoff)
+	keptNames := make(map[string]bool, len(res.Kept))
+	for _, k := range res.Kept {
+		keptNames[k.Name] = true
+	}
+	for _, b := range branches {
+		if keptNames[b.Name] {
+			kept = append(kept, b)
+		}
+	}
+	return kept, res.ForcedMainBranch, res.ForcedMainDate
 }
 
 func loadCompletedBranches(store *common.DataStore) map[string]bool {

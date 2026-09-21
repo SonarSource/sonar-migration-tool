@@ -106,6 +106,12 @@ type ExtractConfig struct {
 	// the default (0) in applyDefaults; 0 — whether defaulted or passed
 	// explicitly — means "no spacing rule, take every analysis".
 	HistoryMinIntervalDays int
+
+	// BranchAnalyzedAfter is the raw --branch_analyzed_after value (or the
+	// config file's resolved branch_analyzed_after / source.branch_analyzed_after),
+	// in YYYY-MM-DD form. "" means unset — no filter, every branch is
+	// selected (current behavior). #583.
+	BranchAnalyzedAfter string
 }
 
 // Executor is the runtime context passed to every task function.
@@ -138,6 +144,10 @@ type Executor struct {
 	MigrateHistory         bool
 	HistoryMaxPoints       int
 	HistoryMinIntervalDays int
+
+	// BranchAnalyzedAfter — see ExtractConfig. nil means unset: no filter,
+	// every branch is selected. #583.
+	BranchAnalyzedAfter *time.Time
 
 	mu              sync.Mutex
 	skippedProjects map[string]bool
@@ -223,6 +233,14 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 		}
 		executor.BranchRe = branchRe
 	}
+	// Defensive re-validation (#583): cmd/extract.go already validates
+	// --branch_analyzed_after before calling RunExtract, but this entry
+	// point also serves direct callers (e.g. the GUI wizard) that may not.
+	branchAnalyzedAfter, err := common.ParseBranchAnalyzedAfter(cfg.BranchAnalyzedAfter)
+	if err != nil {
+		return nil, err
+	}
+	executor.BranchAnalyzedAfter = branchAnalyzedAfter
 
 	// Truncation tracking (#574). The observer is installed on the raw
 	// client — one installation covering all of its call sites,
