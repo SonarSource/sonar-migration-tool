@@ -648,27 +648,37 @@ func (a *projectSettingsApplier) propagateGlobalsToProjects(ctx context.Context)
 		if len(bucket) == 0 {
 			continue
 		}
-		coverSet := covered[projLookupKey]
-		for _, entry := range bucket {
-			if a.skipPropagation(pm, entry, coverSet) {
-				continue
-			}
-			if err := gate.Acquire(gctx); err != nil {
-				if waitErr := g.Wait(); waitErr != nil {
-					return waitErr
-				}
-				return err
-			}
-			g.Go(func() error {
-				defer gate.Release()
-				if gctx.Err() != nil {
-					return gctx.Err()
-				}
-				return a.propagateOne(gctx, pm, entry)
-			})
+		if err := a.enqueuePropagations(gctx, g, gate, pm, bucket, covered[projLookupKey]); err != nil {
+			return err
 		}
 	}
 	return g.Wait()
+}
+
+// enqueuePropagations submits one gated goroutine per bucket entry that
+// still needs propagating onto pm (skipPropagation filters out entries the
+// project already overrides). It stops submitting and drains g on the
+// first admission error, same as the inline loop this was extracted from.
+func (a *projectSettingsApplier) enqueuePropagations(gctx context.Context, g *errgroup.Group, gate *DynamicGate, pm projectMapping, bucket []globalEntry, coverSet map[string]bool) error {
+	for _, entry := range bucket {
+		if a.skipPropagation(pm, entry, coverSet) {
+			continue
+		}
+		if err := gate.Acquire(gctx); err != nil {
+			if waitErr := g.Wait(); waitErr != nil {
+				return waitErr
+			}
+			return err
+		}
+		g.Go(func() error {
+			defer gate.Release()
+			if gctx.Err() != nil {
+				return gctx.Err()
+			}
+			return a.propagateOne(gctx, pm, entry)
+		})
+	}
+	return nil
 }
 
 // applyProjectSetting dispatches a single getProjectSettings record via
