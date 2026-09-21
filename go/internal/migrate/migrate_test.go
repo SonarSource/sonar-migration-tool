@@ -378,38 +378,36 @@ func TestPlanPhasesObjectsSettingsOnlyExcludesProjectDataTasks(t *testing.T) {
 func TestPlanPhasesEveryObjectsCombinationProducesAValidPlan(t *testing.T) {
 	reg := BuildMigrateRegistry(RegisterAll())
 	for _, cat := range common.AllObjects {
-		objects, err := common.ParseObjects([]string{cat})
-		if err != nil {
-			t.Fatalf("ParseObjects(%s): %v", cat, err)
-		}
-		targets := MigrateTargetTasks(reg, "", MigrateTargetTasksFlags{SkipProfiles: false, IncludeProjectData: true, SkipIssueSync: false, SkipProjectDataMigration: false}, nil, objects)
-		excluded := excludedMigrateTasks(objects)
-		taskSet := ResolveDependenciesExcluding(targets, reg, excluded)
-		if taskSet == nil {
-			t.Errorf("objects=%s: ResolveDependenciesExcluding returned nil", cat)
-			continue
-		}
-		if _, err := PlanPhasesExcluding(taskSet, reg, excluded); err != nil {
-			t.Errorf("objects=%s: PlanPhasesExcluding: %v", cat, err)
-		}
+		assertValidPlanForCategories(t, reg, cat, cat)
 	}
 	for i, a := range common.AllObjects {
 		for _, b := range common.AllObjects[i+1:] {
-			objects, err := common.ParseObjects([]string{a, b})
-			if err != nil {
-				t.Fatalf("ParseObjects(%s,%s): %v", a, b, err)
-			}
-			targets := MigrateTargetTasks(reg, "", MigrateTargetTasksFlags{SkipProfiles: false, IncludeProjectData: true, SkipIssueSync: false, SkipProjectDataMigration: false}, nil, objects)
-			excluded := excludedMigrateTasks(objects)
-			taskSet := ResolveDependenciesExcluding(targets, reg, excluded)
-			if taskSet == nil {
-				t.Errorf("objects=%s,%s: ResolveDependenciesExcluding returned nil", a, b)
-				continue
-			}
-			if _, err := PlanPhasesExcluding(taskSet, reg, excluded); err != nil {
-				t.Errorf("objects=%s,%s: PlanPhasesExcluding: %v", a, b, err)
-			}
+			assertValidPlanForCategories(t, reg, a+","+b, a, b)
 		}
+	}
+}
+
+// assertValidPlanForCategories resolves and plans the migrate task set for
+// the given --objects category selection, failing the test with the exact
+// combination named if any step errors. Split out of
+// TestPlanPhasesEveryObjectsCombinationProducesAValidPlan to keep its
+// cognitive complexity down — the two sweeps (single-category, pairwise)
+// only differ in which categories they pass in.
+func assertValidPlanForCategories(t *testing.T, reg map[string]*TaskDef, label string, cats ...string) {
+	t.Helper()
+	objects, err := common.ParseObjects(cats)
+	if err != nil {
+		t.Fatalf("ParseObjects(%s): %v", label, err)
+	}
+	targets := MigrateTargetTasks(reg, "", MigrateTargetTasksFlags{SkipProfiles: false, IncludeProjectData: true, SkipIssueSync: false, SkipProjectDataMigration: false}, nil, objects)
+	excluded := excludedMigrateTasks(objects)
+	taskSet := ResolveDependenciesExcluding(targets, reg, excluded)
+	if taskSet == nil {
+		t.Errorf("objects=%s: ResolveDependenciesExcluding returned nil", label)
+		return
+	}
+	if _, err := PlanPhasesExcluding(taskSet, reg, excluded); err != nil {
+		t.Errorf("objects=%s: PlanPhasesExcluding: %v", label, err)
 	}
 }
 
