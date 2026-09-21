@@ -145,6 +145,18 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 		cfg.ExcludeBranches, _ = cmd.Flags().GetStringSlice("exclude_branches")
 	}
 	overrideString(cmd, flagBranchRegexp, &cfg.BranchRegexp)
+	// #582 — reject an invalid --branch_regexp pattern up front, mirroring
+	// applyMigrateProjectKeyFlag above and the equivalent checks already
+	// present in extract's RunE and transfer's validateTransferConfig.
+	// Without this, migrate was the only one of the three commands that
+	// deferred the check to RunMigrate's own defensive compile — same
+	// fail-fast outcome, but only by accident, and RunMigrate's comment
+	// claiming this cmd-side validation already existed was not true.
+	if cfg.BranchRegexp != "" {
+		if _, err := extract.CompileProjectKeyPattern(cfg.BranchRegexp); err != nil {
+			return cfg, fmt.Errorf("invalid branch regexp pattern %q: %w", cfg.BranchRegexp, err)
+		}
+	}
 	applyFlagBool(cmd, flagFastSync, &cfg.FastSync)
 	applyFlagBool(cmd, flagMigrateHistory, &cfg.MigrateHistory)
 	applyFlagInt(cmd, flagMaxIssueComments, &cfg.MaxIssueComments)
