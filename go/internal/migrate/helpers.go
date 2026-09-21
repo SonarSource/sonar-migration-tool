@@ -803,12 +803,52 @@ func runProjectSyncLoop[T any](
 	items []T, label string, interval int64,
 	apply func(ctx context.Context, item T),
 ) {
+	runProjectSyncLoopBounded(ctx, e, items, label, interval, 0, apply)
+}
+
+// nestedSyncLoopConcurrency bounds a runProjectSyncLoop that is itself
+// invoked from inside another fan-out — syncProjectIssues and
+// syncProjectHotspots are called per project by runSyncIssueMetadata's
+// and runSyncHotspotMetadata's own forEachMigrateItem loops, so both
+// levels reading the live ConcurrencyLimiter.Current() would put
+// Current()² requests in flight for a single task (up to 10,000 at the
+// ceiling of 100).
+//
+// That aggregate matters because throttleTransport's SlidingWindowLimiter
+// makes excess callers WAIT inside the round trip, and sqapi sets
+// http.Client.Timeout (60s), which the stdlib turns into a deadline on
+// the request context for a layered transport stack like ours. Queue
+// long enough and requests fail with "waiting for API rate limit slot:
+// context deadline exceeded" instead of merely being slowed down —
+// proactive throttling turning into request failures.
+//
+// A small constant, not a fraction of Current(): the inner loop's unit
+// is one fast Cloud call, the outer per-project loop is what genuinely
+// benefits from tracking observed latency, and bounding the inner level
+// is enough to keep aggregate demand sane. The top-level
+// runProjectSyncLoop call in sync_issues_standalone.go is NOT nested and
+// deliberately keeps the dynamic limit.
+const nestedSyncLoopConcurrency = 10
+
+// runProjectSyncLoopBounded is runProjectSyncLoop with an explicit
+// concurrency bound. concurrency <= 0 means "use the live dynamic
+// ConcurrencyLimiter" (the top-level, non-nested case); a positive value
+// pins a fixed bound for this loop only — see nestedSyncLoopConcurrency.
+func runProjectSyncLoopBounded[T any](
+	ctx context.Context, e *Executor,
+	items []T, label string, interval int64, concurrency int,
+	apply func(ctx context.Context, item T),
+) {
 	prog := common.NewProgressLoggerWithInterval(e.Logger, label, len(items), interval)
 	// DynamicGate, not errgroup.SetLimit — see the doc comment on
 	// DynamicGate (#573): SetLimit freezes at whatever Current() is right
 	// now for this errgroup's entire lifetime, and this loop runs across
 	// every project's issues/hotspots, easily spanning many minutes.
-	gate := NewDynamicGate(e.ConcurrencyLimiter)
+	limiter := e.ConcurrencyLimiter
+	if concurrency > 0 {
+		limiter = NewFixedConcurrencyLimiter(concurrency)
+	}
+	gate := NewDynamicGate(limiter)
 	g, gctx := errgroup.WithContext(ctx)
 	for _, item := range items {
 		if err := gate.Acquire(gctx); err != nil {

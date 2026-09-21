@@ -258,9 +258,11 @@ type Executor struct {
 	Mapping   structure.ExtractMapping
 	// ConcurrencyLimiter provides a live capacity figure, NOT a semaphore.
 	// Nothing in this package acquires or releases it; every reference
-	// reads ConcurrencyLimiter.Current() to size a per-task errgroup limit.
-	// Each task therefore gets its own independent limit rather than
-	// sharing one pool. Always dynamic (#573): a background goroutine
+	// reads ConcurrencyLimiter.Current() to size a per-task fan-out limit
+	// (an errgroup.SetLimit for the few still-fixed/serial cases, a
+	// DynamicGate for everything else, #573). Each task therefore gets
+	// its own independent limit rather than sharing one pool. Always
+	// dynamic (#573): a background goroutine
 	// recalculates Current() every 30s from observed API latency,
 	// targeting APIMaxRatePerMin calls/min — cfg.Concurrency, if set, is
 	// only the starting value it seeds from, never a permanent fixed cap.

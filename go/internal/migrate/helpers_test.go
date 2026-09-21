@@ -545,6 +545,80 @@ func TestRunProjectSyncLoop(t *testing.T) {
 	})
 }
 
+// #573 follow-up — runProjectSyncLoopBounded's explicit bound is what
+// keeps the NESTED sync loops (syncProjectIssues / syncProjectHotspots,
+// each called per-project from inside their task's own fan-out) from
+// putting Current()² requests in flight. See nestedSyncLoopConcurrency:
+// that aggregate matters because excess callers queue inside
+// throttleTransport's round trip, against the 60s HTTP client timeout.
+func TestRunProjectSyncLoopBounded(t *testing.T) {
+	// observeMaxInFlight runs the loop and reports the highest number of
+	// apply calls that were ever executing simultaneously.
+	observeMaxInFlight := func(t *testing.T, e *Executor, concurrency int, items int) int64 {
+		t.Helper()
+		var inFlight, maxInFlight atomic.Int64
+		runProjectSyncLoopBounded(context.Background(), e, make([]int, items), "sync:", 1000, concurrency,
+			func(_ context.Context, _ int) {
+				cur := inFlight.Add(1)
+				for {
+					prev := maxInFlight.Load()
+					if cur <= prev || maxInFlight.CompareAndSwap(prev, cur) {
+						break
+					}
+				}
+				// Hold the slot briefly so overlap is observable.
+				time.Sleep(2 * time.Millisecond)
+				inFlight.Add(-1)
+			})
+		return maxInFlight.Load()
+	}
+
+	t.Run("a positive bound caps in-flight work below the dynamic limit", func(t *testing.T) {
+		logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		// The executor's own limiter is deliberately much higher than the
+		// bound, so a regression that ignored the bound would show up as
+		// in-flight work far above it.
+		e := &Executor{ConcurrencyLimiter: NewFixedConcurrencyLimiter(50), Logger: logger}
+
+		const bound = 3
+		got := observeMaxInFlight(t, e, bound, 30)
+		if got > bound {
+			t.Errorf("max in-flight = %d, want <= the explicit bound %d", got, bound)
+		}
+		if got == 0 {
+			t.Fatal("apply was never called")
+		}
+	})
+
+	t.Run("a non-positive bound falls back to the executor's dynamic limiter", func(t *testing.T) {
+		logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		const dynamic = 4
+		e := &Executor{ConcurrencyLimiter: NewFixedConcurrencyLimiter(dynamic), Logger: logger}
+
+		got := observeMaxInFlight(t, e, 0, 30)
+		if got > dynamic {
+			t.Errorf("max in-flight = %d, want <= the executor's limit %d", got, dynamic)
+		}
+		if got == 0 {
+			t.Fatal("apply was never called")
+		}
+	})
+
+	t.Run("every item is still applied exactly once under a bound", func(t *testing.T) {
+		logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		e := &Executor{ConcurrencyLimiter: NewFixedConcurrencyLimiter(50), Logger: logger}
+
+		const items = 25
+		var applied atomic.Int64
+		runProjectSyncLoopBounded(context.Background(), e, make([]int, items), "sync:", 1000, 2,
+			func(_ context.Context, _ int) { applied.Add(1) })
+
+		if applied.Load() != items {
+			t.Errorf("apply called %d times, want %d", applied.Load(), items)
+		}
+	})
+}
+
 // #326: sortMigrateItems orders items by (orgField, sortField) for tasks
 // in the registry, and is a no-op for tasks not in the registry.
 func TestSortMigrateItems(t *testing.T) {

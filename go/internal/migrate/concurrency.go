@@ -150,8 +150,9 @@ type ConcurrencyLimiter struct {
 }
 
 // NewFixedConcurrencyLimiter returns a limiter whose Current() always
-// returns n (used when --concurrency was explicitly set by the user, and
-// by all existing test fixtures that construct a fixed-size pool today).
+// returns n. Production code no longer constructs one this way —
+// newConcurrencyLimiter is always dynamic (#573 follow-up) — so this
+// exists for test fixtures that want a stable, non-recalculating pool.
 func NewFixedConcurrencyLimiter(n int) *ConcurrencyLimiter {
 	l := &ConcurrencyLimiter{fixed: true}
 	l.current.Store(int32(n))
