@@ -307,7 +307,8 @@ const dynamicGatePollInterval = 25 * time.Millisecond
 // across nested fan-outs — that would reintroduce exactly the deadlock
 // Executor.ConcurrencyLimiter's own doc comment warns against: nested
 // fan-outs (e.g. runSyncIssueMetadata's forEachMigrateItem holding a
-// slot for each of its workers, each of which calls runProjectSyncLoop)
+// slot for each of its workers, each of which calls syncProjectIssues,
+// whose inner loop is bounded by nestedSyncLoopConcurrency, its own gate)
 // would have the outer holders take every slot, leaving no room for
 // inner work to ever acquire.
 type DynamicGate struct {

@@ -269,11 +269,10 @@ type Executor struct {
 	//
 	// Do not "fix" this by acquiring it. The fan-outs nest —
 	// runSyncIssueMetadata's forEachMigrateItem holds a slot for each of
-	// its 25 workers, and each of those calls runProjectSyncLoop, which
-	// limits on the same capacity. On one shared counting semaphore the
-	// outer holders would take every slot and no inner work could ever
-	// acquire: a permanent deadlock. Making it a real semaphore requires
-	// restructuring the nested fan-outs first.
+	// its workers, and each of those calls syncProjectIssues, whose inner
+	// loop is bounded by nestedSyncLoopConcurrency (its own gate). Sharing
+	// one counting semaphore across both levels would let the outer holders
+	// take every slot and deadlock the inner work.
 	ConcurrencyLimiter *ConcurrencyLimiter
 	// BuildSem bounds concurrent scanner-report CONSTRUCTION, which is the
 	// memory-heavy part of importProjectData: a branch's full source text,
