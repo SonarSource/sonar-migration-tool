@@ -85,21 +85,7 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 		}
 		g.Go(func() error {
 			defer gate.Release()
-			if gCtx.Err() != nil {
-				return gCtx.Err()
-			}
-
-			sqBranches := resolveProjectBranches(e, w, cloudKey, serverURL, serverKey)
-
-			scMainBranch := fetchSCMainBranch(gCtx, e, cloudKey)
-
-			// #474 — a rejected report used to be a Warn that left the task
-			// summary reporting nothing at all, so a transfer that migrated
-			// zero issues and zero branches still looked clean.
-			recordImportOutcome(e, counter, cloudKey,
-				importProjectBranches(gCtx, e, proj, sqBranches, scMainBranch, completed, w))
-			prog.Increment()
-			return nil
+			return importProjectDataOne(gCtx, e, proj, cloudKey, serverURL, serverKey, completed, w, counter, prog)
 		})
 	}
 	if err := g.Wait(); err != nil {
@@ -142,6 +128,29 @@ func resolveProjectBranches(e *Executor, w *common.ChunkWriter, cloudKey, server
 		recordBranchLimitSkip(w, cloudKey, d.Name)
 	}
 	return sqBranches
+}
+
+// importProjectDataOne imports project data for a single project's branches.
+// Split out of runImportProjectData so the per-project work (branch
+// discovery, the #583 analyzed-after filter, and outcome recording) isn't
+// nested inside the fan-out loop and goroutine.
+func importProjectDataOne(ctx context.Context, e *Executor, proj json.RawMessage, cloudKey, serverURL, serverKey string,
+	completed map[string]bool, w *common.ChunkWriter, counter *TaskCounter, prog *common.ProgressLogger) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	sqBranches := resolveProjectBranches(e, w, cloudKey, serverURL, serverKey)
+
+	scMainBranch := fetchSCMainBranch(ctx, e, cloudKey)
+
+	// #474 — a rejected report used to be a Warn that left the task
+	// summary reporting nothing at all, so a transfer that migrated
+	// zero issues and zero branches still looked clean.
+	recordImportOutcome(e, counter, cloudKey,
+		importProjectBranches(ctx, e, proj, sqBranches, scMainBranch, completed, w))
+	prog.Increment()
+	return nil
 }
 
 // fetchSCMainBranch queries SonarCloud for the main branch name of a project.
