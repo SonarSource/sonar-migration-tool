@@ -45,6 +45,7 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 	ncdBranchOverrideSet := collectNCDBranchOverrides(store)
 	syncStatsMap := collectSyncStats(store)
 	branchSourcePurgedMap := collectBranchSourcePurged(store)
+	branchLimitSkippedMap := collectBranchLimitSkips(store)
 	extractMapping, _ := structure.GetUniqueExtracts(exportDir)
 	// #353 — per-object dropped-user-permission counts: SonarQube Cloud
 	// has no API to grant permissions to individual users, so any user
@@ -98,6 +99,13 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 			attachBranchSourcePurged(section.Succeeded, branchSourcePurgedMap)
 			attachBranchSourcePurged(section.NearPerfect, branchSourcePurgedMap)
 			attachBranchSourcePurged(section.Partial, branchSourcePurgedMap)
+			// #584 — note branches dropped by the per-project hard branch
+			// cap in each affected project's Details column. Applied to
+			// all routed buckets; the outcome itself is unchanged (the
+			// branches within the cap still migrate normally).
+			attachBranchLimitSkips(section.Succeeded, branchLimitSkippedMap)
+			attachBranchLimitSkips(section.NearPerfect, branchLimitSkippedMap)
+			attachBranchLimitSkips(section.Partial, branchLimitSkippedMap)
 		}
 		// #353 — attach the dropped-user-permission count marker to
 		// every entity in every routed bucket so the per-row Details
@@ -1453,12 +1461,13 @@ func encodeSyncStats(c projectSyncCounts) string {
 	return strings.Join(parts, ",")
 }
 
-// collectBranchSourcePurged reads importProjectData JSONL and returns,
-// per cloud project key, the ordered list of branch names whose source
-// text was purged on the source server and were therefore migrated
-// without it (issue #425). Branches are de-duplicated and kept in
-// first-seen order so the report lists each affected branch once.
-func collectBranchSourcePurged(store *common.DataStore) map[string][]string {
+// collectBranchesByBoolMarker reads importProjectData JSONL and returns,
+// per cloud project key, the ordered list of branch names whose record
+// carries boolField=true. Branches are de-duplicated and kept in
+// first-seen order so the report lists each affected branch once. Shared
+// by collectBranchSourcePurged (#425) and collectBranchLimitSkips (#584),
+// which differ only in which bool field they key on.
+func collectBranchesByBoolMarker(store *common.DataStore, boolField string) map[string][]string {
 	items, err := store.ReadAll("importProjectData")
 	if err != nil || len(items) == 0 {
 		return nil
@@ -1466,7 +1475,7 @@ func collectBranchSourcePurged(store *common.DataStore) map[string][]string {
 	result := make(map[string][]string)
 	seen := make(map[string]bool)
 	for _, item := range items {
-		if !jsonBool(item, "source_purged") {
+		if !jsonBool(item, boolField) {
 			continue
 		}
 		key := jsonStr(item, "cloud_project_key")
@@ -1487,6 +1496,34 @@ func collectBranchSourcePurged(store *common.DataStore) map[string][]string {
 	return result
 }
 
+// attachBranchMarker appends a "|<marker>:branchA,branchB" suffix to each
+// affected project's Detail field, for whichever affected-branches map the
+// caller collected. Shared by attachBranchSourcePurged (#425) and
+// attachBranchLimitSkips (#584), which differ only in the marker name and
+// the map of affected branches; the outcome itself is never changed by
+// either — both are informational notes.
+func attachBranchMarker(projects []EntityItem, markedMap map[string][]string, marker string) {
+	if len(markedMap) == 0 || len(projects) == 0 {
+		return
+	}
+	for i := range projects {
+		key := projectCloudKey(projects[i].Detail)
+		branches, ok := markedMap[key]
+		if !ok || len(branches) == 0 {
+			continue
+		}
+		projects[i].Detail = projects[i].Detail + "|" + marker + ":" + strings.Join(branches, ",")
+	}
+}
+
+// collectBranchSourcePurged reads importProjectData JSONL and returns,
+// per cloud project key, the ordered list of branch names whose source
+// text was purged on the source server and were therefore migrated
+// without it (issue #425).
+func collectBranchSourcePurged(store *common.DataStore) map[string][]string {
+	return collectBranchesByBoolMarker(store, "source_purged")
+}
+
 // attachBranchSourcePurged appends a "|srcPurged:branchA,branchB" marker
 // to each affected project's Detail field. The renderer turns it into a
 // one-line "Source code of branch(es) X, Y is missing (likely purged in
@@ -1495,17 +1532,24 @@ func collectBranchSourcePurged(store *common.DataStore) map[string][]string {
 // project's outcome is unchanged — the branches still migrate their
 // measures and issues.
 func attachBranchSourcePurged(projects []EntityItem, purgedMap map[string][]string) {
-	if len(purgedMap) == 0 || len(projects) == 0 {
-		return
-	}
-	for i := range projects {
-		key := projectCloudKey(projects[i].Detail)
-		branches, ok := purgedMap[key]
-		if !ok || len(branches) == 0 {
-			continue
-		}
-		projects[i].Detail = projects[i].Detail + "|srcPurged:" + strings.Join(branches, ",")
-	}
+	attachBranchMarker(projects, purgedMap, "srcPurged")
+}
+
+// collectBranchLimitSkips reads importProjectData JSONL and returns, per
+// cloud project key, the ordered list of branch names dropped by the
+// per-project hard branch cap (issue #584) rather than migrated.
+func collectBranchLimitSkips(store *common.DataStore) map[string][]string {
+	return collectBranchesByBoolMarker(store, "branch_limit_exceeded")
+}
+
+// attachBranchLimitSkips appends a "|branchLimit:branchA,branchB" marker
+// to each affected project's Detail field. The renderer turns it into a
+// one-line note that this project has more long-lived branches than the
+// migration's hard cap, naming the branches that were not migrated
+// (issue #584). The project's outcome is unchanged — the branches within
+// the cap still migrate normally.
+func attachBranchLimitSkips(projects []EntityItem, droppedMap map[string][]string) {
+	attachBranchMarker(projects, droppedMap, "branchLimit")
 }
 
 // collectNCDFallback reads the setNewCodePeriods JSONL and returns a

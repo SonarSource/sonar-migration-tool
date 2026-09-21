@@ -1343,7 +1343,7 @@ const (
 // bold markers so the PDF renderer can stress it. Other sections keep
 // the bare cloud key as-is.
 func successDetails(item EntityItem, predictive, hideCloudKey, labelProjectKey bool) string {
-	cloudKey, scan, ncdFallback, syncStats, userPerms, srcPurged := parseProjectDetailMarkers(item.Detail)
+	cloudKey, scan, ncdFallback, syncStats, userPerms, srcPurged, branchLimit := parseProjectDetailMarkers(item.Detail)
 	if hideCloudKey || (predictive && strings.HasPrefix(cloudKey, "predict:")) {
 		cloudKey = ""
 	}
@@ -1403,6 +1403,12 @@ func successDetails(item EntityItem, predictive, hideCloudKey, labelProjectKey b
 	if line := renderBranchSourcePurgedLine(srcPurged); line != "" {
 		parts = append(parts, line)
 	}
+	// #584 — this project has more long-lived branches than the migration's
+	// hard cap; name the branches the cap dropped. Shown in both actual and
+	// predictive reports, same as the other project-level notes above.
+	if line := renderBranchLimitSkipLine(branchLimit); line != "" {
+		parts = append(parts, line)
+	}
 	return strings.Join(parts, "\n")
 }
 
@@ -1430,6 +1436,32 @@ func renderBranchSourcePurgedLine(payload string) string {
 	return fmt.Sprintf(
 		"Source code of %s %s is missing (likely purged in SQS). Migration is executed without the sources.",
 		noun, strings.Join(branches, ", "))
+}
+
+// renderBranchLimitSkipLine turns a |branchLimit:branchA,branchB marker
+// payload into the operator-facing line for issue #584. Branch names are
+// stressed with inline bold; noun/verb agree for one branch vs. several.
+// Empty payload yields "" so callers can skip appending.
+func renderBranchLimitSkipLine(payload string) string {
+	if payload == "" {
+		return ""
+	}
+	var branches []string
+	for _, b := range strings.Split(payload, ",") {
+		if b = strings.TrimSpace(b); b != "" {
+			branches = append(branches, inlineBoldStart+b+inlineBoldEnd)
+		}
+	}
+	if len(branches) == 0 {
+		return ""
+	}
+	noun, verb := "Branch", "was"
+	if len(branches) > 1 {
+		noun, verb = "Branches", "were"
+	}
+	return fmt.Sprintf(
+		"%s %s %s not migrated: this project has more long-lived branches than the migration's hard limit of %d.",
+		noun, strings.Join(branches, ", "), verb, migrate.MaxBranchesPerProject)
 }
 
 // renderDroppedUserPermsLine turns a |userPerms:N marker payload into
@@ -1697,16 +1729,22 @@ func parseProjectData(detail string) (string, string) {
 // #353 dropped-user-permissions count payload (or empty). Markers
 // are stripped in reverse-attachment order so trailing payloads
 // don't get absorbed into earlier ones' suffix matching.
-func parseProjectDetailMarkers(detail string) (cloudKey, scan, ncdFallback, syncStats, userPerms, srcPurged string) {
+func parseProjectDetailMarkers(detail string) (cloudKey, scan, ncdFallback, syncStats, userPerms, srcPurged, branchLimit string) {
 	cloudKey = detail
 	// userPerms marker (always last when present — attachDroppedUserPerms
-	// runs after attachSyncStats / attachBranchSourcePurged / etc.).
+	// runs after attachSyncStats / attachBranchSourcePurged / attachBranchLimitSkips).
 	if idx := strings.Index(cloudKey, "|userPerms:"); idx >= 0 {
 		userPerms = cloudKey[idx+len("|userPerms:"):]
 		cloudKey = cloudKey[:idx]
 	}
+	// branchLimit marker (#584 — branches dropped by the per-project hard
+	// branch cap; attached after srcPurged, before userPerms).
+	if idx := strings.Index(cloudKey, "|branchLimit:"); idx >= 0 {
+		branchLimit = cloudKey[idx+len("|branchLimit:"):]
+		cloudKey = cloudKey[:idx]
+	}
 	// srcPurged marker (#425 — branches migrated without their purged
-	// source; attached after syncStats, before userPerms).
+	// source; attached after syncStats, before branchLimit/userPerms).
 	if idx := strings.Index(cloudKey, "|srcPurged:"); idx >= 0 {
 		srcPurged = cloudKey[idx+len("|srcPurged:"):]
 		cloudKey = cloudKey[:idx]
@@ -1726,7 +1764,7 @@ func parseProjectDetailMarkers(detail string) (cloudKey, scan, ncdFallback, sync
 		ncdFallback = cloudKey[idx+len("|ncdFallback:"):]
 		cloudKey = cloudKey[:idx]
 	}
-	return cloudKey, scan, ncdFallback, syncStats, userPerms, srcPurged
+	return cloudKey, scan, ncdFallback, syncStats, userPerms, srcPurged, branchLimit
 }
 
 func checkPageBreak(pdf *fpdf.Fpdf, h float64) {
