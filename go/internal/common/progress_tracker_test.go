@@ -516,3 +516,294 @@ func TestTrackerNilSafety(t *testing.T) {
 		t.Errorf("Fraction() on nil registry = %v, want 0", got)
 	}
 }
+
+// completeWithDuration drives the same path runPhase does — MarkTaskStarted
+// then MarkTaskComplete — but backdates the start so the banked observed
+// duration is exactly took, with no real sleep.
+func completeWithDuration(tr *Tracker, name string, took time.Duration) {
+	tr.mu.Lock()
+	tr.running[name] = time.Now().Add(-took)
+	tr.mu.Unlock()
+	tr.MarkTaskComplete(name)
+}
+
+// TestTrackerMarkTaskCompleteRecordsObservedDuration: the observed
+// duration of a finished task is what every calibration below is built
+// on, so MarkTaskComplete must bank it whenever a start was recorded, and
+// bank nothing when one wasn't (#564).
+func TestTrackerMarkTaskCompleteRecordsObservedDuration(t *testing.T) {
+	plan := [][]string{{"general-1", "general-2"}}
+	tr := NewTracker(testLogger(), plan, categorizeByPrefix, CategoryWeights{General: 100}, fixedDuration(time.Second))
+
+	completeWithDuration(tr, "general-1", 7*time.Second)
+	if got := tr.actual["general-1"]; got < 7*time.Second || got > 8*time.Second {
+		t.Errorf("observed duration = %v, want ~7s", got)
+	}
+
+	// Never started (tests that exercise a task's Run directly), so there
+	// is no honest duration to bank — and a zero must not be invented,
+	// since it would drag the speed factor toward "infinitely fast".
+	tr.MarkTaskComplete("general-2")
+	if got, ok := tr.actual["general-2"]; ok {
+		t.Errorf("observed duration for a task that never started = %v, want none recorded", got)
+	}
+}
+
+// TestTrackerObservedSpeedFactorAtFullConfidence: once enough seeded work
+// has completed, the factor is simply real-over-seeded — 200s of seeded
+// work that really took 20s means this run is running at a tenth of the
+// mined seeds (#564).
+func TestTrackerObservedSpeedFactorAtFullConfidence(t *testing.T) {
+	plan := [][]string{{"general-1"}}
+	tr := NewTracker(testLogger(), plan, categorizeByPrefix, CategoryWeights{General: 100}, fixedDuration(200*time.Second))
+
+	completeWithDuration(tr, "general-1", 20*time.Second)
+
+	if got := tr.observedSpeedFactor(tr.actual, nil); !almostEqual(got, 0.1, 0.02) {
+		t.Errorf("speed factor = %v, want ~0.1", got)
+	}
+}
+
+// TestTrackerObservedSpeedFactorBlendsWhileWorkIsThin: a run's first
+// completions are all tiny orchestration tasks, and their ratio says
+// little about what importProjectData will cost. Until fullCalibrationWork
+// seconds of seeded work have finished, the factor must be blended toward
+// 1 in proportion rather than applied outright.
+func TestTrackerObservedSpeedFactorBlendsWhileWorkIsThin(t *testing.T) {
+	plan := [][]string{{"general-1"}}
+	tr := NewTracker(testLogger(), plan, categorizeByPrefix, CategoryWeights{General: 100}, fixedDuration(30*time.Second))
+
+	completeWithDuration(tr, "general-1", 3*time.Second)
+
+	// raw 0.1, confidence 30/120 = 0.25 -> 1 + 0.25*(0.1-1) = 0.775
+	if got := tr.observedSpeedFactor(tr.actual, nil); !almostEqual(got, 0.775, 0.02) {
+		t.Errorf("speed factor = %v, want ~0.775 (blended toward 1 on thin evidence)", got)
+	}
+}
+
+// TestTrackerObservedSpeedFactorNoObservations: before anything has
+// finished there is nothing to calibrate against, and the factor must be
+// exactly 1 so behaviour falls back to the raw seeds.
+func TestTrackerObservedSpeedFactorNoObservations(t *testing.T) {
+	plan := [][]string{{"general-1"}}
+	tr := NewTracker(testLogger(), plan, categorizeByPrefix, CategoryWeights{General: 100}, fixedDuration(200*time.Second))
+
+	if got := tr.observedSpeedFactor(tr.actual, nil); got != 1 {
+		t.Errorf("speed factor with no completions = %v, want exactly 1", got)
+	}
+}
+
+// TestTrackerObservedSpeedFactorClamped: a single pathological
+// observation must not be able to rewrite every remaining estimate by an
+// arbitrary factor in either direction.
+func TestTrackerObservedSpeedFactorClamped(t *testing.T) {
+	t.Run("absurdly fast", func(t *testing.T) {
+		plan := [][]string{{"general-1"}}
+		tr := NewTracker(testLogger(), plan, categorizeByPrefix, CategoryWeights{General: 100}, fixedDuration(200*time.Second))
+		completeWithDuration(tr, "general-1", time.Millisecond)
+
+		if got := tr.observedSpeedFactor(tr.actual, nil); !almostEqual(got, minSpeedFactor, 0.001) {
+			t.Errorf("speed factor = %v, want clamped to %v", got, minSpeedFactor)
+		}
+	})
+
+	t.Run("absurdly slow", func(t *testing.T) {
+		plan := [][]string{{"general-1"}}
+		tr := NewTracker(testLogger(), plan, categorizeByPrefix, CategoryWeights{General: 100}, fixedDuration(200*time.Second))
+		completeWithDuration(tr, "general-1", 100*time.Hour)
+
+		if got := tr.observedSpeedFactor(tr.actual, nil); !almostEqual(got, maxSpeedFactor, 0.001) {
+			t.Errorf("speed factor = %v, want clamped to %v", got, maxSpeedFactor)
+		}
+	})
+}
+
+// TestTrackerInFlightCreditUsesObservedSpeed is the behavioural heart of
+// this change (#564). SeedTaskDurations was mined from a handful of large
+// runs, so on a small run every seed is far too big: a task that really
+// takes a fraction of its seed earns almost no in-flight credit for its
+// whole life, which is what made a small run's progress sit flat and then
+// jump at the end. Once completed tasks show this run is ten times faster
+// than the seeds, a still-running task must be credited against the
+// scaled-down seed instead of the raw one.
+func TestTrackerInFlightCreditUsesObservedSpeed(t *testing.T) {
+	expected := func(name string) time.Duration {
+		if name == "general-fast" {
+			return 200 * time.Second
+		}
+		return 1000 * time.Second
+	}
+	plan := [][]string{{"general-fast", "general-slow"}}
+	tr := NewTracker(testLogger(), plan, categorizeByPrefix, CategoryWeights{General: 100}, expected)
+
+	// general-slow has been running for 100s and has no item-level counter.
+	tr.mu.Lock()
+	tr.running["general-slow"] = time.Now().Add(-100 * time.Second)
+	tr.mu.Unlock()
+
+	// Nothing has completed yet, so the raw 1000s seed applies:
+	// inFlightCredit(100s, 1000s) = 0.0909 of 1000s out of 1200s total.
+	baseline, _, _ := tr.snapshot()
+	if !almostEqual(baseline, 7.58, 0.3) {
+		t.Fatalf("uncalibrated percent = %v, want ~7.58", baseline)
+	}
+
+	// 200s of seeded work really took 20s, so this run is at a tenth of
+	// the seeds: general-slow's effective seed becomes 100s, and it has
+	// been running exactly that long -> inFlightCredit = 0.5.
+	completeWithDuration(tr, "general-fast", 20*time.Second)
+
+	got, _, _ := tr.snapshot()
+	want := 100 * (200.0 + 1000.0*0.5) / 1200.0 // ~58.3%
+	if !almostEqual(got, want, 1) {
+		t.Errorf("calibrated percent = %v, want ~%v", got, want)
+	}
+	if got <= baseline {
+		t.Errorf("percent went from %v to %v — a run measured faster than its seeds must credit in-flight work faster, not slower", baseline, got)
+	}
+}
+
+// TestTrackerETAComesFromRemainingWorkNotThePercentage pins the second
+// half of #564. The reported percentage is deliberately skewed by
+// DefaultCategoryWeights so the categories operators watch move visibly,
+// and the old ETA extrapolated straight from that percentage, so it
+// inherited the skew. Here one 10s task in General is done and one 990s
+// task in IssueSync has not started: the percentage says ~20% because
+// General is a whole category, but 99% of the real work is left, and only
+// an ETA that measures work gets that right.
+func TestTrackerETAComesFromRemainingWorkNotThePercentage(t *testing.T) {
+	expected := func(name string) time.Duration {
+		if name == "general-1" {
+			return 10 * time.Second
+		}
+		return 990 * time.Second
+	}
+	plan := [][]string{{"general-1", "sync-1"}}
+	tr := NewTracker(testLogger(), plan, categorizeByPrefix, DefaultCategoryWeights, expected)
+	tr.start = time.Now().Add(-10 * time.Second)
+
+	completeWithDuration(tr, "general-1", 10*time.Second)
+
+	percent, eta, known := tr.snapshot()
+	if !known {
+		t.Fatal("known = false, want true")
+	}
+	// General fully done = 12 of the 59 active weight points.
+	if !almostEqual(percent, 100*12.0/59.0, 0.5) {
+		t.Fatalf("percent = %v, want ~20.3 (unchanged, still category-weighted)", percent)
+	}
+	// 10s of elapsed time bought 10s of seeded work, and 990s of seeded
+	// work is left.
+	if !almostEqual(eta.Seconds(), 990, 30) {
+		t.Errorf("eta = %v, want ~990s", eta)
+	}
+	// What the old percentage-based extrapolation would have produced,
+	// for contrast: elapsed*(100/percent - 1) = 10s*3.92 = ~39s.
+	if eta < 100*time.Second {
+		t.Errorf("eta = %v — that is the old percentage-based extrapolation, not remaining work", eta)
+	}
+}
+
+// TestTrackerETAIsZeroWhenNoWorkRemains: with every task complete there
+// is no remaining work, so the ETA must be exactly zero rather than a
+// leftover extrapolation.
+func TestTrackerETAIsZeroWhenNoWorkRemains(t *testing.T) {
+	plan := [][]string{{"general-1", "sync-1"}}
+	tr := NewTracker(testLogger(), plan, categorizeByPrefix, DefaultCategoryWeights, ExpectedTaskDuration)
+	tr.start = time.Now().Add(-10 * time.Second)
+
+	completeWithDuration(tr, "general-1", 5*time.Second)
+	completeWithDuration(tr, "sync-1", 5*time.Second)
+
+	percent, eta, known := tr.snapshot()
+	if percent != 100 || eta != 0 || !known {
+		t.Errorf("got percent=%v eta=%v known=%v, want 100, 0, true", percent, eta, known)
+	}
+}
+
+// TestTrackerETAIncludesProjectHistoryReplay covers issue #564's fourth
+// ask directly: with --migrate_history on, the replay's per-run expected
+// duration must reach the remaining work the ETA is built from, not only
+// the reported percentage. The replay is a pseudo-task — it runs inline
+// inside importProjectData rather than as its own TaskDef — so its cost
+// arrives via SetExpectedDuration rather than the static seed table.
+func TestTrackerETAIncludesProjectHistoryReplay(t *testing.T) {
+	plan := [][]string{{"data-1"}}
+	newTracker := func() *Tracker {
+		tr := NewTracker(testLogger(), plan, categorizeByPrefix, CategoryWeights{ProjectData: 100}, fixedDuration(100*time.Second))
+		tr.start = time.Now().Add(-100 * time.Second)
+		completeWithDuration(tr, "data-1", 100*time.Second)
+		return tr
+	}
+
+	// History off: data-1 is the whole plan and it is finished, so
+	// nothing is left to wait for.
+	_, off, _ := newTracker().snapshot()
+	if off != 0 {
+		t.Fatalf("eta with history off = %v, want 0 — the only task in the plan completed", off)
+	}
+
+	tr := newTracker()
+	tr.AddPseudoTask(CategoryProjectData, "migrateProjectHistory")
+	tr.SetExpectedDuration("migrateProjectHistory", 900*time.Second)
+
+	_, on, known := tr.snapshot()
+	if !known {
+		t.Fatal("known = false, want true")
+	}
+	// 100s of elapsed time bought 100s of seeded work; 900s of replay is
+	// still ahead of us.
+	if !almostEqual(on.Seconds(), 900, 30) {
+		t.Errorf("eta with history on = %v, want ~900s", on)
+	}
+}
+
+// TestTrackerETAReportsUnknownRatherThanNonsense: a snapshot taken in the
+// first instants of a task divides by a near-zero consumed-work figure,
+// and an unbounded result overflows time.Duration's int64 into a NEGATIVE
+// duration — an operator would read a nonsense clock. Past
+// maxReportableETASeconds the tracker must report "calculating..." (known
+// false, eta zero) instead.
+func TestTrackerETAReportsUnknownRatherThanNonsense(t *testing.T) {
+	plan := [][]string{{"general-1", "general-2"}}
+	tr := NewTracker(testLogger(), plan, categorizeByPrefix, CategoryWeights{General: 100}, fixedDuration(400*24*time.Hour))
+	tr.start = time.Now().Add(-time.Hour)
+
+	// Microseconds of task time against a seed of well over a year.
+	tr.MarkTaskStarted("general-1")
+
+	percent, eta, known := tr.snapshot()
+	if percent <= 0 {
+		t.Fatalf("percent = %v, want a small positive value so the guard below is the thing under test", percent)
+	}
+	if known {
+		t.Errorf("known = true with eta %v, want false — an unbounded estimate must read as calculating, not as a clock", eta)
+	}
+	if eta != 0 {
+		t.Errorf("eta = %v, want 0 alongside known=false", eta)
+	}
+}
+
+// TestTrackerETAGrowsWhenTheRunIsSlowerThanSeeded: the calibration has to
+// work in both directions. A run whose tasks over-run their seeds must
+// report a longer ETA for the same remaining task list than one whose
+// tasks came in on seed.
+func TestTrackerETAGrowsWhenTheRunIsSlowerThanSeeded(t *testing.T) {
+	plan := [][]string{{"general-1", "sync-1"}}
+	expected := fixedDuration(100 * time.Second)
+
+	etaFor := func(actualDuration, elapsed time.Duration) time.Duration {
+		tr := NewTracker(testLogger(), plan, categorizeByPrefix, DefaultCategoryWeights, expected)
+		tr.start = time.Now().Add(-elapsed)
+		completeWithDuration(tr, "general-1", actualDuration)
+		_, eta, _ := tr.snapshot()
+		return eta
+	}
+
+	onSeed := etaFor(100*time.Second, 100*time.Second)
+	slow := etaFor(400*time.Second, 400*time.Second)
+
+	if slow <= onSeed {
+		t.Errorf("slow run eta = %v, on-seed run eta = %v — a run measured slower than its seeds must report a longer ETA", slow, onSeed)
+	}
+}
