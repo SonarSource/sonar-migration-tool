@@ -124,6 +124,10 @@ type Tracker struct {
 	categoryTasks map[TaskCategory][]string
 	registry      *ProgressRegistry
 	expected      func(string) time.Duration
+	// now is the clock. Always time.Now in production; replaced in tests
+	// so a recorded real run's timeline can be replayed deterministically
+	// against the estimator (#564).
+	now func() time.Time
 
 	mu        sync.Mutex
 	completed map[string]bool
@@ -159,6 +163,7 @@ func NewTracker(logger *slog.Logger, plan [][]string, categorize func(string) Ta
 		categoryTasks: categoryTasks,
 		registry:      NewProgressRegistry(),
 		expected:      expected,
+		now:           time.Now,
 		completed:     make(map[string]bool),
 		running:       make(map[string]time.Time),
 		actual:        make(map[string]time.Duration),
@@ -209,7 +214,7 @@ func (t *Tracker) MarkTaskComplete(name string) {
 	defer t.mu.Unlock()
 	t.completed[name] = true
 	if startedAt, ok := t.running[name]; ok {
-		t.actual[name] = time.Since(startedAt)
+		t.actual[name] = t.now().Sub(startedAt)
 	}
 }
 
@@ -224,7 +229,7 @@ func (t *Tracker) MarkTaskStarted(name string) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.running[name] = time.Now()
+	t.running[name] = t.now()
 }
 
 // AddPseudoTask adds a task name to a category's weighting set after
@@ -443,7 +448,7 @@ func (t *Tracker) taskFraction(name string, s trackerState, speed float64) float
 	if !started || exp <= 0 {
 		return itemFrac
 	}
-	timeFrac := inFlightCredit(time.Since(startedAt), exp)
+	timeFrac := inFlightCredit(t.now().Sub(startedAt), exp)
 	if itemFrac == 0 {
 		return timeFrac
 	}
@@ -567,7 +572,7 @@ func (t *Tracker) snapshot() (percent float64, eta time.Duration, known bool) {
 	if percent <= 0 || consumedWork <= 0 {
 		return percent, 0, false
 	}
-	etaSeconds := time.Since(t.start).Seconds() * remainingWork / consumedWork
+	etaSeconds := t.now().Sub(t.start).Seconds() * remainingWork / consumedWork
 	if etaSeconds > maxReportableETASeconds {
 		return percent, 0, false
 	}
