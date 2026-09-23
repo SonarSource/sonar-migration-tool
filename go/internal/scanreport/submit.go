@@ -21,14 +21,95 @@ import (
 
 const headerContentType = "Content-Type"
 
-// CEPollInterval is the wait between successive api/ce/task polls in
-// PollCETask. Doubled from the original 5s (#571) to reduce the request
-// volume PollCETask puts on SonarQube Cloud — a project-data migration can
-// poll for minutes per branch, and this runs once per branch. Exported (and
-// a package variable rather than an inline constant) so tests — including
+// PollCETask waits between successive api/ce/task polls on an exponential
+// backoff ladder: the first poll is immediate, the next wait is
+// CEPollInitialInterval, and each subsequent wait is multiplied by
+// CEPollBackoffFactor until it saturates at CEPollMaxInterval.
+//
+// Why a ladder rather than the fixed 10s this used to be: measured over 603
+// real CE tasks in a migrate run, task executionTimeMs had a median of
+// 1.57s and a p90 of 2.95s, but with a fixed 10s cadence completion was only
+// ever *discovered* at the next 10s tick — roughly 84% of each task's wall
+// clock was spent asleep after the CE had already finished. That dead time
+// is largely hidden inside a wide parallel fan-out, but it is the entire
+// critical path for the #554 chronological history replay, which is
+// strictly serial within a branch: one project with 113 history points
+// spent ~20 minutes at a dead-constant ~10.6s per snapshot.
+//
+// The ladder tops out at exactly the previous fixed value, so a genuinely
+// long-running CE task settles into the old cadence and puts no more
+// sustained load on SonarQube Cloud than before (#571, #578). Only short
+// tasks — the overwhelming majority — are discovered sooner, at the cost of
+// a few extra cheap polls each.
+//
+// All three are package variables rather than constants so tests — including
 // other packages' tests that exercise PollCETask indirectly, e.g.
-// internal/migrate's — can drive it down instead of waiting for real.
-var CEPollInterval = 10 * time.Second
+// internal/migrate's — can drive them down instead of waiting for real.
+var (
+	CEPollInitialInterval = 1 * time.Second
+	CEPollMaxInterval     = 10 * time.Second
+	CEPollBackoffFactor   = 2.0
+)
+
+// minPollInterval is a hard floor on any computed wait. It keeps the ladder
+// from degenerating into a zero-length busy-loop (which would hammer the API
+// and, in AveragePollInterval, spin forever) if the tunables above are set to
+// zero or a negative duration.
+const minPollInterval = time.Millisecond
+
+// initialPollInterval returns the first backoff wait, clamped into
+// [minPollInterval, CEPollMaxInterval]. Clamping down to the max matters for
+// tests, which drive CEPollMaxInterval to 1ms and would otherwise still pay
+// the full initial wait on the very first poll.
+func initialPollInterval() time.Duration {
+	d := CEPollInitialInterval
+	if d > CEPollMaxInterval {
+		d = CEPollMaxInterval
+	}
+	if d < minPollInterval {
+		d = minPollInterval
+	}
+	return d
+}
+
+// nextPollInterval advances the ladder one rung, saturating at
+// CEPollMaxInterval. A factor of <= 1 is treated as "no growth" rather than
+// allowed to shrink the wait.
+func nextPollInterval(cur time.Duration) time.Duration {
+	next := cur
+	if CEPollBackoffFactor > 1 {
+		next = time.Duration(float64(cur) * CEPollBackoffFactor)
+	}
+	if next > CEPollMaxInterval {
+		next = CEPollMaxInterval
+	}
+	if next < minPollInterval {
+		next = minPollInterval
+	}
+	return next
+}
+
+// AveragePollInterval returns the mean wall-clock time between the polls
+// PollCETask issues for a CE task that reaches a terminal state after d —
+// that is, the elapsed time at discovery divided by the number of polls
+// spent. It is the backoff ladder's equivalent of the old fixed
+// CEPollInterval, and exists so callers that size themselves against the
+// api/ce/task request rate (internal/migrate's pollBoundConcurrency) stay
+// correct as the ladder's tunables change.
+func AveragePollInterval(d time.Duration) time.Duration {
+	interval := initialPollInterval()
+	if d <= 0 {
+		return interval
+	}
+	var elapsed time.Duration
+	polls := 1 // PollCETask's first poll is immediate
+	for elapsed < d {
+		elapsed += interval
+		polls++
+		interval = nextPollInterval(interval)
+	}
+	return elapsed / time.Duration(polls)
+}
 
 // SubmitConfig holds the parameters for submitting a scanner report.
 type SubmitConfig struct {
@@ -183,14 +264,19 @@ func PollCETask(ctx context.Context, client *http.Client, cloudURL, taskID strin
 	// scannerContext|warnings are valid) and the 400 would break polling.
 	params := url.Values{"id": {taskID}}
 
+	// Exponential backoff: poll immediately, then wait on the ladder. The
+	// retry `continue`s below fall through here too, so a flapping endpoint
+	// backs off exactly the same way a slow CE task does.
+	interval := initialPollInterval()
 	first := true
 	for {
 		if !first {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(CEPollInterval):
+			case <-time.After(interval):
 			}
+			interval = nextPollInterval(interval)
 		} else if err := ctx.Err(); err != nil {
 			return err
 		}

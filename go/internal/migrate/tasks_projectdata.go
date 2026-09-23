@@ -56,12 +56,21 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 	prog := common.NewProgressLogger(e.Logger, "importProjectData", len(projects))
 	e.Progress.Registry().Register("importProjectData", prog)
 
-	// A plain errgroup.SetLimit here would freeze at whatever
-	// e.ConcurrencyLimiter.Current() happens to be right now for this
-	// task's entire run — which can be tens of minutes for a large
-	// instance — silently ignoring every later recalculation (#573).
-	// DynamicGate re-reads Current() on each admission instead.
-	gate := NewDynamicGate(e.ConcurrencyLimiter)
+	// A plain errgroup.SetLimit here would freeze at whatever the limiter's
+	// Current() happens to be right now for this task's entire run — which
+	// can be tens of minutes for a large instance — silently ignoring every
+	// later recalculation (#573). DynamicGate re-reads Current() on each
+	// admission instead.
+	//
+	// Bounded by CEPollConcurrencyLimiter, NOT ConcurrencyLimiter: a
+	// project's gate slot here is held across build -> submit -> PollCETask
+	// for every one of its branches (and, when enabled, the #554 history
+	// replay nested inside that same slot) — minutes of mostly sleeping
+	// between cheap polls, not one HTTP call's round-trip time. Sizing that
+	// off observed call latency (what ConcurrencyLimiter does) sees only
+	// the fast polls and drastically under-provisions concurrency; see
+	// pollBoundConcurrency's doc comment in concurrency.go.
+	gate := NewDynamicGate(importProjectDataGateLimiter(e))
 	g, gCtx := errgroup.WithContext(ctx)
 
 	var admitErr error
@@ -93,6 +102,17 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 		return err
 	}
 	return admitErr
+}
+
+// importProjectDataGateLimiter picks the limiter that bounds
+// runImportProjectData's outer per-project gate: CEPollConcurrencyLimiter
+// when set, falling back to ConcurrencyLimiter otherwise (test fixtures,
+// and any other caller that never wires the former).
+func importProjectDataGateLimiter(e *Executor) *ConcurrencyLimiter {
+	if e.CEPollConcurrencyLimiter != nil {
+		return e.CEPollConcurrencyLimiter
+	}
+	return e.ConcurrencyLimiter
 }
 
 // resolveProjectBranches builds the final list of branches to import for
@@ -276,7 +296,7 @@ func importProjectBranches(ctx context.Context, e *Executor, proj json.RawMessag
 
 	// Phase 1: import main branch (blocking gate).
 	if mainBranch != nil {
-		if err := importAndRecordBranch(ctx, e, bctx, *mainBranch); err != nil {
+		if err := gatedImportAndRecordBranch(ctx, e, bctx, *mainBranch); err != nil {
 			e.Logger.Warn("main branch failed, skipping remaining branches",
 				"project", cloudKey, "err", err)
 			for _, nb := range nonMainBranches {
@@ -296,11 +316,55 @@ func importProjectBranches(ctx context.Context, e *Executor, proj json.RawMessag
 		renameSCMainBranchToSource(ctx, e, cloudKey, mainBranch.Name)
 	}
 
-	// Phase 2: import non-main branches sequentially.
+	// Phase 2: import non-main branches in parallel.
+	//
+	// Safe to fan out only because Phase 1 above is a hard barrier. Main
+	// must be fully imported and renamed (#428) before any non-main branch
+	// is submitted: a non-main report carries branch characteristics that
+	// the CE rejects until a main analysis anchors the project, and
+	// PreCreateAnalysis points targetBranchName at bctx.MainTargetName,
+	// which only resolves on the target after renameSCMainBranchToSource.
+	//
+	// Nothing else is shared-mutable across branches: bctx is passed BY
+	// VALUE, both of its maps are read-only once built (Completed after
+	// loadCompletedBranches, TargetAnalysisDates after the
+	// targetAnalysisDates call above), and ChunkWriter is documented
+	// thread-safe (it hands each writer its own results.N.jsonl via atomic
+	// indexing). Per-branch outcomes are
+	// recorded independently inside importAndRecordBranch, so — exactly as
+	// when this loop was sequential — a non-main failure is logged against
+	// that branch and never fails the project.
+	//
+	// Bounded by the run-wide e.BranchGate, not a per-project limit: see
+	// Executor.BranchGate for why the bound has to be global.
+	g, gCtx := errgroup.WithContext(ctx)
 	for _, branch := range nonMainBranches {
-		_ = importAndRecordBranch(ctx, e, bctx, branch)
+		if err := e.BranchGate.Acquire(gCtx); err != nil {
+			break
+		}
+		g.Go(func() error {
+			defer e.BranchGate.Release()
+			if gCtx.Err() != nil {
+				return nil
+			}
+			_ = importAndRecordBranch(gCtx, e, bctx, branch)
+			return nil
+		})
 	}
+	_ = g.Wait()
 	return nil
+}
+
+// gatedImportAndRecordBranch runs one branch import while holding a slot in
+// the run-wide branch gate. Phase 2's fan-out below acquires the gate
+// itself so it can admit the next branch while earlier ones are still in
+// flight; this wrapper is for the sequential Phase 1 call.
+func gatedImportAndRecordBranch(ctx context.Context, e *Executor, bctx branchImportContext, branch branchInfo) error {
+	if err := e.BranchGate.Acquire(ctx); err != nil {
+		return err
+	}
+	defer e.BranchGate.Release()
+	return importAndRecordBranch(ctx, e, bctx, branch)
 }
 
 // resolveMainTargetName returns the project's main branch name on the target,

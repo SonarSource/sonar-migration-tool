@@ -468,6 +468,39 @@ func newProjectDataExecutor(t *testing.T, dir string) *Executor {
 	}
 }
 
+// TestImportProjectDataGateLimiter_PrefersCEPollConcurrencyLimiter proves
+// runImportProjectData's outer gate is bounded by CEPollConcurrencyLimiter
+// when set, not ConcurrencyLimiter — the whole point of this fix (a
+// project's gate slot is held across build->submit->PollCETask, so it
+// needs a limiter sized off the poll cadence, not raw HTTP call latency).
+func TestImportProjectDataGateLimiter_PrefersCEPollConcurrencyLimiter(t *testing.T) {
+	e := &Executor{
+		ConcurrencyLimiter:       NewFixedConcurrencyLimiter(5),
+		CEPollConcurrencyLimiter: NewFixedConcurrencyLimiter(250),
+	}
+	got := importProjectDataGateLimiter(e)
+	if got.Current() != 250 {
+		t.Fatalf("importProjectDataGateLimiter() = limiter with Current() %d, want 250 (CEPollConcurrencyLimiter)", got.Current())
+	}
+}
+
+// TestImportProjectDataGateLimiter_FallsBackToConcurrencyLimiter proves
+// callers that never wire CEPollConcurrencyLimiter (test fixtures today;
+// potentially other future callers) still get a working limiter rather
+// than a nil one that would panic DynamicGate.
+func TestImportProjectDataGateLimiter_FallsBackToConcurrencyLimiter(t *testing.T) {
+	e := &Executor{
+		ConcurrencyLimiter: NewFixedConcurrencyLimiter(5),
+	}
+	got := importProjectDataGateLimiter(e)
+	if got == nil {
+		t.Fatal("importProjectDataGateLimiter() = nil, want fallback to ConcurrencyLimiter")
+	}
+	if got.Current() != 5 {
+		t.Fatalf("importProjectDataGateLimiter() = limiter with Current() %d, want 5 (ConcurrencyLimiter fallback)", got.Current())
+	}
+}
+
 func TestCollectBranchInfo(t *testing.T) {
 	dir := t.TempDir()
 	setupProjectDataExtract(t, dir)

@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/scanreport"
 )
 
 const (
@@ -22,6 +24,29 @@ const (
 	// ConcurrencyLimiter will ever report, regardless of how high observed
 	// latency or the target rate are.
 	maxConcurrencyCeiling = 100
+
+	// maxPollBoundConcurrencyCeiling caps pollBoundConcurrency independently
+	// of maxConcurrencyCeiling: that constant guards against runaway growth
+	// from the latency-driven formula chasing degraded latency upward (see
+	// maxGrowthFactor's comment) — a risk that doesn't apply here, since
+	// pollBoundConcurrency is a one-time static computation from
+	// already-known constants, not an adaptively-growing figure. 300 gives
+	// generous headroom above today's natural maximum (25 at the top of the
+	// valid --api_max_rate_per_min range; it was 250 back when PollCETask
+	// polled on a fixed 10s cadence) for future poll-ladder tuning.
+	maxPollBoundConcurrencyCeiling = 300
+
+	// typicalCETaskDuration is the CE execution time pollBoundConcurrency
+	// assumes when asking AveragePollInterval how often one polling slot
+	// hits api/ce/task. Measured over 603 real CE tasks in a migrate run:
+	// median 1.57s, p90 2.95s.
+	//
+	// The MEDIAN is used rather than a tail figure on purpose. A shorter
+	// assumed duration keeps the slot on the ladder's early, short rungs,
+	// which yields a shorter average poll interval and therefore a SMALLER
+	// concurrency figure — so guessing wrong here errs toward staying
+	// inside the rate budget rather than overrunning it.
+	typicalCETaskDuration = 1570 * time.Millisecond
 
 	// maxGrowthFactor bounds how much Current() may increase in a single
 	// recalculation tick, regardless of what desiredConcurrency computes.
@@ -123,6 +148,61 @@ func clampConcurrency(n int) int {
 	return n
 }
 
+// pollBoundConcurrency sizes concurrency for a submit-then-poll fan-out —
+// runImportProjectData's outer per-project gate, which also covers the
+// nested #554 history replay (migrateBranchHistory/submitHistoricalSnapshot
+// run inside the same held gate slot) — using Little's Law with the KNOWN
+// poll cadence as the occupancy time per slot, instead of observed HTTP
+// call latency the way desiredConcurrency does.
+//
+// A branch's gate slot is held for minutes across build -> SubmitReport ->
+// PollCETask, issuing one cheap ~200-600ms call per poll and sleeping the
+// rest of the time. Sizing off raw call latency (as ConcurrencyLimiter's
+// network-latency-driven formula does) sees only the fast call and ignores
+// the sleep entirely, drastically under-provisioning concurrency: measured
+// live at avg_latency_ms ~250 and target_rate_per_min=1500,
+// desiredConcurrency computed ~6-9, driving only ~37 actual calls/min —
+// 2.5% of budget — because each of those few slots spends ~97% of its held
+// time asleep between polls, not because the API itself was ever close to
+// saturated.
+//
+// The occupancy figure comes from scanreport.AveragePollInterval rather
+// than a single fixed cadence, because PollCETask now backs off
+// exponentially instead of polling on a fixed 10s tick. This coupling is
+// load-bearing and must not be replaced with a constant: a slot that
+// discovers a typical task in ~3s has issued ~3 polls to do it, so it
+// consumes roughly 10x more of the api/ce/task rate budget per unit of
+// held time than the old fixed cadence did. Sizing the gate off the old
+// 10s figure would let aggregate demand exceed api_max_rate_per_min by
+// about an order of magnitude — not a correctness bug, since
+// SlidingWindowLimiter still enforces the real cap inside Wait(), but
+// exactly the recipe for the queue-then-burst pathology documented in
+// maxGrowthFactor's comment.
+//
+// The practical consequence is that the figure is much smaller than it was
+// (25 rather than 250 at --api_max_rate_per_min=1500), which is the
+// intended trade: fewer branches in flight, each finishing several times
+// sooner. Throughput in branches/minute is comparable, and the serial
+// history chain — where nothing else can use the spare budget anyway —
+// gets the full latency win.
+//
+// This is a pure function of values already known at startup (the
+// configured rate target and the poll ladder's tunables), so — unlike the
+// network-latency-driven limiter — it needs no background recalculation:
+// callers wrap the result in a NewFixedConcurrencyLimiter once per run.
+func pollBoundConcurrency(apiMaxRatePerMin int) int {
+	avgPollInterval := scanreport.AveragePollInterval(typicalCETaskDuration)
+	raw := float64(apiMaxRatePerMin) * avgPollInterval.Seconds() / 60.0
+	n := int(math.Ceil(raw))
+	if n < minConcurrency {
+		return minConcurrency
+	}
+	if n > maxPollBoundConcurrencyCeiling {
+		return maxPollBoundConcurrencyCeiling
+	}
+	return n
+}
+
 // ConcurrencyLimiter replaces the old Executor.Sem role: rather than a
 // fixed-capacity channel whose cap() every fan-out site reads
 // independently, it exposes a live Current() figure that a background
@@ -150,9 +230,12 @@ type ConcurrencyLimiter struct {
 }
 
 // NewFixedConcurrencyLimiter returns a limiter whose Current() always
-// returns n. Production code no longer constructs one this way —
-// newConcurrencyLimiter is always dynamic (#573 follow-up) — so this
-// exists for test fixtures that want a stable, non-recalculating pool.
+// returns n. newConcurrencyLimiter (the network-latency-driven limiter used
+// for most fan-outs) is always dynamic (#573 follow-up), but production
+// code does legitimately construct a fixed one for pollBoundConcurrency's
+// result — both its inputs are already known at startup, so there is
+// nothing for a background recalculation loop to react to. Also used by
+// test fixtures that want a stable, non-recalculating pool.
 func NewFixedConcurrencyLimiter(n int) *ConcurrencyLimiter {
 	l := &ConcurrencyLimiter{fixed: true}
 	l.current.Store(int32(n))
@@ -324,7 +407,17 @@ func NewDynamicGate(limiter *ConcurrencyLimiter) *DynamicGate {
 
 // Acquire blocks until fewer than limiter.Current() units are currently
 // admitted, then admits one. Returns ctx.Err() if ctx is done first.
+//
+// A nil gate admits immediately (subject only to ctx). That is not
+// defensive padding: Executor.BranchGate is legitimately nil in test
+// fixtures and in Executors built by reset.go / sync_issues_standalone.go,
+// and a nil-receiver method keeps every call site a plain
+// Acquire/defer Release pair instead of an if-nil ladder that is easy to
+// get wrong on the Release side.
 func (g *DynamicGate) Acquire(ctx context.Context) error {
+	if g == nil {
+		return ctx.Err()
+	}
 	for {
 		if g.tryAcquire() {
 			return nil
@@ -354,8 +447,11 @@ func (g *DynamicGate) tryAcquire() bool {
 }
 
 // Release frees one admitted unit. Must be called exactly once per
-// successful Acquire.
+// successful Acquire. A nil gate is a no-op, mirroring Acquire.
 func (g *DynamicGate) Release() {
+	if g == nil {
+		return
+	}
 	g.active.Add(-1)
 	select {
 	case g.freed <- struct{}{}:
