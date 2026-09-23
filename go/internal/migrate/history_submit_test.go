@@ -26,12 +26,14 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// TestMain drives scanreport.CEPollInterval down to near-zero for the whole
-// package so tests that exercise PollCETask (via submitHistoricalSnapshot,
-// importBranch, ...) don't pay its real wall-clock delay on every poll
-// (#571; also see go/internal/scanreport/submit_test.go's withFastCEPoll).
+// TestMain collapses scanreport's CE poll backoff ladder to near-zero for
+// the whole package so tests that exercise PollCETask (via
+// submitHistoricalSnapshot, importBranch, ...) don't pay its real
+// wall-clock delay on every poll (#571; also see
+// go/internal/scanreport/submit_test.go's withFastCEPoll). Setting the max
+// is enough — the initial wait is clamped down to it.
 func TestMain(m *testing.M) {
-	scanreport.CEPollInterval = time.Millisecond
+	scanreport.CEPollMaxInterval = time.Millisecond
 	os.Exit(m.Run())
 }
 
