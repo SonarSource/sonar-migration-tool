@@ -549,3 +549,73 @@ func TestDynamicGateAcquireRespectsContextCancellation(t *testing.T) {
 		t.Fatal("expected Acquire to return an error for an already-canceled context")
 	}
 }
+
+// TestNewBranchGateNilLimiterYieldsNilGate pins the nil-limiter guard in
+// newBranchGate. NewDynamicGate stores the limiter and dereferences it on
+// every tryAcquire, so handing it a nil limiter builds a gate that panics
+// the first time a branch import tries to enter. Returning a nil *DynamicGate
+// instead is safe by construction: Acquire and Release are nil-receiver
+// methods that admit and no-op (see Executor.BranchGate).
+func TestNewBranchGateNilLimiterYieldsNilGate(t *testing.T) {
+	if got := newBranchGate(nil); got != nil {
+		t.Fatalf("newBranchGate(nil) = %v, want nil gate", got)
+	}
+}
+
+// TestNewBranchGateNilGateAdmitsWithoutBounding proves the nil gate
+// newBranchGate hands back is actually usable, not merely non-panicking:
+// an unbounded caller must be able to acquire repeatedly without releasing
+// and never block. This is the behaviour every test fixture that leaves
+// CEPollConcurrencyLimiter unset relies on.
+func TestNewBranchGateNilGateAdmitsWithoutBounding(t *testing.T) {
+	gate := newBranchGate(nil)
+	ctx := context.Background()
+	for i := range 3 {
+		if err := gate.Acquire(ctx); err != nil {
+			t.Fatalf("Acquire #%d on a nil gate = %v, want nil", i, err)
+		}
+	}
+	for range 3 {
+		gate.Release()
+	}
+}
+
+// TestNewBranchGateNilGateHonoursCancellation proves the nil gate still
+// reports cancellation. A migrate run cancelled mid-flight relies on
+// Acquire returning an error to stop admitting branches; a nil gate that
+// unconditionally returned nil would keep feeding work into a dead run.
+func TestNewBranchGateNilGateHonoursCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := newBranchGate(nil).Acquire(ctx); err == nil {
+		t.Fatal("Acquire on a nil gate with a cancelled context = nil, want the context error")
+	}
+}
+
+// TestNewBranchGateBoundsFromItsLimiter proves the non-nil path wires the
+// limiter through rather than returning an unbounded gate: a limiter of 2
+// must admit exactly 2 branches before the third blocks.
+func TestNewBranchGateBoundsFromItsLimiter(t *testing.T) {
+	gate := newBranchGate(NewFixedConcurrencyLimiter(2))
+	if gate == nil {
+		t.Fatal("newBranchGate(limiter) = nil, want a gate")
+	}
+	ctx := context.Background()
+	for i := range 2 {
+		if err := gate.Acquire(ctx); err != nil {
+			t.Fatalf("Acquire #%d = %v, want nil", i, err)
+		}
+	}
+
+	blocked, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+	if err := gate.Acquire(blocked); err == nil {
+		t.Fatal("third Acquire against a limit of 2 succeeded, want it to block until the deadline")
+	}
+
+	// A release must hand the slot to the next caller.
+	gate.Release()
+	if err := gate.Acquire(ctx); err != nil {
+		t.Fatalf("Acquire after Release = %v, want nil", err)
+	}
+}
