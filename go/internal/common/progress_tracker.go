@@ -385,7 +385,7 @@ const maxReportableETASeconds = 30 * 24 * 60 * 60
 // scales the expected duration that taskFraction credits a running task
 // against, so letting running tasks feed the factor would let the
 // estimate chase its own tail.
-func (t *Tracker) observedSpeedFactor(actual map[string]time.Duration, overrides map[string]time.Duration) float64 {
+func (t *Tracker) observedSpeedFactor(actual, overrides map[string]time.Duration) float64 {
 	var sumActual, sumExpected float64
 	for name, d := range actual {
 		exp := t.expectedDuration(name, overrides).Seconds()
