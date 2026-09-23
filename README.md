@@ -32,7 +32,7 @@ See [what's new](WHATSNEW.md) in the latest release.
 ---
 
 ## What gets migrated
-<!-- updated: 2026-07-27_23:05:00 -->
+<!-- updated: 2026-09-23_19:23:41 -->
 
 ### ✅ Migrated
 * Projects, Quality Gates, Quality Profiles<br>
@@ -40,6 +40,7 @@ See [what's new](WHATSNEW.md) in the latest release.
 * Project Settings, Webhooks, Links<br>
 * Portfolios (Enterprise)<br>
 * Project data (Branches with Measures, Issues, Source files, Syntax highlighting, ...) (Optional)<br>
+* Project analysis history — a bounded set of the source project's earlier **main-branch** analyses, replayed as separate backdated points, so a migrated project's history no longer starts on the day it was migrated. Each point carries that analysis's project-level measures only — not the issues or files as they stood at the time. Opt-in proof of concept; read the limitations under [`--migrate_history`](docs/TRANSFER.md#project-history-migration---migrate_history--poc) before relying on it (Optional)<br>
 * Issues & Hotspots status, comments, and tags (optional)
 * SCM blame authorship
 * Project DevOps platform binding (GitHub / GitLab / Azure DevOps / Bitbucket Cloud) — requires the target organization to be bound to the same platform
@@ -47,7 +48,7 @@ See [what's new](WHATSNEW.md) in the latest release.
 ### ❌ NOT migrated
 * User accounts & auth
 * User Permissions on users
-* Analysis history
+* The issues and Security Hotspots *as they stood at* a past analysis — backdated history points carry measures only (no API reports which issues existed at a past date)
 * Coverage and Duplication data
 * Applications
 * Portfolio hierarchies
