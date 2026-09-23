@@ -1094,7 +1094,11 @@ func collectProjectData(store *common.DataStore) map[string]projectDataOutcome {
 			} else {
 				result[key] = projectDataOutcome{State: "skipped", Reason: projectDataSkipReason(skipErr)}
 			}
-		case len(a.states["success"]) > 0:
+		// "up_to_date" (#588) means the target already carried this branch's
+		// analysis, so a re-run had nothing to submit. The branch is migrated;
+		// counting it anywhere but success would report a healthy project as
+		// Skipped purely because the operator ran transfer twice.
+		case len(a.states["success"]) > 0 || len(a.states["up_to_date"]) > 0:
 			result[key] = projectDataOutcome{State: "success"}
 		default:
 			// State string we don't recognise — surface as skipped so
