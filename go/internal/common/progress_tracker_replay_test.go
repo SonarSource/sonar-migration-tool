@@ -16,6 +16,12 @@ import (
 // reported on completion. Offsets and durations are milliseconds from the
 // start of the run, which finished in recordedMigrateTotal.
 //
+// The offsets come from the "running task" log line, which runPhase emits
+// as it hands a task to its errgroup, so for a phase wider than the
+// concurrency cap they are queue-entry times rather than execution starts.
+// That is what the log records and it is left as recorded; the timeline is
+// a historical artefact, not a description of current runPhase behaviour.
+//
 // It is kept as a fixture because the shape is what makes ETA estimation
 // hard, and no synthetic plan reproduces it honestly: ten seconds of many
 // cheap tasks, then importProjectData alone for 77 of the 98 seconds, then

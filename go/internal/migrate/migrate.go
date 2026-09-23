@@ -810,9 +810,16 @@ func runPhase(ctx context.Context, e *Executor, taskNames []string, registry map
 	for _, name := range taskNames {
 		def := registry[name]
 		e.Logger.Info("running task", "task", name)
-		e.Progress.MarkTaskStarted(name)
 		g.Go(func() error {
 			taskStart := time.Now()
+			// Marked here rather than before g.Go: the errgroup is capped
+			// at maxConcurrentTasksPerPhase, so in a phase wider than that
+			// cap most tasks sit queued after the loop hands them over.
+			// Stamping the start at hand-over makes the tracker read queue
+			// wait as execution time, which both inflates the duration
+			// MarkTaskComplete banks and distorts the in-flight credit a
+			// queued-but-not-running task receives (#564).
+			e.Progress.MarkTaskStarted(name)
 			counter := NewTaskCounter(name)
 			taskCtx := WithTaskCounter(ctx, counter)
 			runErr := def.Run(taskCtx, e)

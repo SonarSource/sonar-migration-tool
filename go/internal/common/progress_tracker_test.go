@@ -789,21 +789,30 @@ func TestTrackerETAReportsUnknownRatherThanNonsense(t *testing.T) {
 // report a longer ETA for the same remaining task list than one whose
 // tasks came in on seed.
 func TestTrackerETAGrowsWhenTheRunIsSlowerThanSeeded(t *testing.T) {
-	plan := [][]string{{"general-1", "sync-1"}}
+	plan := [][]string{{"general-1", "general-2"}}
 	expected := fixedDuration(100 * time.Second)
 
-	etaFor := func(actualDuration, elapsed time.Duration) time.Duration {
+	// Elapsed time is held identical across both cases on purpose, and
+	// general-2 is left in flight. The ONLY thing that differs is how long
+	// the finished task was observed to take, so the difference in ETA can
+	// only come from the calibration: an earlier version of this test also
+	// varied elapsed, which moved the ETA on its own and let the test pass
+	// with calibration disabled entirely.
+	etaFor := func(observed time.Duration) time.Duration {
 		tr := NewTracker(testLogger(), plan, categorizeByPrefix, DefaultCategoryWeights, expected)
-		tr.start = time.Now().Add(-elapsed)
-		completeWithDuration(tr, "general-1", actualDuration)
+		tr.start = time.Now().Add(-200 * time.Second)
+		completeWithDuration(tr, "general-1", observed)
+		tr.mu.Lock()
+		tr.running["general-2"] = time.Now().Add(-50 * time.Second)
+		tr.mu.Unlock()
 		_, eta, _ := tr.snapshot()
 		return eta
 	}
 
-	onSeed := etaFor(100*time.Second, 100*time.Second)
-	slow := etaFor(400*time.Second, 400*time.Second)
+	onSeed := etaFor(100 * time.Second) // factor ~1: general-2 credited against its raw 100s seed
+	slow := etaFor(400 * time.Second)   // factor ~3.5: general-2 credited against ~350s, so less of it is done
 
 	if slow <= onSeed {
-		t.Errorf("slow run eta = %v, on-seed run eta = %v — a run measured slower than its seeds must report a longer ETA", slow, onSeed)
+		t.Errorf("slow run eta = %v, on-seed run eta = %v — a run measured slower than its seeds must credit in-flight work more slowly, and so report a longer ETA", slow, onSeed)
 	}
 }
