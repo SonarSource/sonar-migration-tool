@@ -145,6 +145,36 @@ func newCEServer(t *testing.T, rec *ceRecorder) *httptest.Server {
 	return srv
 }
 
+// newCancelOnBranchHandshakeServer serves the same submit/poll pair as
+// newCEServer, but cancels the run the first time a NON-main branch opens its
+// "Create analysis" handshake. Main never calls that endpoint, so the cancel
+// always lands after main is fully imported and recorded. Cancelling any
+// earlier fails MAIN instead, and Phase 1's own "main branch CE failed" path
+// would then write the skip rows while Phase 2 never runs at all.
+func newCancelOnBranchHandshakeServer(t *testing.T, cancel context.CancelFunc) *httptest.Server {
+	t.Helper()
+	var once sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/analysis/analyses":
+			once.Do(cancel)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "an-1", "branchId": "br-1", "branchType": "LONG",
+			})
+		case "/api/ce/submit":
+			_ = json.NewEncoder(w).Encode(map[string]any{"taskId": "task-" + submittedBranch(r)})
+		case "/api/ce/task":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"task": map[string]any{"status": "SUCCESS"},
+			})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 // submittedBranch names the branch a ce/submit request carries. Main sends
 // no branch characteristic at all (buildMultipartForm omits them so the CE
 // registers the project's main branch), so its absence identifies main.
@@ -401,33 +431,7 @@ func TestImportProjectBranchesRecordsBranchesSkippedByCancellation(t *testing.T)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Cancel on the first non-main "Create analysis" handshake. Main never
-	// calls that endpoint, so by the time it fires main is fully imported
-	// and recorded — which is what forces Phase 2 to be the code under test.
-	// Cancelling any earlier fails MAIN instead, and Phase 1's own "main
-	// branch CE failed" path would write the skip rows while Phase 2 never
-	// runs at all.
-	var once sync.Once
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/analysis/analyses":
-			once.Do(cancel)
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"id": "an-1", "branchId": "br-1", "branchType": "LONG",
-			})
-		case "/api/ce/submit":
-			_ = json.NewEncoder(w).Encode(map[string]any{"taskId": "task-" + submittedBranch(r)})
-		case "/api/ce/task":
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"task": map[string]any{"status": "SUCCESS"},
-			})
-		default:
-			_ = json.NewEncoder(w).Encode(map[string]any{})
-		}
-	}))
-	t.Cleanup(srv.Close)
-
-	e := newMultiBranchExecutor(t, dir, srv)
+	e := newMultiBranchExecutor(t, dir, newCancelOnBranchHandshakeServer(t, cancel))
 	// One slot, so only the first non-main branch is ever admitted. The rest
 	// are still blocked on Acquire when the cancel lands, which is the path
 	// that used to drop them.
@@ -460,21 +464,21 @@ func TestImportProjectBranchesRecordsBranchesSkippedByCancellation(t *testing.T)
 			status["main"], reason["main"])
 	}
 
-	// The accounting assertion: nothing vanishes.
+	// The accounting assertion: nothing vanishes, and whatever the run never
+	// attempted says why.
+	cancelled := 0
 	for _, name := range multiBranchNonMain {
 		if _, ok := status[name]; !ok {
 			t.Errorf("branch %q left no row; a cancelled run must still account for it (rows: %v)", name, status)
+			continue
 		}
-	}
-
-	cancelled := 0
-	for _, name := range multiBranchNonMain {
-		if reason[name] == "skipped: migration cancelled" {
-			if status[name] != "skipped" {
-				t.Errorf("branch %q: status = %q, want \"skipped\"", name, status[name])
-			}
-			cancelled++
+		if reason[name] != "skipped: migration cancelled" {
+			continue
 		}
+		if status[name] != "skipped" {
+			t.Errorf("branch %q: status = %q, want \"skipped\"", name, status[name])
+		}
+		cancelled++
 	}
 	if cancelled == 0 {
 		t.Errorf("no branch was recorded as cancelled; reasons: %v", reason)
