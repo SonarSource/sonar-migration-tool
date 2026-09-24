@@ -484,3 +484,49 @@ func TestImportProjectBranchesRecordsBranchesSkippedByCancellation(t *testing.T)
 		t.Errorf("no branch was recorded as cancelled; reasons: %v", reason)
 	}
 }
+
+// TestImportProjectBranchesRecordsMainWhenGateRefusesOnCancel guards the
+// mirror image of the test above. Phase 1 reaches the gate before it reaches
+// importAndRecordBranch, which is the only thing that writes main's row, so a
+// gate that refuses a cancelled context drops MAIN rather than a non-main
+// branch. A main-only project would then write nothing at all, and a project
+// with no project-data rows reads as nothing to flag and renders as Succeeded.
+func TestImportProjectBranchesRecordsMainWhenGateRefusesOnCancel(t *testing.T) {
+	dir := t.TempDir()
+	setupMultiBranchExtract(t, dir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already done before Phase 1 even starts
+
+	e := newMultiBranchExecutor(t, dir, newCEServer(t, &ceRecorder{}))
+	// Non-nil with a free slot: the case that used to let a cancelled context
+	// straight through to importAndRecordBranch, which recorded a failed row.
+	e.BranchGate = NewDynamicGate(NewFixedConcurrencyLimiter(10))
+
+	w, err := e.Store.Writer("importProjectData")
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	if err := importProjectBranches(ctx, e, multiBranchProject(t), multiBranchList(), nil, nil, w); err == nil {
+		t.Fatal("importProjectBranches on a cancelled context returned nil, want an error")
+	}
+
+	items, err := e.Store.ReadAll("importProjectData")
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	reason := map[string]string{}
+	for _, it := range items {
+		reason[extractField(it, "branch")] = extractField(it, "error")
+	}
+
+	// Main is the point of this test; the non-main branches must not be
+	// blamed on a CE failure that never happened.
+	for _, name := range append([]string{"main"}, multiBranchNonMain...) {
+		if got, ok := reason[name]; !ok {
+			t.Errorf("branch %q left no row on a cancelled run (rows: %v)", name, reason)
+		} else if got != "skipped: migration cancelled" {
+			t.Errorf("branch %q: error = %q, want %q", name, got, "skipped: migration cancelled")
+		}
+	}
+}

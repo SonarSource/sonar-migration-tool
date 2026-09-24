@@ -1356,8 +1356,10 @@ func TestRunImportProjectDataSkipsEmptyKeys(t *testing.T) {
 // for a run cancelled after every project was already admitted. The gate
 // never blocks in that window, so admitErr stays nil, and
 // importProjectDataOne records per-project outcomes rather than returning
-// them, so g.Wait() is nil too. Reporting success there makes migrate.go
-// MarkComplete a half-finished task, and a later resume skips it.
+// them, so g.Wait() is nil too. Reporting success there lets migrate.go start
+// the next phase on an already-cancelled context, where the trailing metadata
+// syncs create their task directories, fail, and are then dropped as already
+// done by the next --run_id resume.
 func TestRunImportProjectDataReportsCancellation(t *testing.T) {
 	dir := t.TempDir()
 	setupProjectDataExtract(t, dir)
