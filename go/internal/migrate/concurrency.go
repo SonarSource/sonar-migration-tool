@@ -419,6 +419,15 @@ func (g *DynamicGate) Acquire(ctx context.Context) error {
 		return ctx.Err()
 	}
 	for {
+		// Checked BEFORE tryAcquire, not only in the select below: a gate
+		// with a free slot would otherwise admit on an already-cancelled
+		// context and send the caller off to do doomed network work. Callers
+		// that treat a nil Acquire as "still running" (runImportProjectData's
+		// admitErr, importProjectBranches' Phase 2) then miss the
+		// cancellation entirely.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if g.tryAcquire() {
 			return nil
 		}

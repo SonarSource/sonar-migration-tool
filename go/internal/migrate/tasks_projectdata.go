@@ -101,7 +101,15 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 	if err := g.Wait(); err != nil {
 		return err
 	}
-	return admitErr
+	if admitErr != nil {
+		return admitErr
+	}
+	// A cancellation that lands after the loop admitted every project leaves
+	// admitErr nil, and g.Wait() nil too, because importProjectDataOne
+	// records per-project outcomes rather than returning them. Reporting
+	// success there would have migrate.go MarkComplete a half-finished task,
+	// so a later resume skips it and its projects are never retried.
+	return ctx.Err()
 }
 
 // importProjectDataGateLimiter picks the limiter that bounds
@@ -337,14 +345,22 @@ func importProjectBranches(ctx context.Context, e *Executor, proj json.RawMessag
 	//
 	// Bounded by the run-wide e.BranchGate, not a per-project limit: see
 	// Executor.BranchGate for why the bound has to be global.
+	// Both bail-outs below record a row rather than dropping the branch. The
+	// migration report is assembled purely by enumerating this store, with no
+	// pass that reconciles it against the branch list, so an unattempted
+	// branch that writes nothing simply vanishes from the report — and a
+	// project whose rows ALL vanish has no project-data rows at all, which
+	// attachProjectData reads as nothing-to-flag and renders as Succeeded.
 	g, gCtx := errgroup.WithContext(ctx)
 	for _, branch := range nonMainBranches {
 		if err := e.BranchGate.Acquire(gCtx); err != nil {
-			break
+			recordBranchCancelled(w, cloudKey, branch.Name)
+			continue
 		}
 		g.Go(func() error {
 			defer e.BranchGate.Release()
 			if gCtx.Err() != nil {
+				recordBranchCancelled(w, cloudKey, branch.Name)
 				return nil
 			}
 			_ = importAndRecordBranch(gCtx, e, bctx, branch)
@@ -353,6 +369,16 @@ func importProjectBranches(ctx context.Context, e *Executor, proj json.RawMessag
 	}
 	_ = g.Wait()
 	return nil
+}
+
+// recordBranchCancelled marks a branch the run never got to because the
+// context was cancelled. Acquire only ever fails on a done context, so the
+// caller's loop keeps walking the remaining branches to account for each of
+// them rather than stopping at the first.
+func recordBranchCancelled(w *common.ChunkWriter, cloudKey, branchName string) {
+	recordBranchResult(w, cloudKey, branchName, &importResult{
+		Status: "skipped", Error: "skipped: migration cancelled",
+	})
 }
 
 // gatedImportAndRecordBranch runs one branch import while holding a slot in

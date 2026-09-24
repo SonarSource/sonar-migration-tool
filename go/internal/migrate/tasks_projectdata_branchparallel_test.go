@@ -387,3 +387,96 @@ func TestImportProjectBranchesMainFailureSkipsNonMain(t *testing.T) {
 		}
 	}
 }
+
+// TestImportProjectBranchesRecordsBranchesSkippedByCancellation pins the
+// report accounting for a cancelled run. The migration report is assembled
+// by enumerating the importProjectData store, with no pass that reconciles
+// it against the branch list, so a branch the run never attempted has to
+// leave a row behind or it disappears from the report entirely — and a
+// project whose rows all disappear renders as Succeeded.
+func TestImportProjectBranchesRecordsBranchesSkippedByCancellation(t *testing.T) {
+	dir := t.TempDir()
+	setupMultiBranchExtract(t, dir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Cancel on the first non-main "Create analysis" handshake. Main never
+	// calls that endpoint, so by the time it fires main is fully imported
+	// and recorded — which is what forces Phase 2 to be the code under test.
+	// Cancelling any earlier fails MAIN instead, and Phase 1's own "main
+	// branch CE failed" path would write the skip rows while Phase 2 never
+	// runs at all.
+	var once sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/analysis/analyses":
+			once.Do(cancel)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "an-1", "branchId": "br-1", "branchType": "LONG",
+			})
+		case "/api/ce/submit":
+			_ = json.NewEncoder(w).Encode(map[string]any{"taskId": "task-" + submittedBranch(r)})
+		case "/api/ce/task":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"task": map[string]any{"status": "SUCCESS"},
+			})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	e := newMultiBranchExecutor(t, dir, srv)
+	// One slot, so only the first non-main branch is ever admitted. The rest
+	// are still blocked on Acquire when the cancel lands, which is the path
+	// that used to drop them.
+	e.BranchGate = NewDynamicGate(NewFixedConcurrencyLimiter(1))
+
+	w, err := e.Store.Writer("importProjectData")
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	if err := importProjectBranches(ctx, e, multiBranchProject(t), multiBranchList(), nil, nil, w); err != nil {
+		t.Fatalf("importProjectBranches: %v", err)
+	}
+
+	items, err := e.Store.ReadAll("importProjectData")
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	status := map[string]string{}
+	reason := map[string]string{}
+	for _, it := range items {
+		branch := extractField(it, "branch")
+		status[branch] = extractField(it, "status")
+		reason[branch] = extractField(it, "error")
+	}
+
+	// Guard against this test going vacuous: if main did not succeed, Phase 1
+	// wrote the rows below and the Phase 2 path was never exercised.
+	if status["main"] != "success" {
+		t.Fatalf("main must succeed for Phase 2 to be reached: main status = %q, error = %q",
+			status["main"], reason["main"])
+	}
+
+	// The accounting assertion: nothing vanishes.
+	for _, name := range multiBranchNonMain {
+		if _, ok := status[name]; !ok {
+			t.Errorf("branch %q left no row; a cancelled run must still account for it (rows: %v)", name, status)
+		}
+	}
+
+	cancelled := 0
+	for _, name := range multiBranchNonMain {
+		if reason[name] == "skipped: migration cancelled" {
+			if status[name] != "skipped" {
+				t.Errorf("branch %q: status = %q, want \"skipped\"", name, status[name])
+			}
+			cancelled++
+		}
+	}
+	if cancelled == 0 {
+		t.Errorf("no branch was recorded as cancelled; reasons: %v", reason)
+	}
+}
