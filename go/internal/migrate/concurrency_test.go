@@ -7,6 +7,7 @@ package migrate
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -547,6 +548,26 @@ func TestDynamicGateAcquireRespectsContextCancellation(t *testing.T) {
 
 	if err := gate.Acquire(ctx); err == nil {
 		t.Fatal("expected Acquire to return an error for an already-canceled context")
+	}
+}
+
+// TestDynamicGateAcquireRejectsCancelledContextWithFreeSlot covers what the
+// test above cannot: its limiter of 0 means Acquire only ever reaches the
+// select. With a slot actually free, tryAcquire would otherwise win the race
+// and hand the caller a live slot on a dead context. Callers that read a nil
+// Acquire as "still running" — runImportProjectData's admitErr,
+// importProjectBranches' Phase 2 — then miss the cancellation entirely and
+// go on to do doomed network work.
+func TestDynamicGateAcquireRejectsCancelledContextWithFreeSlot(t *testing.T) {
+	gate := NewDynamicGate(NewFixedConcurrencyLimiter(10)) // plenty of room
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := gate.Acquire(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Acquire with a free slot on a cancelled context = %v, want context.Canceled", err)
+	}
+	if got := gate.active.Load(); got != 0 {
+		t.Errorf("a rejected Acquire must not consume a slot: active = %d, want 0", got)
 	}
 }
 

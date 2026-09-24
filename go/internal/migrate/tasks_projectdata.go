@@ -101,7 +101,23 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 	if err := g.Wait(); err != nil {
 		return err
 	}
-	return admitErr
+	if admitErr != nil {
+		return admitErr
+	}
+	// A cancellation that lands after the loop admitted every project leaves
+	// admitErr nil, and g.Wait() nil too, because importProjectDataOne records
+	// per-project outcomes rather than returning them. Reporting success there
+	// lets migrate.go start the NEXT phase on an already-cancelled context,
+	// where syncIssueMetadata and syncHotspotMetadata create their task
+	// directories before their first ctx check, fail immediately, and are then
+	// dropped by filterCompleted's directory-exists gate on the next --run_id
+	// resume. With no sync tasks in the plan at all, the run instead prints
+	// "Migration Complete" and exits 0 on an interrupted migration.
+	//
+	// Note this task itself is never skipped by resume: filterCompleted
+	// exempts importProjectData (#393), and it redoes its own work per
+	// (project, branch) via loadCompletedBranches.
+	return ctx.Err()
 }
 
 // importProjectDataGateLimiter picks the limiter that bounds
@@ -297,14 +313,9 @@ func importProjectBranches(ctx context.Context, e *Executor, proj json.RawMessag
 	// Phase 1: import main branch (blocking gate).
 	if mainBranch != nil {
 		if err := gatedImportAndRecordBranch(ctx, e, bctx, *mainBranch); err != nil {
-			e.Logger.Warn("main branch failed, skipping remaining branches",
+			e.Logger.Warn("main branch not imported, skipping remaining branches",
 				"project", cloudKey, "err", err)
-			for _, nb := range nonMainBranches {
-				recordBranchResult(w, cloudKey, nb.Name, &importResult{
-					Status: "skipped", Error: "skipped: main branch CE failed",
-				})
-			}
-			return fmt.Errorf("main branch CE failed for %s: %w", cloudKey, err)
+			return recordPhase1Skips(w, cloudKey, nonMainBranches, ctx.Err() != nil, err)
 		}
 		// #428 — SonarCloud creates the project's main branch under its own
 		// default name (typically "master"), discarding the source main branch
@@ -337,14 +348,22 @@ func importProjectBranches(ctx context.Context, e *Executor, proj json.RawMessag
 	//
 	// Bounded by the run-wide e.BranchGate, not a per-project limit: see
 	// Executor.BranchGate for why the bound has to be global.
+	// Both bail-outs below record a row rather than dropping the branch. The
+	// migration report is assembled purely by enumerating this store, with no
+	// pass that reconciles it against the branch list, so an unattempted
+	// branch that writes nothing simply vanishes from the report — and a
+	// project whose rows ALL vanish has no project-data rows at all, which
+	// attachProjectData reads as nothing-to-flag and renders as Succeeded.
 	g, gCtx := errgroup.WithContext(ctx)
 	for _, branch := range nonMainBranches {
 		if err := e.BranchGate.Acquire(gCtx); err != nil {
-			break
+			recordBranchCancelled(w, cloudKey, branch.Name)
+			continue
 		}
 		g.Go(func() error {
 			defer e.BranchGate.Release()
 			if gCtx.Err() != nil {
+				recordBranchCancelled(w, cloudKey, branch.Name)
 				return nil
 			}
 			_ = importAndRecordBranch(gCtx, e, bctx, branch)
@@ -355,12 +374,49 @@ func importProjectBranches(ctx context.Context, e *Executor, proj json.RawMessag
 	return nil
 }
 
+// recordBranchCancelled marks a branch the run never got to because the
+// context was cancelled. Acquire only ever fails on a done context, so the
+// caller's loop keeps walking the remaining branches to account for each of
+// them rather than stopping at the first.
+func recordBranchCancelled(w *common.ChunkWriter, cloudKey, branchName string) {
+	recordBranchResult(w, cloudKey, branchName, &importResult{
+		Status: "skipped", Error: "skipped: migration cancelled",
+	})
+}
+
+// recordPhase1Skips accounts for the non-main branches a project will not
+// attempt because its main branch did not import, and returns the error to
+// report for the project. A cancelled run is deliberately not labelled a main
+// branch rejection: reporting "main branch CE failed" for it sends the reader
+// hunting for a Compute Engine failure that never happened.
+func recordPhase1Skips(w *common.ChunkWriter, cloudKey string, nonMain []branchInfo, cancelled bool, err error) error {
+	if cancelled {
+		for _, nb := range nonMain {
+			recordBranchCancelled(w, cloudKey, nb.Name)
+		}
+		return fmt.Errorf("migration cancelled for %s: %w", cloudKey, err)
+	}
+	for _, nb := range nonMain {
+		recordBranchResult(w, cloudKey, nb.Name, &importResult{
+			Status: "skipped", Error: "skipped: main branch CE failed",
+		})
+	}
+	return fmt.Errorf("main branch CE failed for %s: %w", cloudKey, err)
+}
+
 // gatedImportAndRecordBranch runs one branch import while holding a slot in
 // the run-wide branch gate. Phase 2's fan-out below acquires the gate
 // itself so it can admit the next branch while earlier ones are still in
 // flight; this wrapper is for the sequential Phase 1 call.
 func gatedImportAndRecordBranch(ctx context.Context, e *Executor, bctx branchImportContext, branch branchInfo) error {
 	if err := e.BranchGate.Acquire(ctx); err != nil {
+		// Acquire fails only on a done context, and it fails BEFORE
+		// importAndRecordBranch, which is what would otherwise write this
+		// branch's row. Recording here is what keeps MAIN in the report: a
+		// main-only project that writes nothing at all has no project data
+		// rows, which attachProjectData reads as nothing to flag and renders
+		// as Succeeded.
+		recordBranchCancelled(bctx.Writer, bctx.CloudKey, branch.Name)
 		return err
 	}
 	defer e.BranchGate.Release()

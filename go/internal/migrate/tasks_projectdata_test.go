@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -1348,6 +1349,48 @@ func TestRunImportProjectDataSkipsEmptyKeys(t *testing.T) {
 	items, _ := e.Store.ReadAll("importProjectData")
 	if len(items) != 0 {
 		t.Errorf("expected 0 results for empty keys, got %d", len(items))
+	}
+}
+
+// TestRunImportProjectDataReportsCancellation pins the task's return value
+// for a run cancelled after every project was already admitted. The gate
+// never blocks in that window, so admitErr stays nil, and
+// importProjectDataOne records per-project outcomes rather than returning
+// them, so g.Wait() is nil too. Reporting success there lets migrate.go start
+// the next phase on an already-cancelled context, where the trailing metadata
+// syncs create their task directories, fail, and are then dropped as already
+// done by the next --run_id resume.
+func TestRunImportProjectDataReportsCancellation(t *testing.T) {
+	dir := t.TempDir()
+	setupProjectDataExtract(t, dir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Cancelling on the first request guarantees the project's goroutine is
+	// already past its entry ctx check, which is the case the task used to
+	// report as success.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		cancel()
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	}))
+	defer srv.Close()
+
+	e := newProjectDataExecutor(t, dir)
+	e.CloudURL = srv.URL + "/"
+	e.Raw = common.NewRawClient(srv.Client(), srv.URL+"/")
+
+	w, _ := e.Store.Writer("createProjects")
+	b, _ := json.Marshal(map[string]any{
+		"key":                "proj1",
+		"cloud_project_key":  "cloud-proj1",
+		"sonarcloud_org_key": "cloud-org1",
+		"server_url":         testServerURL,
+	})
+	w.WriteOne(b)
+
+	if err := runImportProjectData(ctx, e); !errors.Is(err, context.Canceled) {
+		t.Fatalf("runImportProjectData on a cancelled run = %v, want context.Canceled", err)
 	}
 }
 
