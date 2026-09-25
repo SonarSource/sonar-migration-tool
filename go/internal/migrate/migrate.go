@@ -298,13 +298,55 @@ type Executor struct {
 	// one counting semaphore across both levels would let the outer holders
 	// take every slot and deadlock the inner work.
 	ConcurrencyLimiter *ConcurrencyLimiter
+	// CEPollConcurrencyLimiter bounds runImportProjectData's outer
+	// per-project gate instead of ConcurrencyLimiter — and, nested inside
+	// that gate's held slot, the #554 history replay. See
+	// pollBoundConcurrency's doc comment for why this fan-out needs a
+	// different sizing signal: a branch's gate slot is held for minutes
+	// across build -> submit -> PollCETask, so sizing off raw HTTP call
+	// latency (as ConcurrencyLimiter does) drastically under-provisions it.
+	// Fixed for the run (NewFixedConcurrencyLimiter): both its inputs
+	// (api_max_rate_per_min and the CE poll backoff ladder's tunables) are
+	// already known at startup.
+	//
+	// May be nil (test fixtures, and Executors built by reset.go /
+	// sync_issues_standalone.go which never run importProjectData);
+	// callers fall back to ConcurrencyLimiter.
+	CEPollConcurrencyLimiter *ConcurrencyLimiter
+	// BranchGate bounds how many BRANCH imports are in flight at once
+	// across the whole run — main and non-main alike, each one a
+	// build -> submit -> PollCETask cycle holding a CE task open.
+	//
+	// It exists because importProjectBranches imports a project's non-main
+	// branches in parallel (#554 follow-up). Without a branch-level bound,
+	// in-flight CE tasks would be the PRODUCT of the two levels — the outer
+	// per-project gate (pollBoundConcurrency, 25 at
+	// --api_max_rate_per_min=1500) times MaxBranchesPerProject (10) = 250,
+	// roughly ten times the api/ce/task rate budget those 25 were sized to
+	// fit. SlidingWindowLimiter would still enforce the real cap, but only
+	// by queueing the excess inside Wait() — precisely the queue-then-burst
+	// pathology documented in maxGrowthFactor's comment.
+	//
+	// Deliberately run-wide and shared, not one gate per project: "how many
+	// CE tasks may be open at once" is a single global budget, and a
+	// per-project gate could not bound the product. It is a SEPARATE gate
+	// from runImportProjectData's outer one even though both read this same
+	// limiter — sharing one gate across nested fan-outs is the deadlock
+	// DynamicGate's doc comment warns about. There is no cycle here:
+	// holding a branch slot never requires a project slot, so branch slots
+	// always drain.
+	//
+	// May be nil (test fixtures, reset.go, sync_issues_standalone.go);
+	// DynamicGate's methods are nil-safe, so callers need no nil check.
+	BranchGate *DynamicGate
 	// BuildSem bounds concurrent scanner-report CONSTRUCTION, which is the
 	// memory-heavy part of importProjectData: a branch's full source text,
 	// its protobufs and the packaged ZIP are all live at once.
 	//
-	// Deliberately NOT the same bound as project fan-out. importProjectData
-	// spends most of its wall clock in PollCETask, so 25 branches can stay
-	// in flight against the CE while only a few are being built.
+	// Deliberately NOT the same bound as project fan-out (see
+	// CEPollConcurrencyLimiter) — importProjectData spends most of its wall
+	// clock in PollCETask, so many more branches can stay in flight against
+	// the CE than are ever concurrently being built.
 	//
 	// May be nil (test fixtures); callers must nil-check.
 	BuildSem        chan struct{}
@@ -484,31 +526,33 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 	phases := filterCompleted(mp.Plan, store)
 
 	executor := &Executor{
-		Cloud:                clients.Cloud,
-		CloudAPI:             clients.CloudAPI,
-		Raw:                  clients.Raw,
-		RawAPI:               clients.RawAPI,
-		Extract:              nil, // Will be set per-task based on extract mapping
-		Store:                store,
-		CloudURL:             clients.CloudURL,
-		APIURL:               clients.APIURL,
-		EntKey:               cfg.EnterpriseKey,
-		Edition:              mp.Edition,
-		ExportDir:            cfg.ExportDirectory,
-		Mapping:              mp.Mapping,
-		ConcurrencyLimiter:   clients.ConcurrencyLimiter,
-		BuildSem:             make(chan struct{}, cfg.BuildConcurrency),
-		ExcludeBranches:      cfg.ExcludeBranches,
-		UnsupportedLanguages: cfg.UnsupportedLanguages,
-		FastSync:             cfg.FastSync,
-		MaxIssueComments:     cfg.MaxIssueComments,
-		ProjectKeyPattern:    cfg.ProjectKeyPattern,
-		Objects:              cfg.Objects,
-		ProjectKeyRe:         projectKeyRe,
-		BranchRe:             branchRe,
-		MigrateHistory:       cfg.MigrateHistory,
-		BranchAnalyzedAfter:  branchAnalyzedAfter,
-		Logger:               logger,
+		Cloud:                    clients.Cloud,
+		CloudAPI:                 clients.CloudAPI,
+		Raw:                      clients.Raw,
+		RawAPI:                   clients.RawAPI,
+		Extract:                  nil, // Will be set per-task based on extract mapping
+		Store:                    store,
+		CloudURL:                 clients.CloudURL,
+		APIURL:                   clients.APIURL,
+		EntKey:                   cfg.EnterpriseKey,
+		Edition:                  mp.Edition,
+		ExportDir:                cfg.ExportDirectory,
+		Mapping:                  mp.Mapping,
+		ConcurrencyLimiter:       clients.ConcurrencyLimiter,
+		CEPollConcurrencyLimiter: clients.CEPollConcurrencyLimiter,
+		BranchGate:               newBranchGate(clients.CEPollConcurrencyLimiter),
+		BuildSem:                 make(chan struct{}, cfg.BuildConcurrency),
+		ExcludeBranches:          cfg.ExcludeBranches,
+		UnsupportedLanguages:     cfg.UnsupportedLanguages,
+		FastSync:                 cfg.FastSync,
+		MaxIssueComments:         cfg.MaxIssueComments,
+		ProjectKeyPattern:        cfg.ProjectKeyPattern,
+		Objects:                  cfg.Objects,
+		ProjectKeyRe:             projectKeyRe,
+		BranchRe:                 branchRe,
+		MigrateHistory:           cfg.MigrateHistory,
+		BranchAnalyzedAfter:      branchAnalyzedAfter,
+		Logger:                   logger,
 	}
 
 	// Overall progress/ETA logging (#520) — every 10s for the duration of
@@ -580,14 +624,15 @@ func validateMigrateOrgs(ctx context.Context, cc *cloud.Client, cfg MigrateConfi
 // migrateClients bundles the Cloud API clients, raw readers, and
 // rate-limit tracker a migrate run wires together before executing tasks.
 type migrateClients struct {
-	Cloud              *cloud.Client
-	CloudAPI           *cloud.Client
-	Raw                *common.RawClient
-	RawAPI             *common.RawClient
-	CloudURL           string
-	APIURL             string
-	RateLimitTracker   *RateLimitTracker
-	ConcurrencyLimiter *ConcurrencyLimiter
+	Cloud                    *cloud.Client
+	CloudAPI                 *cloud.Client
+	Raw                      *common.RawClient
+	RawAPI                   *common.RawClient
+	CloudURL                 string
+	APIURL                   string
+	RateLimitTracker         *RateLimitTracker
+	ConcurrencyLimiter       *ConcurrencyLimiter
+	CEPollConcurrencyLimiter *ConcurrencyLimiter
 }
 
 // newConcurrencyLimiter builds a ConcurrencyLimiter for a Cloud-facing
@@ -637,6 +682,10 @@ func newMigrateClients(cfg MigrateConfig, logger *slog.Logger, reqLog *requestLo
 	// egress IP and therefore the same 8000-calls/5min SonarQube Cloud
 	// budget (#573).
 	concurrencyLimiter := newConcurrencyLimiter(cfg.Concurrency, cfg.APIMaxRatePerMin, logger)
+	// Fixed, not dynamic: both of pollBoundConcurrency's inputs are already
+	// known here, so there's nothing for a background recalculation loop to
+	// react to (see CEPollConcurrencyLimiter's doc comment on Executor).
+	ceLimiter := NewFixedConcurrencyLimiter(pollBoundConcurrency(cfg.APIMaxRatePerMin))
 	apiRateLimiter := sqapi.NewSlidingWindowLimiter(cfg.APIMaxRatePerMin)
 	clientOpts := []sqapi.Option{
 		sqapi.WithTimeout(cfg.Timeout),
@@ -656,15 +705,27 @@ func newMigrateClients(cfg MigrateConfig, logger *slog.Logger, reqLog *requestLo
 	apiClient := sqapi.NewCloudClient(apiURL, cfg.Token, clientOpts...)
 
 	return &migrateClients{
-		Cloud:              cloud.New(cloudClient),
-		CloudAPI:           cloud.New(apiClient),
-		Raw:                common.NewRawClient(cloudClient.HTTPClient(), cloudClient.BaseURL()),
-		RawAPI:             common.NewRawClient(apiClient.HTTPClient(), apiClient.BaseURL()),
-		CloudURL:           cloudClient.BaseURL(),
-		APIURL:             apiClient.BaseURL(),
-		RateLimitTracker:   rateLimitTracker,
-		ConcurrencyLimiter: concurrencyLimiter,
+		Cloud:                    cloud.New(cloudClient),
+		CloudAPI:                 cloud.New(apiClient),
+		Raw:                      common.NewRawClient(cloudClient.HTTPClient(), cloudClient.BaseURL()),
+		RawAPI:                   common.NewRawClient(apiClient.HTTPClient(), apiClient.BaseURL()),
+		CloudURL:                 cloudClient.BaseURL(),
+		APIURL:                   apiClient.BaseURL(),
+		RateLimitTracker:         rateLimitTracker,
+		ConcurrencyLimiter:       concurrencyLimiter,
+		CEPollConcurrencyLimiter: ceLimiter,
 	}
+}
+
+// newBranchGate builds Executor.BranchGate from the CE poll limiter,
+// returning nil when there is none to size it from — NewDynamicGate would
+// otherwise hand back a gate whose Acquire panics on a nil limiter, where a
+// nil gate simply admits (see Executor.BranchGate).
+func newBranchGate(l *ConcurrencyLimiter) *DynamicGate {
+	if l == nil {
+		return nil
+	}
+	return NewDynamicGate(l)
 }
 
 // migratePlan bundles the resolved extract mapping, task registry, and

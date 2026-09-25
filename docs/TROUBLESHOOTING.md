@@ -419,6 +419,29 @@ The CV report ships 143 `measures-{ref}.pb` files (aggregate metrics: `reliabili
 
 ---
 
+## Re-running `transfer` / `migrate` on a project that is already migrated
+<!-- updated: 2026-09-21 -->
+
+**Symptom** (fixed in v1.2, [#588](https://github.com/SonarSource/sonar-migration-tool/issues/588)): the first run succeeds, and a second run of the same command fails with
+
+```
+CE task failed: Report for commit '<a>' can't be processed: a newer report has already
+been processed, and processing older reports is not supported. The last processed report
+was for commit '<b>'.
+```
+
+When the main branch fails this way, the remaining branches are skipped too, so the re-run migrates nothing and the project is reported as Partially Migrated.
+
+**Cause**: every branch's report is backdated to the source branch's real last-analysis date ([#557](https://github.com/SonarSource/sonar-migration-tool/issues/557)), not to the migration run's own timestamp. A re-run against an unchanged source rebuilds a report carrying that same date, and the Compute Engine refuses a report dated at or before the one it already processed. The commit ids in the message are the synthetic `scmRevisionId` values `BuildMetadata` stamps into each report, so they differ every run and carry no ordering information of their own — the date is what the CE compares.
+
+**Behaviour now**: before importing a branch, `importAndRecordBranch` reads the analysis date SonarQube Cloud already holds for it (from the `/api/project_branches/list` call the task already makes) and skips the branch when that date is at or after the date this run would submit. The source has not changed, so the report would have been identical. The branch is recorded as `up_to_date`, the project still reports as Succeeded, and no duplicate analysis is added to the target's Activity. The check sits ahead of history replay ([#554](https://github.com/SonarSource/sonar-migration-tool/issues/554)) because every history point is older still and would be rejected the same way.
+
+**When a re-run does import again**: the source branch was analyzed again since the last migration, so its last-analysis date moved forward. A branch the target has never analyzed, a source branch that was never analyzed at all (its report is stamped "now"), and a first migration into an empty organization are all unaffected.
+
+**To force a full re-import**, delete the target project (or the branch) on SonarQube Cloud and run again. There is no flag for it.
+
+---
+
 ## Branch Migration Ordering and Failures
 <!-- updated: 2026-06-05_19:20:00 -->
 
@@ -487,6 +510,10 @@ A malformed date aborts the run immediately with an explicit error (`invalid bra
 ### Resuming after a branch failure
 
 The tool tracks per-branch completion status. When resuming a failed migration with `--run_id`, branches that already succeeded are automatically skipped. Only failed or not-yet-attempted branches are retried.
+
+A branch recorded as `up_to_date` counts as succeeded and is skipped too: the target already holds an analysis at or after the date this run would submit, so there is nothing left to import. A branch dropped by the per-project branch limit is the exception — it is re-evaluated on every run, so raising `--max_branches_per_project` (or narrowing `--exclude_branches`, `--branch_regexp` or `--branch_analyzed_after` so fewer other branches compete for the limit) and resuming will migrate it.
+
+Each attempt appends its results to the run directory rather than overwriting the previous attempt's, so `<export_directory>/<run_id>/importProjectData/` keeps a record of every attempt. The migration report reads the most recent result for each branch, so a branch that failed and was then retried successfully is reported as migrated.
 
 ### Project-level parallelism
 

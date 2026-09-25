@@ -25,7 +25,8 @@ The recommended shape ("unified config") carries one top-level block of defaults
 | Command | Reads |
 |---|---|
 | `extract` | top-level + `source` |
-| `structure`, `mappings`, `predictive-report` | top-level only |
+| `structure`, `mappings` | top-level; `structure` also reads `target.default_organization` |
+| `predictive-report` | top-level + `target.default_organization` |
 | `migrate`, `reset` | top-level + `target` |
 | `transfer` | top-level + `source` + `target` |
 
@@ -91,7 +92,7 @@ Only `source.url` / `source.token` (for `extract`) and `target.url` / `target.to
 | `target.timeout` | `--timeout` | top-level | No | Override top-level timeout for migrate / reset calls. |
 | `target.run_id` | `--run_id` | `null` | No | Resume an in-progress migrate run by ID. |
 | `target.target_task` | `--target_task` | `null` | No | Stop migrate at a specific task (dependencies still run). |
-| `target.default_organization` | `--default_organization` | `null` | No | SonarQube Cloud org applied to every project when `organizations.csv` has no per-row mapping. Ignored (with a WARN) when any row carries a `sonarcloud_org_key` (#281). |
+| `target.default_organization` | `--default_organization` | `null` | No | SonarQube Cloud org applied to every project when `organizations.csv` has no per-row mapping. Ignored (with a WARN) when any row carries a `sonarcloud_org_key` (#281). Also read by `structure` and `predictive-report` (#566). |
 | `target.project_key_pattern` | `--project_key_pattern` | `<ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>` | No | Template for target project keys (#138). See [Project key renaming strategy](#project-key-renaming-strategy). |
 | `target.skip_profiles` | `--skip_profiles` | `false` | No | Skip quality profile migration / provisioning. |
 | `target.exclude_branches` | `--exclude_branches` | `[]` | No | Glob patterns (Go `filepath.Match`) for non-main branches to skip. The main branch is never excluded. Repeatable on the CLI. |
@@ -174,7 +175,7 @@ The CLI flags `--skip_issue_sync` and `--skip_project_data_migration` on `migrat
 | `timeout` | | Override top-level default. |
 | `run_id` | | Resume an in-progress migrate run by ID. |
 | `target_task` | | Stop migrate at a specific task. |
-| `default_organization` | | SonarCloud org applied to every project when `organizations.csv` has no per-row mapping. Ignored (with a WARN) when any row already carries a `sonarcloud_org_key`. CLI `--default_organization` wins. |
+| `default_organization` | | SonarCloud org applied to every project when `organizations.csv` has no per-row mapping. Ignored (with a WARN) when any row already carries a `sonarcloud_org_key`. CLI `--default_organization` wins. Also read by `structure` and `predictive-report` (#566). |
 | `project_key_pattern` | | Template for target project keys, built from `<ORIGINAL_PROJECT_KEY>` and `<ORGANIZATION_KEY>`. Default `<ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>`. CLI `--project_key_pattern` wins. See [Project key renaming strategy](#project-key-renaming-strategy). |
 | `skip_profiles` | | Skip quality profile migration. |
 | `exclude_branches` | | Array of glob patterns (Go `filepath.Match` syntax) for non-main branches to skip during project data import. The main branch is never excluded regardless of patterns. Example: `["feature/*", "release/*"]`. |
@@ -291,6 +292,9 @@ sonar-migration-tool predictive-report --config config.json
 |---|---|
 | `-c, --config <path>` | Path to JSON configuration file. |
 | `--export_directory <dir>` | Override the config file's `export_directory`. |
+| `--default_organization <key>` | `predictive-report` only. SonarQube Cloud org assumed for every project when `organizations.csv` has no mapping. Defaults to the config file's `target.default_organization`. Ignored (with a WARN) when any row already carries a `sonarcloud_org_key`. #566 |
+
+`structure` and `predictive-report` both honour `target.default_organization`, so a unified config that names a single target organization needs no manual edit of `organizations.csv`: `structure` writes the key into every row, and `predictive-report` fills any row still blank before predicting. Neither contacts SonarQube Cloud to do it, so `predictive-report` still makes no Cloud API calls. #566
 
 ### `migrate`
 

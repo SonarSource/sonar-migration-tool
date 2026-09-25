@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -465,6 +466,39 @@ func newProjectDataExecutor(t *testing.T, dir string) *Executor {
 		Mapping:            structure.ExtractMapping{testServerURL: "extract-01"},
 		ConcurrencyLimiter: NewFixedConcurrencyLimiter(5),
 		Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 1})),
+	}
+}
+
+// TestImportProjectDataGateLimiter_PrefersCEPollConcurrencyLimiter proves
+// runImportProjectData's outer gate is bounded by CEPollConcurrencyLimiter
+// when set, not ConcurrencyLimiter — the whole point of this fix (a
+// project's gate slot is held across build->submit->PollCETask, so it
+// needs a limiter sized off the poll cadence, not raw HTTP call latency).
+func TestImportProjectDataGateLimiter_PrefersCEPollConcurrencyLimiter(t *testing.T) {
+	e := &Executor{
+		ConcurrencyLimiter:       NewFixedConcurrencyLimiter(5),
+		CEPollConcurrencyLimiter: NewFixedConcurrencyLimiter(250),
+	}
+	got := importProjectDataGateLimiter(e)
+	if got.Current() != 250 {
+		t.Fatalf("importProjectDataGateLimiter() = limiter with Current() %d, want 250 (CEPollConcurrencyLimiter)", got.Current())
+	}
+}
+
+// TestImportProjectDataGateLimiter_FallsBackToConcurrencyLimiter proves
+// callers that never wire CEPollConcurrencyLimiter (test fixtures today;
+// potentially other future callers) still get a working limiter rather
+// than a nil one that would panic DynamicGate.
+func TestImportProjectDataGateLimiter_FallsBackToConcurrencyLimiter(t *testing.T) {
+	e := &Executor{
+		ConcurrencyLimiter: NewFixedConcurrencyLimiter(5),
+	}
+	got := importProjectDataGateLimiter(e)
+	if got == nil {
+		t.Fatal("importProjectDataGateLimiter() = nil, want fallback to ConcurrencyLimiter")
+	}
+	if got.Current() != 5 {
+		t.Fatalf("importProjectDataGateLimiter() = limiter with Current() %d, want 5 (ConcurrencyLimiter fallback)", got.Current())
 	}
 }
 
@@ -1318,6 +1352,48 @@ func TestRunImportProjectDataSkipsEmptyKeys(t *testing.T) {
 	}
 }
 
+// TestRunImportProjectDataReportsCancellation pins the task's return value
+// for a run cancelled after every project was already admitted. The gate
+// never blocks in that window, so admitErr stays nil, and
+// importProjectDataOne records per-project outcomes rather than returning
+// them, so g.Wait() is nil too. Reporting success there lets migrate.go start
+// the next phase on an already-cancelled context, where the trailing metadata
+// syncs create their task directories, fail, and are then dropped as already
+// done by the next --run_id resume.
+func TestRunImportProjectDataReportsCancellation(t *testing.T) {
+	dir := t.TempDir()
+	setupProjectDataExtract(t, dir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Cancelling on the first request guarantees the project's goroutine is
+	// already past its entry ctx check, which is the case the task used to
+	// report as success.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		cancel()
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	}))
+	defer srv.Close()
+
+	e := newProjectDataExecutor(t, dir)
+	e.CloudURL = srv.URL + "/"
+	e.Raw = common.NewRawClient(srv.Client(), srv.URL+"/")
+
+	w, _ := e.Store.Writer("createProjects")
+	b, _ := json.Marshal(map[string]any{
+		"key":                "proj1",
+		"cloud_project_key":  "cloud-proj1",
+		"sonarcloud_org_key": "cloud-org1",
+		"server_url":         testServerURL,
+	})
+	w.WriteOne(b)
+
+	if err := runImportProjectData(ctx, e); !errors.Is(err, context.Canceled) {
+		t.Fatalf("runImportProjectData on a cancelled run = %v, want context.Canceled", err)
+	}
+}
+
 // --- New tests for branch migration fixes ---
 
 func TestSortBranchesMainFirst(t *testing.T) {
@@ -1735,6 +1811,9 @@ func TestLoadCompletedBranches(t *testing.T) {
 		{"cloud_project_key": "proj1", "branch": "main", "status": "success"},
 		{"cloud_project_key": "proj1", "branch": "develop", "status": "failed"},
 		{"cloud_project_key": "proj1", "branch": "release", "status": "skipped"},
+		{"cloud_project_key": "proj1", "branch": "cancelled", "status": "skipped", "error": "skipped: migration cancelled"},
+		{"cloud_project_key": "proj1", "branch": "already-there", "status": BranchStatusUpToDate},
+		{"cloud_project_key": "proj1", "branch": "over-the-cap", "status": BranchStatusCapped, "branch_limit_exceeded": true},
 		{"cloud_project_key": "proj2", "branch": "main", "status": "success"},
 	} {
 		b, _ := json.Marshal(rec)
@@ -1754,8 +1833,75 @@ func TestLoadCompletedBranches(t *testing.T) {
 	if completed["proj1:release"] {
 		t.Error("proj1:release (skipped) should not be completed")
 	}
+	if completed["proj1:cancelled"] {
+		t.Error("proj1:cancelled (skipped by a cancelled run, #603) should not be completed")
+	}
+	// #605 — an up_to_date branch IS migrated: #588 found the target
+	// already holding an analysis at or after the date this run would
+	// submit. Re-attempting it rebuilds the report and re-reads the
+	// target's branch list only to reach the same conclusion, so a
+	// resume must treat it as done.
+	if !completed["proj1:already-there"] {
+		t.Error("proj1:already-there (up_to_date) should be completed — re-attempting it is pure waste")
+	}
+	// #605 — capped is deliberately NOT complete. The #584 cap is applied
+	// during branch selection, so a capped branch only reaches
+	// shouldSkipBranch at all when the operator raised
+	// --max_branches_per_project (or loosened a branch filter) and
+	// resumed. That is exactly when it must migrate; marking it complete
+	// would pin it as skipped for the life of the run directory.
+	if completed["proj1:over-the-cap"] {
+		t.Error("proj1:over-the-cap (capped) must NOT be completed — the cap is re-evaluated every run")
+	}
 	if !completed["proj2:main"] {
 		t.Error("proj2:main should be completed")
+	}
+}
+
+// #605 + #604 together: after a resume, an up_to_date branch must be
+// skipped, and a capped branch must be re-offered — reading across BOTH
+// attempts' rows, which now coexist in the run directory because chunk
+// writers append (#604).
+func TestLoadCompletedBranchesAcrossResume(t *testing.T) {
+	dir := t.TempDir()
+	store := common.NewDataStore(dir)
+
+	write := func(recs ...map[string]any) {
+		w, err := store.Writer("importProjectData")
+		if err != nil {
+			t.Fatalf("Writer: %v", err)
+		}
+		for _, rec := range recs {
+			b, _ := json.Marshal(rec)
+			if err := w.WriteOne(b); err != nil {
+				t.Fatalf("WriteOne: %v", err)
+			}
+		}
+	}
+
+	// Attempt 1: one branch imported, one cut short by a cancellation,
+	// one dropped by the branch cap.
+	write(
+		map[string]any{"cloud_project_key": "proj1", "branch": "main", "status": "success"},
+		map[string]any{"cloud_project_key": "proj1", "branch": "develop", "status": "skipped", "error": "skipped: migration cancelled"},
+		map[string]any{"cloud_project_key": "proj1", "branch": "old", "status": BranchStatusCapped, "branch_limit_exceeded": true},
+	)
+	// Attempt 2 (--run_id resume): the retried branch is already on the
+	// target, so #588 records it up_to_date. A fresh writer on the same
+	// directory must not clobber attempt 1.
+	write(
+		map[string]any{"cloud_project_key": "proj1", "branch": "develop", "status": BranchStatusUpToDate},
+	)
+
+	completed := loadCompletedBranches(store)
+	if !completed["proj1:main"] {
+		t.Error("proj1:main was imported by attempt 1 and must stay complete after the resume")
+	}
+	if !completed["proj1:develop"] {
+		t.Error("proj1:develop finished up_to_date on the resume and must now be complete")
+	}
+	if completed["proj1:old"] {
+		t.Error("proj1:old was capped and must remain available for a later run with a higher cap")
 	}
 }
 
@@ -1899,7 +2045,7 @@ func TestImportProjectBranchesMainCEFailAborts(t *testing.T) {
 		{Name: "develop", IsMain: false},
 	}
 
-	err := importProjectBranches(context.Background(), e, proj, branches, "", nil, w)
+	err := importProjectBranches(context.Background(), e, proj, branches, nil, nil, w)
 	if err == nil {
 		t.Fatal("expected error when main branch CE fails")
 	}
@@ -1971,7 +2117,7 @@ func TestImportProjectBranchesMainFirst(t *testing.T) {
 	}
 	sortBranchesMainFirst(branches)
 
-	err := importProjectBranches(context.Background(), e, proj, branches, "", nil, w)
+	err := importProjectBranches(context.Background(), e, proj, branches, nil, nil, w)
 	if err != nil {
 		t.Fatalf("importProjectBranches: %v", err)
 	}
@@ -2015,7 +2161,7 @@ func TestImportSkipsCompletedBranches(t *testing.T) {
 		{Name: "develop", IsMain: false},
 	}
 
-	err := importProjectBranches(context.Background(), e, proj, branches, "", completed, w)
+	err := importProjectBranches(context.Background(), e, proj, branches, nil, completed, w)
 	if err != nil {
 		t.Fatalf("importProjectBranches: %v", err)
 	}

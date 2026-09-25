@@ -1038,13 +1038,69 @@ type projectDataOutcome struct {
 	NeverAnalyzed bool
 }
 
+// Terminal statuses an importProjectData row can carry. statusUpToDate
+// (#588) and statusCapped (#584) are aliases of the migrate-side
+// constants rather than fresh literals: this package is the only reader
+// of those two statuses, and every bug they have caused so far came from
+// the reader and the writer holding separate copies of the string (#604).
+const (
+	statusSuccess   = "success"
+	statusUpToDate  = migrate.BranchStatusUpToDate
+	statusCapped    = migrate.BranchStatusCapped
+	statusFailed    = "failed"
+	statusSkipped   = "skipped"
+	fieldProjectKey = "cloud_project_key"
+	fieldBranch     = "branch"
+)
+
+// readProjectDataRows returns the importProjectData records reduced to the
+// final row per (cloud_project_key, branch), in first-seen order.
+//
+// Every reader of this task goes through here, because a resumed run
+// leaves more than one row per branch on disk (#604). Before the
+// ChunkWriter fix the second attempt silently truncated part of the first
+// attempt's output and left the rest; now both attempts are kept, chunk
+// files are read in write order, and the last row for a branch is the one
+// that describes where that branch actually ended up. A branch retried
+// after a cancellation therefore reads as the success it became, not as
+// the cancellation it started out as.
+//
+// First-seen order is preserved rather than last-seen so the report still
+// lists branches in the order the first attempt met them, which is the
+// order an operator watched them go by.
+func readProjectDataRows(store *common.DataStore) []json.RawMessage {
+	items, err := store.ReadAll("importProjectData")
+	if err != nil || len(items) == 0 {
+		return nil
+	}
+	return resolveProjectDataRows(items)
+}
+
+// resolveProjectDataRows collapses duplicate (project, branch) rows to the
+// last one, keeping first-seen order. Split out from readProjectDataRows
+// so it can be tested on hand-built records without a store.
+func resolveProjectDataRows(items []json.RawMessage) []json.RawMessage {
+	at := make(map[string]int, len(items))
+	resolved := make([]json.RawMessage, 0, len(items))
+	for _, item := range items {
+		key := jsonStr(item, fieldProjectKey) + "\x00" + jsonStr(item, fieldBranch)
+		if pos, seen := at[key]; seen {
+			resolved[pos] = item
+			continue
+		}
+		at[key] = len(resolved)
+		resolved = append(resolved, item)
+	}
+	return resolved
+}
+
 // collectProjectData reads importProjectData JSONL and returns the
 // per-project outcome. A project may have multiple branch records;
 // the worst non-success outcome wins (failed > skipped > success),
 // because that's the signal an operator should see in the report.
 func collectProjectData(store *common.DataStore) map[string]projectDataOutcome {
-	items, err := store.ReadAll("importProjectData")
-	if err != nil || len(items) == 0 {
+	items := readProjectDataRows(store)
+	if len(items) == 0 {
 		return nil
 	}
 	type acc struct {
@@ -1054,12 +1110,12 @@ func collectProjectData(store *common.DataStore) map[string]projectDataOutcome {
 	}
 	by := make(map[string]*acc)
 	for _, item := range items {
-		key := jsonStr(item, "cloud_project_key")
+		key := jsonStr(item, fieldProjectKey)
 		if key == "" {
 			continue
 		}
 		state := jsonStr(item, "status")
-		branch := jsonStr(item, "branch")
+		branch := jsonStr(item, fieldBranch)
 		errMsg := jsonStr(item, "error")
 		bucket := by[key]
 		if bucket == nil {
@@ -1078,10 +1134,10 @@ func collectProjectData(store *common.DataStore) map[string]projectDataOutcome {
 	result := make(map[string]projectDataOutcome, len(by))
 	for key, a := range by {
 		switch {
-		case len(a.states["failed"]) > 0:
-			result[key] = projectDataOutcome{State: "failed", Reason: projectDataFailureReason(a.errs["failed"])}
-		case len(a.states["skipped"]) > 0:
-			skipErr := a.errs["skipped"]
+		case len(a.states[statusFailed]) > 0:
+			result[key] = projectDataOutcome{State: "failed", Reason: projectDataFailureReason(a.errs[statusFailed])}
+		case len(a.states[statusSkipped]) > 0:
+			skipErr := a.errs[statusSkipped]
 			if skipErr == "" {
 				// #432 — provisioned but never analyzed: the project's
 				// settings still migrate and the outcome must NOT be
@@ -1094,8 +1150,26 @@ func collectProjectData(store *common.DataStore) map[string]projectDataOutcome {
 			} else {
 				result[key] = projectDataOutcome{State: "skipped", Reason: projectDataSkipReason(skipErr)}
 			}
-		case len(a.states["success"]) > 0:
+		// "up_to_date" (#588) means the target already carried this branch's
+		// analysis, so a re-run had nothing to submit. The branch is migrated;
+		// counting it anywhere but success would report a healthy project as
+		// Skipped purely because the operator ran transfer twice.
+		case len(a.states[statusSuccess]) > 0 || len(a.states[statusUpToDate]) > 0:
 			result[key] = projectDataOutcome{State: "success"}
+		// Every branch was dropped by the per-project cap (#584), so
+		// nothing was imported: "skipped" is the honest state. It must sit
+		// below the success arm — a project with both capped and imported
+		// branches migrated fine and stays Succeeded — and it needs its own
+		// arm rather than the default below, which would blame the source
+		// for being "provisioned but never analyzed" when the truth is that
+		// this run's own cap dropped the branches (#604).
+		case len(a.states[statusCapped]) > 0:
+			result[key] = projectDataOutcome{
+				State: "skipped",
+				Reason: "Every branch was dropped by the per-project branch limit, no project data migrated — " +
+					"this project has more long-lived branches than the migration's hard limit of " +
+					strconv.Itoa(migrate.MaxBranchesPerProject),
+			}
 		default:
 			// State string we don't recognise — surface as skipped so
 			// the report still warns the operator instead of silently
@@ -1467,9 +1541,14 @@ func encodeSyncStats(c projectSyncCounts) string {
 // first-seen order so the report lists each affected branch once. Shared
 // by collectBranchSourcePurged (#425) and collectBranchLimitSkips (#584),
 // which differ only in which bool field they key on.
+// Reading through readProjectDataRows matters here as well as for the
+// outcome: a branch the cap dropped on the first attempt and a resume
+// then migrated (because the cap was raised) must stop being listed as
+// dropped, and the same holds for a source_purged branch whose source
+// came back (#604).
 func collectBranchesByBoolMarker(store *common.DataStore, boolField string) map[string][]string {
-	items, err := store.ReadAll("importProjectData")
-	if err != nil || len(items) == 0 {
+	items := readProjectDataRows(store)
+	if len(items) == 0 {
 		return nil
 	}
 	result := make(map[string][]string)
@@ -1478,8 +1557,8 @@ func collectBranchesByBoolMarker(store *common.DataStore, boolField string) map[
 		if !jsonBool(item, boolField) {
 			continue
 		}
-		key := jsonStr(item, "cloud_project_key")
-		branch := jsonStr(item, "branch")
+		key := jsonStr(item, fieldProjectKey)
+		branch := jsonStr(item, fieldBranch)
 		if key == "" || branch == "" {
 			continue
 		}
