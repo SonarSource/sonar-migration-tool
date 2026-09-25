@@ -1811,6 +1811,9 @@ func TestLoadCompletedBranches(t *testing.T) {
 		{"cloud_project_key": "proj1", "branch": "main", "status": "success"},
 		{"cloud_project_key": "proj1", "branch": "develop", "status": "failed"},
 		{"cloud_project_key": "proj1", "branch": "release", "status": "skipped"},
+		{"cloud_project_key": "proj1", "branch": "cancelled", "status": "skipped", "error": "skipped: migration cancelled"},
+		{"cloud_project_key": "proj1", "branch": "already-there", "status": BranchStatusUpToDate},
+		{"cloud_project_key": "proj1", "branch": "over-the-cap", "status": BranchStatusCapped, "branch_limit_exceeded": true},
 		{"cloud_project_key": "proj2", "branch": "main", "status": "success"},
 	} {
 		b, _ := json.Marshal(rec)
@@ -1830,8 +1833,75 @@ func TestLoadCompletedBranches(t *testing.T) {
 	if completed["proj1:release"] {
 		t.Error("proj1:release (skipped) should not be completed")
 	}
+	if completed["proj1:cancelled"] {
+		t.Error("proj1:cancelled (skipped by a cancelled run, #603) should not be completed")
+	}
+	// #605 — an up_to_date branch IS migrated: #588 found the target
+	// already holding an analysis at or after the date this run would
+	// submit. Re-attempting it rebuilds the report and re-reads the
+	// target's branch list only to reach the same conclusion, so a
+	// resume must treat it as done.
+	if !completed["proj1:already-there"] {
+		t.Error("proj1:already-there (up_to_date) should be completed — re-attempting it is pure waste")
+	}
+	// #605 — capped is deliberately NOT complete. The #584 cap is applied
+	// during branch selection, so a capped branch only reaches
+	// shouldSkipBranch at all when the operator raised
+	// --max_branches_per_project (or loosened a branch filter) and
+	// resumed. That is exactly when it must migrate; marking it complete
+	// would pin it as skipped for the life of the run directory.
+	if completed["proj1:over-the-cap"] {
+		t.Error("proj1:over-the-cap (capped) must NOT be completed — the cap is re-evaluated every run")
+	}
 	if !completed["proj2:main"] {
 		t.Error("proj2:main should be completed")
+	}
+}
+
+// #605 + #604 together: after a resume, an up_to_date branch must be
+// skipped, and a capped branch must be re-offered — reading across BOTH
+// attempts' rows, which now coexist in the run directory because chunk
+// writers append (#604).
+func TestLoadCompletedBranchesAcrossResume(t *testing.T) {
+	dir := t.TempDir()
+	store := common.NewDataStore(dir)
+
+	write := func(recs ...map[string]any) {
+		w, err := store.Writer("importProjectData")
+		if err != nil {
+			t.Fatalf("Writer: %v", err)
+		}
+		for _, rec := range recs {
+			b, _ := json.Marshal(rec)
+			if err := w.WriteOne(b); err != nil {
+				t.Fatalf("WriteOne: %v", err)
+			}
+		}
+	}
+
+	// Attempt 1: one branch imported, one cut short by a cancellation,
+	// one dropped by the branch cap.
+	write(
+		map[string]any{"cloud_project_key": "proj1", "branch": "main", "status": "success"},
+		map[string]any{"cloud_project_key": "proj1", "branch": "develop", "status": "skipped", "error": "skipped: migration cancelled"},
+		map[string]any{"cloud_project_key": "proj1", "branch": "old", "status": BranchStatusCapped, "branch_limit_exceeded": true},
+	)
+	// Attempt 2 (--run_id resume): the retried branch is already on the
+	// target, so #588 records it up_to_date. A fresh writer on the same
+	// directory must not clobber attempt 1.
+	write(
+		map[string]any{"cloud_project_key": "proj1", "branch": "develop", "status": BranchStatusUpToDate},
+	)
+
+	completed := loadCompletedBranches(store)
+	if !completed["proj1:main"] {
+		t.Error("proj1:main was imported by attempt 1 and must stay complete after the resume")
+	}
+	if !completed["proj1:develop"] {
+		t.Error("proj1:develop finished up_to_date on the resume and must now be complete")
+	}
+	if completed["proj1:old"] {
+		t.Error("proj1:old was capped and must remain available for a later run with a higher cap")
 	}
 }
 

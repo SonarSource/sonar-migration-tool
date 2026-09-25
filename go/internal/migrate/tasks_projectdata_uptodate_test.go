@@ -195,8 +195,8 @@ func TestImportProjectBranchesSkipsUpToDateBranch(t *testing.T) {
 	if len(items) != 1 {
 		t.Fatalf("expected exactly 1 branch record, got %d", len(items))
 	}
-	if got := extractField(items[0], "status"); got != branchStatusUpToDate {
-		t.Errorf("status = %q, want %q", got, branchStatusUpToDate)
+	if got := extractField(items[0], "status"); got != BranchStatusUpToDate {
+		t.Errorf("status = %q, want %q", got, BranchStatusUpToDate)
 	}
 }
 

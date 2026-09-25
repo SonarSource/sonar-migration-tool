@@ -458,12 +458,26 @@ type branchImportContext struct {
 	Writer              *common.ChunkWriter
 }
 
-// branchStatusUpToDate is the importProjectData record status for a branch the
+// BranchStatusUpToDate is the importProjectData record status for a branch the
 // target already holds at the date this run would have submitted (#588). It is
 // deliberately neither "success" nor "skipped": the branch IS migrated, so the
 // migration report must not degrade the project to Skipped, yet this run did
 // not import it. report/summary's collectProjectData treats it as a success.
-const branchStatusUpToDate = "up_to_date"
+const BranchStatusUpToDate = "up_to_date"
+
+// BranchStatusCapped is the importProjectData record status for a branch
+// the per-project branch cap dropped before any import was attempted
+// (#584). Like BranchStatusUpToDate it is deliberately neither "success"
+// nor "skipped" so it cannot degrade the project's reported outcome; see
+// recordBranchLimitSkip.
+//
+// This was a bare string literal at its single write site and had no
+// matching case on the read side, so report/summary classified it as an
+// unrecognised status and rendered a capped-only project as "provisioned
+// but never analyzed". Both constants are exported for that reader
+// (report/summary already imports this package) so the two sides cannot
+// drift again (#604).
+const BranchStatusCapped = "capped"
 
 // targetBranchUpToDate reports whether SonarCloud already holds an analysis for
 // targetBranch that is at least as recent as the one this run would submit, and
@@ -512,7 +526,7 @@ func importAndRecordBranch(ctx context.Context, e *Executor, bctx branchImportCo
 			"project", bctx.CloudKey, "branch", branch.Name, "target_branch", targetBranch,
 			"target_analysis_date", existing.Format(time.RFC3339),
 			"source_last_analysis_date", branch.LastAnalysisDate.Format(time.RFC3339))
-		recordBranchResult(bctx.Writer, bctx.CloudKey, branch.Name, &importResult{Status: branchStatusUpToDate})
+		recordBranchResult(bctx.Writer, bctx.CloudKey, branch.Name, &importResult{Status: BranchStatusUpToDate})
 		return nil
 	}
 
@@ -1238,7 +1252,7 @@ func recordBranchLimitSkip(w *common.ChunkWriter, cloudKey, branchName string) {
 	record, _ := json.Marshal(map[string]any{
 		"cloud_project_key":     cloudKey,
 		"branch":                branchName,
-		"status":                "capped",
+		"status":                BranchStatusCapped,
 		"branch_limit_exceeded": true,
 	})
 	w.WriteOne(record) //nolint:errcheck
@@ -1273,6 +1287,31 @@ func filterBranchesByAnalyzedAfter(branches []branchInfo, cutoff *time.Time) (ke
 	return kept, res.ForcedMainBranch, res.ForcedMainDate
 }
 
+// loadCompletedBranches reads the importProjectData rows a previous
+// attempt on this run directory left behind and returns the set of
+// (project, branch) pairs a resume has no work left to do for.
+//
+// Terminal statuses and why each is, or is not, "complete" (#605):
+//
+//   - "success" — imported by an earlier attempt. Complete.
+//   - BranchStatusUpToDate — #588 found the target already holding an
+//     analysis at or after the date this run would submit. The branch IS
+//     migrated, and re-attempting it only rebuilds the report and re-reads
+//     the target's branch list to reach the same conclusion. Complete.
+//   - BranchStatusCapped — the #584 per-project cap dropped the branch.
+//     Deliberately NOT complete. The cap is applied during branch
+//     selection, so a capped branch only ever reaches shouldSkipBranch
+//     when the operator has raised --max_branches_per_project or loosened
+//     a branch filter and resumed — exactly the case where it must now
+//     migrate. Treating it as complete would pin it as skipped for the
+//     life of the run directory. Re-evaluating costs nothing: selection is
+//     list arithmetic, with no report build and no target lookup.
+//   - "failed", "skipped" (including "skipped: migration cancelled") —
+//     not complete, which is the whole point of resuming.
+//
+// Duplicate rows for one branch need no resolution here: a later attempt
+// never downgrades a branch it skipped, so it writes no row at all for an
+// already-complete branch, and the union of successes cannot regress.
 func loadCompletedBranches(store *common.DataStore) map[string]bool {
 	items, err := store.ReadAll("importProjectData")
 	if err != nil || len(items) == 0 {
@@ -1280,7 +1319,8 @@ func loadCompletedBranches(store *common.DataStore) map[string]bool {
 	}
 	done := make(map[string]bool)
 	for _, item := range items {
-		if extractField(item, "status") == "success" {
+		switch extractField(item, "status") {
+		case "success", BranchStatusUpToDate:
 			key := extractField(item, "cloud_project_key") + ":" + extractField(item, "branch")
 			done[key] = true
 		}

@@ -1061,10 +1061,12 @@ func TestMatchProjectReposOnPremSourceBinding(t *testing.T) {
 func TestGetOrgBinding(t *testing.T) {
 	e := newFlowTest(t)
 
-	w, _ := e.Store.Writer("generateOrganizationMappings")
-	om, _ := json.Marshal(map[string]any{"sonarcloud_org_key": testCloudOrg})
-	w.WriteOne(om)
-
+	// setupCreateOutputs already seeds generateOrganizationMappings with
+	// testCloudOrg. This test used to write its own copy on top, which
+	// worked only because a second ChunkWriter on the same directory
+	// restarted at results.1 and truncated the seeded record. Chunk
+	// writers now append (#604), so the extra write would leave two
+	// mappings for the same org and getOrgBinding would record it twice.
 	reg := BuildMigrateRegistry(RegisterAll())
 	if err := reg["getOrgBinding"].Run(context.Background(), e); err != nil {
 		t.Fatalf("getOrgBinding: %v", err)
