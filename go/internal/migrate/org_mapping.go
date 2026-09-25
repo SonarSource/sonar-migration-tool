@@ -45,7 +45,7 @@ const orgCSVFileName = "organizations.csv"
 // SonarQube Cloud API via validateOrgExists (issue #550). If the org
 // doesn't exist, this returns that error and organizations.csv is left
 // completely untouched — a prior bug validated defaultOrg only AFTER
-// writeOrgCSVWithDefault had already persisted it, so a wrong
+// WriteOrgCSVWithDefault had already persisted it, so a wrong
 // --default_organization on a failed run got written to disk, and a
 // retry with a corrected value then found the file already "mapped"
 // (hasMapping above) and silently ignored the correction.
@@ -91,7 +91,7 @@ func applyOrgMapping(ctx context.Context, lookup orgLookup, exportDir, defaultOr
 	}
 
 	// Apply defaultOrg to every row and write back.
-	if err := writeOrgCSVWithDefault(csvPath, rows, defaultOrg); err != nil {
+	if err := WriteOrgCSVWithDefault(csvPath, rows, defaultOrg); err != nil {
 		return false, fmt.Errorf("applying default_organization to organizations.csv: %w", err)
 	}
 	logger.Info("organizations.csv was empty — every project will migrate to the provided default organization",
@@ -104,11 +104,18 @@ func missingMappingError(csvPath string) error {
 		`No organization mapping has been defined, please review the %q file`, csvPath))
 }
 
-// writeOrgCSVWithDefault rewrites the file so every row's
+// WriteOrgCSVWithDefault rewrites the file so every row's
 // sonarcloud_org_key cell carries defaultOrg, preserving all other
 // columns and their order. The file is read once to recover the
 // canonical header order — map iteration would otherwise scramble it.
-func writeOrgCSVWithDefault(path string, rows []map[string]any, defaultOrg string) error {
+//
+// Exported because the predictive report needs the same rewrite (#566).
+// It is pure local file I/O: no context, no orgLookup, no SonarQube
+// Cloud request. The live existence check is validateOrgExists, kept
+// deliberately separate so predict can apply the default without
+// breaking predictive-report's "no Cloud API calls" contract (#235).
+// Callers that DO talk to Cloud must run validateOrgExists first (#550).
+func WriteOrgCSVWithDefault(path string, rows []map[string]any, defaultOrg string) error {
 	headers, err := readOrgCSVHeaders(path)
 	if err != nil {
 		return err

@@ -438,6 +438,12 @@ func (s configFileShape) toResetConfig() ResetConfig {
 // LoadSonarCloudOrgsFromConfigFile returns the organizations list from a
 // side-sectioned config file. Returns nil when the file uses a different shape
 // or no organizations are defined.
+//
+// Only shape 3 carries per-organization credentials, so this deliberately
+// does NOT synthesize an entry from the unified shape's
+// target.default_organization — an entry with no token or URL would be a
+// lie. Callers that only need an organization key should fall back to
+// LoadDefaultOrganizationFromConfigFile when this returns nothing (#566).
 func LoadSonarCloudOrgsFromConfigFile(path string) ([]OrgConfigEntry, error) {
 	shape, err := parseConfigFile(path)
 	if err != nil {
@@ -447,6 +453,24 @@ func LoadSonarCloudOrgsFromConfigFile(path string) ([]OrgConfigEntry, error) {
 		return nil, nil
 	}
 	return shape.SonarCloud.Organizations, nil
+}
+
+// LoadDefaultOrganizationFromConfigFile returns the SonarQube Cloud
+// organization key a migrate run would stamp onto every unmapped row of
+// organizations.csv — target.default_organization in the unified shape
+// (#281). Returns "" when the config file defines none.
+//
+// Resolution goes through toMigrateConfig rather than reading
+// shape.Target directly, so the helper keeps matching migrate exactly if
+// another shape starts carrying the field later. Used by structure and
+// predictive-report, which otherwise leave sonarcloud_org_key empty and
+// then report every entity as "Organization skipped" (#566).
+func LoadDefaultOrganizationFromConfigFile(path string) (string, error) {
+	shape, err := parseConfigFile(path)
+	if err != nil {
+		return "", err
+	}
+	return shape.toMigrateConfig().DefaultOrganization, nil
 }
 
 // LoadMigrateConfigFile parses a JSON config file in any of the three

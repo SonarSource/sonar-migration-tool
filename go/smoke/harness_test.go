@@ -543,12 +543,17 @@ func assertCSV(t *testing.T, exportDir, name string, requiredCols ...string) {
 // assertCSVColumns checks a CSV exists, has at least one data row, and
 // declares every named column — WITHOUT requiring the column to hold a value.
 //
-// organizations.csv is the motivating case. `structure` deliberately emits
-// sonarcloud_org_key EMPTY, because mapping a source organization to a Cloud
-// organization is the operator's decision. (Step B3 of
+// organizations.csv is the motivating case. `structure` emits
+// sonarcloud_org_key EMPTY whenever the config names no single target
+// organization, because mapping a source organization to a Cloud
+// organization is then the operator's decision. (Step B3 of
 // docs/REGRESSION-TESTING-PLAN.md — "confirm sonarcloud_org_key is populated"
 // — is a human review step performed AFTER editing the file, not a property of
 // structure's output.) Asserting non-emptiness there fails on a correct run.
+//
+// A config carrying target.default_organization is the exception: since
+// #566 structure pre-populates the column from it, and tier 1 asserts
+// that separately.
 func assertCSVColumns(t *testing.T, exportDir, name string, cols ...string) {
 	t.Helper()
 	rows, err := structure.LoadCSV(exportDir, name)
@@ -564,6 +569,27 @@ func assertCSVColumns(t *testing.T, exportDir, name string, cols ...string) {
 		}
 	}
 	logf(t, "csv: %s has %d rows, columns present: %v\n", name, len(rows), cols)
+}
+
+// assertOrgMapping checks every organizations.csv row maps to org. Used
+// for the one case where the tool fills the column itself: a config
+// carrying target.default_organization (#566).
+func assertOrgMapping(t *testing.T, exportDir, org string) {
+	t.Helper()
+	rows, err := structure.LoadCSV(exportDir, "organizations.csv")
+	if err != nil {
+		t.Fatalf("loading organizations.csv from %q: %v", exportDir, err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("organizations.csv has no rows")
+	}
+	for i, r := range rows {
+		got, _ := r["sonarcloud_org_key"].(string)
+		if got != org {
+			t.Errorf("organizations.csv row %d: sonarcloud_org_key = %q, want %q", i, got, org)
+		}
+	}
+	logf(t, "csv: organizations.csv maps all %d rows to %s\n", len(rows), org)
 }
 
 // setOrgMapping fills in the sonarcloud_org_key column of organizations.csv,
