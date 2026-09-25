@@ -6,6 +6,7 @@ package common
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -241,6 +242,129 @@ func TestChunkWriterConcurrent(t *testing.T) {
 	entries, _ := os.ReadDir(taskDir)
 	if len(entries) != goroutines {
 		t.Errorf("expected %d files, got %d", goroutines, len(entries))
+	}
+}
+
+// #604 regression: a ChunkWriter opened on a directory an earlier run
+// already wrote to must APPEND past the highest existing chunk, not
+// restart at results.1 and truncate it.
+//
+// This is the gap that let #604 in. A --run_id resume re-runs
+// importProjectData against the first attempt's directory; because the
+// index restarted at 0, a resume that wrote FEWER rows than the first
+// attempt overwrote the rows it re-wrote and left the first attempt's
+// tail in place. The run directory then held a mix of both attempts with
+// the stale rows outnumbering the fresh ones, and the migration report
+// bucketed a fully-migrated project as Skipped or Failed off the stale
+// tail.
+func TestChunkWriterAppendsToExistingDir(t *testing.T) {
+	taskDir := filepath.Join(t.TempDir(), "importProjectData")
+
+	first, err := NewChunkWriter(taskDir)
+	if err != nil {
+		t.Fatalf("first NewChunkWriter: %v", err)
+	}
+	for _, branch := range []string{"main", "develop", "release"} {
+		if err := first.WriteOne(json.RawMessage(`{"run":1,"branch":"` + branch + `"}`)); err != nil {
+			t.Fatalf("first run WriteOne: %v", err)
+		}
+	}
+
+	// The resume writes fewer rows than the first attempt — the exact
+	// shape that used to corrupt the directory.
+	second, err := NewChunkWriter(taskDir)
+	if err != nil {
+		t.Fatalf("second NewChunkWriter: %v", err)
+	}
+	if err := second.WriteOne(json.RawMessage(`{"run":2,"branch":"develop"}`)); err != nil {
+		t.Fatalf("second run WriteOne: %v", err)
+	}
+
+	for _, name := range []string{"results.1.jsonl", "results.2.jsonl", "results.3.jsonl", "results.4.jsonl"} {
+		if _, err := os.Stat(filepath.Join(taskDir, name)); err != nil {
+			t.Errorf("expected %s to exist after the resume: %v", name, err)
+		}
+	}
+
+	// Nothing the first attempt wrote may have been destroyed.
+	got, err := os.ReadFile(filepath.Join(taskDir, "results.1.jsonl"))
+	if err != nil {
+		t.Fatalf("reading results.1.jsonl: %v", err)
+	}
+	if !strings.Contains(string(got), `"run":1`) {
+		t.Errorf("results.1.jsonl was overwritten by the resume: %s", got)
+	}
+
+	ds := NewDataStore(filepath.Dir(taskDir))
+	items, err := ds.ReadAll("importProjectData")
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(items) != 4 {
+		t.Fatalf("expected 4 records (3 from run 1, 1 from run 2), got %d: %v", len(items), items)
+	}
+	// The resume's row must be LAST, so a reader resolving duplicates by
+	// last-one-wins sees the retry rather than the stale first attempt.
+	if !strings.Contains(string(items[3]), `"run":2`) {
+		t.Errorf("last record should be the resume's row, got %s", items[3])
+	}
+}
+
+// Only results.N.jsonl participates in the index. A neighbouring file
+// must neither raise the starting index nor stop the writer.
+func TestChunkWriterIgnoresNonChunkFiles(t *testing.T) {
+	taskDir := filepath.Join(t.TempDir(), "task")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"results.jsonl", "results.0.jsonl", "results.abc.jsonl", "notes.txt", "results.7.json"} {
+		if err := os.WriteFile(filepath.Join(taskDir, name), []byte("{}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	w, err := NewChunkWriter(taskDir)
+	if err != nil {
+		t.Fatalf("NewChunkWriter: %v", err)
+	}
+	if err := w.WriteOne(json.RawMessage(`{"fresh":true}`)); err != nil {
+		t.Fatalf("WriteOne: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(taskDir, "results.1.jsonl")); err != nil {
+		t.Errorf("expected the first write to land on results.1.jsonl: %v", err)
+	}
+}
+
+// #604: chunk files must be read in numeric index order. os.ReadDir
+// returns them lexicographically, where results.10.jsonl sorts before
+// results.2.jsonl — which would make "the last row wins" resolve to the
+// wrong attempt as soon as a task writes ten chunks.
+func TestDataStoreReadsChunksInNumericOrder(t *testing.T) {
+	dir := t.TempDir()
+	ds := NewDataStore(dir)
+	w, err := ds.Writer("orderedTask")
+	if err != nil {
+		t.Fatalf("Writer: %v", err)
+	}
+	const chunks = 12
+	for i := 1; i <= chunks; i++ {
+		if err := w.WriteOne(json.RawMessage(fmt.Sprintf(`{"n":%d}`, i))); err != nil {
+			t.Fatalf("WriteOne %d: %v", i, err)
+		}
+	}
+
+	items, err := ds.ReadAll("orderedTask")
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(items) != chunks {
+		t.Fatalf("expected %d records, got %d", chunks, len(items))
+	}
+	for i, item := range items {
+		want := fmt.Sprintf(`{"n":%d}`, i+1)
+		if string(item) != want {
+			t.Errorf("record %d = %s, want %s (chunk files read out of order)", i, item, want)
+		}
 	}
 }
 

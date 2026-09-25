@@ -301,8 +301,11 @@ func applyProjectFailures(succeeded, nearPerfect, partial []EntityItem,
 // on them — never left the source. The project is routed to Partial with an
 // Issues line naming the languages and the file count.
 func collectUnsupportedLanguageExclusions(store *common.DataStore) []projectFailure {
-	items, err := store.ReadAll("importProjectData")
-	if err != nil || len(items) == 0 {
+	// readProjectDataRows, not ReadAll: the per-project file count is the
+	// worst branch's, so a stale row from an earlier attempt would keep an
+	// exclusion in the report after a resume had resolved it (#604).
+	items := readProjectDataRows(store)
+	if len(items) == 0 {
 		return nil
 	}
 	by, order := aggregateLanguageExclusions(items)
@@ -411,6 +414,31 @@ func jsonStrSlice(raw json.RawMessage, key string) []string {
 //
 // scanMap (the per-project data outcomes from collectProjectData) is
 // used to gate the sync-side failures.
+// degradesProjectData reports whether an importProjectData row's status
+// means the branch did not get migrated, and so should push its project
+// into the Partial bucket.
+//
+// It used to be spelled inline as `status != "success"`, which quietly
+// demoted two healthy outcomes to Partial (#604). statusUpToDate (#588)
+// means the target already held the branch, so a re-run of an unchanged
+// project reported every project Partial even though collectProjectData
+// correctly called them Succeeded. statusCapped (#584) means the branch
+// cap dropped the branch, which recordBranchLimitSkip explicitly requires
+// not to degrade the project — the cap is a deliberate choice by the
+// operator, not a migration failure, and it is surfaced as its own
+// "|branchLimit:" note instead.
+//
+// A project whose branches are ALL capped is still reported as Skipped by
+// collectProjectData, so nothing is hidden by exempting the status here.
+func degradesProjectData(status string) bool {
+	switch status {
+	case statusSuccess, statusUpToDate, statusCapped:
+		return false
+	default:
+		return true
+	}
+}
+
 func collectProjectSyncSkips(store *common.DataStore, scanMap map[string]projectDataOutcome) []projectFailure {
 	dataSkipped := func(key string) bool {
 		o, ok := scanMap[key]
@@ -428,11 +456,10 @@ func collectProjectSyncSkips(store *common.DataStore, scanMap map[string]project
 	// |scan: marker's "Project data migration skipped: <reason>"
 	// head line into Issues.
 	seenSkipped := make(map[string]bool)
-	historyItems, _ := store.ReadAll("importProjectData")
-	for _, raw := range historyItems {
-		key := jsonStr(raw, "cloud_project_key")
+	for _, raw := range readProjectDataRows(store) {
+		key := jsonStr(raw, fieldProjectKey)
 		status := jsonStr(raw, "status")
-		if key == "" || status == "success" || seenSkipped[key] {
+		if key == "" || seenSkipped[key] || !degradesProjectData(status) {
 			continue
 		}
 		// #432 — a project that was provisioned but never analyzed on the
