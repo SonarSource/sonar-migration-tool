@@ -511,7 +511,7 @@ A malformed date aborts the run immediately with an explicit error (`invalid bra
 
 The tool tracks per-branch completion status. When resuming a failed migration with `--run_id`, branches that already succeeded are automatically skipped. Only failed or not-yet-attempted branches are retried.
 
-A branch recorded as `up_to_date` counts as succeeded and is skipped too: the target already holds an analysis at or after the date this run would submit, so there is nothing left to import. A branch dropped by the per-project branch limit is the exception — it is re-evaluated on every run, so raising `--max_branches_per_project` (or relaxing `--exclude_branches`, `--branch_regexp` or `--branch_analyzed_after`) and resuming will migrate it.
+A branch recorded as `up_to_date` counts as succeeded and is skipped too: the target already holds an analysis at or after the date this run would submit, so there is nothing left to import. A branch dropped by the per-project branch limit is the exception — it is re-evaluated on every run, so raising `--max_branches_per_project` (or narrowing `--exclude_branches`, `--branch_regexp` or `--branch_analyzed_after` so fewer other branches compete for the limit) and resuming will migrate it.
 
 Each attempt appends its results to the run directory rather than overwriting the previous attempt's, so `<export_directory>/<run_id>/importProjectData/` keeps a record of every attempt. The migration report reads the most recent result for each branch, so a branch that failed and was then retried successfully is reported as migrated.
 

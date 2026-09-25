@@ -1299,15 +1299,14 @@ func filterBranchesByAnalyzedAfter(branches []branchInfo, cutoff *time.Time) (ke
 //     migrated, and re-attempting it only rebuilds the report and re-reads
 //     the target's branch list to reach the same conclusion. Complete.
 //   - BranchStatusCapped — the #584 per-project cap dropped the branch.
-//     Deliberately NOT complete. The cap is applied during branch
-//     selection, so a capped branch only ever reaches shouldSkipBranch
-//     when the operator has loosened a branch filter
-//     (--branch_regexp, --exclude_branches, --branch_analyzed_after) and
-//     resumed, changing which branches the cap drops — exactly the case
-//     where it must now migrate. MaxBranchesPerProject itself is a
-//     compile-time constant with no flag, so the cap cannot be raised. Treating it as complete would pin it as skipped for the
-//     life of the run directory. Re-evaluating costs nothing: selection is
-//     list arithmetic, with no report build and no target lookup.
+//     Deliberately NOT complete. A branch dropped by the per-project branch
+//     limit is the exception — it is re-evaluated on every run, so raising
+//     `--max_branches_per_project` (or narrowing `--exclude_branches`,
+//     `--branch_regexp` or `--branch_analyzed_after` so fewer other branches
+//     compete for the limit) and resuming will migrate it. Treating it as
+//     complete would pin it as skipped for the life of the run directory.
+//     Re-evaluating costs nothing: selection is list arithmetic, with no
+//     report build and no target lookup.
 //   - "failed", "skipped" (including "skipped: migration cancelled") —
 //     not complete, which is the whole point of resuming.
 //
