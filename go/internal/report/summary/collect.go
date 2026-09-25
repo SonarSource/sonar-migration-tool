@@ -1167,7 +1167,8 @@ func collectProjectData(store *common.DataStore) map[string]projectDataOutcome {
 			result[key] = projectDataOutcome{
 				State: "skipped",
 				Reason: "Every branch was dropped by the per-project branch limit, no project data migrated — " +
-					"raise --max_branches_per_project and re-run to migrate them",
+					"this project has more long-lived branches than the migration's hard limit of " +
+					strconv.Itoa(migrate.MaxBranchesPerProject),
 			}
 		default:
 			// State string we don't recognise — surface as skipped so
