@@ -1069,3 +1069,148 @@ func TestLoadMigrateConfigFileObjectsAndProjectKey_AbsentObjectsMeansNil(t *test
 		t.Errorf("expected nil Objects (everything) when absent, got %+v", cfg.Objects)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Organization-key loaders used by structure / predictive-report (#566)
+// ---------------------------------------------------------------------------
+
+// LoadSonarCloudOrgsFromConfigFile had no test at all, which is how #566
+// shipped: structure --config quietly pre-populated nothing for three of
+// the four documented shapes. These lock the contract in place.
+func TestLoadSonarCloudOrgsFromConfigFile(t *testing.T) {
+	cases := []struct {
+		name     string
+		content  string
+		wantKeys []string
+	}{
+		{
+			name: "side_sectioned_single_org",
+			content: `{
+  "sonarcloud": {
+    "enterprise": { "key": "ent" },
+    "organizations": [{ "key": "only-org", "token": "t", "url": "https://sonarcloud.io/" }]
+  }
+}`,
+			wantKeys: []string{"only-org"},
+		},
+		{
+			name: "side_sectioned_multiple_orgs",
+			content: `{
+  "sonarcloud": {
+    "organizations": [
+      { "key": "org-a", "token": "t", "url": "https://sonarcloud.io/" },
+      { "key": "org-b", "token": "t", "url": "https://sonarcloud.io/" }
+    ]
+  }
+}`,
+			wantKeys: []string{"org-a", "org-b"},
+		},
+		{
+			name:     "side_sectioned_legacy_flat_has_no_organizations",
+			content:  sideSectionedShapeJSON,
+			wantKeys: nil,
+		},
+		{
+			name:     "flat_shape_has_no_organizations",
+			content:  flatShapeJSON,
+			wantKeys: nil,
+		},
+		{
+			name:     "command_sectioned_shape_has_no_organizations",
+			content:  commandSectionedShapeJSON,
+			wantKeys: nil,
+		},
+		{
+			name:     "unified_shape_is_not_synthesized_into_an_org_entry",
+			content:  `{"target":{"url":"u","token":"t","default_organization":"my-org"}}`,
+			wantKeys: nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			orgs, err := LoadSonarCloudOrgsFromConfigFile(writeConfigFixture(t, tc.content))
+			if err != nil {
+				t.Fatalf("LoadSonarCloudOrgsFromConfigFile: %v", err)
+			}
+			var got []string
+			for _, o := range orgs {
+				got = append(got, o.Key)
+			}
+			if !reflect.DeepEqual(got, tc.wantKeys) {
+				t.Errorf("org keys: got %v, want %v", got, tc.wantKeys)
+			}
+		})
+	}
+}
+
+func TestLoadSonarCloudOrgsFromConfigFile_MissingFileErrors(t *testing.T) {
+	if _, err := LoadSonarCloudOrgsFromConfigFile("/path/that/does/not/exist.json"); err == nil {
+		t.Error("expected an error for a missing config file")
+	}
+}
+
+// #566: the default-organization loader has to agree with what
+// LoadMigrateConfigFile resolves, for every shape, or the predictive
+// report goes on disagreeing with the migration it predicts.
+func TestLoadDefaultOrganizationFromConfigFile(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "unified_target_default_organization",
+			content: `{"target":{"url":"u","token":"t","default_organization":"my-org"}}`,
+			want:    "my-org",
+		},
+		{
+			name:    "unified_without_default_organization",
+			content: `{"source":{"url":"s"},"target":{"url":"u","token":"t"}}`,
+			want:    "",
+		},
+		{
+			name:    "side_sectioned_defines_none",
+			content: sideSectionedShapeJSON,
+			want:    "",
+		},
+		{
+			name:    "flat_defines_none",
+			content: flatShapeJSON,
+			want:    "",
+		},
+		{
+			name:    "command_sectioned_defines_none",
+			content: commandSectionedShapeJSON,
+			want:    "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeConfigFixture(t, tc.content)
+			got, err := LoadDefaultOrganizationFromConfigFile(path)
+			if err != nil {
+				t.Fatalf("LoadDefaultOrganizationFromConfigFile: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("default organization: got %q, want %q", got, tc.want)
+			}
+			// It must not drift from what migrate itself would use.
+			cfg, err := LoadMigrateConfigFile(path)
+			if err != nil {
+				t.Fatalf("LoadMigrateConfigFile: %v", err)
+			}
+			if got != cfg.DefaultOrganization {
+				t.Errorf("loader disagrees with MigrateConfig: got %q, migrate uses %q",
+					got, cfg.DefaultOrganization)
+			}
+		})
+	}
+}
+
+func TestLoadDefaultOrganizationFromConfigFile_MissingFileErrors(t *testing.T) {
+	if _, err := LoadDefaultOrganizationFromConfigFile("/path/that/does/not/exist.json"); err == nil {
+		t.Error("expected an error for a missing config file")
+	}
+}

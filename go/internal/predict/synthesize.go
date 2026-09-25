@@ -160,7 +160,7 @@ func BuildPredictiveRun(exportDir string) (string, error) {
 // sonarqube_org_key → sonarcloud_org_key. Mirrors what migrate does in
 // helpers.go.
 func buildOrgKeyLookup(exportDir string) (map[string]string, error) {
-	rows, err := structure.LoadCSV(exportDir, "organizations.csv")
+	rows, err := structure.LoadCSV(exportDir, orgCSVFileName)
 	if err != nil {
 		return nil, err
 	}

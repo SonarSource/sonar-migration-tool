@@ -150,7 +150,7 @@ http://localhost:9000,my-cloud-org-key
 
 Save the file when you are done.
 
-> **Shortcut for single-org migrations:** if every project on every server is going to land in the same SonarQube Cloud organization, you can skip this step and pass `--default_organization <org-key>` (or set `target.default_organization` in the config file) when running `migrate` in Step 6. The tool fills `sonarcloud_org_key` for every row in `organizations.csv` automatically. If you have already mapped any row by hand, the flag is ignored and a `WARN` is logged. (Issue #281.)
+> **Shortcut for single-org migrations:** if every project on every server is going to land in the same SonarQube Cloud organization, you can skip this step and pass `--default_organization <org-key>` (or set `target.default_organization` in the config file) when running `migrate` in Step 6. The tool fills `sonarcloud_org_key` for every row in `organizations.csv` automatically. If you have already mapped any row by hand, the flag is ignored and a `WARN` is logged. (Issue #281.) Running `structure --config` with that same config file fills the column in straight away, and `predictive-report` applies the same default, so a preview run agrees with the migration. (Issue #566.)
 
 ### Step 5 — Mappings
 
@@ -247,7 +247,9 @@ sonar-migration-tool predictive-report --export_directory ./files/
 sonar-migration-tool predictive-report --config extract-config.json
 ```
 
-Output: `<export_directory>/predictive_migration_summary.pdf`. The `--config` flag accepts the same configuration file shape as `extract` or `migrate` — only the `export_directory` field is read. An explicit `--export_directory` flag overrides whatever the config file carries.
+Output: `<export_directory>/predictive_migration_summary.pdf`. The `--config` flag accepts the same configuration file shape as `extract` or `migrate`; `export_directory` and `target.default_organization` are read from it. An explicit `--export_directory` flag overrides whatever the config file carries.
+
+If `organizations.csv` carries no `sonarcloud_org_key` on any row, the target organization is taken from `--default_organization` or the config file's `target.default_organization` and stamped onto every row first, exactly as `migrate` would, so the prediction matches the migration it predicts. An already-mapped `organizations.csv` always wins, and the supplied default is then ignored with a `WARN`. When nothing is mapped and no default is available, a `WARN` says so rather than the report silently claiming that nothing will migrate. Neither step calls SonarQube Cloud. (Issue #566.)
 
 The Global Settings section is included with the SQS-only settings predicted to be Skipped (Setting Key column, sorted alphabetically). SonarQube Cloud API errors or rate-limiting cannot be predicted ahead of time, so they have no row in the Failed bucket.
 

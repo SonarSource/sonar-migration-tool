@@ -82,7 +82,7 @@ var commandFlags = map[string][]string{
 		"--skip_profiles", "--skip_project_data_migration", "--target_task",
 		"--target_token", "--target_url", "--timeout",
 	},
-	"predictive-report": {"--config", "--export_directory"},
+	"predictive-report": {"--config", "--default_organization", "--export_directory"},
 	"regtest":           {"--concurrency", "--config", "--format", "--project_key", "--verbose"},
 	"report":            {"--export_directory", "--filename", "--report_type"},
 	"reset": {

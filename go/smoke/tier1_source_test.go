@@ -138,11 +138,22 @@ func TestTier1_SourcePipeline(t *testing.T) {
 		res := runCLI(t, "structure", "--config", cfg.path, "--export_directory", exportDir)
 		requireExit(t, res, 0, "structure")
 
-		// structure emits sonarcloud_org_key EMPTY by design — the operator maps
-		// it to a Cloud org afterwards. Assert the column exists, not that it has
-		// a value, or this fails on a correct run.
+		// structure emits sonarcloud_org_key EMPTY by design when the config
+		// names no single target org — the operator maps it to a Cloud org
+		// afterwards. Assert the column exists, not that it has a value, or
+		// this fails on a correct run.
 		assertCSVColumns(t, exportDir, "organizations.csv", "sonarcloud_org_key")
 		assertCSV(t, exportDir, "projects.csv")
+
+		// #566: the one case where the column IS pre-populated — the config
+		// carries target.default_organization, so structure --config stamps
+		// it on every row instead of leaving the mapping blank and having
+		// every downstream report call the entities "Organization skipped".
+		if cfg.org == "" {
+			t.Log("config has no target.default_organization; skipping the #566 pre-population check")
+			return
+		}
+		assertOrgMapping(t, exportDir, cfg.org)
 	})
 
 	t.Run("mappings", func(t *testing.T) {
@@ -219,6 +230,13 @@ func TestTier1_SourcePipeline(t *testing.T) {
 		res := runCLI(t, "predictive-report", "--config", cfg.path, "--export_directory", exportDir)
 		requireExit(t, res, 0, "predictive_report")
 		assertPDF(t, filepath.Join(exportDir, "predictive_migration_summary.pdf"))
+
+		// #566: predictive-report applies the same default organization
+		// migrate would, so the mapping is filled in rather than read as a
+		// deliberate org skip. Still no Cloud call — asserted below.
+		if cfg.org != "" {
+			assertOrgMapping(t, exportDir, cfg.org)
+		}
 	})
 
 	t.Run("predictive_report_makes_no_cloud_calls", func(t *testing.T) {
