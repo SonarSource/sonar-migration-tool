@@ -104,13 +104,31 @@ func BuildPredictiveRun(exportDir string) (string, error) {
 
 	store := common.NewDataStore(runDir)
 
-	// Convert each mapping CSV → JSONL + synthesize the matching create*
-	// task output. Missing CSVs are tolerated (the user may not have
-	// populated every section for their migration).
+	if err := synthesizeMappingTasks(exportDir, store, orgLookup); err != nil {
+		return "", err
+	}
+
+	// Extract-data-driven synthesizers all need the extract mapping. No
+	// extract is not an error: the mapping CSVs above already carry a
+	// usable report on their own.
+	extractMapping, err := structure.GetUniqueExtracts(exportDir)
+	if err == nil && len(extractMapping) > 0 {
+		if err := synthesizeExtractDriven(exportDir, runDir, extractMapping, orgLookup); err != nil {
+			return "", err
+		}
+	}
+
+	return runDir, nil
+}
+
+// synthesizeMappingTasks converts each mapping CSV to its generate*Mappings
+// JSONL and synthesizes the matching create* task output. A missing CSV is
+// tolerated: an operator need not populate every section of their migration.
+func synthesizeMappingTasks(exportDir string, store *common.DataStore, orgLookup map[string]string) error {
 	for _, ct := range createTasks {
 		rows, err := structure.LoadCSV(exportDir, ct.CSVFile)
 		if err != nil {
-			return "", fmt.Errorf("loading %s: %w", ct.CSVFile, err)
+			return fmt.Errorf("loading %s: %w", ct.CSVFile, err)
 		}
 		if len(rows) == 0 {
 			continue
@@ -125,40 +143,41 @@ func BuildPredictiveRun(exportDir string) (string, error) {
 		// even when the entity already appears in Succeeded.
 		rows = dedupeMappingRows(rows, ct, orgLookup)
 		if err := writeMappingJSONL(store, ct.MappingsTask, rows, orgLookup, ct.PerProjectOrg); err != nil {
-			return "", fmt.Errorf("synthesizing %s: %w", ct.MappingsTask, err)
+			return fmt.Errorf("synthesizing %s: %w", ct.MappingsTask, err)
 		}
 		if err := writeCreateJSONL(store, ct, rows, orgLookup); err != nil {
-			return "", fmt.Errorf("synthesizing %s: %w", ct.OutputTask, err)
+			return fmt.Errorf("synthesizing %s: %w", ct.OutputTask, err)
 		}
 	}
+	return nil
+}
 
-	// Extract-data-driven synthesizers — both need the extract mapping.
-	extractMapping, err := structure.GetUniqueExtracts(exportDir)
-	if err == nil && len(extractMapping) > 0 {
-		if err := synthesizeAddGateConditionsNotes(exportDir, runDir, extractMapping, orgLookup); err != nil {
-			return "", fmt.Errorf("synthesizing addGateConditions.notes: %w", err)
-		}
-		if err := synthesizeSetGlobalSettings(exportDir, runDir, extractMapping, orgLookup); err != nil {
-			return "", fmt.Errorf("synthesizing setGlobalSettings: %w", err)
-		}
-		if err := synthesizeSetNewCodePeriods(exportDir, runDir, extractMapping); err != nil {
-			return "", fmt.Errorf("synthesizing setNewCodePeriods: %w", err)
-		}
-		if err := synthesizeAnalyzeProfileRulesNotes(exportDir, runDir, extractMapping); err != nil {
-			return "", fmt.Errorf("synthesizing analyzeProfileRules: %w", err)
-		}
-		if err := synthesizeSyncHotspotMetadata(exportDir, runDir, extractMapping); err != nil {
-			return "", fmt.Errorf("synthesizing syncHotspotMetadata: %w", err)
-		}
-		// #425 — predict which branches will migrate without their source
-		// (purged on the source server). Must run after the createProjects
-		// synthesis above so it can join on the synthetic cloud_project_key.
-		if err := synthesizeBranchSourcePurged(exportDir, runDir, extractMapping); err != nil {
-			return "", fmt.Errorf("synthesizing branch source-purged: %w", err)
-		}
+// synthesizeExtractDriven runs the synthesizers that read the extract itself
+// rather than a mapping CSV. Order matters for the last one only.
+func synthesizeExtractDriven(exportDir, runDir string, extractMapping structure.ExtractMapping, orgLookup map[string]string) error {
+	if err := synthesizeAddGateConditionsNotes(exportDir, runDir, extractMapping, orgLookup); err != nil {
+		return fmt.Errorf("synthesizing addGateConditions.notes: %w", err)
 	}
-
-	return runDir, nil
+	if err := synthesizeSetGlobalSettings(exportDir, runDir, extractMapping, orgLookup); err != nil {
+		return fmt.Errorf("synthesizing setGlobalSettings: %w", err)
+	}
+	if err := synthesizeSetNewCodePeriods(exportDir, runDir, extractMapping); err != nil {
+		return fmt.Errorf("synthesizing setNewCodePeriods: %w", err)
+	}
+	if err := synthesizeAnalyzeProfileRulesNotes(exportDir, runDir, extractMapping); err != nil {
+		return fmt.Errorf("synthesizing analyzeProfileRules: %w", err)
+	}
+	if err := synthesizeSyncHotspotMetadata(exportDir, runDir, extractMapping); err != nil {
+		return fmt.Errorf("synthesizing syncHotspotMetadata: %w", err)
+	}
+	// #425 — predict which branches will migrate without their source
+	// (purged on the source server). Must run after the createProjects
+	// synthesis in synthesizeMappingTasks so it can join on the synthetic
+	// cloud_project_key.
+	if err := synthesizeBranchSourcePurged(exportDir, runDir, extractMapping); err != nil {
+		return fmt.Errorf("synthesizing branch source-purged: %w", err)
+	}
+	return nil
 }
 
 // buildOrgKeyLookup reads organizations.csv and returns a map from
