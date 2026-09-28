@@ -571,6 +571,29 @@ func assertCSVColumns(t *testing.T, exportDir, name string, cols ...string) {
 	logf(t, "csv: %s has %d rows, columns present: %v\n", name, len(rows), cols)
 }
 
+// assertCSVColumnEmpty checks a column exists and is empty on every row.
+// The counterpart to assertCSV's requiredCols, for a column whose whole
+// point is to stay blank until an operator edits it (#612).
+func assertCSVColumnEmpty(t *testing.T, exportDir, name, col string) {
+	t.Helper()
+	rows, err := structure.LoadCSV(exportDir, name)
+	if err != nil {
+		t.Fatalf("loading %s from %q: %v", name, exportDir, err)
+	}
+	if len(rows) == 0 {
+		t.Fatalf("%s has no rows", name)
+	}
+	for i, r := range rows {
+		if _, ok := r[col]; !ok {
+			t.Fatalf("%s does not declare the column %q", name, col)
+		}
+		if v, _ := r[col].(string); strings.TrimSpace(v) != "" {
+			t.Errorf("%s row %d: column %q = %q, want empty", name, i, col, v)
+		}
+	}
+	logf(t, "csv: %s has %d rows, column %q empty on all of them\n", name, len(rows), col)
+}
+
 // assertOrgMapping checks every organizations.csv row maps to org. Used
 // for the one case where the tool fills the column itself: a config
 // carrying target.default_organization (#566).

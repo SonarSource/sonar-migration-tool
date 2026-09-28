@@ -260,11 +260,14 @@ func RunSyncIssues(ctx context.Context, cfg SyncIssuesConfig) (SyncIssuesSummary
 // resolveSyncTargets reads projects.csv + organizations.csv from exportDir
 // and computes each project's target SonarQube Cloud project key, exactly
 // mirroring what the createProjects task does (tasks_create.go:68) so
-// sync-issues resolves to the SAME already-migrated Cloud project.
+// sync-issues resolves to the SAME already-migrated Cloud project — the
+// per-project organization override (#612) included, since it feeds
+// RenderProjectKey and therefore changes the resulting project key
+// whenever the pattern carries <ORGANIZATION_KEY>.
 // Projects whose org is unmapped (shouldSkipOrg) or that aren't in
 // projectKeys (when non-empty) are excluded.
 func resolveSyncTargets(exportDir, pattern string, projectKeys []string) ([]syncTarget, error) {
-	rows, err := structure.LoadCSV(exportDir, "projects.csv")
+	rows, err := structure.LoadCSV(exportDir, structure.ProjectsCSVFileName)
 	if err != nil {
 		return nil, fmt.Errorf("loading projects.csv: %w", err)
 	}
@@ -292,7 +295,10 @@ func resolveSyncTargets(exportDir, pattern string, projectKeys []string) ([]sync
 		}
 		serverURL, _ := row["server_url"].(string)
 		sourceOrgKey, _ := row["sonarqube_org_key"].(string)
-		orgKey := orgLookup[sourceOrgKey]
+		// #612: honour the per-project organization override, or
+		// sync-issues would look for an overridden project in the
+		// organization it was NOT migrated into and find nothing.
+		orgKey, _ := structure.ResolveProjectOrg(row, orgLookup[sourceOrgKey])
 		if shouldSkipOrg(orgKey) {
 			continue
 		}

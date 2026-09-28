@@ -203,11 +203,13 @@ func confirmResetOrgs(exportDir string, autoYes bool, orgPattern string, presetO
 			return nil, err
 		}
 		if len(orgs) == 0 {
-			return nil, fmt.Errorf("no SonarCloud organization key matches --%s %q in %s/organizations.csv", flagResetOrganization, orgPattern, exportDir)
+			return nil, fmt.Errorf("no SonarCloud organization key matches --%s %q in %s/organizations.csv or %s/%s",
+				flagResetOrganization, orgPattern, exportDir, exportDir, structure.ProjectsCSVFileName)
 		}
 	}
 	if len(orgs) == 0 {
-		return nil, fmt.Errorf("no SonarCloud organizations found in %s/organizations.csv — nothing to reset", exportDir)
+		return nil, fmt.Errorf("no SonarCloud organizations found in %s/organizations.csv or %s/%s — nothing to reset",
+			exportDir, exportDir, structure.ProjectsCSVFileName)
 	}
 	projCounts := loadProjectsPerOrg(exportDir)
 
@@ -302,23 +304,47 @@ func confirmResetOrgsInteractive(known map[string]bool, in io.Reader, out io.Wri
 	return confirmed, nil
 }
 
-// loadResetTargetOrgs reads organizations.csv and returns every unique
-// non-empty, non-SKIPPED sonarcloud_org_key, sorted for deterministic
-// display.
+// loadResetTargetOrgs returns every unique non-empty, non-SKIPPED
+// SonarQube Cloud organization a migrate run from this export directory
+// could have written to, sorted for deterministic display.
+//
+// That is every mapped sonarcloud_org_key in organizations.csv, plus every
+// per-project override honoured in projects.csv (#612). The overrides have
+// to be included or a migration that dispatched projects across extra
+// organizations could not be undone: reset would offer only the
+// organizations.csv ones and silently leave the rest behind. Widening the
+// candidate list is safe because nothing here deletes anything — the list
+// still goes through --organization narrowing and the confirmation prompt
+// before a single project is touched.
 func loadResetTargetOrgs(exportDir string) ([]string, error) {
 	rows, err := structure.LoadCSV(exportDir, "organizations.csv")
 	if err != nil {
 		return nil, fmt.Errorf("loading organizations.csv from %s: %w", exportDir, err)
 	}
-	seen := make(map[string]bool, len(rows))
-	for _, r := range rows {
-		k, _ := r["sonarcloud_org_key"].(string)
+	projectRows, err := structure.LoadCSV(exportDir, structure.ProjectsCSVFileName)
+	if err != nil {
+		return nil, fmt.Errorf("loading %s from %s: %w", structure.ProjectsCSVFileName, exportDir, err)
+	}
+
+	seen := make(map[string]bool, len(rows)+len(projectRows))
+	add := func(k string) {
 		k = strings.TrimSpace(k)
 		if k == "" || k == "SKIPPED" {
-			continue
+			return
 		}
 		seen[k] = true
 	}
+	for _, r := range rows {
+		k, _ := r["sonarcloud_org_key"].(string)
+		add(k)
+	}
+	for _, r := range projectRows {
+		// An empty mappedOrg leaves only an honoured override to come
+		// back; a refused one yields "" and is skipped.
+		org, _ := structure.ResolveProjectOrg(r, "")
+		add(org)
+	}
+
 	out := make([]string, 0, len(seen))
 	for k := range seen {
 		out = append(out, k)
