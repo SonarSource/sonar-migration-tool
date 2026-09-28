@@ -145,6 +145,13 @@ func TestTier1_SourcePipeline(t *testing.T) {
 		assertCSVColumns(t, exportDir, "organizations.csv", "sonarcloud_org_key")
 		assertCSV(t, exportDir, "projects.csv")
 
+		// #612: projects.csv carries a per-project organization override
+		// column. Assert it is DECLARED and left EMPTY on every row —
+		// structure must never fill it in, or every project would be
+		// pinned to one organization regardless of organizations.csv.
+		assertCSVColumns(t, exportDir, "projects.csv", "sonarcloud_org_key")
+		assertCSVColumnEmpty(t, exportDir, "projects.csv", "sonarcloud_org_key")
+
 		// #566: the one case where the column IS pre-populated — the config
 		// carries target.default_organization, so structure --config stamps
 		// it on every row instead of leaving the mapping blank and having

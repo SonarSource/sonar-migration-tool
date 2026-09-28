@@ -457,6 +457,10 @@ func buildOrgKeyLookup(exportDir string) (map[string]string, error) {
 // to the task output. Used by generate*Mappings tasks.
 // It enriches each row with sonarcloud_org_key by joining on sonarqube_org_key
 // from organizations.csv.
+//
+// projects.csv is the one CSV that may override that join per row, via its
+// own sonarcloud_org_key column (#612) — see structure.ResolveProjectOrg for
+// the rule and why a DevOps-bound project cannot be redirected.
 func loadCSVToJSONL(e *Executor, taskName, csvFilename string) error {
 	rows, err := structure.LoadCSV(e.ExportDir, csvFilename)
 	if err != nil {
@@ -473,13 +477,31 @@ func loadCSVToJSONL(e *Executor, taskName, csvFilename string) error {
 		return err
 	}
 
+	// #612: projects.csv carries an optional per-project organization
+	// override; every other mapping CSV takes its organization purely from
+	// the organizations.csv join.
+	perProjectOrg := csvFilename == structure.ProjectsCSVFileName
+
 	items := make([]json.RawMessage, 0, len(rows))
 	for _, row := range rows {
 		// Enrich with sonarcloud_org_key from org lookup.
+		mapped, mappedFound := "", false
 		if sqKey, ok := row["sonarqube_org_key"].(string); ok && sqKey != "" {
-			if scKey, found := orgLookup[sqKey]; found {
-				row["sonarcloud_org_key"] = scKey
+			mapped, mappedFound = orgLookup[sqKey]
+		}
+		switch {
+		case perProjectOrg:
+			org, refused := structure.ResolveProjectOrg(row, mapped)
+			if refused != "" {
+				e.Logger.Warn("projects.csv: organization override ignored because the project is bound to a DevOps platform — a bound project must stay in the organization that carries the matching platform binding, and will migrate there instead",
+					"project", row["key"],
+					"ignored_organization", refused,
+					"organization", org,
+					"alm", row["alm"])
 			}
+			row[structure.ProjectOrgColumn] = org
+		case mappedFound:
+			row["sonarcloud_org_key"] = mapped
 		}
 		// #381: in reset mode, rows whose cloud org wasn't confirmed
 		// by the operator get their sonarcloud_org_key rewritten to

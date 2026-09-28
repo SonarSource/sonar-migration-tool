@@ -43,6 +43,11 @@ type createTaskDef struct {
 	OutputTask   string // create* task whose JSONL we synthesise
 	IDField      string // synthetic id field name (cloud_gate_id, cloud_project_key, ...)
 	NameField    string // entity name field on the mapping row (default "name")
+
+	// PerProjectOrg marks the one CSV whose rows may override the
+	// organizations.csv join with their own sonarcloud_org_key cell
+	// (#612). Only projects.csv carries that column.
+	PerProjectOrg bool
 }
 
 // createTasks mirrors the relevant rows from summary.sectionDefs but in
@@ -55,7 +60,7 @@ var createTasks = []createTaskDef{
 	{MappingsTask: "generateTemplateMappings", CSVFile: "templates.csv", OutputTask: "createPermissionTemplates", IDField: "cloud_template_id"},
 	{MappingsTask: "generateGroupMappings", CSVFile: "groups.csv", OutputTask: "createGroups", IDField: "cloud_group_id"},
 	{MappingsTask: "generatePortfolioMappings", CSVFile: "portfolios.csv", OutputTask: "createPortfolios", IDField: "cloud_portfolio_id"},
-	{MappingsTask: "generateProjectMappings", CSVFile: "projects.csv", OutputTask: "createProjects", IDField: "cloud_project_key", NameField: "key"},
+	{MappingsTask: "generateProjectMappings", CSVFile: structure.ProjectsCSVFileName, OutputTask: "createProjects", IDField: "cloud_project_key", NameField: "key", PerProjectOrg: true},
 }
 
 // BuildPredictiveRun synthesizes a predictive run directory under
@@ -119,7 +124,7 @@ func BuildPredictiveRun(exportDir string) (string, error) {
 		// would emit a Skipped row for every skipped-org occurrence
 		// even when the entity already appears in Succeeded.
 		rows = dedupeMappingRows(rows, ct, orgLookup)
-		if err := writeMappingJSONL(store, ct.MappingsTask, rows, orgLookup); err != nil {
+		if err := writeMappingJSONL(store, ct.MappingsTask, rows, orgLookup, ct.PerProjectOrg); err != nil {
 			return "", fmt.Errorf("synthesizing %s: %w", ct.MappingsTask, err)
 		}
 		if err := writeCreateJSONL(store, ct, rows, orgLookup); err != nil {
@@ -175,6 +180,32 @@ func buildOrgKeyLookup(exportDir string) (map[string]string, error) {
 	return out, nil
 }
 
+// enrichRowOrg sets a mapping row's sonarcloud_org_key from the
+// organizations.csv lookup, mirroring migrate.loadCSVToJSONL so the
+// predictive report lands each entity in the organization a real migrate
+// would.
+//
+// perProjectOrg additionally honours the row's own sonarcloud_org_key cell
+// as an override (#612). Unlike migrate, an override refused because the
+// project is DevOps-bound is dropped without a WARN: BuildPredictiveRun has
+// no logger and predictive-report makes no Cloud calls, so migrate and
+// transfer remain the only places that log it. The resulting organization is
+// identical either way.
+func enrichRowOrg(row map[string]any, orgLookup map[string]string, perProjectOrg bool) {
+	mapped, mappedFound := "", false
+	if sqKey, ok := row["sonarqube_org_key"].(string); ok && sqKey != "" {
+		mapped, mappedFound = orgLookup[sqKey]
+	}
+	if perProjectOrg {
+		org, _ := structure.ResolveProjectOrg(row, mapped)
+		row[structure.ProjectOrgColumn] = org
+		return
+	}
+	if mappedFound {
+		row["sonarcloud_org_key"] = mapped
+	}
+}
+
 // dedupeMappingRows collapses CSV rows that describe the same entity
 // across multiple source orgs into a single row per identity. When
 // the same entity is mapped from N orgs and at least one of those orgs
@@ -194,11 +225,7 @@ func dedupeMappingRows(rows []map[string]any, ct createTaskDef, orgLookup map[st
 		nameField = "name"
 	}
 	enrich := func(row map[string]any) {
-		if sqKey, ok := row["sonarqube_org_key"].(string); ok && sqKey != "" {
-			if scKey, found := orgLookup[sqKey]; found {
-				row["sonarcloud_org_key"] = scKey
-			}
-		}
+		enrichRowOrg(row, orgLookup, ct.PerProjectOrg)
 	}
 
 	out := make([]map[string]any, 0, len(rows))
@@ -233,18 +260,14 @@ func dedupeMappingRows(rows []map[string]any, ct createTaskDef, orgLookup map[st
 // writeMappingJSONL writes one JSONL row per CSV row, enriched with the
 // sonarcloud_org_key looked up from organizations.csv. Mirrors
 // migrate.loadCSVToJSONL.
-func writeMappingJSONL(store *common.DataStore, taskName string, rows []map[string]any, orgLookup map[string]string) error {
+func writeMappingJSONL(store *common.DataStore, taskName string, rows []map[string]any, orgLookup map[string]string, perProjectOrg bool) error {
 	w, err := store.Writer(taskName)
 	if err != nil {
 		return err
 	}
 	out := make([]json.RawMessage, 0, len(rows))
 	for _, row := range rows {
-		if sqKey, ok := row["sonarqube_org_key"].(string); ok && sqKey != "" {
-			if scKey, found := orgLookup[sqKey]; found {
-				row["sonarcloud_org_key"] = scKey
-			}
-		}
+		enrichRowOrg(row, orgLookup, perProjectOrg)
 		b, err := json.Marshal(row)
 		if err != nil {
 			continue
@@ -281,11 +304,7 @@ func writeCreateJSONL(store *common.DataStore, ct createTaskDef, rows []map[stri
 	seen := make(map[string]bool, len(rows))
 	for _, row := range rows {
 		// Enrich with sonarcloud_org_key (mirrors migrate behaviour).
-		if sqKey, ok := row["sonarqube_org_key"].(string); ok && sqKey != "" {
-			if scKey, found := orgLookup[sqKey]; found {
-				row["sonarcloud_org_key"] = scKey
-			}
-		}
+		enrichRowOrg(row, orgLookup, ct.PerProjectOrg)
 		orgKey, _ := row["sonarcloud_org_key"].(string)
 		// Portfolios are enterprise-level on SQC — the mapping CSV has
 		// no organization column, so the per-org skip check doesn't

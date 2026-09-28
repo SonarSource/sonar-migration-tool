@@ -205,6 +205,8 @@ sonar-migration-tool transfer \
 
 Omit `--project_key` to transfer **every** project visible to the token (in which case the rest of the manual workflow applies — see [MIGRATE.md](MIGRATE.md) for the per-project `organizations.csv` mapping step).
 
+> **Note:** `transfer` runs `structure` itself, which rewrites `projects.csv`, so the per-project organization override described in [Mapping unbound SonarQube Server projects](MAPPING-UNBOUND-PROJECTS.md) cannot be used with `transfer`. Use the step-by-step `migrate` workflow when you need it. (Issue #612.)
+
 ---
 
 ## Flags

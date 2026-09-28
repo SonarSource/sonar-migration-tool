@@ -18,7 +18,12 @@ type Organization struct {
 
 // Project represents a mapped project with its org assignment and metadata.
 type Project struct {
-	Key                    string `csv:"key" json:"key"`
+	Key string `csv:"key" json:"key"`
+	// SonarCloudOrgKey is a per-project organization override an operator
+	// can fill in by hand (#612). Deliberately the second column so it is
+	// visible next to the project key in a spreadsheet, and always written
+	// empty — an empty cell means "use the organizations.csv mapping".
+	SonarCloudOrgKey       string `csv:"sonarcloud_org_key" json:"sonarcloud_org_key"`
 	Name                   string `csv:"name" json:"name"`
 	GateName               string `csv:"gate_name" json:"gate_name"`
 	Profiles               any    `csv:"profiles" json:"profiles"`
