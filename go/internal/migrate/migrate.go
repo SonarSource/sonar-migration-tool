@@ -573,6 +573,21 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 			time.Duration(float64(totalPoints)*common.SecondsPerHistoryPoint*float64(time.Second)))
 	}
 
+	// #597: syncIssueMetadata fans out one sync per project, and it is the
+	// only migrate task whose duration has a positive fit against a size
+	// the migrate path knows for free (R^2 0.36 on project count over 17
+	// archived runs; every other task scored negative, i.e. worse than a
+	// constant). Floored at the seeded constant so a one- or two-project
+	// run keeps the constant rather than seeding well under a second — the
+	// fit is real but weak, and under-seeding the task would hand the ETA
+	// the same wrong-proportions problem #598 set out to fix.
+	if n := projectsInScope(executor); n > 0 {
+		scaled := time.Duration(float64(n) * common.SecondsPerProjectIssueSync * float64(time.Second))
+		if base := common.ExpectedTaskDuration("syncIssueMetadata"); scaled > base {
+			executor.Progress.SetExpectedDuration("syncIssueMetadata", scaled)
+		}
+	}
+
 	executor.Progress.OnUpdate(cfg.ProgressCallback)
 	executor.Progress.Start(ctx, 10*time.Second)
 	defer executor.Progress.Stop()
