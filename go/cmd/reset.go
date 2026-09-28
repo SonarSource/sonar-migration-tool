@@ -203,11 +203,13 @@ func confirmResetOrgs(exportDir string, autoYes bool, orgPattern string, presetO
 			return nil, err
 		}
 		if len(orgs) == 0 {
-			return nil, fmt.Errorf("no SonarCloud organization key matches --%s %q in %s/organizations.csv", flagResetOrganization, orgPattern, exportDir)
+			return nil, fmt.Errorf("no SonarCloud organization key matches --%s %q in %s/organizations.csv or %s/%s",
+				flagResetOrganization, orgPattern, exportDir, exportDir, structure.ProjectsCSVFileName)
 		}
 	}
 	if len(orgs) == 0 {
-		return nil, fmt.Errorf("no SonarCloud organizations found in %s/organizations.csv — nothing to reset", exportDir)
+		return nil, fmt.Errorf("no SonarCloud organizations found in %s/organizations.csv or %s/%s — nothing to reset",
+			exportDir, exportDir, structure.ProjectsCSVFileName)
 	}
 	projCounts := loadProjectsPerOrg(exportDir)
 
@@ -312,8 +314,8 @@ func confirmResetOrgsInteractive(known map[string]bool, in io.Reader, out io.Wri
 // organizations could not be undone: reset would offer only the
 // organizations.csv ones and silently leave the rest behind. Widening the
 // candidate list is safe because nothing here deletes anything — the list
-// still goes through --reset_organization narrowing and the confirmation
-// prompt before a single project is touched.
+// still goes through --organization narrowing and the confirmation prompt
+// before a single project is touched.
 func loadResetTargetOrgs(exportDir string) ([]string, error) {
 	rows, err := structure.LoadCSV(exportDir, "organizations.csv")
 	if err != nil {

@@ -42,7 +42,11 @@ A project bound to an **on-premise** platform (GitHub Enterprise Server, self-ma
 
 The override moves the project and everything scoped to it: the project itself, its key (including the `<ORGANIZATION_KEY>` part when `--project_key_pattern` uses it), its settings, its new code definition, its branches, its project data, and its issue and hotspot metadata sync.
 
-It does **not** move the organization-scoped objects. Quality profiles, quality gates, groups and permission templates are mapped per source organization in their own CSVs and still go where `organizations.csv` sends them. So before you redirect a project, check that the destination organization already has the quality profiles and quality gate that project needs, or the project will fall back to that organization's defaults. If it does not, map that organization in `organizations.csv` too so the objects get created there.
+It does **not** move the organization-scoped objects. Quality profiles, quality gates, groups and permission templates are mapped per source organization in their own CSVs and are created only in the organizations `organizations.csv` names.
+
+**A redirected project loses its quality gate and quality profile assignments.** The migration assigns a project only the gates and profiles *this run created in that project's own organization*, so for a redirected project there are none to assign, and it keeps the destination organization's defaults. That holds even when a gate or profile of exactly the same name already exists there, whether you made it by hand or an earlier migration did: the assignment step never looks at what is already on the target. The quality gate case logs a `WARN`; the quality profile case is silent.
+
+Mapping the destination organization in `organizations.csv` as well does not help, because that is usually not possible: every project that was never bound shares one `organizations.csv` row, and a row maps to exactly one SonarQube Cloud organization. Plan to reassign the gate and the profiles by hand after the migration, or leave the project where `organizations.csv` sends it.
 
 ## Checking your work before you migrate
 

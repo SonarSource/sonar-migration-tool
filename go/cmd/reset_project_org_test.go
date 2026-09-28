@@ -5,6 +5,7 @@
 package cmd
 
 import (
+	"io"
 	"strings"
 	"testing"
 
@@ -55,5 +56,67 @@ func TestLoadResetTargetOrgsWithoutProjectsCSV(t *testing.T) {
 	}
 	if strings.Join(got, ",") != "default-org" {
 		t.Errorf("loadResetTargetOrgs = %v, want [default-org]", got)
+	}
+}
+
+// #612: organizations now come from two files, so both "nothing matched"
+// errors have to name both. Pointing an operator at organizations.csv
+// alone sends them to a file that may legitimately have no mapping while
+// projects.csv carries every override.
+func TestConfirmResetOrgsEmptyErrorsNameBothFiles(t *testing.T) {
+	cases := []struct {
+		name       string
+		orgCSV     string
+		projectCSV string
+		orgPattern string
+	}{
+		{
+			name:       "no organization matches the narrowing pattern",
+			orgCSV:     "sonarqube_org_key,sonarcloud_org_key\nsrv,default-org\n",
+			projectCSV: "key,sonarcloud_org_key,sonarqube_org_key,alm,is_cloud_binding\np1,extra-org,srv,,false\n",
+			orgPattern: "nothing-matches-this",
+		},
+		{
+			name:       "no organization mapped anywhere",
+			orgCSV:     "sonarqube_org_key,sonarcloud_org_key\nsrv,\n",
+			projectCSV: "key,sonarcloud_org_key,sonarqube_org_key,alm,is_cloud_binding\np1,,srv,,false\n",
+			orgPattern: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, "organizations.csv", tc.orgCSV)
+			writeFile(t, dir, structure.ProjectsCSVFileName, tc.projectCSV)
+
+			_, err := confirmResetOrgs(dir, false, tc.orgPattern, nil, strings.NewReader(""), io.Discard)
+			if err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+			for _, want := range []string{"organizations.csv", structure.ProjectsCSVFileName} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error does not name %q: %q", want, err.Error())
+				}
+			}
+		})
+	}
+}
+
+// The narrowing flag is --organization. A message naming a flag that does
+// not exist sends the operator looking for it in --help.
+func TestConfirmResetOrgsNamesTheRealNarrowingFlag(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "organizations.csv", "sonarqube_org_key,sonarcloud_org_key\nsrv,default-org\n")
+
+	_, err := confirmResetOrgs(dir, false, "nothing-matches-this", nil, strings.NewReader(""), io.Discard)
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	if !strings.Contains(err.Error(), "--organization ") {
+		t.Errorf("error does not name --organization: %q", err.Error())
+	}
+	if strings.Contains(err.Error(), "--reset_organization") {
+		t.Errorf("error names the non-existent --reset_organization flag: %q", err.Error())
 	}
 }
