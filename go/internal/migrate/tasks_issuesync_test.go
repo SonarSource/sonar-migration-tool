@@ -1357,7 +1357,7 @@ func TestWaitForCloudIndexingSucceedsImmediatelyWithoutLogging(t *testing.T) {
 	err := waitForCloudIndexing(context.Background(), logger, "syncIssueMetadata", "proj-a", func() (int, error) {
 		calls++
 		return 5, nil
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("waitForCloudIndexing: unexpected error: %v", err)
 	}
@@ -1378,7 +1378,7 @@ func TestWaitForCloudIndexingPropagatesFetchError(t *testing.T) {
 
 	err := waitForCloudIndexing(context.Background(), logger, "syncIssueMetadata", "proj-a", func() (int, error) {
 		return 0, wantErr
-	})
+	}, nil)
 	if !errors.Is(err, wantErr) {
 		t.Errorf("err = %v, want %v", err, wantErr)
 	}
@@ -1401,7 +1401,7 @@ func TestWaitForCloudIndexingLogsBeforeRetrying(t *testing.T) {
 
 	err := waitForCloudIndexing(ctx, logger, "syncHotspotMetadata", "proj-b", func() (int, error) {
 		return 0, nil
-	})
+	}, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("err = %v, want context.Canceled", err)
 	}
@@ -1411,5 +1411,98 @@ func TestWaitForCloudIndexingLogsBeforeRetrying(t *testing.T) {
 	}
 	if !strings.Contains(out, "project=proj-b") {
 		t.Errorf("expected the log line to be project-scoped, got: %s", out)
+	}
+}
+
+// #597: a zero issue count is ambiguous. When the analysis-completion probe
+// confirms the target has finished analysing, zero is the real answer and
+// the loop must stop immediately instead of burning the full ~8m17s
+// backoff. This is the case that cost 75% of one real 11-minute run.
+func TestWaitForCloudIndexingStopsWhenTargetAnalysisIsComplete(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	// A canceled context proves no sleep happened: the retry path selects
+	// on ctx.Done() and would return context.Canceled instead of nil.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	probes := 0
+	err := waitForCloudIndexing(ctx, logger, "syncHotspotMetadata", "proj-empty",
+		func() (int, error) { return 0, nil },
+		func() (bool, error) { probes++; return true, nil })
+	if err != nil {
+		t.Fatalf("waitForCloudIndexing: unexpected error: %v", err)
+	}
+	if probes != 1 {
+		t.Errorf("analysisDoneFn calls = %d, want 1", probes)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "target analysis is complete and the project has no indexed issues") {
+		t.Errorf("expected the nothing-to-wait-for log line, got: %s", out)
+	}
+	if strings.Contains(out, "waiting for Cloud indexing to catch up") {
+		t.Errorf("must not log a retry wait once the analysis is confirmed complete, got: %s", out)
+	}
+}
+
+// The probe must not change the happy path: when the first fetch already
+// reports indexed issues, the extra Cloud call is never made.
+func TestWaitForCloudIndexingSkipsProbeWhenIssuesAreAlreadyIndexed(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	probes := 0
+	err := waitForCloudIndexing(context.Background(), logger, "syncIssueMetadata", "proj-a",
+		func() (int, error) { return 7, nil },
+		func() (bool, error) { probes++; return true, nil })
+	if err != nil {
+		t.Fatalf("waitForCloudIndexing: unexpected error: %v", err)
+	}
+	if probes != 0 {
+		t.Errorf("analysisDoneFn calls = %d, want 0 — the probe costs an API call and is only needed on a zero count", probes)
+	}
+}
+
+// When the target has genuinely not finished analysing yet, the probe says
+// so and the loop keeps its original backoff behaviour.
+func TestWaitForCloudIndexingKeepsWaitingWhenAnalysisIsNotDone(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := waitForCloudIndexing(ctx, logger, "syncIssueMetadata", "proj-slow",
+		func() (int, error) { return 0, nil },
+		func() (bool, error) { return false, nil })
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+	if !strings.Contains(buf.String(), "waiting for Cloud indexing to catch up") {
+		t.Errorf("expected the retry wait to still be logged, got: %s", buf.String())
+	}
+}
+
+// A probe failure is a diagnostic failure, not a sync failure: it must warn
+// and fall back to the original count-only backoff.
+func TestWaitForCloudIndexingFallsBackWhenProbeErrors(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := waitForCloudIndexing(ctx, logger, "syncIssueMetadata", "proj-probe-broken",
+		func() (int, error) { return 0, nil },
+		func() (bool, error) { return false, errors.New("probe boom") })
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled — a probe error must not abort the sync", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "analysis-completion probe failed") {
+		t.Errorf("expected a probe-failure warning, got: %s", out)
+	}
+	if !strings.Contains(out, "waiting for Cloud indexing to catch up") {
+		t.Errorf("expected the count-only backoff to continue, got: %s", out)
 	}
 }

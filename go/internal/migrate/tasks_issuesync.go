@@ -382,7 +382,8 @@ func countDistinctBranches(issues []matchableIssue) int {
 // ---------------------------------------------------------------------------
 
 // waitForCloudIndexing polls fetchFn with exponential backoff until a
-// non-zero total is returned or the maximum number of retries is exhausted.
+// non-zero total is returned, analysisDoneFn confirms the target has a
+// completed analysis, or the maximum number of retries is exhausted.
 //
 // This accommodates the delay between CE task completion and the issues
 // becoming searchable via /api/issues/search. If the max retries are
@@ -390,12 +391,31 @@ func countDistinctBranches(issues []matchableIssue) int {
 // sync proceeds with zero matches — the alternative would be a hard
 // failure that blocks later projects unnecessarily.
 //
-// Retries are logged (task/project-scoped) because the backoff can run up
-// to ~8 minutes (10+20+40+60*7s) with no other activity for this project:
-// without a log line here, that wait is indistinguishable from a hang —
-// the run-wide progress percentage can't move either, since it only
+// analysisDoneFn exists because a zero count is ambiguous and, until #597,
+// this loop could not tell the two cases apart (#597):
+//
+//   - the compute engine result is not searchable yet, so wait; or
+//   - the project genuinely carries no issues on the target, in which case
+//     the count can never rise and every retry is pure waste.
+//
+// The second case is not hypothetical. A project whose every finding was
+// dropped on an inactive target rule ("converted=0 droppedInactiveRule=3")
+// burned the full 8m17s backoff and then did nothing, on 7 of the 17
+// migrate runs archived for #597 — about 58 minutes of dead wall clock, and
+// 75% of one 11-minute run. It also made syncHotspotMetadata look like a
+// ~497s size-independent task when it really costs ~0.01s.
+//
+// The probe asks a question that has a useful answer either way: does the
+// target project report a completed analysis? A probe error is non-fatal
+// and falls back to the old count-only backoff, because a sync should not
+// fail over a diagnostic call.
+//
+// Retries are still logged (task/project-scoped) because the backoff can
+// run up to ~8 minutes (10+20+40+60*7s) with no other activity for this
+// project: without a log line here, that wait is indistinguishable from a
+// hang — the run-wide progress percentage can't move either, since it only
 // advances once this project's whole sync completes.
-func waitForCloudIndexing(ctx context.Context, logger *slog.Logger, task, projectKey string, fetchFn func() (int, error)) error {
+func waitForCloudIndexing(ctx context.Context, logger *slog.Logger, task, projectKey string, fetchFn func() (int, error), analysisDoneFn func() (bool, error)) error {
 	const (
 		initialDelay = 10 * time.Second
 		maxDelay     = 60 * time.Second
@@ -410,6 +430,18 @@ func waitForCloudIndexing(ctx context.Context, logger *slog.Logger, task, projec
 		}
 		if total > 0 {
 			return nil
+		}
+		if analysisDoneFn != nil {
+			done, probeErr := analysisDoneFn()
+			switch {
+			case probeErr != nil:
+				logAPIWarn(logger, fmt.Sprintf("%s: analysis-completion probe failed, falling back to the count-only backoff", task),
+					probeErr, "project", projectKey, "attempt", attempt+1)
+			case done:
+				logger.Info(fmt.Sprintf("%s: target analysis is complete and the project has no indexed issues, nothing to wait for", task),
+					"project", projectKey, "attempt", attempt+1)
+				return nil
+			}
 		}
 		logger.Info(fmt.Sprintf("%s: waiting for Cloud indexing to catch up", task),
 			"project", projectKey, "attempt", attempt+1, "max_attempts", maxRetries, "retry_in", delay)
@@ -426,6 +458,28 @@ func waitForCloudIndexing(ctx context.Context, logger *slog.Logger, task, projec
 	}
 	// Non-fatal: proceed with 0 matches.
 	return nil
+}
+
+// targetAnalysisComplete returns a probe reporting whether the target
+// project has at least one branch carrying an analysis date, i.e. the
+// compute-engine task importProjectData submitted has landed (#597).
+//
+// This is the question waitForCloudIndexing actually wants answered. The
+// issue count it polls is only a proxy for it, and a proxy that is stuck at
+// zero for any project that legitimately has no issues.
+func targetAnalysisComplete(ctx context.Context, e *Executor, cloudKey string) func() (bool, error) {
+	return func() (bool, error) {
+		branches, err := e.Cloud.Branches.List(ctx, cloudKey)
+		if err != nil {
+			return false, err
+		}
+		for _, b := range branches {
+			if b.AnalysisDate != "" {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -553,7 +607,7 @@ func syncProjectIssues(ctx context.Context, e *Executor, cloudKey, orgKey, serve
 		params.Set("componentKeys", cloudKey)
 		params.Set("organization", orgKey)
 		return e.Cloud.Issues.Count(ctx, params)
-	}); err != nil {
+	}, targetAnalysisComplete(ctx, e, cloudKey)); err != nil {
 		logAPIWarn(e.Logger, "syncIssueMetadata: indexing wait failed", err, "project", cloudKey)
 		return stats
 	}

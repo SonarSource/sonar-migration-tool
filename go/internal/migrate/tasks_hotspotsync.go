@@ -565,7 +565,7 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 		params.Set("componentKeys", input.CloudKey)
 		params.Set("organization", input.OrgKey)
 		return e.Cloud.Issues.Count(ctx, params)
-	})
+	}, targetAnalysisComplete(ctx, e, input.CloudKey))
 
 	e.Logger.Info("syncHotspotMetadata: syncing hotspots as issues",
 		"project", input.CloudKey,
