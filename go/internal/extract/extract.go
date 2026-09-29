@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"sync"
 	"time"
@@ -23,13 +24,18 @@ import (
 
 // ExtractConfig holds all parameters for an extract run.
 type ExtractConfig struct {
-	URL                      string
-	Token                    string
-	ExportDirectory          string
-	ExtractType              string // "all" or report type
-	PEMFilePath              string
-	KeyFilePath              string
-	CertPassword             string
+	URL             string
+	Token           string
+	ExportDirectory string
+	ExtractType     string // "all" or report type
+	PEMFilePath     string
+	KeyFilePath     string
+	CertPassword    string
+	// Insecure skips TLS certificate verification on the source
+	// SonarQube Server connection (#586) — for a trusted internal server
+	// whose certificate is self-signed or not signed by a trusted CA.
+	// Defaults to false; nothing about the connection changes unless set.
+	Insecure                 bool
 	Concurrency              int
 	Timeout                  int
 	ExtractID                string
@@ -49,11 +55,63 @@ type ExtractConfig struct {
 	// requested projects are fetched and all downstream per-project tasks
 	// naturally scope to the same set.
 	ProjectKeys []string
+	// ProjectKey is the raw --project_key regexp pattern (or config-file
+	// "project_key" value) before resolution. cmd/extract.go resolves it
+	// into ProjectKeys via ResolveProjectKeys before calling RunExtract
+	// (#536, mirrors #529's transfer-side flag).
+	ProjectKey string
+	// BranchRegexp, when non-empty, limits which branches of each project get
+	// extracted (both the getBranches task's own written records and every
+	// downstream per-branch task that fans out from them — issues, hotspots,
+	// source, SCM, versions, history). Always compiled as a full-match regex
+	// implicitly anchored with ^ and $ (mirrors ProjectKey/CompileProjectKeyPattern,
+	// #529/#536). The project's main branch is always kept regardless of
+	// whether it matches. Empty means "extract every branch" (#582).
+	BranchRegexp string
+	// Objects, when non-nil, limits extraction to the selected object
+	// categories (settings, permission_templates, quality_profiles,
+	// quality_gates, projects, portfolios, groups, license_profiles —
+	// aliases qp/qg/pt/lp). nil means "everything" — same semantics as
+	// common.ParseObjects's empty-input contract (#536).
+	Objects map[string]bool
+	// objectsRaw carries the raw --objects / config-file "objects" values
+	// from LoadExtractConfigFile's parsing step through to the
+	// common.ParseObjects call that fills in Objects, so parsing logic
+	// lives in one place (config_file.go) instead of being duplicated
+	// between the config-file loader and cmd/extract.go's CLI handling.
+	// Cleared once Objects is populated; not meant to be read afterward.
+	objectsRaw []string
 	// ProgressCallback, when set, is invoked with the same run-wide
 	// percent/ETA snapshot as the #520 log line, on every tick and once
 	// more at completion. Nil for CLI callers (go/cmd/extract.go); the
 	// GUI wizard sets it to drive a progress bar (#519).
 	ProgressCallback func(percent float64, eta time.Duration, known bool)
+
+	// MigrateHistory opts into the project-history migration PoC (#554):
+	// walk each project+branch's SonarQube Server analysis history and
+	// extract a bounded set of historical (date, project-level measures)
+	// snapshots, so the migrate phase can replay them as separate,
+	// backdated analyses on the target. Defaults to false — when unset,
+	// getProjectAnalysisHistory makes zero extra API calls and behavior is
+	// unchanged from before this feature existed.
+	MigrateHistory bool
+	// HistoryMaxPoints bounds how many historical snapshots are selected
+	// per project+branch when MigrateHistory is set. <=0 means no cap —
+	// which is also the default (accuracy over speed: an unbounded,
+	// unrequested run should still capture every real historical point
+	// rather than silently sampling a subset).
+	HistoryMaxPoints int
+	// HistoryMinIntervalDays is the minimum spacing, in days, enforced
+	// between two selected historical snapshots. HistoryUnset resolves to
+	// the default (0) in applyDefaults; 0 — whether defaulted or passed
+	// explicitly — means "no spacing rule, take every analysis".
+	HistoryMinIntervalDays int
+
+	// BranchAnalyzedAfter is the raw --branch_analyzed_after value (or the
+	// config file's resolved branch_analyzed_after / source.branch_analyzed_after),
+	// in YYYY-MM-DD form. "" means unset — no filter, every branch is
+	// selected (current behavior). #583.
+	BranchAnalyzedAfter string
 }
 
 // Executor is the runtime context passed to every task function.
@@ -68,6 +126,28 @@ type Executor struct {
 	ProjectKeys   []string        // non-empty → limit extraction to these project keys
 	SkipIssueSync bool            // drop additionalFields=_all + hotspot detail enrichment. #398.
 	Progress      *common.Tracker // run-wide progress/ETA estimator (#520)
+
+	// BranchRe is the compiled form of ExtractConfig.BranchRegexp, or nil
+	// when unset (meaning "no branch filtering"). #582.
+	BranchRe *regexp.Regexp
+
+	// Truncation collects every truncated API response observed during
+	// the run, for the end-of-run console block and the
+	// extract_truncation.json artefact the migration report reads
+	// (#574). Nil-safe on every method, so hand-built executors (tests,
+	// and anything that does not go through RunExtract) need no change
+	// and simply record nothing.
+	Truncation *TruncationTracker
+
+	// MigrateHistory / HistoryMaxPoints / HistoryMinIntervalDays — see
+	// ExtractConfig. #554.
+	MigrateHistory         bool
+	HistoryMaxPoints       int
+	HistoryMinIntervalDays int
+
+	// BranchAnalyzedAfter — see ExtractConfig. nil means unset: no filter,
+	// every branch is selected. #583.
+	BranchAnalyzedAfter *time.Time
 
 	mu              sync.Mutex
 	skippedProjects map[string]bool
@@ -142,21 +222,60 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 	executor := newExecutor(raw, store, client.BaseURL(), edition, version, cfg.Concurrency)
 	executor.ProjectKeys = cfg.ProjectKeys
 	executor.SkipIssueSync = cfg.SkipIssueSync
+	executor.MigrateHistory = cfg.MigrateHistory
+	executor.HistoryMaxPoints = cfg.HistoryMaxPoints
+	executor.HistoryMinIntervalDays = cfg.HistoryMinIntervalDays
+
+	if cfg.BranchRegexp != "" {
+		branchRe, err := CompileProjectKeyPattern(cfg.BranchRegexp)
+		if err != nil {
+			return nil, fmt.Errorf("invalid branch regexp pattern %q: %w", cfg.BranchRegexp, err)
+		}
+		executor.BranchRe = branchRe
+	}
+	// Defensive re-validation (#583): cmd/extract.go already validates
+	// --branch_analyzed_after before calling RunExtract, but this entry
+	// point also serves direct callers (e.g. the GUI wizard) that may not.
+	branchAnalyzedAfter, err := common.ParseBranchAnalyzedAfter(cfg.BranchAnalyzedAfter)
+	if err != nil {
+		return nil, err
+	}
+	executor.BranchAnalyzedAfter = branchAnalyzedAfter
+
+	// Truncation tracking (#574). The observer is installed on the raw
+	// client — one installation covering all of its call sites,
+	// including the ones nobody remembers to wire — and it is installed
+	// HERE, before any task can run: a record produced by a task that
+	// started first would otherwise be dropped, and the failure mode of
+	// installing it late is the feature being dead in production while
+	// every unit test stays green.
+	executor.Truncation = NewTruncationTracker()
+	raw.SetTruncationObserver(executor.Truncation.Record)
 
 	// Overall progress/ETA logging (#520) — every 10s for the duration of
 	// the run, stopped once phases finish (success or error).
-	executor.Progress = common.NewTracker(executor.Logger, plan, CategorizeTask, common.DefaultCategoryWeights)
+	executor.Progress = common.NewTracker(executor.Logger, plan, CategorizeTask, common.DefaultCategoryWeights, common.ExpectedTaskDuration)
 	executor.Progress.OnUpdate(cfg.ProgressCallback)
 	executor.Progress.Start(ctx, 10*time.Second)
 	defer executor.Progress.Stop()
 
-	if err := executePhases(ctx, executor, plan, registry, store); err != nil {
-		return nil, err
+	phaseErr := executePhases(ctx, executor, plan, registry, store)
+	// Flushed on both exits: the truncation a completed phase recorded
+	// is real whether or not a later phase then failed, and the tracker
+	// is the only place it exists until the artefact is written (#574).
+	flushTruncation(extractDir, executor.Truncation, executor.Logger)
+	if phaseErr != nil {
+		return nil, phaseErr
 	}
 	executor.Progress.Stop() // silence the ticker before the closing line
 	executor.Progress.LogFinal()
 
-	fmt.Printf("%s v%s - Extract Complete: %s\n", smtver.ToolName, smtver.Version, extractID)
+	// Before the success banner, not after it: printing in place here
+	// rather than widening RunExtract's return gives all of its callers
+	// (extract, transfer, sync_issues, the wizard) the same warning.
+	PrintTruncationBlock(os.Stderr, executor.Truncation.State())
+
+	fmt.Printf("%s %s - Extract Complete: %s\n", smtver.ToolName, smtver.Version, extractID)
 	return executor.SkippedProjectKeys(), nil
 }
 
@@ -229,16 +348,28 @@ func buildPlan(cfg ExtractConfig, edition Edition) (map[string]*TaskDef, [][]str
 
 	var targets []string
 	if cfg.IncludeProjectData {
-		targets = TargetTasksWithProjectData(registry, cfg.TargetTask, cfg.ExtractType)
+		targets = TargetTasksWithProjectData(registry, cfg.TargetTask, cfg.ExtractType, cfg.Objects)
 	} else {
-		targets = TargetTasks(registry, cfg.TargetTask, cfg.ExtractType)
+		targets = TargetTasks(registry, cfg.TargetTask, cfg.ExtractType, cfg.Objects)
 	}
-	taskSet := ResolveDependencies(targets, registry)
+
+	var taskSet map[string]bool
+	var excluded map[string]bool
+	if cfg.Objects != nil {
+		// An --objects filter is active: exclude cross-category
+		// dependency edges too, so an excluded category's task doesn't
+		// get pulled back in just because a selected task happens to
+		// declare it as a dependency (#536).
+		excluded = excludedExtractTasks(cfg.Objects)
+		taskSet = ResolveDependenciesExcluding(targets, registry, excluded)
+	} else {
+		taskSet = ResolveDependencies(targets, registry)
+	}
 	if taskSet == nil {
 		return nil, nil, nil, fmt.Errorf("cannot resolve dependencies for target tasks")
 	}
 
-	plan, err := PlanPhases(taskSet, registry)
+	plan, err := PlanPhasesExcluding(taskSet, registry, excluded)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -282,6 +413,13 @@ func runPhase(ctx context.Context, e *Executor, taskNames []string, registry map
 		e.Logger.Info("running task", "task", name)
 		g.Go(func() error {
 			taskStart := time.Now()
+			// Marked here rather than before g.Go: the errgroup is
+			// limited, so a task can sit queued well after the loop hands
+			// it over. Stamping the start at hand-over makes the tracker
+			// read queue wait as execution time, which both inflates the
+			// duration MarkTaskComplete banks and distorts the in-flight
+			// credit a queued-but-not-running task receives (#564).
+			e.Progress.MarkTaskStarted(name)
 			err := def.Run(ctx, e)
 			// Per-task end-of-run timing line (#311), emitted on
 			// both success and failure paths.
@@ -309,11 +447,44 @@ func (cfg *ExtractConfig) applyDefaults() {
 	if cfg.ExtractType == "" {
 		cfg.ExtractType = "all"
 	}
+	// #554 — only default the history bounds when the feature is actually
+	// requested; an unused MigrateHistory=false run never touches these.
+	if cfg.MigrateHistory {
+		if cfg.HistoryMaxPoints <= 0 {
+			cfg.HistoryMaxPoints = DefaultHistoryMaxPoints
+		}
+		// Unset is HistoryUnset (a negative sentinel), NOT 0: zero is a
+		// meaningful, explicitly-requestable value here — "no spacing rule,
+		// take every analysis" — so it must survive defaulting. Treating
+		// <=0 as unset silently turned an explicit 0 into 30, which made
+		// "give me everything" quietly mean "give me one point a month".
+		if cfg.HistoryMinIntervalDays < 0 {
+			cfg.HistoryMinIntervalDays = DefaultHistoryMinIntervalDays
+		}
+	}
 	// Ensure trailing slash on URL.
 	if cfg.URL != "" && cfg.URL[len(cfg.URL)-1] != '/' {
 		cfg.URL += "/"
 	}
 }
+
+// DefaultHistoryMaxPoints / DefaultHistoryMinIntervalDays are the PoC
+// history-migration bounds (#554) applied when --migrate_history is set but
+// --history_max_points / --history_min_interval_days are not: no cap, no
+// minimum spacing — every real historical analysis becomes a candidate.
+// Accuracy takes priority over migration speed here; a caller who wants a
+// bounded, faster run opts into that explicitly via the two flags.
+const (
+	DefaultHistoryMaxPoints       = 0
+	DefaultHistoryMinIntervalDays = 0
+)
+
+// HistoryUnset marks HistoryMinIntervalDays as "caller said nothing", so
+// applyDefaults can substitute DefaultHistoryMinIntervalDays. It has to be a
+// negative sentinel rather than 0 because 0 is itself a legal request ("no
+// spacing rule"), and a JSON config file cannot distinguish an absent integer
+// from an explicit 0.
+const HistoryUnset = -1
 
 func detectVersion(ctx context.Context, cfg ExtractConfig) (common.Version, error) {
 	// Temporary client with version 10 (bearer auth) to fetch the raw
@@ -333,13 +504,16 @@ func detectVersion(ctx context.Context, cfg ExtractConfig) (common.Version, erro
 }
 
 // baseSDKOptions assembles the SDK option set shared by every extract API
-// client: timeout, optional mTLS, and (when --debug is set) the HTTP
-// request/response debug logger that surfaces every API call as a Debug
-// slog entry.
+// client: timeout, optional mTLS, optionally skipping TLS verification, and
+// (when --debug is set) the HTTP request/response debug logger that surfaces
+// every API call as a Debug slog entry.
 func baseSDKOptions(cfg ExtractConfig) []sqapi.Option {
 	opts := []sqapi.Option{sqapi.WithTimeout(cfg.Timeout)}
 	if cfg.PEMFilePath != "" {
 		opts = append(opts, sqapi.WithClientCert(cfg.PEMFilePath, cfg.KeyFilePath, cfg.CertPassword))
+	}
+	if cfg.Insecure {
+		opts = append(opts, sqapi.WithInsecureSkipVerify())
 	}
 	if cfg.Debug {
 		opts = append(opts, sqapi.WithDebugLogger(common.NewHTTPDebugLogger(slog.Default())))

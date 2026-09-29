@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
@@ -23,6 +24,13 @@ import (
 type portfolioFailure struct {
 	CloudPortfolioID string
 	Error            string
+
+	// HTTPStatus is set only for a failure read back from requests.log,
+	// where the status and message are SonarQube Cloud's own. A sidecar
+	// failure never reached the wire and leaves this zero, which is what
+	// keeps its tool-authored reason from being classified as if the
+	// platform had said it.
+	HTTPStatus int
 }
 
 // collectPortfolioFailures combines two sources of per-portfolio failures:
@@ -133,6 +141,7 @@ func matchPortfolioFailure(entry map[string]any) (string, portfolioFailure, bool
 	return id, portfolioFailure{
 		CloudPortfolioID: id,
 		Error:            extractFailureError(payload),
+		HTTPStatus:       httpStatusOf(payload["status"]),
 	}, true
 }
 
@@ -191,6 +200,7 @@ func applyPortfolioFailures(store *common.DataStore,
 			Organization: item.Organization,
 			Detail:       item.Detail,
 			ErrorMessage: failureMessage(fail),
+			Cause:        classifyPortfolioCause(fail),
 		}
 		failed = append(failed, failedItem)
 	}
@@ -226,6 +236,33 @@ func portfolioNameToID(store *common.DataStore) map[string]string {
 		out[name] = id
 	}
 	return out
+}
+
+// classifyPortfolioCause labels a portfolio failure with the run's own
+// classification — the invariant every builder of a Failed item holds,
+// and which this one did not, leaving the side of the split its rows
+// land on to the zero value.
+//
+// Only a failure read back from requests.log is classified: its status
+// and message are SonarQube Cloud's own, which is what ClassifyHTTPFailure
+// reads everywhere else. A sidecar failure never reached the wire and its
+// reason is prose this tool wrote, so it stays unclassified — and so
+// actionable, which is the right way round for a default.
+func classifyPortfolioCause(f portfolioFailure) string {
+	if f.HTTPStatus == 0 {
+		return ""
+	}
+	return classifyFailureCause(strconv.Itoa(f.HTTPStatus), failureMessage(f))
+}
+
+// httpStatusOf reads requests.log's numeric status, which is a JSON
+// number and so arrives as a float64.
+func httpStatusOf(v any) int {
+	n, ok := numericStatus(v)
+	if !ok {
+		return 0
+	}
+	return int(n)
 }
 
 func failureMessage(f portfolioFailure) string {

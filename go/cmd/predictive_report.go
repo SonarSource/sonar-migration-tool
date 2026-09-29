@@ -11,6 +11,7 @@ import (
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/extract"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/migrate"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/predict"
 	"github.com/spf13/cobra"
 )
@@ -29,14 +30,21 @@ The export directory can be supplied directly via --export_directory or
 read from the same JSON config file the extract / migrate commands use
 via --config (issue #246).
 
+When organizations.csv carries no sonarcloud_org_key at all, the target
+organization is taken from --default_organization or the config file's
+target.default_organization and stamped onto every row first, the same
+way migrate does it, so the prediction matches the migration it
+predicts (issue #566). An already-mapped organizations.csv always wins.
+
 The PDF is written to <export_directory>/predictive_migration_summary.pdf.`,
 	RunE: runPredictiveReport,
 }
 
 func init() {
 	f := predictiveReportCmd.Flags()
-	f.String("config", "", "Path to JSON configuration file (same shape as extract --config); export_directory is read from it")
+	f.String("config", "", "Path to JSON configuration file (same shape as extract --config); export_directory and default_organization are read from it")
 	f.String("export_directory", "", "Root directory containing extract data and the mapping CSVs")
+	f.String("default_organization", "", "SonarQube Cloud organization key assumed for every project when organizations.csv has no mapping defined; ignored (with a WARN) when any row already carries a sonarcloud_org_key")
 }
 
 func runPredictiveReport(cmd *cobra.Command, args []string) error {
@@ -46,7 +54,11 @@ func runPredictiveReport(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	pdfPath, err := predict.GeneratePredictiveReport(exportDir)
+	defaultOrg, err := resolvePredictiveReportDefaultOrg(cmd)
+	if err != nil {
+		return err
+	}
+	pdfPath, err := predict.GeneratePredictiveReport(exportDir, defaultOrg)
 	if err != nil {
 		return err
 	}
@@ -83,4 +95,28 @@ func resolvePredictiveReportExportDir(cmd *cobra.Command) (string, error) {
 		exportDir = DefaultExportDirectory
 	}
 	return exportDir, nil
+}
+
+// resolvePredictiveReportDefaultOrg returns the organization key to
+// assume for unmapped organizations.csv rows, using migrate's own
+// precedence: the CLI flag wins, otherwise the config file's
+// target.default_organization (#566).
+//
+// An empty result is normal and simply means no default is available;
+// predict then warns rather than silently reporting nothing migrated.
+func resolvePredictiveReportDefaultOrg(cmd *cobra.Command) (string, error) {
+	if cmd.Flags().Changed("default_organization") {
+		v, _ := cmd.Flags().GetString("default_organization")
+		return v, nil
+	}
+
+	configFile, _ := cmd.Flags().GetString("config")
+	if configFile == "" {
+		return "", nil
+	}
+	org, err := migrate.LoadDefaultOrganizationFromConfigFile(configFile)
+	if err != nil {
+		return "", fmt.Errorf("loading config %s: %w", configFile, err)
+	}
+	return org, nil
 }

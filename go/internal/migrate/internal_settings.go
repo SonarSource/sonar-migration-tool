@@ -18,13 +18,13 @@ import "strings"
 // internal setting is one we want to drop entirely from extract /
 // report consideration.
 var internalSettingPrefixes = []string{
-	"sonaranalyzer",                  // covers sonaranalyzer-cs.*, sonaranalyzer-vbnet.*, sonaranalyzer.security.cs.*, ...
-	"sonar.updatecenter",             // server update-center plumbing
-	"sonar.plugins.risk.consent",     // license / risk-acceptance flag
-	"sonar.core.id",                  // server identity
-	"sonar.core.startTime",           // read-only server timestamp
-	"sonar.plsql.jdbc.driver.class",  // server JDBC plumbing
-	"sonar.documentation.baseUrl",    // server-only doc URL
+	"sonaranalyzer",                 // covers sonaranalyzer-cs.*, sonaranalyzer-vbnet.*, sonaranalyzer.security.cs.*, ...
+	"sonar.updatecenter",            // server update-center plumbing
+	"sonar.plugins.risk.consent",    // license / risk-acceptance flag
+	"sonar.core.id",                 // server identity
+	"sonar.core.startTime",          // read-only server timestamp
+	"sonar.plsql.jdbc.driver.class", // server JDBC plumbing
+	"sonar.documentation.baseUrl",   // server-only doc URL
 }
 
 // IsInternalSqsSetting reports whether the named SonarQube Server

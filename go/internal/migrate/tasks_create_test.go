@@ -16,6 +16,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/extract"
 )
 
 // newCreateTest creates a complete test environment for create-task tests:
@@ -56,6 +58,119 @@ func TestCreateProjects(t *testing.T) {
 	items := runCreateTask(t, "generateProjectMappings", "createProjects")
 	if key := extractField(items[0], "cloud_project_key"); key == "" {
 		t.Error("expected cloud_project_key to be set")
+	}
+}
+
+// #536: runCreateProjects must skip any source project whose key does
+// not match e.ProjectKeyRe (the compiled --project_key filter), issuing
+// no POST /api/projects/create for it. Every other project-scoped task
+// scopes off createProjects's own output, so filtering here is
+// sufficient.
+func TestRunCreateProjectsRespectsProjectKeyFilter(t *testing.T) {
+	e, _ := newCreateTest(t)
+
+	w, err := e.Store.Writer("generateProjectMappings")
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	for _, key := range []string{"BANKING_core", "OTHER_app"} {
+		b, _ := json.Marshal(map[string]any{
+			"key": key, "name": key,
+			"sonarcloud_org_key": testCloudOrg, "server_url": testServerURL,
+		})
+		if err := w.WriteOne(b); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+
+	re, err := extract.CompileProjectKeyPattern("BANKING_.+")
+	if err != nil {
+		t.Fatalf("CompileProjectKeyPattern: %v", err)
+	}
+	e.ProjectKeyRe = re
+
+	if err := runCreateProjects(context.Background(), e); err != nil {
+		t.Fatalf("runCreateProjects: %v", err)
+	}
+
+	items, _ := e.Store.ReadAll("createProjects")
+	if len(items) != 1 {
+		t.Fatalf("expected exactly 1 created project after filtering, got %d: %v", len(items), items)
+	}
+	if key := extractField(items[0], "key"); key != "BANKING_core" {
+		t.Errorf("expected the matching project BANKING_core, got %q", key)
+	}
+}
+
+// #536 (Gitar review on PR #555): a --project_key that matches zero
+// source projects must fail loudly rather than silently succeed —
+// mirroring extract.ResolveProjectKeys' behavior for the same flag.
+// Before this fix, a typo'd or case-wrong pattern created zero
+// projects, every downstream project-scoped task no-op'd on the empty
+// createProjects output, and the run exited 0 as if it had succeeded.
+func TestRunCreateProjectsProjectKeyFilterMatchingNothingErrors(t *testing.T) {
+	e, _ := newCreateTest(t)
+
+	w, err := e.Store.Writer("generateProjectMappings")
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	for _, key := range []string{"BANKING_core", "OTHER_app"} {
+		b, _ := json.Marshal(map[string]any{
+			"key": key, "name": key,
+			"sonarcloud_org_key": testCloudOrg, "server_url": testServerURL,
+		})
+		if err := w.WriteOne(b); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+
+	re, err := extract.CompileProjectKeyPattern("NO_SUCH_PREFIX_.+")
+	if err != nil {
+		t.Fatalf("CompileProjectKeyPattern: %v", err)
+	}
+	e.ProjectKeyRe = re
+
+	err = runCreateProjects(context.Background(), e)
+	if err == nil {
+		t.Fatal("expected an error when --project_key matches zero source projects, got nil")
+	}
+	if !strings.Contains(err.Error(), "NO_SUCH_PREFIX_.+") {
+		t.Errorf("expected error to name the pattern, got: %v", err)
+	}
+
+	items, _ := e.Store.ReadAll("createProjects")
+	if len(items) != 0 {
+		t.Errorf("expected zero created projects, got %d: %v", len(items), items)
+	}
+}
+
+// A nil e.ProjectKeyRe (no --project_key filter configured) must behave
+// exactly as before: every source project is created.
+func TestRunCreateProjectsNoFilterCreatesEverything(t *testing.T) {
+	e, _ := newCreateTest(t)
+
+	w, err := e.Store.Writer("generateProjectMappings")
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	for _, key := range []string{"BANKING_core", "OTHER_app"} {
+		b, _ := json.Marshal(map[string]any{
+			"key": key, "name": key,
+			"sonarcloud_org_key": testCloudOrg, "server_url": testServerURL,
+		})
+		if err := w.WriteOne(b); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+
+	if err := runCreateProjects(context.Background(), e); err != nil {
+		t.Fatalf("runCreateProjects: %v", err)
+	}
+
+	items, _ := e.Store.ReadAll("createProjects")
+	if len(items) != 2 {
+		t.Fatalf("expected both projects created with no filter, got %d: %v", len(items), items)
 	}
 }
 

@@ -383,6 +383,7 @@ func distinctRuleKeys(hotspots []matchableHotspot) []string {
 // It iterates over every project created during migration and synchronises
 // hotspot statuses and comments from the SonarQube Server extract to Cloud.
 func runSyncHotspotMetadata(ctx context.Context, e *Executor) error {
+	submitted := loadSubmittedIssueIndex(e)
 	return forEachMigrateItem(ctx, e, "syncHotspotMetadata", "createProjects",
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
 			if isFailedMigrateRecord(item) {
@@ -402,6 +403,7 @@ func runSyncHotspotMetadata(ctx context.Context, e *Executor) error {
 				OrgKey:    orgKey,
 				ServerURL: serverURL,
 				ServerKey: serverKey,
+				Submitted: submitted,
 			})
 
 			record, _ := json.Marshal(map[string]any{
@@ -426,6 +428,9 @@ type syncHotspotInput struct {
 	OrgKey    string
 	ServerURL string
 	ServerKey string
+	// Submitted is shared across every project in the task (#597). Its zero
+	// value keeps the original always-wait behaviour.
+	Submitted submittedIssueIndex
 }
 
 // syncHotspotResult holds the per-project sync outcome. Stats carries
@@ -560,12 +565,20 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 
 	// 2. Wait for Cloud indexing — proves the CE task is done. Counted over
 	// issues, not hotspots: the imported findings are issues on the target.
-	_ = waitForCloudIndexing(ctx, func() (int, error) {
-		params := url.Values{}
-		params.Set("componentKeys", input.CloudKey)
-		params.Set("organization", input.OrgKey)
-		return e.Cloud.Issues.Count(ctx, params)
-	})
+	// Skipped up front when this run's import submitted zero findings for
+	// the project — the classic case being every hotspot dropped on an
+	// inactive target rule (#597).
+	if input.Submitted.nothingSubmitted(input.CloudKey) {
+		e.Logger.Info("syncHotspotMetadata: import submitted no findings for this project, nothing to wait for",
+			"project", input.CloudKey)
+	} else {
+		_ = waitForCloudIndexing(ctx, e.Logger, "syncHotspotMetadata", input.CloudKey, func() (int, error) {
+			params := url.Values{}
+			params.Set("componentKeys", input.CloudKey)
+			params.Set("organization", input.OrgKey)
+			return e.Cloud.Issues.Count(ctx, params)
+		})
+	}
 
 	e.Logger.Info("syncHotspotMetadata: syncing hotspots as issues",
 		"project", input.CloudKey,
@@ -593,7 +606,9 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 	resolveParams := hotspotResolveParams{CloudKey: input.CloudKey, BaseURL: baseURL, SourceKey: input.ServerKey}
 	var a, b, c atomic.Int64
 	label := "Project key " + input.CloudKey + " hotspot sync:"
-	runProjectSyncLoop(ctx, e, items, label, 10,
+	// Bounded, not dynamic: nested inside runSyncHotspotMetadata's own
+	// per-project fan-out — see nestedSyncLoopConcurrency.
+	runProjectSyncLoopBounded(ctx, e, items, label, 10, nestedSyncLoopConcurrency,
 		func(gctx context.Context, it classifiedHotspot) {
 			if failedBranches[it.h.Branch] {
 				return
@@ -728,7 +743,7 @@ func syncOneHotspotAsIssue(ctx context.Context, e *Executor, src matchableHotspo
 	syncComments := cat == hotspotCategoryEligible ||
 		(cat == hotspotCategoryAcknowledged && hotspotHasUserComment(src.Comments))
 	if syncComments && len(src.Comments) > 0 {
-		if syncIssueComments(ctx, e, target.Key, hotspotCommentsAsIssueComments(src.Comments), target.Comments) && firstErr == nil {
+		if syncIssueComments(ctx, e, target.Key, hotspotCommentsAsIssueComments(src.Comments), target.Comments, e.MaxIssueComments) && firstErr == nil {
 			firstErr = fmt.Errorf("one or more comments failed")
 		}
 	}

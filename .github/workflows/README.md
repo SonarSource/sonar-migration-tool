@@ -60,6 +60,22 @@ workflow always has OIDC available and is unaffected by the fork restriction bel
 
 Uses no secrets, no Vault, and no OIDC, so it runs identically on fork pull requests.
 
+## Live smoke suite (not run in CI)
+
+The live end-to-end smoke suite in `go/smoke/` is **deliberately not run by any
+workflow in this directory**. It is a local pre-PR gate, run with `make smoke-full`.
+
+- It needs live credentials for a real SonarQube Server and a real staging
+  SonarQube Cloud organization, which CI does not have.
+- Its Tier 2 performs destructive resets — `reset --yes` deletes migrated
+  entities — which should never run unattended in CI.
+- No workflow change was needed to add it: every file in `go/smoke/` sits
+  behind a `//go:build smoke` build tag, so the existing `go test` steps in
+  `build.yml` never compile it.
+
+See [../../docs/SMOKE-TESTING.md](../../docs/SMOKE-TESTING.md) for how to run
+it and what it covers.
+
 ## Fork pull requests
 <!-- updated: 2026-07-28_10:25:08 -->
 

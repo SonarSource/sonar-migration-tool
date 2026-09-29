@@ -82,10 +82,10 @@ func TestAnalyzeProfile_ThirdParty(t *testing.T) {
 	in := ProfileAnalysisInput{
 		CloudProfileKey: "cp1", ProfileName: "x", Language: "java",
 		ActiveRules: []json.RawMessage{
-			rawJSON(t, map[string]any{"key": "java:S1", "repo": "java"}),                    // standard
-			rawJSON(t, map[string]any{"key": "vendor:R1", "repo": "vendor-plugin"}),         // 3rd-party
-			rawJSON(t, map[string]any{"key": "javasecurity:X", "repo": "javasecurity"}),     // standard (in list)
-			rawJSON(t, map[string]any{"key": "custom-checks:C1", "repo": "custom-checks"}),  // 3rd-party
+			rawJSON(t, map[string]any{"key": "java:S1", "repo": "java"}),                   // standard
+			rawJSON(t, map[string]any{"key": "vendor:R1", "repo": "vendor-plugin"}),        // 3rd-party
+			rawJSON(t, map[string]any{"key": "javasecurity:X", "repo": "javasecurity"}),    // standard (in list)
+			rawJSON(t, map[string]any{"key": "custom-checks:C1", "repo": "custom-checks"}), // 3rd-party
 		},
 	}
 	out := AnalyzeProfile(in)
@@ -123,8 +123,8 @@ func TestAnalyzeProfile_TemplateInstance(t *testing.T) {
 			rawJSON(t, map[string]any{"key": "java:custom1", "repo": "java"}),
 		},
 		BaseRulesByKey: map[string]json.RawMessage{
-			"java:S1":       rawJSON(t, map[string]any{"key": "java:S1"}),
-			"java:custom1":  rawJSON(t, map[string]any{"key": "java:custom1", "templateKey": "java:T1"}),
+			"java:S1":      rawJSON(t, map[string]any{"key": "java:S1"}),
+			"java:custom1": rawJSON(t, map[string]any{"key": "java:custom1", "templateKey": "java:T1"}),
 		},
 	}
 	out := AnalyzeProfile(in)

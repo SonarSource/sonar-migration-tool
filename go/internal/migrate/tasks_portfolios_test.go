@@ -5,14 +5,19 @@
 package migrate
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
 func TestTransformPortfolioRegex(t *testing.T) {
@@ -265,6 +270,106 @@ func TestRunConfigurePortfoliosSkipsNoneAndRest(t *testing.T) {
 	}
 	if patchCalled {
 		t.Error("PATCH must not be called for NONE/REST portfolios")
+	}
+}
+
+// #536 scenario (b): --objects=portfolios (no "projects" category
+// selected) must still schedule createPortfolios / setPortfolioProjects
+// / configurePortfolios — even though all three declare createProjects
+// as a dependency — and runConfigurePortfolios must hit its existing
+// "MANUAL portfolio has no resolved cloud projects to migrate" warning
+// path gracefully (no crash, no PATCH sent) rather than silently doing
+// nothing or erroring, since createProjects never runs in this
+// configuration and buildProjectCloudKeyIndex reads an empty
+// createProjects output.
+func TestRunConfigurePortfoliosWithProjectsExcludedHitsNoResolvedProjectsWarning(t *testing.T) {
+	cloudSrv := newMockCloudServer()
+	defer cloudSrv.Close()
+
+	patchCalled := false
+	apiMux := http.NewServeMux()
+	apiMux.HandleFunc("GET /enterprises/enterprises", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode([]map[string]any{{"id": "ent-1", "key": "test-enterprise"}})
+	})
+	apiMux.HandleFunc("PATCH /enterprises/portfolios/", func(w http.ResponseWriter, _ *http.Request) {
+		patchCalled = true
+		w.WriteHeader(http.StatusNoContent)
+	})
+	apiSrv := httptest.NewServer(apiMux)
+	defer apiSrv.Close()
+
+	dir := t.TempDir()
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	// The "projects" category is not selected — mirrors what a real
+	// --objects=portfolios run leaves on the Executor.
+	e.Objects = map[string]bool{common.ObjectPortfolios: true}
+
+	var logBuf bytes.Buffer
+	e.Logger = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	// No createProjects records written at all — createProjects is
+	// excluded from this run's plan, so its output directory never
+	// exists (buildProjectCloudKeyIndex must tolerate this).
+	cpw, _ := e.Store.Writer("createPortfolios")
+	cpw.WriteOne(json.RawMessage(`{"source_portfolio_key":"manual-portfolio","name":"Manual Portfolio","selection_mode":"MANUAL","cloud_portfolio_id":"cloud-manual-1"}`))
+
+	if err := runConfigurePortfolios(context.Background(), e); err != nil {
+		t.Fatalf("runConfigurePortfolios must not error when no projects are known: %v", err)
+	}
+	if patchCalled {
+		t.Error("PATCH must not be sent for a MANUAL portfolio with no resolved cloud projects")
+	}
+	if !strings.Contains(logBuf.String(), "MANUAL portfolio has no resolved cloud projects to migrate") {
+		t.Errorf("expected the existing graceful warning, got logs:\n%s", logBuf.String())
+	}
+
+	failures, _ := e.Store.ReadAll("configurePortfolios.failures")
+	if len(failures) != 1 {
+		t.Fatalf("expected one recorded portfolio failure, got %d", len(failures))
+	}
+}
+
+// #536 scenario (b), planning level: with --objects=portfolios,
+// createPortfolios / setPortfolioProjects / configurePortfolios must
+// still be scheduled (their Enterprise-only feature is independent of
+// the objects filter) despite each declaring createProjects — which IS
+// excluded — as a dependency. This exercises exactly the
+// MigrateTargetTasks -> ResolveDependenciesExcluding -> PlanPhasesExcluding
+// pipeline RunMigrate uses.
+func TestPlanPhasesObjectsPortfoliosOnlySchedulesPortfolioTasksWithoutCreateProjects(t *testing.T) {
+	reg := BuildMigrateRegistry(RegisterAll())
+	objects, err := common.ParseObjects([]string{"portfolios"})
+	if err != nil {
+		t.Fatalf("ParseObjects: %v", err)
+	}
+	targets := MigrateTargetTasks(reg, "", MigrateTargetTasksFlags{SkipProfiles: false, IncludeProjectData: false, SkipIssueSync: false, SkipProjectDataMigration: false}, nil, objects)
+	excluded := excludedMigrateTasks(objects)
+	if !excluded["createProjects"] {
+		t.Fatal("expected createProjects to be excluded when objects=portfolios")
+	}
+	taskSet := ResolveDependenciesExcluding(targets, reg, excluded)
+	if taskSet == nil {
+		t.Fatal("cannot resolve dependencies")
+	}
+	if taskSet["createProjects"] {
+		t.Fatal("createProjects must not be scheduled when --objects=portfolios")
+	}
+	for _, name := range []string{"createPortfolios", "setPortfolioProjects", "configurePortfolios"} {
+		if !taskSet[name] {
+			t.Errorf("expected %q to still be scheduled when --objects=portfolios", name)
+		}
+	}
+
+	plan, err := PlanPhasesExcluding(taskSet, reg, excluded)
+	if err != nil {
+		t.Fatalf("PlanPhasesExcluding failed: %v", err)
+	}
+	for _, phase := range plan {
+		for _, name := range phase {
+			if name == "createProjects" {
+				t.Fatalf("createProjects must never appear in the phase plan when --objects=portfolios, got phase %v", phase)
+			}
+		}
 	}
 }
 

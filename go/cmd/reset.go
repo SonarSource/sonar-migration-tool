@@ -42,6 +42,11 @@ var resetCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		if err := validateAPIMaxRatePerMin(cfg.APIMaxRatePerMin); err != nil {
+			return err
+		}
+		// reset's target is always SonarQube Cloud (#573).
+		warnIfConcurrencyDeprecated(cfg.Concurrency)
 		if cfg.Token == "" || cfg.EnterpriseKey == "" {
 			return fmt.Errorf("TOKEN and ENTERPRISE_KEY are required (either as arguments or in config file)")
 		}
@@ -94,7 +99,13 @@ func init() {
 	// Deprecated alias (#406): kept so existing scripts keep working.
 	f.String("url", "https://sonarcloud.io/", "")
 	_ = f.MarkDeprecated("url", "use --target_url instead")
-	f.Int("concurrency", 25, "Maximum number of concurrent requests")
+	f.Int("concurrency", 25, "Starting number of concurrent requests. Deprecated (#573): "+
+		"only seeds the initial value now — concurrency is always dynamically re-evaluated every 30s from observed SonarQube Cloud API latency. "+
+		"Use --"+flagAPIMaxRatePerMin+" instead to control the target rate.")
+	f.Int(flagAPIMaxRatePerMin, 0, fmt.Sprintf(
+		"Max sustained SonarQube Cloud API calls/min, as a sliding window (default: 1500, valid range [%d,%d]). "+
+			"Concurrency is dynamically adjusted to approach this rate without exceeding it (#573).",
+		minAPIMaxRatePerMin, maxAPIMaxRatePerMin))
 	f.String("export_directory", DefaultExportDirectory, "Directory to place all interim files")
 	f.Bool(flagResetYes, false, "Skip the interactive confirmation prompt and reset every listed organization (intended for non-interactive / scripted use). #381.")
 	f.String(flagResetOrganization, "", "Regexp (anchored full-match) narrowing the candidate organizations to reset to those whose sonarcloud_org_key matches, applied before the confirmation prompt / --yes. E.g. \"BANKING_.+\" matches every org key starting with BANKING_. #550.")
@@ -128,6 +139,7 @@ func buildResetConfig(cmd *cobra.Command, args []string) (migrate.ResetConfig, e
 	overrideString(cmd, flagTargetURL, &cfg.URL)
 	overrideString(cmd, "export_directory", &cfg.ExportDirectory)
 	overrideInt(cmd, "concurrency", &cfg.Concurrency)
+	overrideInt(cmd, flagAPIMaxRatePerMin, &cfg.APIMaxRatePerMin)
 	if cmd.Flags().Changed("debug") {
 		cfg.Debug, _ = cmd.Flags().GetBool("debug")
 	}
@@ -191,11 +203,13 @@ func confirmResetOrgs(exportDir string, autoYes bool, orgPattern string, presetO
 			return nil, err
 		}
 		if len(orgs) == 0 {
-			return nil, fmt.Errorf("no SonarCloud organization key matches --%s %q in %s/organizations.csv", flagResetOrganization, orgPattern, exportDir)
+			return nil, fmt.Errorf("no SonarCloud organization key matches --%s %q in %s/organizations.csv or %s/%s",
+				flagResetOrganization, orgPattern, exportDir, exportDir, structure.ProjectsCSVFileName)
 		}
 	}
 	if len(orgs) == 0 {
-		return nil, fmt.Errorf("no SonarCloud organizations found in %s/organizations.csv — nothing to reset", exportDir)
+		return nil, fmt.Errorf("no SonarCloud organizations found in %s/organizations.csv or %s/%s — nothing to reset",
+			exportDir, exportDir, structure.ProjectsCSVFileName)
 	}
 	projCounts := loadProjectsPerOrg(exportDir)
 
@@ -290,23 +304,47 @@ func confirmResetOrgsInteractive(known map[string]bool, in io.Reader, out io.Wri
 	return confirmed, nil
 }
 
-// loadResetTargetOrgs reads organizations.csv and returns every unique
-// non-empty, non-SKIPPED sonarcloud_org_key, sorted for deterministic
-// display.
+// loadResetTargetOrgs returns every unique non-empty, non-SKIPPED
+// SonarQube Cloud organization a migrate run from this export directory
+// could have written to, sorted for deterministic display.
+//
+// That is every mapped sonarcloud_org_key in organizations.csv, plus every
+// per-project override honoured in projects.csv (#612). The overrides have
+// to be included or a migration that dispatched projects across extra
+// organizations could not be undone: reset would offer only the
+// organizations.csv ones and silently leave the rest behind. Widening the
+// candidate list is safe because nothing here deletes anything — the list
+// still goes through --organization narrowing and the confirmation prompt
+// before a single project is touched.
 func loadResetTargetOrgs(exportDir string) ([]string, error) {
 	rows, err := structure.LoadCSV(exportDir, "organizations.csv")
 	if err != nil {
 		return nil, fmt.Errorf("loading organizations.csv from %s: %w", exportDir, err)
 	}
-	seen := make(map[string]bool, len(rows))
-	for _, r := range rows {
-		k, _ := r["sonarcloud_org_key"].(string)
+	projectRows, err := structure.LoadCSV(exportDir, structure.ProjectsCSVFileName)
+	if err != nil {
+		return nil, fmt.Errorf("loading %s from %s: %w", structure.ProjectsCSVFileName, exportDir, err)
+	}
+
+	seen := make(map[string]bool, len(rows)+len(projectRows))
+	add := func(k string) {
 		k = strings.TrimSpace(k)
 		if k == "" || k == "SKIPPED" {
-			continue
+			return
 		}
 		seen[k] = true
 	}
+	for _, r := range rows {
+		k, _ := r["sonarcloud_org_key"].(string)
+		add(k)
+	}
+	for _, r := range projectRows {
+		// An empty mappedOrg leaves only an honoured override to come
+		// back; a refused one yields "" and is skipped.
+		org, _ := structure.ResolveProjectOrg(r, "")
+		add(org)
+	}
+
 	out := make([]string, 0, len(seen))
 	for k := range seen {
 		out = append(out, k)

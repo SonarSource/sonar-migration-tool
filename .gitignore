@@ -93,3 +93,6 @@ dynamic-workflows/
 # Archived run logs and other retired local artifacts
 .archives/
 INVESTIGATION-SUMMARY.md
+
+# Live smoke-suite output (logs + per-run summary reports; may contain hosts/data)
+.smoke/

@@ -108,6 +108,38 @@ func readExtractItems(e *Executor, taskKey string) ([]structure.ExtractItem, err
 	return structure.ReadExtractData(e.ExportDir, e.Mapping, taskKey)
 }
 
+// projectsInScope counts the extracted projects this run will actually
+// migrate, honouring --project_key the same way runCreateProjects does
+// (#536). A pure read of already-extracted data with no API calls, so
+// RunMigrate can size per-project task seeds before a single task has
+// started (#597) — the same shape as projectHistoryPointTotal.
+//
+// It counts source projects, not (project, target org) pairs, so a run that
+// fans one source project out across several target orgs is under-counted —
+// and since #612 a project can also be redirected to a specific org by its
+// own projects.csv cell. That is deliberate: the caller floors the seed at
+// the task's constant, so an under-count cannot produce an absurdly small
+// expected duration, and a seed does not justify replaying resolveRowOrg's
+// mapping here.
+func projectsInScope(e *Executor) int {
+	projects, err := readExtractItems(e, "getProjects")
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, p := range projects {
+		key := extractField(p.Data, "key")
+		if key == "" {
+			continue
+		}
+		if e.ProjectKeyRe != nil && !e.ProjectKeyRe.MatchString(key) {
+			continue
+		}
+		n++
+	}
+	return n
+}
+
 // extractScope is the (server, project, branch) slice of an extract task
 // that one project-data loader cares about. An empty Branch matches every
 // branch.
@@ -259,7 +291,7 @@ func forEachMigrateItemFiltered(ctx context.Context, e *Executor, taskName, depT
 	fn func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error) error {
 
 	return forEachMigrateItemImpl(ctx, e, migrateItemLoop{
-		taskName: taskName, depTask: depTask, filterFn: filterFn, concurrency: cap(e.Sem),
+		taskName: taskName, depTask: depTask, filterFn: filterFn, gate: NewDynamicGate(e.ConcurrencyLimiter),
 	}, fn)
 }
 
@@ -273,7 +305,7 @@ func forEachMigrateItemTransformed(ctx context.Context, e *Executor, taskName, d
 	fn func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error) error {
 
 	return forEachMigrateItemImpl(ctx, e, migrateItemLoop{
-		taskName: taskName, depTask: depTask, transformFn: transformFn, concurrency: cap(e.Sem),
+		taskName: taskName, depTask: depTask, transformFn: transformFn, gate: NewDynamicGate(e.ConcurrencyLimiter),
 	}, fn)
 }
 
@@ -301,17 +333,26 @@ type migrateItemLoop struct {
 	depTask     string
 	filterFn    func(json.RawMessage) bool
 	transformFn func([]json.RawMessage) []json.RawMessage
+	// concurrency is used only when gate is nil — forEachMigrateItemSerial's
+	// hardcoded 1 is a correctness constraint (avoiding a duplicate quality-
+	// profile name race), not a throughput knob, so it must never move with
+	// ConcurrencyLimiter's recalculation.
 	concurrency int
+	// gate, when set, re-reads ConcurrencyLimiter.Current() on each
+	// admission instead of freezing a value for this call's entire
+	// (potentially long) run — see DynamicGate's doc comment (#573).
+	gate *DynamicGate
 }
 
 // forEachMigrateItemImpl is the shared body that backs the concurrent and
-// serial migrate iterators. loop.concurrency is the errgroup limit (1 to
-// serialize, cap(e.Sem) for the default fan-out).
+// serial migrate iterators. loop.gate (default fan-out) re-reads live
+// concurrency per admission; loop.concurrency (serial iterators) is a
+// fixed errgroup limit instead.
 func forEachMigrateItemImpl(ctx context.Context, e *Executor, loop migrateItemLoop,
 	fn func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error) error {
 
 	taskName, depTask := loop.taskName, loop.depTask
-	filterFn, concurrency := loop.filterFn, loop.concurrency
+	filterFn := loop.filterFn
 
 	items, err := e.Store.ReadAll(depTask)
 	if err != nil {
@@ -343,9 +384,24 @@ func forEachMigrateItemImpl(ctx context.Context, e *Executor, loop migrateItemLo
 	}
 
 	g, ctx := errgroup.WithContext(ctx)
-	g.SetLimit(concurrency)
+	// admit/release default to gate-based (dynamic, #573); the serial
+	// iterator (loop.gate == nil) instead sets a fixed errgroup limit of
+	// 1, a correctness constraint that must never move.
+	admit := func(context.Context) error { return nil }
+	release := func() {}
+	if loop.gate != nil {
+		admit, release = loop.gate.Acquire, loop.gate.Release
+	} else {
+		g.SetLimit(loop.concurrency)
+	}
+	var admitErr error
 	for _, item := range filtered {
+		if err := admit(ctx); err != nil {
+			admitErr = err
+			break
+		}
 		g.Go(func() error {
+			defer release()
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -354,7 +410,10 @@ func forEachMigrateItemImpl(ctx context.Context, e *Executor, loop migrateItemLo
 			return err
 		})
 	}
-	return g.Wait()
+	if err := g.Wait(); err != nil {
+		return err
+	}
+	return admitErr
 }
 
 // forEachExtractItem reads items from an extract task and calls fn for each,
@@ -381,10 +440,19 @@ func forEachExtractItem(ctx context.Context, e *Executor, taskName, extractKey s
 		return err
 	}
 
+	// DynamicGate, not errgroup.SetLimit — see the doc comment on
+	// DynamicGate (#573): SetLimit freezes at whatever Current() is right
+	// now for this errgroup's entire lifetime.
+	gate := NewDynamicGate(e.ConcurrencyLimiter)
 	g, ctx := errgroup.WithContext(ctx)
-	g.SetLimit(cap(e.Sem))
+	var admitErr error
 	for _, item := range items {
+		if err := gate.Acquire(ctx); err != nil {
+			admitErr = err
+			break
+		}
 		g.Go(func() error {
+			defer gate.Release()
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -393,7 +461,10 @@ func forEachExtractItem(ctx context.Context, e *Executor, taskName, extractKey s
 			return err
 		})
 	}
-	return g.Wait()
+	if err := g.Wait(); err != nil {
+		return err
+	}
+	return admitErr
 }
 
 // buildOrgKeyLookup loads organizations.csv and returns a map from
@@ -414,10 +485,48 @@ func buildOrgKeyLookup(exportDir string) (map[string]string, error) {
 	return lookup, nil
 }
 
+// resolveRowOrg stamps a mapping row's target SonarQube Cloud organization
+// into its sonarcloud_org_key, joining on sonarqube_org_key against
+// organizations.csv.
+//
+// perProjectOrg additionally lets the row's own sonarcloud_org_key cell
+// override that join (#612), which only projects.csv carries. An override
+// refused because the project is DevOps-bound is logged here, where the
+// project key is still at hand.
+//
+// A row whose source org is absent from organizations.csv is left untouched
+// rather than stamped empty, so a CSV that never had the column does not
+// gain one.
+func (e *Executor) resolveRowOrg(row map[string]any, orgLookup map[string]string, perProjectOrg bool) {
+	mapped, mappedFound := "", false
+	if sqKey, ok := row["sonarqube_org_key"].(string); ok && sqKey != "" {
+		mapped, mappedFound = orgLookup[sqKey]
+	}
+	if !perProjectOrg {
+		if mappedFound {
+			row["sonarcloud_org_key"] = mapped
+		}
+		return
+	}
+	org, refused := structure.ResolveProjectOrg(row, mapped)
+	if refused != "" {
+		e.Logger.Warn("projects.csv: organization override ignored because the project is bound to a DevOps platform — a bound project must stay in the organization that carries the matching platform binding, and will migrate there instead",
+			"project", row["key"],
+			"ignored_organization", refused,
+			"organization", org,
+			"alm", row["alm"])
+	}
+	row[structure.ProjectOrgColumn] = org
+}
+
 // loadCSVToJSONL reads a CSV file and writes each row as a JSONL object
 // to the task output. Used by generate*Mappings tasks.
 // It enriches each row with sonarcloud_org_key by joining on sonarqube_org_key
 // from organizations.csv.
+//
+// projects.csv is the one CSV that may override that join per row, via its
+// own sonarcloud_org_key column (#612) — see structure.ResolveProjectOrg for
+// the rule and why a DevOps-bound project cannot be redirected.
 func loadCSVToJSONL(e *Executor, taskName, csvFilename string) error {
 	rows, err := structure.LoadCSV(e.ExportDir, csvFilename)
 	if err != nil {
@@ -434,14 +543,14 @@ func loadCSVToJSONL(e *Executor, taskName, csvFilename string) error {
 		return err
 	}
 
+	// #612: projects.csv carries an optional per-project organization
+	// override; every other mapping CSV takes its organization purely from
+	// the organizations.csv join.
+	perProjectOrg := csvFilename == structure.ProjectsCSVFileName
+
 	items := make([]json.RawMessage, 0, len(rows))
 	for _, row := range rows {
-		// Enrich with sonarcloud_org_key from org lookup.
-		if sqKey, ok := row["sonarqube_org_key"].(string); ok && sqKey != "" {
-			if scKey, found := orgLookup[sqKey]; found {
-				row["sonarcloud_org_key"] = scKey
-			}
-		}
+		e.resolveRowOrg(row, orgLookup, perProjectOrg)
 		// #381: in reset mode, rows whose cloud org wasn't confirmed
 		// by the operator get their sonarcloud_org_key rewritten to
 		// the SKIPPED sentinel so the existing shouldSkipOrg check at
@@ -568,6 +677,47 @@ func NewTaskCounter(task string) *TaskCounter {
 	return &TaskCounter{task: task}
 }
 
+// TaskOutcome is a snapshot of a TaskCounter's tallies. Taken once so a
+// caller sees one self-consistent set of numbers instead of re-reading
+// the atomics between decisions.
+type TaskOutcome struct {
+	Succeeded    int64
+	Failed       int64
+	ByDesign     int64
+	AlreadyDone  int64
+	Environment  int64
+	Bugs         int64
+	Unclassified int64
+}
+
+// Actionable returns how many of the failures need someone to act, i.e.
+// the total minus the classes the migration is content with. See
+// FailureClass.Actionable for why by-design and already-done do not
+// count.
+func (o TaskOutcome) Actionable() int64 {
+	return o.Failed - o.ByDesign - o.AlreadyDone
+}
+
+// Outcome snapshots the counter's tallies.
+//
+// A task can return nil — so the run continues and its recorded error is
+// empty — while having failed every item it touched. setProjectSourceLink
+// failing 2 of 2 on 403s is the case that exposed this: the run recorded
+// ok=true, the report rendered "OK: Yes", and the only trace was a log
+// line. Exposing the tallies lets the run metadata carry what the counter
+// already knew.
+func (c *TaskCounter) Outcome() TaskOutcome {
+	return TaskOutcome{
+		Succeeded:    c.succeeded.Load(),
+		Failed:       c.failed.Load(),
+		ByDesign:     c.byDesign.Load(),
+		AlreadyDone:  c.alreadyDone.Load(),
+		Environment:  c.environment.Load(),
+		Bugs:         c.bugs.Load(),
+		Unclassified: c.unclassified.Load(),
+	}
+}
+
 // taskCounterCtxKey scopes the per-task counter inside the task's
 // context (#333). runPhase injects a fresh counter so the merged
 // "task summary" log can be emitted from a single place after the
@@ -651,7 +801,8 @@ func (c *TaskCounter) FailAPI(err error) FailureClass {
 // falls back to the plain duration line so every task still ends with
 // exactly one closing log entry.
 func (c *TaskCounter) LogSummary(logger *slog.Logger, duration time.Duration) {
-	s, f := c.succeeded.Load(), c.failed.Load()
+	o := c.Outcome()
+	s, f := o.Succeeded, o.Failed
 	total := s + f
 	if total == 0 {
 		common.LogTaskDuration(logger, c.task, duration)
@@ -672,14 +823,14 @@ func (c *TaskCounter) LogSummary(logger *slog.Logger, duration time.Duration) {
 	// Break the failure count down by cause. "failed=42048, all by
 	// design" and "failed=3, all bugs" demand completely different
 	// reactions, and the bare count cannot tell them apart.
-	bugs := c.bugs.Load()
 	if f > 0 {
 		attrs = append(attrs,
-			"failed_by_design", c.byDesign.Load(),
-			"failed_already_done", c.alreadyDone.Load(),
-			"failed_customer_environment_issue", c.environment.Load(),
-			"failed_bugs", bugs,
-			"failed_unclassified", c.unclassified.Load(),
+			"failed_by_design", o.ByDesign,
+			"failed_already_done", o.AlreadyDone,
+			"failed_customer_environment_issue", o.Environment,
+			"failed_bugs", o.Bugs,
+			"failed_unclassified", o.Unclassified,
+			"failed_actionable", o.Actionable(),
 		)
 	}
 
@@ -687,10 +838,18 @@ func (c *TaskCounter) LogSummary(logger *slog.Logger, duration time.Duration) {
 	// #333 merged-summary contract keep matching; only the level varies.
 	//
 	// Severity follows the cause, not the count: a suspected defect or a
-	// task that achieved nothing is an error; expected platform
-	// limitations are a warning however many there are.
+	// task that achieved nothing for a reason worth acting on is an error;
+	// expected platform limitations are a warning however many there are.
+	//
+	// The "achieved nothing" escalation is measured in actionable
+	// failures, not raw ones. setProjectGates failing 2 of 2 because both
+	// source gates were built-in — and built-ins are deliberately not
+	// migrated — logged at ERROR, reading as a broken migration when the
+	// tool had done exactly the right thing. Such a task stays a warning:
+	// still visible, no longer alarming.
+	actionable := o.Actionable()
 	switch {
-	case bugs > 0, f > 0 && s == 0:
+	case o.Bugs > 0, actionable > 0 && s == 0:
 		logger.Error(taskSummaryMsg, attrs...)
 	case f > 0:
 		logger.Warn(taskSummaryMsg, attrs...)
@@ -704,7 +863,7 @@ func (c *TaskCounter) LogSummary(logger *slog.Logger, duration time.Duration) {
 // helper covers both extract and migrate tasks).
 
 // runProjectSyncLoop applies fn concurrently to every item in items,
-// bounded by e.Sem, emitting a "<label> n/total - x%" progress line
+// bounded by e.ConcurrencyLimiter, emitting a "<label> n/total - x%" progress line
 // every `interval` completions (#300). Per-item errors are not
 // propagated — the caller's `apply` is responsible for logging and
 // counter bookkeeping. Used by syncProjectIssues / syncProjectHotspots
@@ -714,11 +873,59 @@ func runProjectSyncLoop[T any](
 	items []T, label string, interval int64,
 	apply func(ctx context.Context, item T),
 ) {
+	runProjectSyncLoopBounded(ctx, e, items, label, interval, 0, apply)
+}
+
+// nestedSyncLoopConcurrency bounds a runProjectSyncLoop that is itself
+// invoked from inside another fan-out — syncProjectIssues and
+// syncProjectHotspots are called per project by runSyncIssueMetadata's
+// and runSyncHotspotMetadata's own forEachMigrateItem loops, so both
+// levels reading the live ConcurrencyLimiter.Current() would put
+// Current()² requests in flight for a single task (up to 10,000 at the
+// ceiling of 100).
+//
+// That aggregate matters because throttleTransport's SlidingWindowLimiter
+// makes excess callers WAIT inside the round trip, and sqapi sets
+// http.Client.Timeout (60s), which the stdlib turns into a deadline on
+// the request context for a layered transport stack like ours. Queue
+// long enough and requests fail with "waiting for API rate limit slot:
+// context deadline exceeded" instead of merely being slowed down —
+// proactive throttling turning into request failures.
+//
+// A small constant, not a fraction of Current(): the inner loop's unit
+// is one fast Cloud call, the outer per-project loop is what genuinely
+// benefits from tracking observed latency, and bounding the inner level
+// is enough to keep aggregate demand sane. The top-level
+// runProjectSyncLoop call in sync_issues_standalone.go is NOT nested and
+// deliberately keeps the dynamic limit.
+const nestedSyncLoopConcurrency = 10
+
+// runProjectSyncLoopBounded is runProjectSyncLoop with an explicit
+// concurrency bound. concurrency <= 0 means "use the live dynamic
+// ConcurrencyLimiter" (the top-level, non-nested case); a positive value
+// pins a fixed bound for this loop only — see nestedSyncLoopConcurrency.
+func runProjectSyncLoopBounded[T any](
+	ctx context.Context, e *Executor,
+	items []T, label string, interval int64, concurrency int,
+	apply func(ctx context.Context, item T),
+) {
 	prog := common.NewProgressLoggerWithInterval(e.Logger, label, len(items), interval)
+	// DynamicGate, not errgroup.SetLimit — see the doc comment on
+	// DynamicGate (#573): SetLimit freezes at whatever Current() is right
+	// now for this errgroup's entire lifetime, and this loop runs across
+	// every project's issues/hotspots, easily spanning many minutes.
+	limiter := e.ConcurrencyLimiter
+	if concurrency > 0 {
+		limiter = NewFixedConcurrencyLimiter(concurrency)
+	}
+	gate := NewDynamicGate(limiter)
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(cap(e.Sem))
 	for _, item := range items {
+		if err := gate.Acquire(gctx); err != nil {
+			break
+		}
 		g.Go(func() error {
+			defer gate.Release()
 			if gctx.Err() != nil {
 				return nil
 			}

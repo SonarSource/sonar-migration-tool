@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
 // The legacy config shapes no longer ship as example files (the examples/
@@ -362,6 +364,96 @@ func TestLoadMigrateConfigFile_FastSync_MigrateSectionedShape(t *testing.T) {
 	}
 }
 
+// Issue #583: branch_analyzed_after resolves with the same
+// target-wins-else-top-level precedence as fast_sync/migrate_history, but
+// as a tri-state string: an explicit empty string at the target level must
+// still override a non-empty top-level value (distinguishing "target
+// didn't set this" from "target explicitly wants no filter").
+func TestLoadMigrateConfigFile_BranchAnalyzedAfter_UnifiedShape(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"absent (default)", `{"target": {"url": "u", "token": "t"}}`, ""},
+		{"top-level only", `{"branch_analyzed_after": "2024-01-01", "target": {"url": "u", "token": "t"}}`, "2024-01-01"},
+		{
+			"target overrides top-level with a different date",
+			`{"branch_analyzed_after": "2024-01-01", "target": {"url": "u", "token": "t", "branch_analyzed_after": "2025-06-01"}}`,
+			"2025-06-01",
+		},
+		{
+			"target explicitly clears a non-empty top-level value",
+			`{"branch_analyzed_after": "2024-01-01", "target": {"url": "u", "token": "t", "branch_analyzed_after": ""}}`,
+			"",
+		},
+		{
+			"target unset falls back to top-level",
+			`{"branch_analyzed_after": "2024-01-01", "target": {"url": "u", "token": "t"}}`,
+			"2024-01-01",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := dir + "/branch_analyzed_after.json"
+			if err := os.WriteFile(path, []byte(c.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadMigrateConfigFile(path)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if cfg.BranchAnalyzedAfter != c.want {
+				t.Errorf("BranchAnalyzedAfter: got %q, want %q", cfg.BranchAnalyzedAfter, c.want)
+			}
+		})
+	}
+}
+
+// Issue #583: branch_analyzed_after also parses in the "migrate"-sectioned
+// shape, with the outer (command-sectioned) field winning when both are
+// set — mirroring fast_sync's outer-wins-else-inner precedence there.
+func TestLoadMigrateConfigFile_BranchAnalyzedAfter_MigrateSectionedShape(t *testing.T) {
+	body := `{
+  "branch_analyzed_after": "2024-01-01",
+  "migrate": {
+    "url": "u", "token": "t",
+    "branch_analyzed_after": "2020-01-01"
+  }
+}`
+	dir := t.TempDir()
+	path := dir + "/branch_analyzed_after_sectioned.json"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadMigrateConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchAnalyzedAfter != "2024-01-01" {
+		t.Errorf("BranchAnalyzedAfter: got %q, want %q (outer wins)", cfg.BranchAnalyzedAfter, "2024-01-01")
+	}
+}
+
+// Issue #583: branch_analyzed_after passes through unchanged on the flat
+// (shape 1) config.
+func TestLoadMigrateConfigFile_BranchAnalyzedAfter_FlatShape(t *testing.T) {
+	body := `{"url": "u", "token": "t", "branch_analyzed_after": "2024-01-01"}`
+	dir := t.TempDir()
+	path := dir + "/branch_analyzed_after_flat.json"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadMigrateConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchAnalyzedAfter != "2024-01-01" {
+		t.Errorf("BranchAnalyzedAfter: got %q, want %q", cfg.BranchAnalyzedAfter, "2024-01-01")
+	}
+}
+
 // Issue #281: target.default_organization parses into
 // MigrateConfig.DefaultOrganization.
 func TestLoadMigrateConfigFileUnifiedShape_DefaultOrganization(t *testing.T) {
@@ -401,6 +493,72 @@ func TestLoadMigrateConfigFileUnifiedShape_TargetOverridesGlobals(t *testing.T) 
 	cfg, _ := LoadMigrateConfigFile(path)
 	if cfg.Concurrency != 25 {
 		t.Errorf("override: concurrency=%d", cfg.Concurrency)
+	}
+}
+
+// #582: unified shape's target.branch_regexp wins over the top-level field.
+func TestLoadMigrateConfigFileUnifiedShape_BranchRegexpTargetOverridesTopLevel(t *testing.T) {
+	body := `{
+  "branch_regexp": "^top-level$",
+  "target": {
+    "url": "u", "token": "t",
+    "branch_regexp": "^release/.*$"
+  }
+}`
+	dir := t.TempDir()
+	path := dir + "/unified.json"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadMigrateConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchRegexp != "^release/.*$" {
+		t.Errorf("BranchRegexp: got %q, want ^release/.*$", cfg.BranchRegexp)
+	}
+}
+
+// #582: unified shape falls back to the top-level branch_regexp when the
+// target block doesn't set one.
+func TestLoadMigrateConfigFileUnifiedShape_BranchRegexpFallsBackToTopLevel(t *testing.T) {
+	body := `{
+  "branch_regexp": "^main$",
+  "target": {
+    "url": "u", "token": "t"
+  }
+}`
+	dir := t.TempDir()
+	path := dir + "/unified.json"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadMigrateConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchRegexp != "^main$" {
+		t.Errorf("BranchRegexp: got %q, want ^main$", cfg.BranchRegexp)
+	}
+}
+
+// #582: flat shape reads branch_regexp directly.
+func TestLoadMigrateConfigFile_BranchRegexpFlatShape(t *testing.T) {
+	body := `{
+  "url": "u", "token": "t",
+  "branch_regexp": "^develop$"
+}`
+	dir := t.TempDir()
+	path := dir + "/flat.json"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadMigrateConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchRegexp != "^develop$" {
+		t.Errorf("BranchRegexp: got %q, want ^develop$", cfg.BranchRegexp)
 	}
 }
 
@@ -484,6 +642,95 @@ func TestMigrateConfig_ApplyDefaultsFillsTimeout(t *testing.T) {
 	cfg.applyDefaults()
 	if cfg.Timeout != 5 {
 		t.Errorf("Timeout preservation: got %d, want 5", cfg.Timeout)
+	}
+}
+
+// #571: MaxIssueComments must flow into MigrateConfig from every documented
+// config-file shape, mirroring Timeout's precedence (unified top-level
+// supplies a default, target overrides it).
+func TestLoadMigrateConfigFile_MaxIssueCommentsAllShapes(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want int
+	}{
+		{
+			name: "flat",
+			body: `{"url":"u","token":"t","max_issue_comments":3}`,
+			want: 3,
+		},
+		{
+			name: "command-sectioned (migrate block)",
+			body: `{"migrate":{"url":"u","token":"t","max_issue_comments":7}}`,
+			want: 7,
+		},
+		{
+			name: "side-sectioned (sonarcloud + settings)",
+			body: `{"sonarcloud":{"url":"u","token":"t"},"settings":{"max_issue_comments":12}}`,
+			want: 12,
+		},
+		{
+			name: "unified — top-level only",
+			body: `{"max_issue_comments":9,"target":{"url":"u","token":"t"}}`,
+			want: 9,
+		},
+		{
+			name: "unified — target overrides top-level",
+			body: `{"max_issue_comments":9,"target":{"url":"u","token":"t","max_issue_comments":2}}`,
+			want: 2,
+		},
+		{
+			name: "unified — missing leaves MaxIssueComments at zero (applyDefaults will fill it)",
+			body: `{"target":{"url":"u","token":"t"}}`,
+			want: 0,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := dir + "/cfg.json"
+			if err := os.WriteFile(path, []byte(c.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadMigrateConfigFile(path)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if cfg.MaxIssueComments != c.want {
+				t.Errorf("MaxIssueComments: got %d, want %d (body=%s)", cfg.MaxIssueComments, c.want, c.body)
+			}
+		})
+	}
+}
+
+// #571: applyDefaults must fill MaxIssueComments with DefaultMaxIssueComments
+// (5) when the config left it at zero, and preserve an explicit value.
+func TestMigrateConfig_ApplyDefaultsFillsMaxIssueComments(t *testing.T) {
+	cfg := MigrateConfig{}
+	cfg.applyDefaults()
+	if cfg.MaxIssueComments != DefaultMaxIssueComments {
+		t.Errorf("MaxIssueComments default: got %d, want %d", cfg.MaxIssueComments, DefaultMaxIssueComments)
+	}
+
+	cfg = MigrateConfig{MaxIssueComments: 3}
+	cfg.applyDefaults()
+	if cfg.MaxIssueComments != 3 {
+		t.Errorf("MaxIssueComments preservation: got %d, want 3", cfg.MaxIssueComments)
+	}
+}
+
+// #571: values above MaxAllowedIssueComments (20) are rejected; unset (<= 0)
+// and any value up to the cap are accepted.
+func TestValidateMaxIssueComments(t *testing.T) {
+	for _, n := range []int{-1, 0, 1, 5, 20} {
+		if err := ValidateMaxIssueComments(n); err != nil {
+			t.Errorf("ValidateMaxIssueComments(%d) = %v, want nil", n, err)
+		}
+	}
+	for _, n := range []int{21, 100} {
+		if err := ValidateMaxIssueComments(n); err == nil {
+			t.Errorf("ValidateMaxIssueComments(%d) = nil, want an error", n)
+		}
 	}
 }
 
@@ -624,5 +871,346 @@ func TestLoadMigrateConfigFile_SkipProjectDataMigration(t *testing.T) {
 				t.Errorf("SkipProjectDataMigration: got %v, want %v", cfg.SkipProjectDataMigration, c.wantSkip)
 			}
 		})
+	}
+}
+
+// #536: "objects" and "project_key" are top-level-only fields, present in
+// every documented shape (mirrors extract's TestLoadExtractConfigFileObjectsAndProjectKey).
+// These tests round-trip them through LoadMigrateConfigFile into
+// MigrateConfig.Objects (validated + alias-resolved via common.ParseObjects)
+// and MigrateConfig.ProjectKeyFilter, following the same
+// TestLoadMigrateConfigFileUnifiedShape_TargetOverridesGlobals-style
+// per-shape coverage used elsewhere in this file.
+// The following TestLoadMigrateConfigFileObjectsAndProjectKey_* functions
+// were originally one function with a t.Run per shape; split into
+// independent top-level tests to keep cognitive complexity low (each
+// covers exactly one config-file shape).
+
+// Each fixture below includes "projects" in its objects list alongside
+// the category actually under test — project_key only survives config-
+// file loading when "projects" is selected (see
+// TestLoadMigrateConfigFileProjectKeyClearedWhenProjectsNotSelected),
+// so a fixture without it would have LoadMigrateConfigFile correctly
+// clear ProjectKeyFilter, defeating the round-trip these tests check.
+
+func TestLoadMigrateConfigFileObjectsAndProjectKey_FlatShape(t *testing.T) {
+	body := `{
+  "token": "tok",
+  "url": "https://sonarcloud.io/",
+  "enterprise_key": "ent",
+  "objects": ["quality_gates", "qp", "projects"],
+  "project_key": "BANKING_.+"
+}`
+	cfg, err := LoadMigrateConfigFile(writeConfigFixture(t, body))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.Objects[common.ObjectQualityGates] || !cfg.Objects[common.ObjectQualityProfiles] || !cfg.Objects[common.ObjectProjects] {
+		t.Errorf("expected quality_gates + quality_profiles (via qp alias) + projects, got %+v", cfg.Objects)
+	}
+	if len(cfg.Objects) != 3 {
+		t.Errorf("expected exactly 3 categories, got %+v", cfg.Objects)
+	}
+	if cfg.ProjectKeyFilter != "BANKING_.+" {
+		t.Errorf("ProjectKeyFilter: got %q", cfg.ProjectKeyFilter)
+	}
+}
+
+func TestLoadMigrateConfigFileObjectsAndProjectKey_UnifiedShape(t *testing.T) {
+	body := `{
+  "objects": ["groups", "projects"],
+  "project_key": "my-project",
+  "target": { "url": "u", "token": "t" }
+}`
+	cfg, err := LoadMigrateConfigFile(writeConfigFixture(t, body))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.Objects[common.ObjectGroups] || !cfg.Objects[common.ObjectProjects] || len(cfg.Objects) != 2 {
+		t.Errorf("Objects: got %+v", cfg.Objects)
+	}
+	if cfg.ProjectKeyFilter != "my-project" {
+		t.Errorf("ProjectKeyFilter: got %q", cfg.ProjectKeyFilter)
+	}
+}
+
+func TestLoadMigrateConfigFileObjectsAndProjectKey_CommandSectionedOuterWins(t *testing.T) {
+	body := `{
+  "objects": ["portfolios", "projects"],
+  "project_key": "outer-pattern",
+  "migrate": {
+    "token": "tok", "url": "https://sonarcloud.io/", "enterprise_key": "ent",
+    "objects": ["groups"],
+    "project_key": "inner-pattern"
+  }
+}`
+	cfg, err := LoadMigrateConfigFile(writeConfigFixture(t, body))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.Objects[common.ObjectPortfolios] || !cfg.Objects[common.ObjectProjects] || len(cfg.Objects) != 2 {
+		t.Errorf("expected outer objects to win, got %+v", cfg.Objects)
+	}
+	if cfg.ProjectKeyFilter != "outer-pattern" {
+		t.Errorf("expected outer project_key to win, got %q", cfg.ProjectKeyFilter)
+	}
+}
+
+func TestLoadMigrateConfigFileObjectsAndProjectKey_CommandSectionedFallsBackToNested(t *testing.T) {
+	body := `{
+  "migrate": {
+    "token": "tok", "url": "https://sonarcloud.io/", "enterprise_key": "ent",
+    "objects": ["groups", "projects"],
+    "project_key": "inner-pattern"
+  }
+}`
+	cfg, err := LoadMigrateConfigFile(writeConfigFixture(t, body))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.Objects[common.ObjectGroups] || !cfg.Objects[common.ObjectProjects] || len(cfg.Objects) != 2 {
+		t.Errorf("expected nested objects to be used, got %+v", cfg.Objects)
+	}
+	if cfg.ProjectKeyFilter != "inner-pattern" {
+		t.Errorf("expected nested project_key to be used, got %q", cfg.ProjectKeyFilter)
+	}
+}
+
+// #582 — command-sectioned shape: outer-level branch_regexp wins over the
+// same field nested inside "migrate", mirroring project_key's precedence
+// above.
+func TestLoadMigrateConfigFileBranchRegexp_CommandSectionedOuterWins(t *testing.T) {
+	body := `{
+  "branch_regexp": "outer-pattern",
+  "migrate": {
+    "token": "tok", "url": "https://sonarcloud.io/", "enterprise_key": "ent",
+    "branch_regexp": "inner-pattern"
+  }
+}`
+	cfg, err := LoadMigrateConfigFile(writeConfigFixture(t, body))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchRegexp != "outer-pattern" {
+		t.Errorf("expected outer branch_regexp to win, got %q", cfg.BranchRegexp)
+	}
+}
+
+func TestLoadMigrateConfigFileBranchRegexp_CommandSectionedFallsBackToNested(t *testing.T) {
+	body := `{
+  "migrate": {
+    "token": "tok", "url": "https://sonarcloud.io/", "enterprise_key": "ent",
+    "branch_regexp": "inner-pattern"
+  }
+}`
+	cfg, err := LoadMigrateConfigFile(writeConfigFixture(t, body))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchRegexp != "inner-pattern" {
+		t.Errorf("expected nested branch_regexp to be used, got %q", cfg.BranchRegexp)
+	}
+}
+
+func TestLoadMigrateConfigFileObjectsAndProjectKey_SideSectionedShape(t *testing.T) {
+	body := `{
+  "sonarcloud": { "url": "https://sonarcloud.io/", "token": "tok", "enterprise_key": "ent" },
+  "objects": ["license_profiles", "projects"],
+  "project_key": "sc-pattern"
+}`
+	cfg, err := LoadMigrateConfigFile(writeConfigFixture(t, body))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.Objects[common.ObjectLicenseProfiles] || !cfg.Objects[common.ObjectProjects] || len(cfg.Objects) != 2 {
+		t.Errorf("Objects: got %+v", cfg.Objects)
+	}
+	if cfg.ProjectKeyFilter != "sc-pattern" {
+		t.Errorf("ProjectKeyFilter: got %q", cfg.ProjectKeyFilter)
+	}
+}
+
+// #536 follow-up (Gitar review): project_key only takes effect when
+// "projects" is selected via objects — mirrors cmd/migrate.go's
+// applyMigrateProjectKeyFlag, but enforced here at the config-file
+// loading layer too, so a fully config-file-driven run (no CLI flags)
+// gets the same guarantee.
+func TestLoadMigrateConfigFileProjectKeyClearedWhenProjectsNotSelected(t *testing.T) {
+	body := `{
+  "token": "tok",
+  "url": "https://sonarcloud.io/",
+  "enterprise_key": "ent",
+  "objects": ["settings"],
+  "project_key": "BANKING_.+"
+}`
+	cfg, err := LoadMigrateConfigFile(writeConfigFixture(t, body))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.ProjectKeyFilter != "" {
+		t.Errorf("expected ProjectKeyFilter cleared when objects excludes projects, got %q", cfg.ProjectKeyFilter)
+	}
+}
+
+func TestLoadMigrateConfigFileObjectsAndProjectKey_InvalidObjectsValueErrors(t *testing.T) {
+	body := `{"token":"tok","url":"https://sonarcloud.io/","enterprise_key":"ent","objects":["bogus"]}`
+	if _, err := LoadMigrateConfigFile(writeConfigFixture(t, body)); err == nil {
+		t.Error("expected an error for an unrecognized objects value")
+	}
+}
+
+func TestLoadMigrateConfigFileObjectsAndProjectKey_AbsentObjectsMeansNil(t *testing.T) {
+	body := `{"token":"tok","url":"https://sonarcloud.io/","enterprise_key":"ent"}`
+	cfg, err := LoadMigrateConfigFile(writeConfigFixture(t, body))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Objects != nil {
+		t.Errorf("expected nil Objects (everything) when absent, got %+v", cfg.Objects)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Organization-key loaders used by structure / predictive-report (#566)
+// ---------------------------------------------------------------------------
+
+// LoadSonarCloudOrgsFromConfigFile had no test at all, which is how #566
+// shipped: structure --config quietly pre-populated nothing for three of
+// the four documented shapes. These lock the contract in place.
+func TestLoadSonarCloudOrgsFromConfigFile(t *testing.T) {
+	cases := []struct {
+		name     string
+		content  string
+		wantKeys []string
+	}{
+		{
+			name: "side_sectioned_single_org",
+			content: `{
+  "sonarcloud": {
+    "enterprise": { "key": "ent" },
+    "organizations": [{ "key": "only-org", "token": "t", "url": "https://sonarcloud.io/" }]
+  }
+}`,
+			wantKeys: []string{"only-org"},
+		},
+		{
+			name: "side_sectioned_multiple_orgs",
+			content: `{
+  "sonarcloud": {
+    "organizations": [
+      { "key": "org-a", "token": "t", "url": "https://sonarcloud.io/" },
+      { "key": "org-b", "token": "t", "url": "https://sonarcloud.io/" }
+    ]
+  }
+}`,
+			wantKeys: []string{"org-a", "org-b"},
+		},
+		{
+			name:     "side_sectioned_legacy_flat_has_no_organizations",
+			content:  sideSectionedShapeJSON,
+			wantKeys: nil,
+		},
+		{
+			name:     "flat_shape_has_no_organizations",
+			content:  flatShapeJSON,
+			wantKeys: nil,
+		},
+		{
+			name:     "command_sectioned_shape_has_no_organizations",
+			content:  commandSectionedShapeJSON,
+			wantKeys: nil,
+		},
+		{
+			name:     "unified_shape_is_not_synthesized_into_an_org_entry",
+			content:  `{"target":{"url":"u","token":"t","default_organization":"my-org"}}`,
+			wantKeys: nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			orgs, err := LoadSonarCloudOrgsFromConfigFile(writeConfigFixture(t, tc.content))
+			if err != nil {
+				t.Fatalf("LoadSonarCloudOrgsFromConfigFile: %v", err)
+			}
+			var got []string
+			for _, o := range orgs {
+				got = append(got, o.Key)
+			}
+			if !reflect.DeepEqual(got, tc.wantKeys) {
+				t.Errorf("org keys: got %v, want %v", got, tc.wantKeys)
+			}
+		})
+	}
+}
+
+func TestLoadSonarCloudOrgsFromConfigFile_MissingFileErrors(t *testing.T) {
+	if _, err := LoadSonarCloudOrgsFromConfigFile("/path/that/does/not/exist.json"); err == nil {
+		t.Error("expected an error for a missing config file")
+	}
+}
+
+// #566: the default-organization loader has to agree with what
+// LoadMigrateConfigFile resolves, for every shape, or the predictive
+// report goes on disagreeing with the migration it predicts.
+func TestLoadDefaultOrganizationFromConfigFile(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "unified_target_default_organization",
+			content: `{"target":{"url":"u","token":"t","default_organization":"my-org"}}`,
+			want:    "my-org",
+		},
+		{
+			name:    "unified_without_default_organization",
+			content: `{"source":{"url":"s"},"target":{"url":"u","token":"t"}}`,
+			want:    "",
+		},
+		{
+			name:    "side_sectioned_defines_none",
+			content: sideSectionedShapeJSON,
+			want:    "",
+		},
+		{
+			name:    "flat_defines_none",
+			content: flatShapeJSON,
+			want:    "",
+		},
+		{
+			name:    "command_sectioned_defines_none",
+			content: commandSectionedShapeJSON,
+			want:    "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeConfigFixture(t, tc.content)
+			got, err := LoadDefaultOrganizationFromConfigFile(path)
+			if err != nil {
+				t.Fatalf("LoadDefaultOrganizationFromConfigFile: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("default organization: got %q, want %q", got, tc.want)
+			}
+			// It must not drift from what migrate itself would use.
+			cfg, err := LoadMigrateConfigFile(path)
+			if err != nil {
+				t.Fatalf("LoadMigrateConfigFile: %v", err)
+			}
+			if got != cfg.DefaultOrganization {
+				t.Errorf("loader disagrees with MigrateConfig: got %q, migrate uses %q",
+					got, cfg.DefaultOrganization)
+			}
+		})
+	}
+}
+
+func TestLoadDefaultOrganizationFromConfigFile_MissingFileErrors(t *testing.T) {
+	if _, err := LoadDefaultOrganizationFromConfigFile("/path/that/does/not/exist.json"); err == nil {
+		t.Error("expected an error for a missing config file")
 	}
 }

@@ -24,6 +24,7 @@ func newResetTestCmd() *cobra.Command {
 	f.String("edition", "enterprise", "")
 	f.String(flagTargetURL, "https://sonarcloud.io/", "")
 	f.Int("concurrency", 25, "")
+	f.Int(flagAPIMaxRatePerMin, 0, "")
 	f.String("export_directory", "/app/files/", "")
 	f.Bool("debug", false, "")
 	// Deprecated alias — registered so tests can exercise back-compat (#406).

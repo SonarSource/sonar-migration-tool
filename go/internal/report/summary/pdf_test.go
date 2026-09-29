@@ -316,6 +316,28 @@ func TestRenderPDFMinimal(t *testing.T) {
 	}
 }
 
+// TestRenderPDFForcedMainBranches is a smoke check that RenderPDF doesn't
+// panic or error when Warnings.ForcedMainBranches is populated (#583).
+func TestRenderPDFForcedMainBranches(t *testing.T) {
+	summary := &MigrationSummary{
+		RunID:       "test-run-583",
+		GeneratedAt: time.Now(),
+		Warnings: WarningLedger{
+			ForcedMainBranches: []ForcedMainBranch{
+				{Project: "org1_api", Branch: "master", AnalysisDate: "2020-01-15", Cutoff: "2024-01-01"},
+			},
+		},
+	}
+
+	pdfBytes, err := RenderPDF(summary)
+	if err != nil {
+		t.Fatalf("RenderPDF: %v", err)
+	}
+	if len(pdfBytes) == 0 {
+		t.Fatal("expected non-empty PDF")
+	}
+}
+
 func TestRenderPDFWithData(t *testing.T) {
 	summary := &MigrationSummary{
 		RunID:       "04-27-2026-02",

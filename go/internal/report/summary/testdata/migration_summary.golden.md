@@ -12,10 +12,10 @@
 - Overall status: partial
 
 ## Executive Summary
-| Objects | Full Migration | Near Full Migration | Partial Migration | Failed | Skipped |
-|:---|:---|:---|:---|:---|:---|
-| Projects | 1 | 1 | 1 | 1 | 1 |
-| Total | 1 | 1 | 1 | 1 | 1 |
+| Objects | Full Migration | Near Full Migration | Partial Migration | Failed | No Action Needed | Skipped |
+|:---|:---|:---|:---|:---|:---|:---|
+| Projects | 1 | 1 | 1 | 1 | 0 | 1 |
+| Total | 1 | 1 | 1 | 1 | 0 | 1 |
 
 ## Projects
 1 succeeded, 1 near full migration, 1 partial migration, 1 failed, 1 skipped (1 organization skipped)
@@ -36,23 +36,24 @@
 | Phase 1 | 2 | 30s |
 
 ### Slowest Tasks
-| Task | Phase | Duration | OK |
-|:---|:---|:---|:---|
-| createProjects | 0 | 45s | Yes |
-| importProjectData | 0 | 15s | No |
+| Task | Phase | Duration | OK | Failed Items |
+|:---|:---|:---|:---|:---|
+| createProjects | 0 | 45s | Yes |  |
+| importProjectData | 0 | 15s | No |  |
 
 ### Per-Branch CE
-| Branch | Type | Status | Task Id |
-|:---|:---|:---|:---|
-| feature-x | LONG | skipped |  |
-| main | LONG | submitted | AY-task-1 |
+| Project | Branch | Type | Status | Task Id |
+|:---|:---|:---|:---|:---|
+| org1_api | feature-x | LONG | skipped |  |
+| org1_api | main | LONG | submitted | AY-task-1 |
+| org1_web | main | LONG | packaged | AY-task-2 |
 
 ## Failure Ledger
-| Entity Type | Name | Organization | HTTP | Cause | Error |
-|:---|:---|:---|:---|:---|:---|
-| Project | Proj Failed | org1 | 400 | Already present | already exists \| duplicate key |
-| Setting | sonar.dbcleaner.x | org1 | 400 | Not supported on Cloud | Setting 'sonar.dbcleaner.x' cannot be set on a Project |
-| Group | devs | org1 | 400 | Needs reporting | Value of parameter 'x' must be one of: [a, b] |
+| Entity Type | Name | Project | Organization | HTTP | Cause | Error |
+|:---|:---|:---|:---|:---|:---|:---|
+| Project | Proj Failed | org1_api | org1 | 400 | Already present | already exists \| duplicate key |
+| Setting | sonar.dbcleaner.x |  | org1 | 400 | Not supported on Cloud | Setting 'sonar.dbcleaner.x' cannot be set on a Project |
+| Group | devs |  | org1 | 400 | Needs reporting | Value of parameter 'x' must be one of: [a, b] |
 
 ### Why these failed
 
@@ -99,8 +100,9 @@
 | Backend QG | new_security_rating_with_aica | new_security_rating |
 
 ## Branch Project Data
-| Branch | Type | Status | Issues | External Issues | Components | Active Rules | Zip Bytes | Task Id | Skip Reason |
-|:---|:---|:---|:---|:---|:---|:---|:---|:---|:---|
-| feature-x | LONG | skipped | 0 | 0 | 0 | 0 | 0 |  | skipping branch: source code not retrievable |
-| main | LONG | submitted | 120 | 5 | 40 | 300 | 1,048,576 | AY-task-1 |  |
+| Project | Branch | Type | Status | Issues | External Issues | Components | Active Rules | Zip Bytes | Task Id | Skip Reason |
+|:---|:---|:---|:---|:---|:---|:---|:---|:---|:---|:---|
+| org1_api | feature-x | LONG | skipped | 0 | 0 | 0 | 0 | 0 |  | skipping branch: source code not retrievable |
+| org1_api | main | LONG | submitted | 120 | 5 | 40 | 300 | 1,048,576 | AY-task-1 |  |
+| org1_web | main | LONG | packaged | 7 | 0 | 3 | 300 | 2,048 | AY-task-2 |  |
 

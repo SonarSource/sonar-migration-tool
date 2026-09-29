@@ -67,6 +67,16 @@ func phaseExtract(ctx context.Context, p Prompter, state *WizardState, exportDir
 		password: ptrStr(state.CertPassword),
 	}
 
+	// #586 — carried from source.insecure in the config file. The GUI and
+	// wizard read from the same source server as extract, so a config that
+	// opts out of certificate verification has to reach both calls below or
+	// the setting is silently dropped here.
+	insecure := ptrBoolOr(state.Insecure, false)
+	if insecure {
+		p.DisplayWarning("TLS certificate verification is disabled for the source SonarQube Server connection " +
+			"(source.insecure), which is vulnerable to man-in-the-middle interception")
+	}
+
 	var projectKeys []string
 	if pattern := ptrStr(state.ProjectKeyPattern); pattern != "" {
 		projectKeys, err = resolveProjectKeysFn(ctx, extract.ExtractConfig{
@@ -76,6 +86,7 @@ func phaseExtract(ctx context.Context, p Prompter, state *WizardState, exportDir
 			PEMFilePath:  cert.pemFile,
 			KeyFilePath:  cert.keyFile,
 			CertPassword: cert.password,
+			Insecure:     insecure,
 		}, pattern)
 		if err != nil {
 			p.DisplayError(err.Error())
@@ -146,6 +157,7 @@ func runExtractWithRetry(ctx context.Context, p Prompter, state *WizardState, ex
 			PEMFilePath:              cert.pemFile,
 			KeyFilePath:              cert.keyFile,
 			CertPassword:             cert.password,
+			Insecure:                 ptrBoolOr(state.Insecure, false),
 			ProjectKeys:              projectKeys,
 			IncludeProjectData:       includeProjectData,
 			SkipProjectDataMigration: !includeProjectData,

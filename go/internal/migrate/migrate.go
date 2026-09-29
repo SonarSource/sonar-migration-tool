@@ -11,10 +11,12 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/extract"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/version"
 	sqapi "github.com/sonar-solutions/sq-api-go"
@@ -31,7 +33,99 @@ import (
 // The phase's wall clock is dominated by PollCETask, which polls every few
 // seconds for minutes, so throttling construction costs little while
 // cutting peak memory by roughly the ratio between the two.
+//
+// This is also the floor and the non-Linux/undetectable fallback for
+// AdaptiveBuildConcurrency — the value used when memory can't be
+// detected, or is too small to safely justify going higher (#541).
 const DefaultBuildConcurrency = 4
+
+const (
+	// buildMemoryBudgetPerWorker is a conservative per-concurrent-build
+	// memory assumption, in bytes. BenchmarkLoadBranchSourceData measured
+	// ~915 MiB allocated for one branch of even a small synthetic
+	// project (scoped_extract_alloc_test.go) before the #541 streaming
+	// fix that cut it to ~405 MiB allocated / ~3 MiB retained — and that
+	// fix is what let BuildSem exist at all without still risking the
+	// OOM. There is no benchmark for a large real project's branch
+	// (protobuf + ZIP packaging included, not just source loading), so
+	// this rounds up from the largest number that IS measured rather
+	// than guess low.
+	buildMemoryBudgetPerWorker = 1 << 30 // 1 GiB
+
+	// buildConcurrencyBudgetShare reserves the rest of the detected
+	// memory budget for everything else the process needs during this
+	// phase — the general request pool's own transient allocations,
+	// the Go runtime, OS overhead the cgroup accounting doesn't capture
+	// — rather than letting build concurrency alone claim the whole
+	// budget.
+	buildConcurrencyBudgetShare = 0.5
+
+	// maxAdaptiveBuildConcurrency caps how far detected memory can push
+	// this. Issue #541's OOM happened at an effectively unbounded 25 (no
+	// separate build limit existed yet) on a 32 GB VM, so this stays
+	// below that even on a very large host until real large-project
+	// measurements justify raising it.
+	maxAdaptiveBuildConcurrency = 20
+)
+
+// AdaptiveBuildConcurrency derives a --project_data_build_concurrency
+// default from the memory actually available to this process — the same
+// cgroup/meminfo detection common.ApplyMemoryLimit uses for GOMEMLIMIT —
+// instead of the single fixed guess DefaultBuildConcurrency was on its
+// own. Falls back to DefaultBuildConcurrency when the budget can't be
+// determined (non-Linux, or detection failed), so nothing changes for
+// local/dev runs (#573 follow-up).
+func AdaptiveBuildConcurrency() int {
+	budget, _ := common.MemoryBudget()
+	return adaptiveBuildConcurrency(budget)
+}
+
+// adaptiveBuildConcurrency is the testable core of AdaptiveBuildConcurrency.
+func adaptiveBuildConcurrency(budgetBytes int64) int {
+	if budgetBytes <= 0 {
+		return DefaultBuildConcurrency
+	}
+	n := int(float64(budgetBytes) * buildConcurrencyBudgetShare / buildMemoryBudgetPerWorker)
+	if n < DefaultBuildConcurrency {
+		return DefaultBuildConcurrency
+	}
+	if n > maxAdaptiveBuildConcurrency {
+		return maxAdaptiveBuildConcurrency
+	}
+	return n
+}
+
+// DefaultMaxIssueComments is the number of most-recent comments migrated
+// onto each Cloud issue/hotspot when --max_issue_comments is unset (#571).
+const DefaultMaxIssueComments = 5
+
+// MaxAllowedIssueComments is the highest value --max_issue_comments accepts.
+// Comments are migrated one add_comment API call at a time, so an
+// unbounded value could put real pressure on SonarQube Cloud for issues
+// with long discussion threads (#571).
+const MaxAllowedIssueComments = 20
+
+// ValidateMaxIssueComments rejects a --max_issue_comments value above
+// MaxAllowedIssueComments. A value of 0 is not an error: it means "use the
+// default" (applyDefaults fills in DefaultMaxIssueComments), matching the
+// existing zero-means-default convention for Concurrency/Timeout. A value
+// of -1 is the documented sentinel for "no cap": applyDefaults leaves it
+// untouched and capIssueComments replays every source comment (#571).
+func ValidateMaxIssueComments(n int) error {
+	if n > MaxAllowedIssueComments {
+		return fmt.Errorf("max_issue_comments %d exceeds the maximum allowed value of %d", n, MaxAllowedIssueComments)
+	}
+	return nil
+}
+
+// MaxBranchesPerProject is the hard cap on the number of long-lived
+// branches migrated per project (#584) — a safeguard against projects with
+// too many branches (little branch housekeeping, or a branch selection
+// filter that casts too wide a net) making a migrate/transfer run too slow
+// and putting too much API pressure on SonarQube Cloud. Not user-facing by
+// design: a single constant, easy to revisit in one place. Applies only to
+// migrate/transfer; extract has no such limit.
+const MaxBranchesPerProject = 10
 
 // MigrateConfig holds all parameters for a migrate run.
 type MigrateConfig struct {
@@ -40,9 +134,25 @@ type MigrateConfig struct {
 	Edition       string // "enterprise", "developer", etc.
 	URL           string // Cloud URL (default: https://sonarcloud.io/)
 	RunID         string // Resume a prior run
-	Concurrency   int
+	// Concurrency, if set (via --concurrency or the config file's
+	// "concurrency" field), is only the STARTING point the dynamic
+	// ConcurrencyLimiter seeds from — it is always re-evaluated every 30s
+	// against observed API latency from the moment the run starts,
+	// regardless of whether this was set (#573). --concurrency /
+	// "concurrency" is deprecated in favor of --api_max_rate_per_min,
+	// which controls the target rate the adjustment aims for. <= 0
+	// resolves to 25 by applyDefaults.
+	Concurrency int
+	// APIMaxRatePerMin caps sustained SonarQube Cloud API calls/min via a
+	// sliding-window limiter, and is the target rate the dynamic
+	// ConcurrencyLimiter aims for (#573). <= 0 is resolved to 1500 by
+	// applyDefaults. Valid range enforced by the CLI layer is [100, 1500].
+	APIMaxRatePerMin int
 	// BuildConcurrency bounds concurrent scanner-report CONSTRUCTION during
 	// importProjectData, independently of Concurrency. See Executor.BuildSem.
+	// <= 0 resolves via AdaptiveBuildConcurrency, not a single fixed
+	// default — sized from memory actually available to this process
+	// when it can be detected.
 	BuildConcurrency int
 	// Timeout is the per-HTTP-request timeout in seconds applied to
 	// every SonarQube Cloud call the migrate phase makes (#383). When
@@ -92,11 +202,68 @@ type MigrateConfig struct {
 	// the enterprise key. Defaults to DefaultProjectKeyPattern. Issue #138.
 	ProjectKeyPattern string
 
+	// Objects, when non-nil, limits migration to the selected object
+	// categories (settings, permission_templates, quality_profiles,
+	// quality_gates, projects, portfolios, groups, license_profiles —
+	// aliases qp/qg/pt/lp). nil means "everything" — same semantics as
+	// common.ParseObjects's empty-input contract (#536).
+	Objects map[string]bool
+	// objectsRaw carries the raw --objects / config-file "objects" values
+	// from LoadMigrateConfigFile's parsing step through to the
+	// common.ParseObjects call that fills in Objects, so parsing logic
+	// lives in one place (config_file.go) instead of being duplicated
+	// between the config-file loader and cmd/migrate.go's CLI handling.
+	// Cleared once Objects is populated; not meant to be read afterward.
+	objectsRaw []string
+	// ProjectKeyFilter, when non-empty, is a regexp pattern (raw --project_key
+	// value, or the config file's top-level "project_key") restricting
+	// migration to source project keys that fully match it (#536, mirrors
+	// #529's transfer-side flag). Unlike extract, migrate never calls the
+	// source API to resolve keys — createProjects filters the records it
+	// already read locally from generateProjectMappings, so the pattern is
+	// stored as-is and only ever used when the "projects" category is
+	// selected (cmd/migrate.go no-ops the flag otherwise, per the issue).
+	ProjectKeyFilter string
+
+	// BranchRegexp, when non-empty, limits which branches importProjectData
+	// migrates for each project, on top of whatever the extract phase already
+	// limited getBranches to. Always compiled as a full-match regex
+	// implicitly anchored with ^ and $ (mirrors ProjectKeyFilter,
+	// extract.CompileProjectKeyPattern). The project's main branch is always
+	// migrated regardless of match (same bypass as ExcludeBranches). Empty
+	// means "migrate every extracted branch" (#582).
+	BranchRegexp string
+
 	// ProgressCallback, when set, is invoked with the same run-wide
 	// percent/ETA snapshot as the #520 log line, on every tick and once
 	// more at completion. Nil for CLI callers (go/cmd/migrate.go); the
 	// GUI wizard sets it to drive a progress bar (#519).
 	ProgressCallback func(percent float64, eta time.Duration, known bool)
+
+	// MigrateHistory opts into the project-history migration PoC (#554):
+	// replay each project's extracted historical (date, measures) snapshots
+	// (see internal/extract's getProjectAnalysisHistory) as separate,
+	// backdated analyses on the target's main branch, before the regular
+	// current-snapshot import. Defaults to false — when unset, migrate
+	// ignores any extracted history records and behaves exactly as before
+	// this feature existed, even if extract happened to capture history
+	// data for a different run.
+	MigrateHistory bool
+
+	// MaxIssueComments caps the number of source comments replayed onto a
+	// single Cloud issue/hotspot during metadata sync, keeping only the
+	// most recent ones (#571) — every comment is an extra
+	// /api/issues/add_comment call, and instances with long comment
+	// threads were putting avoidable pressure on SonarQube Cloud. <= 0
+	// resolves to DefaultMaxIssueComments; values above MaxAllowedIssueComments
+	// are rejected by ValidateMaxIssueComments at the CLI layer.
+	MaxIssueComments int
+
+	// BranchAnalyzedAfter is the raw --branch_analyzed_after value (or the
+	// resolved target.branch_analyzed_after / top-level branch_analyzed_after
+	// from the config file), in YYYY-MM-DD form. "" means unset — every
+	// branch is selected, the pre-#583 behavior.
+	BranchAnalyzedAfter string
 }
 
 // Executor is the runtime context passed to every migrate task function.
@@ -113,26 +280,73 @@ type Executor struct {
 	Edition   common.Edition
 	ExportDir string // Root export directory
 	Mapping   structure.ExtractMapping
-	// Sem is a capacity carrier, NOT a semaphore. Nothing in this package
-	// ever sends to or receives from it; every reference reads cap(e.Sem)
-	// to size a per-task errgroup limit. Each task therefore gets its own
-	// independent limit rather than sharing one pool.
+	// ConcurrencyLimiter provides a live capacity figure, NOT a semaphore.
+	// Nothing in this package acquires or releases it; every reference
+	// reads ConcurrencyLimiter.Current() to size a per-task fan-out limit
+	// (an errgroup.SetLimit for the few still-fixed/serial cases, a
+	// DynamicGate for everything else, #573). Each task therefore gets
+	// its own independent limit rather than sharing one pool. Always
+	// dynamic (#573): a background goroutine
+	// recalculates Current() every 30s from observed API latency,
+	// targeting APIMaxRatePerMin calls/min — cfg.Concurrency, if set, is
+	// only the starting value it seeds from, never a permanent fixed cap.
 	//
 	// Do not "fix" this by acquiring it. The fan-outs nest —
 	// runSyncIssueMetadata's forEachMigrateItem holds a slot for each of
-	// its 25 workers, and each of those calls runProjectSyncLoop, which
-	// limits on the same capacity. On one shared counting semaphore the
-	// outer holders would take every slot and no inner work could ever
-	// acquire: a permanent deadlock. Making it real requires restructuring
-	// the nested fan-outs first.
-	Sem chan struct{}
+	// its workers, and each of those calls syncProjectIssues, whose inner
+	// loop is bounded by nestedSyncLoopConcurrency (its own gate). Sharing
+	// one counting semaphore across both levels would let the outer holders
+	// take every slot and deadlock the inner work.
+	ConcurrencyLimiter *ConcurrencyLimiter
+	// CEPollConcurrencyLimiter bounds runImportProjectData's outer
+	// per-project gate instead of ConcurrencyLimiter — and, nested inside
+	// that gate's held slot, the #554 history replay. See
+	// pollBoundConcurrency's doc comment for why this fan-out needs a
+	// different sizing signal: a branch's gate slot is held for minutes
+	// across build -> submit -> PollCETask, so sizing off raw HTTP call
+	// latency (as ConcurrencyLimiter does) drastically under-provisions it.
+	// Fixed for the run (NewFixedConcurrencyLimiter): both its inputs
+	// (api_max_rate_per_min and the CE poll backoff ladder's tunables) are
+	// already known at startup.
+	//
+	// May be nil (test fixtures, and Executors built by reset.go /
+	// sync_issues_standalone.go which never run importProjectData);
+	// callers fall back to ConcurrencyLimiter.
+	CEPollConcurrencyLimiter *ConcurrencyLimiter
+	// BranchGate bounds how many BRANCH imports are in flight at once
+	// across the whole run — main and non-main alike, each one a
+	// build -> submit -> PollCETask cycle holding a CE task open.
+	//
+	// It exists because importProjectBranches imports a project's non-main
+	// branches in parallel (#554 follow-up). Without a branch-level bound,
+	// in-flight CE tasks would be the PRODUCT of the two levels — the outer
+	// per-project gate (pollBoundConcurrency, 25 at
+	// --api_max_rate_per_min=1500) times MaxBranchesPerProject (10) = 250,
+	// roughly ten times the api/ce/task rate budget those 25 were sized to
+	// fit. SlidingWindowLimiter would still enforce the real cap, but only
+	// by queueing the excess inside Wait() — precisely the queue-then-burst
+	// pathology documented in maxGrowthFactor's comment.
+	//
+	// Deliberately run-wide and shared, not one gate per project: "how many
+	// CE tasks may be open at once" is a single global budget, and a
+	// per-project gate could not bound the product. It is a SEPARATE gate
+	// from runImportProjectData's outer one even though both read this same
+	// limiter — sharing one gate across nested fan-outs is the deadlock
+	// DynamicGate's doc comment warns about. There is no cycle here:
+	// holding a branch slot never requires a project slot, so branch slots
+	// always drain.
+	//
+	// May be nil (test fixtures, reset.go, sync_issues_standalone.go);
+	// DynamicGate's methods are nil-safe, so callers need no nil check.
+	BranchGate *DynamicGate
 	// BuildSem bounds concurrent scanner-report CONSTRUCTION, which is the
 	// memory-heavy part of importProjectData: a branch's full source text,
 	// its protobufs and the packaged ZIP are all live at once.
 	//
-	// Deliberately NOT the same bound as project fan-out. importProjectData
-	// spends most of its wall clock in PollCETask, so 25 branches can stay
-	// in flight against the CE while only a few are being built.
+	// Deliberately NOT the same bound as project fan-out (see
+	// CEPollConcurrencyLimiter) — importProjectData spends most of its wall
+	// clock in PollCETask, so many more branches can stay in flight against
+	// the CE than are ever concurrently being built.
 	//
 	// May be nil (test fixtures); callers must nil-check.
 	BuildSem        chan struct{}
@@ -153,6 +367,40 @@ type Executor struct {
 	// (createProjects, matchProjectRepos, permission templates, portfolios).
 	ProjectKeyPattern string
 
+	// Objects mirrors MigrateConfig.Objects (#536): nil means "everything
+	// selected". Most task exclusion happens at plan time (see
+	// excludedMigrateTasks / ResolveDependenciesExcluding), but
+	// runSetGlobalSettings additionally needs it at RUNTIME to decide
+	// whether its project-scope fallback path is allowed to assume
+	// projects exist — see the "projects" category gate in
+	// tasks_setglobalsettings.go.
+	Objects map[string]bool
+	// ProjectKeyRe is the compiled form of MigrateConfig.ProjectKeyFilter
+	// (#536), or nil when no filter was configured. runCreateProjects
+	// consults it to skip source projects whose key doesn't match; every
+	// other project-scoped task scopes off createProjects's own output,
+	// so filtering there is sufficient.
+	ProjectKeyRe *regexp.Regexp
+	// BranchRe is the compiled form of MigrateConfig.BranchRegexp, or nil
+	// when unset. #582.
+	BranchRe *regexp.Regexp
+	// MigrateHistory — see MigrateConfig.MigrateHistory (#554).
+	MigrateHistory bool
+	// HistoryProgress tracks project-history replay (#554) as its own
+	// unit of work for the overall ETA (#564): migrateBranchHistory
+	// increments it once per historical point submitted. Nil when
+	// MigrateHistory is off or there's no history to replay — callers
+	// must go through it via ProgressLogger's own nil-safety, or check
+	// for nil directly (see migrateBranchHistory).
+	HistoryProgress *common.ProgressLogger
+
+	// MaxIssueComments — see MigrateConfig.MaxIssueComments (#571).
+	MaxIssueComments int
+
+	// BranchAnalyzedAfter — see MigrateConfig.BranchAnalyzedAfter (#583).
+	// Nil means no filter: every branch is selected.
+	BranchAnalyzedAfter *time.Time
+
 	// ResetConfirmedOrgs is populated only by RunReset after the
 	// operator has interactively confirmed which SonarCloud orgs to
 	// wipe (#381). When set (non-nil), loadCSVToJSONL rewrites the
@@ -167,6 +415,48 @@ type Executor struct {
 // Returns the run ID on success.
 func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr error) {
 	cfg.applyDefaults()
+
+	// #571: reject up front rather than silently letting a mistyped, huge
+	// value through — cmd/migrate.go, cmd/transfer.go and cmd/sync_issues.go
+	// all validate this at build-config time, but callers that construct a
+	// MigrateConfig directly (e.g. the GUI wizard) reach RunMigrate without
+	// going through that check.
+	if err := ValidateMaxIssueComments(cfg.MaxIssueComments); err != nil {
+		return "", err
+	}
+
+	// #536: compile --project_key defensively even though cmd/migrate.go
+	// already validated it at build-config time — a config-file-only
+	// caller (e.g. the GUI wizard) may reach RunMigrate without going
+	// through that validation.
+	var projectKeyRe *regexp.Regexp
+	if cfg.ProjectKeyFilter != "" {
+		re, err := extract.CompileProjectKeyPattern(cfg.ProjectKeyFilter)
+		if err != nil {
+			return "", fmt.Errorf("invalid project_key pattern %q: %w", cfg.ProjectKeyFilter, err)
+		}
+		projectKeyRe = re
+	}
+
+	// #582: compile --branch_regexp defensively for the same reason as
+	// --project_key above — a config-file-only caller may reach RunMigrate
+	// without going through cmd/migrate.go's own validation.
+	var branchRe *regexp.Regexp
+	if cfg.BranchRegexp != "" {
+		re, err := extract.CompileProjectKeyPattern(cfg.BranchRegexp)
+		if err != nil {
+			return "", fmt.Errorf("invalid branch regexp pattern %q: %w", cfg.BranchRegexp, err)
+		}
+		branchRe = re
+	}
+	// #583: parse --branch_analyzed_after defensively even though
+	// cmd/migrate.go and cmd/transfer.go already validate it at
+	// build-config time — a config-file-only caller (e.g. the GUI wizard)
+	// may reach RunMigrate without going through that validation.
+	branchAnalyzedAfter, err := common.ParseBranchAnalyzedAfter(cfg.BranchAnalyzedAfter)
+	if err != nil {
+		return "", err
+	}
 
 	tm := &RunTimings{StartedAt: time.Now()}
 
@@ -236,33 +526,63 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 	phases := filterCompleted(mp.Plan, store)
 
 	executor := &Executor{
-		Cloud:                clients.Cloud,
-		CloudAPI:             clients.CloudAPI,
-		Raw:                  clients.Raw,
-		RawAPI:               clients.RawAPI,
-		Extract:              nil, // Will be set per-task based on extract mapping
-		Store:                store,
-		CloudURL:             clients.CloudURL,
-		APIURL:               clients.APIURL,
-		EntKey:               cfg.EnterpriseKey,
-		Edition:              mp.Edition,
-		ExportDir:            cfg.ExportDirectory,
-		Mapping:              mp.Mapping,
-		Sem:                  make(chan struct{}, cfg.Concurrency),
-		BuildSem:             make(chan struct{}, cfg.BuildConcurrency),
-		ExcludeBranches:      cfg.ExcludeBranches,
-		UnsupportedLanguages: cfg.UnsupportedLanguages,
-		FastSync:             cfg.FastSync,
-		ProjectKeyPattern:    cfg.ProjectKeyPattern,
-		Logger:               logger,
+		Cloud:                    clients.Cloud,
+		CloudAPI:                 clients.CloudAPI,
+		Raw:                      clients.Raw,
+		RawAPI:                   clients.RawAPI,
+		Extract:                  nil, // Will be set per-task based on extract mapping
+		Store:                    store,
+		CloudURL:                 clients.CloudURL,
+		APIURL:                   clients.APIURL,
+		EntKey:                   cfg.EnterpriseKey,
+		Edition:                  mp.Edition,
+		ExportDir:                cfg.ExportDirectory,
+		Mapping:                  mp.Mapping,
+		ConcurrencyLimiter:       clients.ConcurrencyLimiter,
+		CEPollConcurrencyLimiter: clients.CEPollConcurrencyLimiter,
+		BranchGate:               newBranchGate(clients.CEPollConcurrencyLimiter),
+		BuildSem:                 make(chan struct{}, cfg.BuildConcurrency),
+		ExcludeBranches:          cfg.ExcludeBranches,
+		UnsupportedLanguages:     cfg.UnsupportedLanguages,
+		FastSync:                 cfg.FastSync,
+		MaxIssueComments:         cfg.MaxIssueComments,
+		ProjectKeyPattern:        cfg.ProjectKeyPattern,
+		Objects:                  cfg.Objects,
+		ProjectKeyRe:             projectKeyRe,
+		BranchRe:                 branchRe,
+		MigrateHistory:           cfg.MigrateHistory,
+		BranchAnalyzedAfter:      branchAnalyzedAfter,
+		Logger:                   logger,
 	}
 
 	// Overall progress/ETA logging (#520) — every 10s for the duration of
 	// the run, stopped once phases finish (success or error).
-	executor.Progress = common.NewTracker(logger, phases, CategorizeTask, common.DefaultCategoryWeights)
+	executor.Progress = common.NewTracker(logger, phases, CategorizeTask, common.DefaultCategoryWeights, common.ExpectedTaskDuration)
+
+	// #554/#564: project-history replay runs inline inside importProjectData
+	// rather than as its own TaskDef, so without this it's invisible to the
+	// overall ETA. The point count is known upfront from already-extracted
+	// data (no API calls), so give it its own tracked unit of work before a
+	// single migrate task has even started. Left nil/unregistered when the
+	// feature is off or there's nothing to replay — zero overhead otherwise.
+	if totalPoints := projectHistoryPointTotal(executor); totalPoints > 0 {
+		executor.HistoryProgress = common.NewProgressLogger(logger, "migrateProjectHistory", totalPoints)
+		executor.Progress.Registry().Register("migrateProjectHistory", executor.HistoryProgress)
+		executor.Progress.AddPseudoTask(common.CategoryProjectData, "migrateProjectHistory")
+		executor.Progress.SetExpectedDuration("migrateProjectHistory",
+			time.Duration(float64(totalPoints)*common.SecondsPerHistoryPoint*float64(time.Second)))
+	}
+
+	seedProjectScaledIssueSyncDuration(executor)
+
 	executor.Progress.OnUpdate(cfg.ProgressCallback)
 	executor.Progress.Start(ctx, 10*time.Second)
 	defer executor.Progress.Stop()
+
+	// Dynamic concurrency re-evaluation (#573) — no-op when ConcurrencyLimiter
+	// is fixed (--concurrency was explicitly set).
+	executor.ConcurrencyLimiter.Start(ctx, 30*time.Second)
+	defer executor.ConcurrencyLimiter.Stop()
 
 	// Execute phases.
 	for i, phase := range phases {
@@ -276,8 +596,41 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 	}
 	executor.Progress.LogFinal()
 
-	fmt.Printf("%s v%s - Migration Complete: %s\n", version.ToolName, version.Version, runIDOut)
+	fmt.Printf("%s %s - Migration Complete: %s\n", version.ToolName, version.Version, runIDOut)
 	return runIDOut, nil
+}
+
+// seedProjectScaledIssueSyncDuration applies scaledIssueSyncDuration's
+// result to e's tracker, if any. Split out of RunMigrate, which was
+// already at its cognitive-complexity budget, so this seeding logic
+// carries its own rather than pushing that function over it.
+func seedProjectScaledIssueSyncDuration(e *Executor) {
+	if d, ok := scaledIssueSyncDuration(projectsInScope(e)); ok {
+		e.Progress.SetExpectedDuration("syncIssueMetadata", d)
+	}
+}
+
+// scaledIssueSyncDuration computes syncIssueMetadata's expected duration
+// scaled by n, the number of projects in scope (#597) — the only migrate
+// task whose duration has a positive fit against a size the migrate path
+// knows for free (R^2 0.36 on project count over 17 archived runs; every
+// other task scored negative, i.e. worse than a constant).
+//
+// ok is false, meaning "leave the seeded constant alone", when n <= 0 (no
+// projects to scale by) or when the scaled value would not exceed the
+// constant — a one- or two-project run keeps the constant rather than
+// seeding well under a second, because the fit is real but weak, and
+// under-seeding the task would hand the ETA the same wrong-proportions
+// problem #598 set out to fix.
+func scaledIssueSyncDuration(n int) (time.Duration, bool) {
+	if n <= 0 {
+		return 0, false
+	}
+	scaled := time.Duration(float64(n) * common.SecondsPerProjectIssueSync * float64(time.Second))
+	if scaled <= common.ExpectedTaskDuration("syncIssueMetadata") {
+		return 0, false
+	}
+	return scaled, true
 }
 
 // validateMigrateConfig validates the project-key renaming pattern syntax
@@ -306,13 +659,25 @@ func validateMigrateOrgs(ctx context.Context, cc *cloud.Client, cfg MigrateConfi
 // migrateClients bundles the Cloud API clients, raw readers, and
 // rate-limit tracker a migrate run wires together before executing tasks.
 type migrateClients struct {
-	Cloud            *cloud.Client
-	CloudAPI         *cloud.Client
-	Raw              *common.RawClient
-	RawAPI           *common.RawClient
-	CloudURL         string
-	APIURL           string
-	RateLimitTracker *RateLimitTracker
+	Cloud                    *cloud.Client
+	CloudAPI                 *cloud.Client
+	Raw                      *common.RawClient
+	RawAPI                   *common.RawClient
+	CloudURL                 string
+	APIURL                   string
+	RateLimitTracker         *RateLimitTracker
+	ConcurrencyLimiter       *ConcurrencyLimiter
+	CEPollConcurrencyLimiter *ConcurrencyLimiter
+}
+
+// newConcurrencyLimiter builds a ConcurrencyLimiter for a Cloud-facing
+// executor (migrate, reset, sync-issues). Always dynamic (#573): starts at
+// concurrency (whatever --concurrency / the config file's "concurrency"
+// field resolved to, or the 25 default) and recalculates every 30s from
+// observed API latency to target apiMaxRatePerMin calls/min — concurrency
+// only seeds the starting point, it is never a permanent fixed cap.
+func newConcurrencyLimiter(concurrency int, apiMaxRatePerMin int, logger *slog.Logger) *ConcurrencyLimiter {
+	return NewDynamicConcurrencyLimiter(concurrency, apiMaxRatePerMin, logger)
 }
 
 // newMigrateClients builds the standard and enterprise Cloud API clients
@@ -347,11 +712,23 @@ func newMigrateClients(cfg MigrateConfig, logger *slog.Logger, reqLog *requestLo
 	rateLimitRecovery := func(_, _ string, retries int, waited time.Duration) {
 		rlEpisode.onResume(retries, waited)
 	}
+	// One SlidingWindowLimiter and one ConcurrencyLimiter shared across
+	// both cloudClient and apiClient below: both hosts share the same
+	// egress IP and therefore the same 8000-calls/5min SonarQube Cloud
+	// budget (#573).
+	concurrencyLimiter := newConcurrencyLimiter(cfg.Concurrency, cfg.APIMaxRatePerMin, logger)
+	// Fixed, not dynamic: both of pollBoundConcurrency's inputs are already
+	// known here, so there's nothing for a background recalculation loop to
+	// react to (see CEPollConcurrencyLimiter's doc comment on Executor).
+	ceLimiter := NewFixedConcurrencyLimiter(pollBoundConcurrency(cfg.APIMaxRatePerMin))
+	apiRateLimiter := sqapi.NewSlidingWindowLimiter(cfg.APIMaxRatePerMin)
 	clientOpts := []sqapi.Option{
 		sqapi.WithTimeout(cfg.Timeout),
 		sqapi.WithRetryLogger(retryLog),
 		sqapi.WithRateLimitObserver(rateLimitObs),
 		sqapi.WithRateLimitRecoveryLogger(rateLimitRecovery),
+		sqapi.WithAPIRateLimiter(apiRateLimiter),
+		sqapi.WithLatencyObserver(concurrencyLimiter.Observe),
 	}
 	if reqLog != nil {
 		clientOpts = append(clientOpts, sqapi.WithRequestLogger(reqLog.Log))
@@ -363,14 +740,27 @@ func newMigrateClients(cfg MigrateConfig, logger *slog.Logger, reqLog *requestLo
 	apiClient := sqapi.NewCloudClient(apiURL, cfg.Token, clientOpts...)
 
 	return &migrateClients{
-		Cloud:            cloud.New(cloudClient),
-		CloudAPI:         cloud.New(apiClient),
-		Raw:              common.NewRawClient(cloudClient.HTTPClient(), cloudClient.BaseURL()),
-		RawAPI:           common.NewRawClient(apiClient.HTTPClient(), apiClient.BaseURL()),
-		CloudURL:         cloudClient.BaseURL(),
-		APIURL:           apiClient.BaseURL(),
-		RateLimitTracker: rateLimitTracker,
+		Cloud:                    cloud.New(cloudClient),
+		CloudAPI:                 cloud.New(apiClient),
+		Raw:                      common.NewRawClient(cloudClient.HTTPClient(), cloudClient.BaseURL()),
+		RawAPI:                   common.NewRawClient(apiClient.HTTPClient(), apiClient.BaseURL()),
+		CloudURL:                 cloudClient.BaseURL(),
+		APIURL:                   apiClient.BaseURL(),
+		RateLimitTracker:         rateLimitTracker,
+		ConcurrencyLimiter:       concurrencyLimiter,
+		CEPollConcurrencyLimiter: ceLimiter,
 	}
+}
+
+// newBranchGate builds Executor.BranchGate from the CE poll limiter,
+// returning nil when there is none to size it from — NewDynamicGate would
+// otherwise hand back a gate whose Acquire panics on a nil limiter, where a
+// nil gate simply admits (see Executor.BranchGate).
+func newBranchGate(l *ConcurrencyLimiter) *DynamicGate {
+	if l == nil {
+		return nil
+	}
+	return NewDynamicGate(l)
 }
 
 // migratePlan bundles the resolved extract mapping, task registry, and
@@ -427,13 +817,28 @@ func prepareMigratePlan(cfg MigrateConfig, logger *slog.Logger) (*migratePlan, e
 		logger.Info("issue-sync disabled: skipping syncHotspotMetadata")
 	}
 
-	targets := MigrateTargetTasks(registry, cfg.TargetTask, cfg.SkipProfiles, cfg.IncludeProjectData, cfg.SkipIssueSync, cfg.SkipProjectDataMigration, cfg.TargetTasks)
-	taskSet := ResolveDependencies(targets, registry)
-	if taskSet == nil {
-		return nil, fmt.Errorf("cannot resolve dependencies for target tasks")
+	targets := MigrateTargetTasks(registry, cfg.TargetTask, MigrateTargetTasksFlags{SkipProfiles: cfg.SkipProfiles, IncludeProjectData: cfg.IncludeProjectData, SkipIssueSync: cfg.SkipIssueSync, SkipProjectDataMigration: cfg.SkipProjectDataMigration}, cfg.TargetTasks, cfg.Objects)
+	var taskSet map[string]bool
+	// Explicit overrides win over the --objects filter (see
+	// MigrateTargetTasks' documented precedence): don't let the
+	// exclusion set drop the very task the operator asked for.
+	explicitOverride := cfg.TargetTask != "" || len(cfg.TargetTasks) > 0
+	if cfg.Objects != nil && !explicitOverride {
+		// #536: exclude cross-category dependency edges too — e.g.
+		// setGlobalSettings/createPortfolios declaring createProjects as a
+		// dependency must not force it to run when "projects" is excluded.
+		taskSet = ResolveDependenciesExcluding(targets, registry, excludedMigrateTasks(cfg.Objects))
+	} else {
+		taskSet = ResolveDependencies(targets, registry)
+	}
+	if len(taskSet) == 0 {
+		return nil, fmt.Errorf("no task left to run for the requested target/objects combination")
 	}
 
-	plan, err := PlanPhases(taskSet, registry)
+	// #536: PlanPhasesExcluding degrades to plain PlanPhases when there
+	// are no exclusions (cfg.Objects == nil), so it's safe to always
+	// call it here.
+	plan, err := PlanPhasesExcluding(taskSet, registry, excludedMigrateTasks(cfg.Objects))
 	if err != nil {
 		return nil, err
 	}
@@ -484,35 +889,52 @@ func writeRateLimitArtifact(runDir string, tracker *RateLimitTracker, logger *sl
 }
 
 // maxConcurrentTasksPerPhase caps task-level fan-out within a phase.
-// Combined with the per-task limit of cap(e.Sem) this bounds total
-// in-flight requests at maxConcurrentTasksPerPhase * concurrency.
+// Combined with the per-task limit of e.ConcurrencyLimiter.Current() this
+// bounds total in-flight requests at maxConcurrentTasksPerPhase * concurrency.
 const maxConcurrentTasksPerPhase = 6
 
 func runPhase(ctx context.Context, e *Executor, taskNames []string, registry map[string]*TaskDef, phaseIdx int, tm *RunTimings) error {
 	phaseStart := time.Now()
 	g, ctx := errgroup.WithContext(ctx)
 	// Bound how many tasks in a phase run at once. Each task opens its
-	// own errgroup limited to cap(e.Sem), so an unbounded phase
-	// multiplies that by the task count — a 14-task phase at the default
-	// concurrency of 25 puts up to 350 requests in flight against one
-	// host. Tasks stay concurrent (they are few and mostly I/O bound),
-	// just not unboundedly so.
+	// own errgroup limited to e.ConcurrencyLimiter.Current(), so an
+	// unbounded phase multiplies that by the task count — a 14-task phase
+	// at the default concurrency of 25 puts up to 350 requests in flight
+	// against one host. Tasks stay concurrent (they are few and mostly
+	// I/O bound), just not unboundedly so.
 	g.SetLimit(maxConcurrentTasksPerPhase)
 	for _, name := range taskNames {
 		def := registry[name]
 		e.Logger.Info("running task", "task", name)
 		g.Go(func() error {
 			taskStart := time.Now()
+			// Marked here rather than before g.Go: the errgroup is capped
+			// at maxConcurrentTasksPerPhase, so in a phase wider than that
+			// cap most tasks sit queued after the loop hands them over.
+			// Stamping the start at hand-over makes the tracker read queue
+			// wait as execution time, which both inflates the duration
+			// MarkTaskComplete banks and distorts the in-flight credit a
+			// queued-but-not-running task receives (#564).
+			e.Progress.MarkTaskStarted(name)
 			counter := NewTaskCounter(name)
 			taskCtx := WithTaskCounter(ctx, counter)
 			runErr := def.Run(taskCtx, e)
 			elapsed := time.Since(taskStart)
+			// The counter is read before LogSummary so the recorded
+			// outcome and the logged one come from the same snapshot.
+			// OK means "did what it was asked", which a task that
+			// returned nil while failing every item did not.
+			outcome := counter.Outcome()
 			tm.addTask(TaskTiming{
-				Phase:    phaseIdx,
-				Name:     name,
-				Duration: elapsed.Seconds(),
-				OK:       runErr == nil,
-				Err:      errString(runErr),
+				Phase:              phaseIdx,
+				Name:               name,
+				Duration:           elapsed.Seconds(),
+				StartedAt:          taskStart,
+				OK:                 runErr == nil && outcome.Actionable() == 0,
+				Err:                errString(runErr),
+				Succeeded:          outcome.Succeeded,
+				Failed:             outcome.Failed,
+				ActionableFailures: outcome.Actionable(),
 			})
 			// Single end-of-task INFO log carrying counts + duration
 			// (#311 + #333). When the task didn't record any per-
@@ -536,11 +958,17 @@ func (cfg *MigrateConfig) applyDefaults() {
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 25
 	}
+	if cfg.APIMaxRatePerMin <= 0 {
+		cfg.APIMaxRatePerMin = 1500
+	}
 	if cfg.BuildConcurrency <= 0 {
-		cfg.BuildConcurrency = DefaultBuildConcurrency
+		cfg.BuildConcurrency = AdaptiveBuildConcurrency()
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 60
+	}
+	if cfg.MaxIssueComments == 0 {
+		cfg.MaxIssueComments = DefaultMaxIssueComments
 	}
 	if cfg.ExportDirectory == "" {
 		cfg.ExportDirectory = "/app/files/"

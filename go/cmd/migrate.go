@@ -7,7 +7,10 @@ package cmd
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/extract"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/migrate"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/report/summary"
 	"github.com/spf13/cobra"
@@ -25,6 +28,11 @@ organization keys to organizations.csv.`,
 		if err != nil {
 			return err
 		}
+		if err := validateAPIMaxRatePerMin(cfg.APIMaxRatePerMin); err != nil {
+			return err
+		}
+		// migrate's target is always SonarQube Cloud (#573).
+		warnIfConcurrencyDeprecated(cfg.Concurrency)
 		if cfg.Token == "" || cfg.EnterpriseKey == "" {
 			return fmt.Errorf("TOKEN and ENTERPRISE_KEY are required (--target_token/--enterprise_key flags or in config file)")
 		}
@@ -60,8 +68,14 @@ func init() {
 	_ = f.MarkDeprecated("url", "use --target_url instead")
 	_ = f.MarkDeprecated("token", "use --target_token instead")
 	f.String("run_id", "", "ID of a run to resume in case of failures")
-	f.Int("concurrency", 0, "Maximum number of concurrent requests")
-	f.Int("project_data_build_concurrency", 0, "Maximum number of scanner reports built at once during project-data migration (default 4). Lower this if the migration runs out of memory on a large instance; raise it toward --concurrency if report building is the bottleneck.")
+	f.Int("concurrency", 0, "Starting number of concurrent requests. Deprecated (#573): "+
+		"only seeds the initial value now — concurrency is always dynamically re-evaluated every 30s from observed SonarQube Cloud API latency. "+
+		"Use --"+flagAPIMaxRatePerMin+" instead to control the target rate.")
+	f.Int(flagAPIMaxRatePerMin, 0, fmt.Sprintf(
+		"Max sustained SonarQube Cloud API calls/min, as a sliding window (default: 1500, valid range [%d,%d]). "+
+			"Concurrency is dynamically adjusted to approach this rate without exceeding it (#573).",
+		minAPIMaxRatePerMin, maxAPIMaxRatePerMin))
+	f.Int("project_data_build_concurrency", 0, "Maximum number of scanner reports built at once during project-data migration (default: adaptive to memory available to this process, floor 4, cap 20; falls back to 4 when memory can't be detected, e.g. non-Linux). Set explicitly to override — lower it if the migration runs out of memory; raise it toward --concurrency if report building is the bottleneck.")
 	f.Int("timeout", 0, "Per-HTTP-request timeout in seconds (default: 60). Maps to the top-level timeout config field.")
 	f.String("export_directory", "", "Root directory containing all SonarQube exports")
 	f.String("target_task", "", "Name of a specific migration task to complete")
@@ -69,9 +83,15 @@ func init() {
 	f.Bool(flagSkipIssueSync, false, "Skip the final per-issue and per-hotspot metadata sync (#299). Same semantics as the skip_issue_sync config-file field — defaults to false (sync happens); pass the flag to skip.")
 	f.Bool(flagSkipProjectDataMigration, false, "Skip the entire project-data migration: importProjectData and the trailing per-issue/per-hotspot sync (#303). Defaults to false (data is migrated); pass the flag to skip.")
 	f.Bool(flagFastSync, false, "Skip tagging and back-linking hotspots/issues with zero user changes on the source (original state, no comments, no custom tags). Defaults to false (every hotspot is tagged and back-linked). #527.")
+	f.Bool(flagMigrateHistory, false, "PoC: replay each project's extracted historical analysis snapshots as separate, backdated analyses on the target's main branch, before the regular current-snapshot import (#554). Defaults to false; requires extract to have run with --migrate_history too.")
 	f.String("default_organization", "", "SonarQube Cloud organization to migrate every project into when organizations.csv has no mapping defined. Ignored if any mapping is present.")
 	f.String("project_key_pattern", "", "Template for target project keys, built from <ORIGINAL_PROJECT_KEY> and <ORGANIZATION_KEY> (default: <ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>). #138")
 	f.StringSlice("exclude_branches", nil, "Glob patterns for non-main branches to skip during project data import (e.g. feature/*,bugfix/*)")
+	f.String(flagBranchRegexp, "", "Regexp pattern of branch names to migrate, applied on top of whatever the extract phase already limited getBranches to. Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"(main|master)\" matches only branches literally named main or master. The project's main branch is always migrated regardless of match. Empty means every extracted branch is migrated (default). #582.")
+	f.String("objects", "", "Comma-separated list of object categories to migrate: "+strings.Join(common.AllObjects, ", ")+" (aliases: qp, qg, pt, lp). Omit to migrate everything (default). #536")
+	f.String(flagProjectKey, "", "Regexp pattern of source project keys to migrate (only applies when the projects category is selected via --objects). Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"BANKING_.+\" matches every key starting with BANKING_, not just a key containing that substring. A plain key like \"my-project\" matches only itself. #536")
+	f.Int(flagMaxIssueComments, 0, fmt.Sprintf("Max most-recent source comments replayed onto each migrated issue/hotspot (default %d, max %d) — reduces SonarQube Cloud API pressure on long comment threads (#571).", migrate.DefaultMaxIssueComments, migrate.MaxAllowedIssueComments))
+	f.String(flagBranchAnalyzedAfter, "", "Only select branches analyzed on or after this date (YYYY-MM-DD) during migrate. The project's main branch is always selected, even when it doesn't meet this date. Omit to select all branches (default). #583")
 }
 
 func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfig, error) {
@@ -103,8 +123,10 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	overrideString(cmd, "default_organization", &cfg.DefaultOrganization)
 	overrideString(cmd, "project_key_pattern", &cfg.ProjectKeyPattern)
 	overrideInt(cmd, "concurrency", &cfg.Concurrency)
+	overrideInt(cmd, flagAPIMaxRatePerMin, &cfg.APIMaxRatePerMin)
 	overrideInt(cmd, "project_data_build_concurrency", &cfg.BuildConcurrency)
 	overrideInt(cmd, "timeout", &cfg.Timeout)
+	overrideInt(cmd, flagMaxIssueComments, &cfg.MaxIssueComments)
 	if cmd.Flags().Changed("skip_profiles") {
 		cfg.SkipProfiles, _ = cmd.Flags().GetBool("skip_profiles")
 	}
@@ -112,28 +134,50 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	// flag always wins over the config-file skip_issue_sync field.
 	// One-way: --skip_issue_sync=false on the CLI does NOT undo a
 	// config-file skip_issue_sync: true.
-	if cmd.Flags().Changed(flagSkipIssueSync) {
-		v, _ := cmd.Flags().GetBool(flagSkipIssueSync)
-		if v {
-			cfg.SkipIssueSync = true
-		}
-	}
+	applyOneWayBoolFlag(cmd, flagSkipIssueSync, &cfg.SkipIssueSync)
 	// --skip_project_data_migration is the wider opt-out: it covers
 	// importProjectData AND the trailing sync pair. Same one-way
 	// override semantics. #303.
-	if cmd.Flags().Changed(flagSkipProjectDataMigration) {
-		v, _ := cmd.Flags().GetBool(flagSkipProjectDataMigration)
-		if v {
-			cfg.SkipProjectDataMigration = true
-		}
-	}
+	applyOneWayBoolFlag(cmd, flagSkipProjectDataMigration, &cfg.SkipProjectDataMigration)
 	if cmd.Flags().Changed("debug") {
 		cfg.Debug, _ = cmd.Flags().GetBool("debug")
 	}
 	if cmd.Flags().Changed("exclude_branches") {
 		cfg.ExcludeBranches, _ = cmd.Flags().GetStringSlice("exclude_branches")
 	}
+	overrideString(cmd, flagBranchRegexp, &cfg.BranchRegexp)
+	// #582 — reject an invalid --branch_regexp pattern up front, mirroring
+	// applyMigrateProjectKeyFlag above and the equivalent checks already
+	// present in extract's RunE and transfer's validateTransferConfig.
+	// Without this, migrate was the only one of the three commands that
+	// deferred the check to RunMigrate's own defensive compile — same
+	// fail-fast outcome, but only by accident, and RunMigrate's comment
+	// claiming this cmd-side validation already existed was not true.
+	if cfg.BranchRegexp != "" {
+		if _, err := extract.CompileProjectKeyPattern(cfg.BranchRegexp); err != nil {
+			return cfg, fmt.Errorf("invalid branch regexp pattern %q: %w", cfg.BranchRegexp, err)
+		}
+	}
 	applyFlagBool(cmd, flagFastSync, &cfg.FastSync)
+	applyFlagBool(cmd, flagMigrateHistory, &cfg.MigrateHistory)
+	applyFlagInt(cmd, flagMaxIssueComments, &cfg.MaxIssueComments)
+
+	if err := applyObjectsFlag(cmd, &cfg.Objects); err != nil {
+		return cfg, err
+	}
+	warnIfLicenseProfilesSelected(cfg.Objects)
+	if err := applyMigrateProjectKeyFlag(cmd, &cfg); err != nil {
+		return cfg, err
+	}
+	// #571 — reject an out-of-range cap up front rather than silently
+	// clamping it deep inside the issue/hotspot sync.
+	if err := migrate.ValidateMaxIssueComments(cfg.MaxIssueComments); err != nil {
+		return cfg, fmt.Errorf("--%s: %w", flagMaxIssueComments, err)
+	}
+	overrideString(cmd, flagBranchAnalyzedAfter, &cfg.BranchAnalyzedAfter)
+	if err := validateBranchAnalyzedAfter(cfg.BranchAnalyzedAfter); err != nil {
+		return cfg, fmt.Errorf("--%s: %w", flagBranchAnalyzedAfter, err)
+	}
 
 	// Default the export directory when neither config nor flag supplied
 	// one (issue #247).
@@ -148,4 +192,29 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	cfg.IncludeProjectData = !cfg.SkipProjectDataMigration
 
 	return cfg, nil
+}
+
+// applyMigrateProjectKeyFlag validates and applies --project_key for
+// migrate: unlike extract, migrate never calls the source API to
+// resolve it — createProjects filters the records it already read
+// locally from generateProjectMappings — so this only validates the
+// pattern compiles (aborting before any API call) and passes it
+// straight through as cfg.ProjectKeyFilter. Only takes effect when the
+// "projects" category is selected (or objects is unset); otherwise the
+// pattern is harmless but unused, matching the issue's checklist for
+// --objects+--project_key (#536, mirrors #529's transfer-side flag —
+// not to be confused with --project_key_pattern, the target-key
+// rendering template).
+func applyMigrateProjectKeyFlag(cmd *cobra.Command, cfg *migrate.MigrateConfig) error {
+	if !cmd.Flags().Changed(flagProjectKey) {
+		return nil
+	}
+	raw, _ := cmd.Flags().GetString(flagProjectKey)
+	if _, err := extract.CompileProjectKeyPattern(raw); err != nil {
+		return fmt.Errorf("invalid --%s pattern %q: %w", flagProjectKey, raw, err)
+	}
+	if cfg.Objects == nil || cfg.Objects[common.ObjectProjects] {
+		cfg.ProjectKeyFilter = raw
+	}
+	return nil
 }

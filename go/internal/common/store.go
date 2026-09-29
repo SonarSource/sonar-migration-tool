@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -96,9 +97,23 @@ func (ds *DataStore) Records(taskName string) func(yield func(json.RawMessage, e
 	}
 }
 
-// jsonlFileNames lists the .jsonl file names directly under dir. A missing
-// directory is not an error — the task simply never ran — and returns no
-// names, which is what gives ReadAll its (nil, nil).
+// jsonlFileNames lists the .jsonl file names directly under dir, in
+// chunk-index order. A missing directory is not an error — the task simply
+// never ran — and returns no names, which is what gives ReadAll its
+// (nil, nil).
+//
+// The names are sorted numerically on the N of results.N.jsonl rather than
+// left in os.ReadDir's lexicographic order, where results.10.jsonl sorts
+// before results.2.jsonl (#604). Since a resumed run now appends chunks
+// past the previous attempt's highest index, chunk order is write order,
+// and readers that resolve duplicate records by "last one wins" depend on
+// getting them in that order. Ten chunks is nothing for a task like
+// importProjectData, so the lexicographic ordering was wrong in practice
+// and not only in theory.
+//
+// Names that are not chunk files keep lexicographic order among
+// themselves and sort after every chunk file, so an unexpected neighbour
+// can never displace a chunk.
 func jsonlFileNames(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -109,11 +124,22 @@ func jsonlFileNames(dir string) ([]string, error) {
 	}
 	var names []string
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), chunkFileSuffix) {
 			continue
 		}
 		names = append(names, entry.Name())
 	}
+	sort.Slice(names, func(i, j int) bool {
+		iIdx, iOK := chunkIndex(names[i])
+		jIdx, jOK := chunkIndex(names[j])
+		if iOK != jOK {
+			return iOK
+		}
+		if !iOK {
+			return names[i] < names[j]
+		}
+		return iIdx < jIdx
+	})
 	return names, nil
 }
 

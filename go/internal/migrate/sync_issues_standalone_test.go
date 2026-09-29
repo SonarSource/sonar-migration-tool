@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -32,6 +33,10 @@ func TestApplyDefaults(t *testing.T) {
 	if cfg.ProjectKeyPattern != DefaultProjectKeyPattern {
 		t.Errorf("ProjectKeyPattern = %q, want %q", cfg.ProjectKeyPattern, DefaultProjectKeyPattern)
 	}
+	// #571.
+	if cfg.MaxIssueComments != DefaultMaxIssueComments {
+		t.Errorf("MaxIssueComments = %d, want %d", cfg.MaxIssueComments, DefaultMaxIssueComments)
+	}
 }
 
 func TestApplyDefaultsPreservesExplicitValuesAndAddsTrailingSlash(t *testing.T) {
@@ -41,6 +46,7 @@ func TestApplyDefaultsPreservesExplicitValuesAndAddsTrailingSlash(t *testing.T) 
 		ExportDirectory:   "/tmp/custom",
 		URL:               "https://sqc.example.com",
 		ProjectKeyPattern: "acme_<ORIGINAL_PROJECT_KEY>",
+		MaxIssueComments:  12,
 	}
 	cfg.applyDefaults()
 
@@ -58,6 +64,21 @@ func TestApplyDefaultsPreservesExplicitValuesAndAddsTrailingSlash(t *testing.T) 
 	}
 	if cfg.ProjectKeyPattern != "acme_<ORIGINAL_PROJECT_KEY>" {
 		t.Errorf("ProjectKeyPattern = %q, want explicit value preserved", cfg.ProjectKeyPattern)
+	}
+	if cfg.MaxIssueComments != 12 {
+		t.Errorf("MaxIssueComments = %d, want 12 (explicit value preserved)", cfg.MaxIssueComments)
+	}
+}
+
+// #571 — a value above MaxAllowedIssueComments is rejected up front, before
+// any client is built or API call made, rather than silently clamped.
+func TestRunSyncIssuesRejectsExcessiveMaxIssueComments(t *testing.T) {
+	_, err := RunSyncIssues(context.Background(), SyncIssuesConfig{MaxIssueComments: MaxAllowedIssueComments + 1})
+	if err == nil {
+		t.Fatal("expected an error for max_issue_comments above the allowed maximum")
+	}
+	if !strings.Contains(err.Error(), "max_issue_comments") {
+		t.Errorf("expected the error to name max_issue_comments, got: %v", err)
 	}
 }
 

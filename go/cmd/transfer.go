@@ -45,14 +45,53 @@ const (
 	flagSkipProjectDataMigration = "skip_project_data_migration"
 	flagFastSync                 = "fast_sync"
 	flagConcurrency              = "concurrency"
+	flagAPIMaxRatePerMin         = "api_max_rate_per_min"
 	flagTimeout                  = "timeout"
 	flagPEMFilePath              = "pem_file_path"
 	flagKeyFilePath              = "key_file_path"
 	flagCertPassword             = "cert_password"
+	flagInsecure                 = "insecure"
 	flagDebug                    = "debug"
 	flagExcludeBranches          = "exclude_branches"
-	flagUnsupportedLanguages     = "unsupported_languages"
+	// flagBranchRegexp — #582: regexp of branch names to extract/migrate.
+	flagBranchRegexp         = "branch_regexp"
+	flagUnsupportedLanguages = "unsupported_languages"
+	flagMaxIssueComments     = "max_issue_comments"
+	// #554 — PoC project-history migration flags.
+	flagMigrateHistory         = "migrate_history"
+	flagHistoryMaxPoints       = "history_max_points"
+	flagHistoryMinIntervalDays = "history_min_interval_days"
+	flagBranchAnalyzedAfter    = "branch_analyzed_after"
+
+	// #573 — SonarQube Cloud API rate limiting. minAPIMaxRatePerMin /
+	// maxAPIMaxRatePerMin bound --api_max_rate_per_min; out-of-range
+	// values abort the command (validateAPIMaxRatePerMin) rather than
+	// being clamped.
+	minAPIMaxRatePerMin = 100
+	maxAPIMaxRatePerMin = 1500
 )
+
+// insecureFlagHelp is shared by extract, transfer and sync-issues so the
+// wording of this security-relevant flag stays identical on all three.
+const insecureFlagHelp = "Skip TLS certificate verification when connecting to the source " + sqServerName +
+	". Only for a trusted internal server whose certificate is self-signed or not signed by a trusted CA — " +
+	"it leaves the connection open to man-in-the-middle interception. Defaults to false. " +
+	"(maps to source.insecure) #586"
+
+// insecureWarning is printed once per run when --insecure is in effect, so
+// an operator who set it in a config file months ago still sees it.
+const insecureWarning = "--" + flagInsecure + " is set: TLS certificate verification is disabled for the source " +
+	sqServerName + " connection, which is vulnerable to man-in-the-middle interception"
+
+// warnIfInsecure emits insecureWarning when insecure is set. Called from
+// each command's run function rather than from the SDK option builder,
+// which runs more than once per command (the version-detection client is
+// built separately) and would repeat the line.
+func warnIfInsecure(insecure bool) {
+	if insecure {
+		slog.Default().Warn(insecureWarning)
+	}
+}
 
 // transferTargetTasks is the explicit set of project-scoped "leaf" migrate
 // tasks the transfer command runs. Their transitive dependencies — creating
@@ -187,44 +226,79 @@ func init() {
 	f.Bool(flagSkipIssueSync, false, "Skip the final per-issue and per-hotspot metadata sync (#299). Same semantics as the skip_issue_sync config-file field — defaults to false (sync happens); pass the flag to skip.")
 	f.Bool(flagSkipProjectDataMigration, false, "Skip the entire project-data migration: importProjectData and the trailing per-issue/per-hotspot sync (#303). Defaults to false (data is migrated); pass the flag to skip.")
 	f.Bool(flagFastSync, false, "Skip tagging and back-linking hotspots/issues with zero user changes on the source (original state, no comments, no custom tags). Defaults to false (every hotspot is tagged and back-linked). #527.")
-	f.Int(flagConcurrency, 0, "Max concurrent requests, applied to both source and target (default: 25). Use source.concurrency / target.concurrency in the config file to set them independently.")
+	f.Int(flagConcurrency, 0, "Max concurrent requests, applied to both source and target (default: 25). Deprecated for the "+scCloudName+" target (#573): "+
+		"only seeds the target side's starting value now — it is always dynamically re-evaluated every 30s from observed API latency. "+
+		"Use --"+flagAPIMaxRatePerMin+" instead to control the target rate. "+
+		"Use source.concurrency / target.concurrency in the config file to set them independently.")
+	f.Int(flagAPIMaxRatePerMin, 0, fmt.Sprintf(
+		"Max sustained %s API calls/min for the target side, as a sliding window (default: 1500, valid range [%d,%d]). "+
+			"Concurrency on the target side is dynamically adjusted to approach this rate without exceeding it (#573).",
+		scCloudName, minAPIMaxRatePerMin, maxAPIMaxRatePerMin))
 	f.Int(flagTimeout, 0, "HTTP request timeout in seconds, applied to both source and target (default: 60). Use source.timeout / target.timeout in the config file to set them independently.")
 	f.String(flagPEMFilePath, "", "Path to client mTLS PEM file for the source server (maps to source.pem_file_path)")
 	f.String(flagKeyFilePath, "", "Path to client mTLS key file for the source server (maps to source.key_file_path)")
 	f.String(flagCertPassword, "", "Password for the source server mTLS client certificate (maps to source.cert_password)")
+	f.Bool(flagInsecure, false, insecureFlagHelp)
 	// --debug is inherited from the persistent root flag; see cmd/root.go.
 	f.StringSlice(flagExcludeBranches, nil, "Glob patterns for non-main branches to skip during project data import (e.g. feature/*,bugfix/*)")
+	f.String(flagBranchRegexp, "", "Regexp of branch names to extract and migrate (maps to source.branch_regexp / target.branch_regexp, or the top-level branch_regexp). Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"(main|master)\" matches only branches literally named main or master. The project's main branch is always included regardless of match. Applied to both the extract and migrate phases. #582.")
 	f.String(flagUnsupportedLanguages, "", "How to handle files whose language has no quality profile on the target — typically a language from a 3rd-party "+sqServerName+" plugin (#474). "+
 		"\"exclude\" (default) drops those files from the analysis report so the rest of the project still migrates; "+
 		"\"skip\" does not migrate the project's issues/branches at all; "+
 		"\"warn\" submits the report unchanged and lets "+scCloudName+" reject it. (maps to unsupported_languages)")
+	f.Bool(flagMigrateHistory, false, "PoC: also migrate a bounded set of historical analysis snapshots (date + project-level measures) per project's main branch, backdated on "+scCloudName+" (#554). Defaults to false — no change to existing single-snapshot behavior unless set. (maps to migrate_history)")
+	f.Int(flagHistoryMaxPoints, 0, "Max historical snapshots migrated per project when --"+flagMigrateHistory+" is set (default: no cap, every analysis is a candidate). Pass a positive number to bound it. (maps to history_max_points)")
+	f.Int(flagHistoryMinIntervalDays, extract.HistoryUnset, "Minimum spacing, in days, enforced between two migrated historical snapshots when --"+flagMigrateHistory+" is set (default 0 — no spacing rule, every analysis in the source history becomes a candidate). (maps to history_min_interval_days)")
+	f.Int(flagMaxIssueComments, 0, fmt.Sprintf("Max most-recent source comments replayed onto each migrated issue/hotspot (default %d, max %d) — reduces "+scCloudName+" API pressure on long comment threads (#571). (maps to max_issue_comments)", migrate.DefaultMaxIssueComments, migrate.MaxAllowedIssueComments))
+	f.String(flagBranchAnalyzedAfter, "", "Only select branches analyzed on or after this date (YYYY-MM-DD), applied to both source (extract) and target (migrate) phases at once (maps to both source.branch_analyzed_after and target.branch_analyzed_after; use the config file to set them independently). The project's main branch is always selected, even when it doesn't meet this date. #583")
 }
 
 // transferConfig holds the resolved configuration after merging file and flag values.
 type transferConfig struct {
-	sourceURL                string
-	sourceToken              string
-	projectKey               string
-	targetURL                string
-	targetToken              string
-	defaultOrganization      string
-	projectKeyPattern        string
-	enterpriseKey            string
-	edition                  string
-	exportDir                string
-	sourceConcurrency        int
-	targetConcurrency        int
+	sourceURL           string
+	sourceToken         string
+	projectKey          string
+	targetURL           string
+	targetToken         string
+	defaultOrganization string
+	projectKeyPattern   string
+	enterpriseKey       string
+	edition             string
+	exportDir           string
+	sourceConcurrency   int
+	targetConcurrency   int
+	// targetAPIMaxRatePerMin — see MigrateConfig.APIMaxRatePerMin (#573).
+	// Only the target side is Cloud-facing; the source (extract) side has
+	// no equivalent.
+	targetAPIMaxRatePerMin   int
 	sourceTimeout            int
 	targetTimeout            int
 	pemFilePath              string
 	keyFilePath              string
 	certPassword             string
+	insecure                 bool
 	skipIssueSync            bool
 	skipProjectDataMigration bool
 	debug                    bool
 	excludeBranches          []string
-	unsupportedLanguages     string
-	fastSync                 bool
+	// sourceBranchRegexp / targetBranchRegexp — #582. A single --branch_regexp
+	// CLI flag sets both at once (transfer runs extract then migrate for one
+	// project in a single invocation), but the config file can still set
+	// source.branch_regexp / target.branch_regexp independently, mirroring
+	// how extract and migrate resolve the field on their own.
+	sourceBranchRegexp   string
+	targetBranchRegexp   string
+	unsupportedLanguages string
+	fastSync             bool
+	maxIssueComments     int
+	// #554 — PoC project-history migration.
+	migrateHistory         bool
+	historyMaxPoints       int
+	historyMinIntervalDays int
+	// #583 — independently resolved per phase; deliberately not merged or
+	// OR'd across sides like migrateHistory (see loadTransferFileDefaults).
+	branchAnalyzedAfterSource string
+	branchAnalyzedAfterTarget string
 }
 
 func applyFlagString(cmd *cobra.Command, name string, target *string) {
@@ -247,6 +321,20 @@ func applyFlagInt(cmd *cobra.Command, name string, target *int) {
 func applyFlagIntBothSides(cmd *cobra.Command, name string, source, target *int) {
 	if cmd.Flags().Changed(name) {
 		v, _ := cmd.Flags().GetInt(name)
+		*source, *target = v, v
+	}
+}
+
+// applyFlagStringBothSides sets both source and target to the CLI flag's
+// value when it was passed — the string-flag counterpart of
+// applyFlagIntBothSides. Used for --branch_regexp (#582) and
+// --branch_analyzed_after (#583), both of which transfer applies to the
+// extract and migrate phases of its single invocation at once. The config
+// file's source/target sections remain the only way to give the two
+// phases different values, exactly like --concurrency / --timeout.
+func applyFlagStringBothSides(cmd *cobra.Command, name string, source, target *string) {
+	if cmd.Flags().Changed(name) {
+		v, _ := cmd.Flags().GetString(name)
 		*source, *target = v, v
 	}
 }
@@ -286,6 +374,42 @@ func resolveSourceTargetRates(extractCfg extract.ExtractConfig, migrateCfg migra
 func applyFlagBool(cmd *cobra.Command, name string, target *bool) {
 	if cmd.Flags().Changed(name) {
 		*target, _ = cmd.Flags().GetBool(name)
+	}
+}
+
+// validateAPIMaxRatePerMin enforces #573's [minAPIMaxRatePerMin,
+// maxAPIMaxRatePerMin] bound on --api_max_rate_per_min. 0 means "unset" —
+// migrate.MigrateConfig.applyDefaults (and its ResetConfig/SyncIssuesConfig
+// counterparts) fill in 1500 — and is not an error. An out-of-range value
+// aborts the command outright, matching the issue's "trigger a warning and
+// abort" requirement, rather than silently clamping to the nearest bound.
+func validateAPIMaxRatePerMin(v int) error {
+	if v == 0 {
+		return nil
+	}
+	if v < minAPIMaxRatePerMin || v > maxAPIMaxRatePerMin {
+		return fmt.Errorf("--%s must be between %d and %d (got %d)", flagAPIMaxRatePerMin, minAPIMaxRatePerMin, maxAPIMaxRatePerMin, v)
+	}
+	return nil
+}
+
+// warnIfConcurrencyDeprecated logs once when a concurrency value is in
+// effect for a SonarQube Cloud target (#573: migrate, transfer,
+// sync-issues, reset all target Cloud) — whether it came from --concurrency
+// on the CLI or from a config file's "concurrency" field. A set value no
+// longer pins concurrency: it only seeds the ConcurrencyLimiter's starting
+// point, which is dynamically re-evaluated every 30s from the moment the
+// run starts regardless (newConcurrencyLimiter is always dynamic). This
+// still warns because --api_max_rate_per_min, not --concurrency, is now
+// the supported way to influence the target throughput.
+//
+// concurrency is the resolved value (config file merged with any CLI
+// override) BEFORE applyDefaults fills in the 25 default, so 0 here means
+// "genuinely unset by the caller."
+func warnIfConcurrencyDeprecated(concurrency int) {
+	if concurrency > 0 {
+		slog.Default().Warn("a concurrency value (--" + flagConcurrency + " or the config file's \"concurrency\" field) is deprecated for SonarQube Cloud targets; use --" + flagAPIMaxRatePerMin +
+			" instead to control the target API rate. The value is now only used as the starting concurrency — it is dynamically re-evaluated every 30s based on observed API latency regardless.")
 	}
 }
 
@@ -347,13 +471,43 @@ func loadTransferFileDefaults(path string) (transferConfig, error) {
 	cfg.pemFilePath = extractCfg.PEMFilePath
 	cfg.keyFilePath = extractCfg.KeyFilePath
 	cfg.certPassword = extractCfg.CertPassword
+	cfg.insecure = extractCfg.Insecure
 
 	cfg.skipIssueSync = migrateCfg.SkipIssueSync
 	cfg.skipProjectDataMigration = migrateCfg.SkipProjectDataMigration
 	cfg.debug = migrateCfg.Debug
 	cfg.excludeBranches = migrateCfg.ExcludeBranches
+	// #582 — each side keeps its own independently-resolved config-file
+	// value (extractCfg.BranchRegexp already applied source.branch_regexp
+	// vs top-level precedence; migrateCfg.BranchRegexp did the same for
+	// target.branch_regexp). --branch_regexp on the CLI overrides both at
+	// once via applyFlagStringBothSides in resolveTransferConfig.
+	cfg.sourceBranchRegexp = extractCfg.BranchRegexp
+	cfg.targetBranchRegexp = migrateCfg.BranchRegexp
 	cfg.unsupportedLanguages = migrateCfg.UnsupportedLanguages
 	cfg.fastSync = migrateCfg.FastSync
+	cfg.maxIssueComments = migrateCfg.MaxIssueComments
+	// #554 — the two bounds exist only on the extract side (they bound the
+	// source-side API calls extract makes). migrate_history, though, can be
+	// set in two places: the top-level plain bool the extract loader reads,
+	// or under "target", which only the migrate loader resolves (its
+	// tri-state gives the target block precedence). Taking the extract value
+	// alone would make a config that sets only target.migrate_history — which
+	// the schema and ADVANCED-CONFIG both advertise — silently do nothing on
+	// transfer: no history extracted, none replayed, no warning. Accept
+	// either.
+	cfg.migrateHistory = extractCfg.MigrateHistory || migrateCfg.MigrateHistory
+	cfg.historyMaxPoints = extractCfg.HistoryMaxPoints
+	cfg.historyMinIntervalDays = extractCfg.HistoryMinIntervalDays
+	// #583 — unlike migrateHistory, branch_analyzed_after is NOT merged or
+	// OR'd across sides: an unset filter ("select every branch") is itself
+	// a meaningful, deliberate value, and the issue's own examples rely on
+	// extract and migrate being allowed different cutoffs. Each loader has
+	// already resolved its own top-level-vs-section precedence, so take
+	// each phase's resolved value independently, with no fallback to the
+	// other side.
+	cfg.branchAnalyzedAfterSource = extractCfg.BranchAnalyzedAfter
+	cfg.branchAnalyzedAfterTarget = migrateCfg.BranchAnalyzedAfter
 	return cfg, nil
 }
 
@@ -380,10 +534,12 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 	applyFlagString(cmd, flagEdition, &cfg.edition)
 	applyFlagString(cmd, flagExportDir, &cfg.exportDir)
 	applyFlagIntBothSides(cmd, flagConcurrency, &cfg.sourceConcurrency, &cfg.targetConcurrency)
+	applyFlagInt(cmd, flagAPIMaxRatePerMin, &cfg.targetAPIMaxRatePerMin)
 	applyFlagIntBothSides(cmd, flagTimeout, &cfg.sourceTimeout, &cfg.targetTimeout)
 	applyFlagString(cmd, flagPEMFilePath, &cfg.pemFilePath)
 	applyFlagString(cmd, flagKeyFilePath, &cfg.keyFilePath)
 	applyFlagString(cmd, flagCertPassword, &cfg.certPassword)
+	applyFlagBool(cmd, flagInsecure, &cfg.insecure)
 	// --skip_issue_sync is one-way: explicit true on the CLI sets
 	// skipIssueSync, but the absence of the flag does NOT undo a
 	// config-file skip_issue_sync: true.
@@ -405,8 +561,23 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 	if cmd.Flags().Changed(flagExcludeBranches) {
 		cfg.excludeBranches, _ = cmd.Flags().GetStringSlice(flagExcludeBranches)
 	}
+	applyFlagStringBothSides(cmd, flagBranchRegexp, &cfg.sourceBranchRegexp, &cfg.targetBranchRegexp)
 	applyFlagString(cmd, flagUnsupportedLanguages, &cfg.unsupportedLanguages)
 	applyFlagBool(cmd, flagFastSync, &cfg.fastSync)
+	applyFlagInt(cmd, flagMaxIssueComments, &cfg.maxIssueComments)
+	// --migrate_history is one-way, same semantics as --skip_project_data_migration. #554.
+	if cmd.Flags().Changed(flagMigrateHistory) {
+		v, _ := cmd.Flags().GetBool(flagMigrateHistory)
+		if v {
+			cfg.migrateHistory = true
+		}
+	}
+	applyFlagInt(cmd, flagHistoryMaxPoints, &cfg.historyMaxPoints)
+	applyFlagInt(cmd, flagHistoryMinIntervalDays, &cfg.historyMinIntervalDays)
+	// #583 — the single transfer flag sets both phases identically when
+	// passed; differing per-phase values are only reachable via the config
+	// file's source/target sections.
+	applyFlagStringBothSides(cmd, flagBranchAnalyzedAfter, &cfg.branchAnalyzedAfterSource, &cfg.branchAnalyzedAfterTarget)
 
 	if cfg.exportDir == "" {
 		cfg.exportDir = "./migration-files/"
@@ -442,10 +613,39 @@ func validateTransferConfig(cfg transferConfig) error {
 	if _, err := anchoredProjectKeyPattern(cfg.projectKey); err != nil {
 		return fmt.Errorf("invalid --%s pattern %q: %w", flagProjectKey, cfg.projectKey, err)
 	}
+	// #582 — reject an invalid --branch_regexp pattern up front, same
+	// rationale as --project_key above.
+	if cfg.sourceBranchRegexp != "" {
+		if _, err := anchoredProjectKeyPattern(cfg.sourceBranchRegexp); err != nil {
+			return fmt.Errorf("invalid branch regexp pattern %q: %w", cfg.sourceBranchRegexp, err)
+		}
+	}
+	if cfg.targetBranchRegexp != "" && cfg.targetBranchRegexp != cfg.sourceBranchRegexp {
+		if _, err := anchoredProjectKeyPattern(cfg.targetBranchRegexp); err != nil {
+			return fmt.Errorf("invalid branch regexp pattern %q: %w", cfg.targetBranchRegexp, err)
+		}
+	}
 	// #474 — reject an unknown handling mode up front rather than silently
 	// falling back to the default after the extract phase has already run.
 	if _, err := migrate.ParseUnsupportedLanguageMode(cfg.unsupportedLanguages); err != nil {
 		return fmt.Errorf("--%s: %w", flagUnsupportedLanguages, err)
+	}
+	// #571 — reject an out-of-range cap up front rather than silently
+	// clamping it deep inside the issue/hotspot sync.
+	if err := migrate.ValidateMaxIssueComments(cfg.maxIssueComments); err != nil {
+		return fmt.Errorf("--%s: %w", flagMaxIssueComments, err)
+	}
+	if err := validateAPIMaxRatePerMin(cfg.targetAPIMaxRatePerMin); err != nil {
+		return err
+	}
+	// #583 — validate both independently resolved cutoffs; each can carry
+	// its own bad-format error or staleness warning. Each side is labeled
+	// so the two advisories are distinguishable in the log.
+	if err := validateBranchAnalyzedAfterSide(cfg.branchAnalyzedAfterSource, "source"); err != nil {
+		return fmt.Errorf("--%s (source): %w", flagBranchAnalyzedAfter, err)
+	}
+	if err := validateBranchAnalyzedAfterSide(cfg.branchAnalyzedAfterTarget, "target"); err != nil {
+		return fmt.Errorf("--%s (target): %w", flagBranchAnalyzedAfter, err)
 	}
 	return nil
 }
@@ -473,6 +673,9 @@ func runTransfer(cmd *cobra.Command, _ []string) error {
 	if err := validateTransferConfig(cfg); err != nil {
 		return err
 	}
+	warnIfInsecure(cfg.insecure)
+	// Transfer's target is always SonarQube Cloud (#573).
+	warnIfConcurrencyDeprecated(cfg.targetConcurrency)
 
 	ctx := cmd.Context()
 
@@ -537,6 +740,7 @@ func resolveTransferProjectKeys(ctx context.Context, cfg transferConfig) ([]stri
 		PEMFilePath:  cfg.pemFilePath,
 		KeyFilePath:  cfg.keyFilePath,
 		CertPassword: cfg.certPassword,
+		Insecure:     cfg.insecure,
 		Debug:        cfg.debug,
 	})
 	if err != nil {
@@ -575,12 +779,20 @@ func runTransferExtract(ctx context.Context, cfg transferConfig) ([]string, erro
 		PEMFilePath:     cfg.pemFilePath,
 		KeyFilePath:     cfg.keyFilePath,
 		CertPassword:    cfg.certPassword,
+		Insecure:        cfg.insecure,
+		BranchRegexp:    cfg.sourceBranchRegexp,
 		// Transfer extracts the project's issues and hotspots so the
 		// downstream migrate phase can replay them. Only skipped when
 		// the operator opts out of project-data migration entirely
 		// via --skip_project_data_migration.
 		IncludeProjectData: !cfg.skipProjectDataMigration,
 		Debug:              cfg.debug,
+		// #554 — PoC project-history migration; a no-op unless set.
+		MigrateHistory:         cfg.migrateHistory,
+		HistoryMaxPoints:       cfg.historyMaxPoints,
+		HistoryMinIntervalDays: cfg.historyMinIntervalDays,
+		// #583 — a no-op unless set; independent of the target-side cutoff.
+		BranchAnalyzedAfter: cfg.branchAnalyzedAfterSource,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("extract failed: %w", err)
@@ -658,13 +870,14 @@ func runTransferMigrate(ctx context.Context, cfg transferConfig) (string, error)
 	// cfg.defaultOrganization, so passing it again would trigger the
 	// "mapping defined, default ignored" WARN in applyOrgMapping.
 	runID, err := migrate.RunMigrate(ctx, migrate.MigrateConfig{
-		URL:             cfg.targetURL,
-		Token:           cfg.targetToken,
-		EnterpriseKey:   cfg.enterpriseKey,
-		Edition:         cfg.edition,
-		ExportDirectory: cfg.exportDir,
-		Concurrency:     cfg.targetConcurrency,
-		Timeout:         cfg.targetTimeout,
+		URL:              cfg.targetURL,
+		Token:            cfg.targetToken,
+		EnterpriseKey:    cfg.enterpriseKey,
+		Edition:          cfg.edition,
+		ExportDirectory:  cfg.exportDir,
+		Concurrency:      cfg.targetConcurrency,
+		APIMaxRatePerMin: cfg.targetAPIMaxRatePerMin,
+		Timeout:          cfg.targetTimeout,
 		// Project-scoped migration: run only the leaf tasks for the project,
 		// its quality gate/profiles, permissions, and issue/hotspot history.
 		// Their dependencies are resolved automatically.
@@ -674,9 +887,14 @@ func runTransferMigrate(ctx context.Context, cfg transferConfig) (string, error)
 		SkipProjectDataMigration: cfg.skipProjectDataMigration,
 		Debug:                    cfg.debug,
 		ExcludeBranches:          cfg.excludeBranches,
+		BranchRegexp:             cfg.targetBranchRegexp,
 		UnsupportedLanguages:     cfg.unsupportedLanguages,
 		FastSync:                 cfg.fastSync,
 		ProjectKeyPattern:        cfg.projectKeyPattern,
+		MigrateHistory:           cfg.migrateHistory,
+		MaxIssueComments:         cfg.maxIssueComments,
+		// #583 — a no-op unless set; independent of the source-side cutoff.
+		BranchAnalyzedAfter: cfg.branchAnalyzedAfterTarget,
 	})
 	if err != nil {
 		return "", fmt.Errorf("migrate failed: %w", err)

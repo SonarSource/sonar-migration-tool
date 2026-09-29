@@ -8,7 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
 // The legacy config shapes are no longer shipped as example files (the
@@ -56,6 +59,9 @@ func TestLoadExtractConfigFileShapes(t *testing.T) {
 				ExportDirectory: "./files",
 				Concurrency:     10,
 				Timeout:         60,
+				// #554: an absent history_min_interval_days loads as the
+				// "caller said nothing" sentinel, not 0 (0 means "no spacing").
+				HistoryMinIntervalDays: HistoryUnset,
 			},
 		},
 		{
@@ -68,6 +74,9 @@ func TestLoadExtractConfigFileShapes(t *testing.T) {
 				ExtractType:     "all",
 				Concurrency:     10,
 				Timeout:         60,
+				// #554: an absent history_min_interval_days loads as the
+				// "caller said nothing" sentinel, not 0 (0 means "no spacing").
+				HistoryMinIntervalDays: HistoryUnset,
 			},
 		},
 		{
@@ -79,6 +88,9 @@ func TestLoadExtractConfigFileShapes(t *testing.T) {
 				ExportDirectory: "./files",
 				Concurrency:     10,
 				Timeout:         60,
+				// #554: an absent history_min_interval_days loads as the
+				// "caller said nothing" sentinel, not 0 (0 means "no spacing").
+				HistoryMinIntervalDays: HistoryUnset,
 			},
 		},
 	}
@@ -147,6 +159,9 @@ func TestLoadExtractConfigFileSnakeCaseFields(t *testing.T) {
 		TargetTask:               "getRules",
 		SkipProjectDataMigration: true,
 		SkipIssueSync:            true,
+		// #554: an absent history_min_interval_days loads as the
+		// "caller said nothing" sentinel, not 0 (0 means "no spacing").
+		HistoryMinIntervalDays: HistoryUnset,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("snake_case round-trip mismatch\n got=%+v\nwant=%+v", got, want)
@@ -248,5 +263,337 @@ func TestLoadExtractConfigFileUnifiedShape_SourceOverridesGlobals(t *testing.T) 
 	cfg, _ := LoadExtractConfigFile(path)
 	if cfg.Concurrency != 25 || cfg.Timeout != 120 {
 		t.Errorf("override: concurrency=%d timeout=%d", cfg.Concurrency, cfg.Timeout)
+	}
+}
+
+// #586: "insecure" lives next to the mTLS fields — under "source" in the
+// unified shape, top-level in the flat shape — and must default to false
+// when absent so an existing config file keeps verifying certificates.
+func TestLoadExtractConfigFileInsecure(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"unified source block", `{"source": {"url": "u", "token": "t", "insecure": true}}`, true},
+		{"unified absent", `{"source": {"url": "u", "token": "t"}}`, false},
+		{"flat shape", `{"url": "u", "token": "t", "insecure": true}`, true},
+		{"flat absent", `{"url": "u", "token": "t"}`, false},
+		{"command-sectioned", `{"extract": {"url": "u", "token": "t", "insecure": true}}`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := t.TempDir() + "/insecure.json"
+			if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadExtractConfigFile(path)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if cfg.Insecure != tc.want {
+				t.Errorf("Insecure = %v, want %v", cfg.Insecure, tc.want)
+			}
+		})
+	}
+}
+
+// #536: "objects" and "project_key" are top-level-only fields, present in
+// every documented shape. These tests round-trip them the same way the
+// TestLoadExtractConfigFileUnifiedShape* tests above round-trip the rest
+// of the unified shape's fields, plus the flat and command-sectioned
+// shapes where the "global level" placement matters most.
+// The following TestLoadExtractConfigFileObjectsAndProjectKey_* functions
+// were originally one function with a t.Run per shape; split into
+// independent top-level tests to keep cognitive complexity low (each
+// covers exactly one config-file shape).
+
+func TestLoadExtractConfigFileObjectsAndProjectKey_FlatShape(t *testing.T) {
+	body := `{
+  "url": "http://sq.example.com",
+  "token": "tok",
+  "objects": ["quality_gates", "qp"],
+  "project_key": "BANKING_.+"
+}`
+	path := filepath.Join(t.TempDir(), "flat.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.Objects[common.ObjectQualityGates] || !cfg.Objects[common.ObjectQualityProfiles] {
+		t.Errorf("expected quality_gates + quality_profiles (via qp alias), got %+v", cfg.Objects)
+	}
+	if len(cfg.Objects) != 2 {
+		t.Errorf("expected exactly 2 categories, got %+v", cfg.Objects)
+	}
+	if cfg.ProjectKey != "BANKING_.+" {
+		t.Errorf("ProjectKey: got %q", cfg.ProjectKey)
+	}
+}
+
+func TestLoadExtractConfigFileObjectsAndProjectKey_UnifiedShape(t *testing.T) {
+	body := `{
+  "objects": ["groups"],
+  "project_key": "my-project",
+  "source": { "url": "u", "token": "t" }
+}`
+	path := filepath.Join(t.TempDir(), "unified.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.Objects[common.ObjectGroups] || len(cfg.Objects) != 1 {
+		t.Errorf("Objects: got %+v", cfg.Objects)
+	}
+	if cfg.ProjectKey != "my-project" {
+		t.Errorf("ProjectKey: got %q", cfg.ProjectKey)
+	}
+}
+
+func TestLoadExtractConfigFileObjectsAndProjectKey_SideSectionedShape(t *testing.T) {
+	body := `{
+  "sonarqube": { "url": "http://sq.example.com", "token": "tok" },
+  "objects": ["portfolios"],
+  "project_key": "PORTFOLIO_PROJ"
+}`
+	path := filepath.Join(t.TempDir(), "side.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.Objects[common.ObjectPortfolios] || len(cfg.Objects) != 1 {
+		t.Errorf("Objects: got %+v", cfg.Objects)
+	}
+	if cfg.ProjectKey != "PORTFOLIO_PROJ" {
+		t.Errorf("ProjectKey: got %q", cfg.ProjectKey)
+	}
+}
+
+func TestLoadExtractConfigFileObjectsAndProjectKey_CommandSectionedGlobalWins(t *testing.T) {
+	body := `{
+  "objects": ["settings"],
+  "project_key": "GLOBAL_PROJ",
+  "extract": {
+    "url": "http://sq.example.com",
+    "token": "tok",
+    "objects": ["projects"],
+    "project_key": "NESTED_PROJ"
+  }
+}`
+	path := filepath.Join(t.TempDir(), "sectioned.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.Objects[common.ObjectSettings] || len(cfg.Objects) != 1 {
+		t.Errorf("expected global-level objects (settings) to win, got %+v", cfg.Objects)
+	}
+	if cfg.ProjectKey != "GLOBAL_PROJ" {
+		t.Errorf("expected global-level project_key to win, got %q", cfg.ProjectKey)
+	}
+}
+
+func TestLoadExtractConfigFileObjectsAndProjectKey_CommandSectionedFallsBackToNested(t *testing.T) {
+	body := `{
+  "extract": {
+    "url": "http://sq.example.com",
+    "token": "tok",
+    "objects": ["projects"],
+    "project_key": "NESTED_PROJ"
+  }
+}`
+	path := filepath.Join(t.TempDir(), "sectioned-fallback.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.Objects[common.ObjectProjects] || len(cfg.Objects) != 1 {
+		t.Errorf("expected fallback to nested objects (projects), got %+v", cfg.Objects)
+	}
+	if cfg.ProjectKey != "NESTED_PROJ" {
+		t.Errorf("expected fallback to nested project_key, got %q", cfg.ProjectKey)
+	}
+}
+
+func TestLoadExtractConfigFileObjectsAndProjectKey_NoObjectsMeansEverything(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "no-objects.json")
+	if err := os.WriteFile(path, []byte(`{"url": "u", "token": "t"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Objects != nil {
+		t.Errorf("expected nil Objects, got %+v", cfg.Objects)
+	}
+}
+
+// #582: "branch_regexp" round-trips for the flat shape, same as
+// "project_key" above.
+func TestLoadExtractConfigFileBranchRegexp_FlatShape(t *testing.T) {
+	body := `{
+  "url": "http://sq.example.com",
+  "token": "tok",
+  "branch_regexp": "release/.+"
+}`
+	path := filepath.Join(t.TempDir(), "flat-branch-regexp.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchRegexp != "release/.+" {
+		t.Errorf("BranchRegexp: got %q", cfg.BranchRegexp)
+	}
+}
+
+// #582: in the unified shape, "source.branch_regexp" wins over the
+// top-level "branch_regexp" when both are set.
+func TestLoadExtractConfigFileBranchRegexp_UnifiedShape_SourceOverridesTopLevel(t *testing.T) {
+	body := `{
+  "branch_regexp": "top-level-.+",
+  "source": {
+    "url": "u", "token": "t",
+    "branch_regexp": "source-.+"
+  }
+}`
+	path := filepath.Join(t.TempDir(), "unified-branch-regexp-override.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchRegexp != "source-.+" {
+		t.Errorf("expected source.branch_regexp to win, got %q", cfg.BranchRegexp)
+	}
+}
+
+// #582: in the unified shape, the top-level "branch_regexp" is used when
+// the "source" block doesn't set its own.
+func TestLoadExtractConfigFileBranchRegexp_UnifiedShape_FallsBackToTopLevel(t *testing.T) {
+	body := `{
+  "branch_regexp": "top-level-.+",
+  "source": { "url": "u", "token": "t" }
+}`
+	path := filepath.Join(t.TempDir(), "unified-branch-regexp-fallback.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchRegexp != "top-level-.+" {
+		t.Errorf("expected fallback to top-level branch_regexp, got %q", cfg.BranchRegexp)
+	}
+}
+
+func TestLoadExtractConfigFileObjectsAndProjectKey_InvalidObjectsValueErrors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bad-objects.json")
+	if err := os.WriteFile(path, []byte(`{"url": "u", "token": "t", "objects": ["not_a_real_category"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadExtractConfigFile(path)
+	if err == nil {
+		t.Fatal("expected an error for an invalid objects value")
+	}
+	if !strings.Contains(err.Error(), "not_a_real_category") {
+		t.Errorf("expected error to name the invalid token, got: %v", err)
+	}
+}
+
+// #583: branch_analyzed_after precedence tests, one per documented shape,
+// mirroring the objects/project_key precedence tests above.
+
+func TestLoadExtractConfigFileBranchAnalyzedAfter_FlatShape(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "flat.json")
+	body := `{"url": "u", "token": "t", "branch_analyzed_after": "2024-01-01"}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchAnalyzedAfter != "2024-01-01" {
+		t.Errorf("BranchAnalyzedAfter = %q, want %q", cfg.BranchAnalyzedAfter, "2024-01-01")
+	}
+}
+
+func TestLoadExtractConfigFileBranchAnalyzedAfter_UnifiedShapeTopLevelOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "unified.json")
+	body := `{
+  "branch_analyzed_after": "2024-01-01",
+  "source": {"url": "u", "token": "t"}
+}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchAnalyzedAfter != "2024-01-01" {
+		t.Errorf("BranchAnalyzedAfter = %q, want top-level fallback %q", cfg.BranchAnalyzedAfter, "2024-01-01")
+	}
+}
+
+func TestLoadExtractConfigFileBranchAnalyzedAfter_SourceOverridesTopLevel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "unified.json")
+	body := `{
+  "branch_analyzed_after": "2024-01-01",
+  "source": {"url": "u", "token": "t", "branch_analyzed_after": "2025-06-01"}
+}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchAnalyzedAfter != "2025-06-01" {
+		t.Errorf("BranchAnalyzedAfter = %q, want source override %q", cfg.BranchAnalyzedAfter, "2025-06-01")
+	}
+}
+
+// TestLoadExtractConfigFileBranchAnalyzedAfter_SourceExplicitEmptyOverridesTopLevel
+// proves the tri-state pointer design (#583): an explicit
+// "source.branch_analyzed_after": "" clears a non-empty top-level filter for
+// extract, rather than being treated as "not set" and falling through.
+func TestLoadExtractConfigFileBranchAnalyzedAfter_SourceExplicitEmptyOverridesTopLevel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "unified.json")
+	body := `{
+  "branch_analyzed_after": "2024-01-01",
+  "source": {"url": "u", "token": "t", "branch_analyzed_after": ""}
+}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BranchAnalyzedAfter != "" {
+		t.Errorf("BranchAnalyzedAfter = %q, want explicit empty override to clear the top-level filter", cfg.BranchAnalyzedAfter)
 	}
 }

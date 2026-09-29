@@ -160,7 +160,10 @@ After issues are uploaded via scanner reports, this phase matches each SonarQube
 
 **What it migrates:**
 - **Issue statuses**: OPEN, CONFIRMED, FALSE_POSITIVE, WONTFIX, ACCEPTED, RESOLVED, CLOSED
-- **Issue comments**: All comments with original author attribution (`[Migrated from SonarQube Server - @author]`)
+- **Issue comments**: the most recent `max_issue_comments` comments (default `5`, max `20`) with
+  original author attribution (`[Migrated from SonarQube Server - @author]`). Older comments beyond
+  the cap are not sent, to reduce `api/issues/add_comment` pressure on SonarQube Cloud (#571). The
+  same cap applies to hotspot review comments, which are posted on the migrated issue.
 - **Issue tags**: Custom tags applied by users, written as the union of the source issue's full tag list and the tags the Cloud issue already carries (`set_tags` replaces rather than merges, so the union is what preserves both sides)
 - **Issue assignments**: User assignments mapped via `users.csv`
 - Pre-filtering skips issues with no manual changes (60-80% of typical enterprise issues), dramatically reducing API calls. A user-added tag is itself a trigger, so an **OPEN** issue that only carries a custom tag is still synced — no status change is required.
@@ -319,7 +322,10 @@ Migration of non-main branches and their associated analysis data.
 - Per-branch issues, hotspots, and measures (each branch's full project data)
 - All non-main branches as long-lived branches (short-lived/PR branches are not separately recreated; everything is migrated long-lived to preserve history)
 - Configurable branch inclusion/exclusion patterns (`--exclude_branches`)
+- Regexp pattern to select which branches are extracted/migrated by name (always anchored ^...$); the main branch is always included regardless of match. (`--branch_regexp`)
+- Date-based branch selection (`--branch_analyzed_after <YYYY-MM-DD>`): only branches last analyzed on or after the given date are selected during `extract`/`migrate`/`transfer`; the project's main branch is always selected regardless, even if it doesn't meet the date (#583)
 - Branches whose source is no longer retrievable on the server are skipped with a clear message
+- Hard cap of **10 migrated branches per project** (#584): main/`master`/`develop` first, then `[Rr]elease.*` branches most-recently-analyzed first, then everything else most-recently-analyzed first. Dropped branches are named in the migration report. `extract` is unaffected.
 
 ### Phase 4: Verification, Reporting & User Experience (P1/P2/P3)
 <!-- updated: 2026-06-04_12:00:00 -->
@@ -496,7 +502,7 @@ Each version has a dedicated extraction/encoding pipeline to handle API differen
 <!-- updated: 2026-07-27_23:55:00 -->
 
 ### SonarQube Server (Source -- Read Only)
-<!-- updated: 2026-07-27_23:55:00 -->
+<!-- updated: 2026-09-02_12:28:13 -->
 
 | Endpoint | Purpose |
 |----------|---------|
@@ -508,7 +514,8 @@ Each version has a dedicated extraction/encoding pipeline to handle API differen
 | `/api/sources/lines` | Extract syntax highlighting (and source-text fallback) |
 | `/api/sources/scm` | Extract SCM blame data |
 | `/api/measures/component` | Extract project measures |
-| `/api/measures/search_history` | Extract measure history |
+| `/api/project_analyses/search` | List a project's full historical analysis dates for `--migrate_history` (PoC, issue #554; `getProjectAnalysisHistory`, opt-in only) |
+| `/api/measures/search_history` | Extract a project's measures as of one historical analysis date for `--migrate_history` (PoC, issue #554; `getProjectAnalysisHistory`, opt-in only — this endpoint was listed here as aspirational documentation before #554 implemented it) |
 | `/api/rules/search` | Extract rule definitions |
 | `/api/qualityprofiles/search` | Extract quality profiles |
 | `/api/qualitygates/list` | Extract quality gates |

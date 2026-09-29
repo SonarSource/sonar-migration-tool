@@ -515,19 +515,19 @@ func newTestExecutor(cloudSrv, apiSrv *httptest.Server, exportDir string) *Execu
 	apiClient := sqapi.NewCloudClient(apiSrv.URL+"/", "test-token")
 
 	return &Executor{
-		Cloud:     cloud.New(cloudClient),
-		CloudAPI:  cloud.New(apiClient),
-		Raw:       common.NewRawClient(cloudSrv.Client(), cloudSrv.URL+"/"),
-		RawAPI:    common.NewRawClient(apiSrv.Client(), apiSrv.URL+"/"),
-		Store:     common.NewDataStore(runDir),
-		CloudURL:  cloudSrv.URL + "/",
-		APIURL:    apiSrv.URL + "/",
-		EntKey:    "test-enterprise",
-		Edition:   common.EditionEnterprise,
-		ExportDir: exportDir,
-		Mapping:   structure.ExtractMapping{testServerURL: "extract-01"},
-		Sem:       make(chan struct{}, 5),
-		Logger:    slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
+		Cloud:              cloud.New(cloudClient),
+		CloudAPI:           cloud.New(apiClient),
+		Raw:                common.NewRawClient(cloudSrv.Client(), cloudSrv.URL+"/"),
+		RawAPI:             common.NewRawClient(apiSrv.Client(), apiSrv.URL+"/"),
+		Store:              common.NewDataStore(runDir),
+		CloudURL:           cloudSrv.URL + "/",
+		APIURL:             apiSrv.URL + "/",
+		EntKey:             "test-enterprise",
+		Edition:            common.EditionEnterprise,
+		ExportDir:          exportDir,
+		Mapping:            structure.ExtractMapping{testServerURL: "extract-01"},
+		ConcurrencyLimiter: NewFixedConcurrencyLimiter(5),
+		Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
 	}
 }
 

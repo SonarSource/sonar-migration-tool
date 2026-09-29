@@ -214,6 +214,14 @@ func isNonFatalHTTPErr(err error) bool {
 
 // perProjectArray runs a per-project task that fetches an array from an endpoint.
 func perProjectArray(taskName, path, resultKey, paramKey, metaKey string) func(ctx context.Context, e *Executor) error {
+	return perProjectArrayFiltered(taskName, path, resultKey, paramKey, metaKey, nil)
+}
+
+// perProjectArrayFiltered is perProjectArray with an optional per-item keep
+// predicate, applied to each fetched array item before it's written. keep
+// == nil means "keep everything" (perProjectArray's behavior). #582.
+func perProjectArrayFiltered(taskName, path, resultKey, paramKey, metaKey string,
+	keep func(e *Executor, item json.RawMessage) bool) func(ctx context.Context, e *Executor) error {
 	return func(ctx context.Context, e *Executor) error {
 		return forEachDep(ctx, e, taskName, "getProjects",
 			func(ctx context.Context, item json.RawMessage, w *ChunkWriter) error {
@@ -228,9 +236,26 @@ func perProjectArray(taskName, path, resultKey, paramKey, metaKey string) func(c
 					}
 					return err
 				}
+				items = filterItems(e, items, keep)
 				return w.WriteChunk(enrichAll(items, map[string]any{metaKey: key, "serverUrl": e.ServerURL}))
 			})
 	}
+}
+
+// filterItems keeps only the items keep approves of, or returns items
+// unchanged when keep is nil ("keep everything"). Split out of
+// perProjectArrayFiltered to keep that closure's cognitive complexity down.
+func filterItems(e *Executor, items []json.RawMessage, keep func(e *Executor, item json.RawMessage) bool) []json.RawMessage {
+	if keep == nil {
+		return items
+	}
+	filtered := items[:0]
+	for _, it := range items {
+		if keep(e, it) {
+			filtered = append(filtered, it)
+		}
+	}
+	return filtered
 }
 
 // perProjectSingle runs a per-project task that fetches a single object.

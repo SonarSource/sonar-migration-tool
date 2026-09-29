@@ -18,9 +18,9 @@ import (
 	"testing"
 	"time"
 
-	sqapi "github.com/sonar-solutions/sq-api-go"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
+	sqapi "github.com/sonar-solutions/sq-api-go"
 )
 
 func TestLoadCSVToJSONL(t *testing.T) {
@@ -61,6 +61,50 @@ func TestLoadCSVToJSONL(t *testing.T) {
 	}
 }
 
+// runLoadCSVToJSONLResetConfirmedOrgsCase runs one case of
+// TestLoadCSVToJSONLResetConfirmedOrgsFilter — factored out of the
+// t.Run loop to keep that test's own cognitive complexity low.
+func runLoadCSVToJSONLResetConfirmedOrgsCase(t *testing.T, confirmed map[string]bool, wantOrgs []string) {
+	t.Helper()
+	dir := t.TempDir()
+	csvContent := "sonarqube_org_key,sonarcloud_org_key\norg1,cloud-a\norg2,cloud-b\norg3,cloud-c\n"
+	if err := os.WriteFile(filepath.Join(dir, "test.csv"), []byte(csvContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// loadCSVToJSONL also reads organizations.csv for the enrichment
+	// join — write a self-referential one that matches the test rows.
+	if err := os.WriteFile(filepath.Join(dir, "organizations.csv"), []byte(csvContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDir := filepath.Join(dir, "run-01")
+	os.MkdirAll(runDir, 0o755)
+	store := common.NewDataStore(runDir)
+
+	e := &Executor{
+		Store:              store,
+		ExportDir:          dir,
+		ResetConfirmedOrgs: confirmed,
+	}
+	if err := loadCSVToJSONL(e, "testTask", "test.csv"); err != nil {
+		t.Fatalf("loadCSVToJSONL: %v", err)
+	}
+	items, err := store.ReadAll("testTask")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != len(wantOrgs) {
+		t.Fatalf("expected %d items, got %d", len(wantOrgs), len(items))
+	}
+	for i, raw := range items {
+		var row map[string]any
+		_ = json.Unmarshal(raw, &row)
+		got, _ := row["sonarcloud_org_key"].(string)
+		if got != wantOrgs[i] {
+			t.Errorf("row %d: sonarcloud_org_key = %q, want %q", i, got, wantOrgs[i])
+		}
+	}
+}
+
 // #381: when Executor.ResetConfirmedOrgs is set, loadCSVToJSONL must
 // rewrite the sonarcloud_org_key of every un-confirmed row to the
 // SKIPPED sentinel so the existing shouldSkipOrg path naturally
@@ -91,44 +135,7 @@ func TestLoadCSVToJSONLResetConfirmedOrgsFilter(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			dir := t.TempDir()
-			csvContent := "sonarqube_org_key,sonarcloud_org_key\norg1,cloud-a\norg2,cloud-b\norg3,cloud-c\n"
-			if err := os.WriteFile(filepath.Join(dir, "test.csv"), []byte(csvContent), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			// loadCSVToJSONL also reads organizations.csv for the
-			// enrichment join — write a self-referential one that
-			// matches the test rows.
-			if err := os.WriteFile(filepath.Join(dir, "organizations.csv"), []byte(csvContent), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			runDir := filepath.Join(dir, "run-01")
-			os.MkdirAll(runDir, 0o755)
-			store := common.NewDataStore(runDir)
-
-			e := &Executor{
-				Store:              store,
-				ExportDir:          dir,
-				ResetConfirmedOrgs: c.confirmed,
-			}
-			if err := loadCSVToJSONL(e, "testTask", "test.csv"); err != nil {
-				t.Fatalf("loadCSVToJSONL: %v", err)
-			}
-			items, err := store.ReadAll("testTask")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(items) != len(c.wantOrgs) {
-				t.Fatalf("expected %d items, got %d", len(c.wantOrgs), len(items))
-			}
-			for i, raw := range items {
-				var row map[string]any
-				_ = json.Unmarshal(raw, &row)
-				got, _ := row["sonarcloud_org_key"].(string)
-				if got != c.wantOrgs[i] {
-					t.Errorf("row %d: sonarcloud_org_key = %q, want %q", i, got, c.wantOrgs[i])
-				}
-			}
+			runLoadCSVToJSONLResetConfirmedOrgsCase(t, c.confirmed, c.wantOrgs)
 		})
 	}
 }
@@ -163,9 +170,9 @@ func TestForEachMigrateItem(t *testing.T) {
 	})
 
 	e := &Executor{
-		Store:  store,
-		Sem:    make(chan struct{}, 5),
-		Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		Store:              store,
+		ConcurrencyLimiter: NewFixedConcurrencyLimiter(5),
+		Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 	}
 
 	var count atomic.Int32
@@ -200,9 +207,9 @@ func TestForEachMigrateItemSerial(t *testing.T) {
 	})
 
 	e := &Executor{
-		Store:  store,
-		Sem:    make(chan struct{}, 8),
-		Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		Store:              store,
+		ConcurrencyLimiter: NewFixedConcurrencyLimiter(8),
+		Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 	}
 
 	var (
@@ -257,9 +264,9 @@ func TestForEachMigrateItemFiltered(t *testing.T) {
 	})
 
 	e := &Executor{
-		Store:  store,
-		Sem:    make(chan struct{}, 5),
-		Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		Store:              store,
+		ConcurrencyLimiter: NewFixedConcurrencyLimiter(5),
+		Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 	}
 
 	var keys []string
@@ -289,11 +296,11 @@ func TestForEachExtractItem(t *testing.T) {
 	os.MkdirAll(filepath.Join(dir, "run-test"), 0o755)
 
 	e := &Executor{
-		Store:     store,
-		ExportDir: dir,
-		Mapping:   structure.ExtractMapping{testServerURL: "extract-01"},
-		Sem:       make(chan struct{}, 5),
-		Logger:    slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		Store:              store,
+		ExportDir:          dir,
+		Mapping:            structure.ExtractMapping{testServerURL: "extract-01"},
+		ConcurrencyLimiter: NewFixedConcurrencyLimiter(5),
+		Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 	}
 
 	var count int
@@ -444,6 +451,7 @@ func TestTaskCounterEmptySummary(t *testing.T) {
 		t.Errorf("empty counter should not emit succeeded/failed attrs, got: %s", output)
 	}
 }
+
 // #300: runProjectSyncLoop applies fn to every item concurrently and
 // emits a "<label>: N/M - X%" progress line every `interval`
 // completions, including a final 100% line at the end of the batch.
@@ -451,7 +459,7 @@ func TestRunProjectSyncLoop(t *testing.T) {
 	t.Run("issue sync cadence at every 20", func(t *testing.T) {
 		var buf bytes.Buffer
 		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-		e := &Executor{Sem: make(chan struct{}, 4), Logger: logger}
+		e := &Executor{ConcurrencyLimiter: NewFixedConcurrencyLimiter(4), Logger: logger}
 
 		items := make([]int, 40)
 		var applied atomic.Int64
@@ -477,7 +485,7 @@ func TestRunProjectSyncLoop(t *testing.T) {
 	t.Run("issue sync label carries project key (#348)", func(t *testing.T) {
 		var buf bytes.Buffer
 		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-		e := &Executor{Sem: make(chan struct{}, 4), Logger: logger}
+		e := &Executor{ConcurrencyLimiter: NewFixedConcurrencyLimiter(4), Logger: logger}
 
 		const cloudKey = "myorg_some_project_key"
 		label := "Project key " + cloudKey + " issue sync:"
@@ -495,7 +503,7 @@ func TestRunProjectSyncLoop(t *testing.T) {
 	t.Run("hotspot sync cadence at every 10", func(t *testing.T) {
 		var buf bytes.Buffer
 		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-		e := &Executor{Sem: make(chan struct{}, 4), Logger: logger}
+		e := &Executor{ConcurrencyLimiter: NewFixedConcurrencyLimiter(4), Logger: logger}
 
 		items := make([]int, 30)
 		runProjectSyncLoop(context.Background(), e, items, "Hotspot sync:", 10,
@@ -513,7 +521,7 @@ func TestRunProjectSyncLoop(t *testing.T) {
 	t.Run("cancelled context short-circuits remaining work", func(t *testing.T) {
 		var buf bytes.Buffer
 		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-		e := &Executor{Sem: make(chan struct{}, 1), Logger: logger}
+		e := &Executor{ConcurrencyLimiter: NewFixedConcurrencyLimiter(1), Logger: logger}
 
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel() // pre-cancel so every goroutine sees gctx.Err() != nil
@@ -531,11 +539,86 @@ func TestRunProjectSyncLoop(t *testing.T) {
 	t.Run("empty input does not panic", func(t *testing.T) {
 		var buf bytes.Buffer
 		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-		e := &Executor{Sem: make(chan struct{}, 4), Logger: logger}
+		e := &Executor{ConcurrencyLimiter: NewFixedConcurrencyLimiter(4), Logger: logger}
 		runProjectSyncLoop(context.Background(), e, []int{}, "Issue sync:", 20,
 			func(_ context.Context, _ int) { t.Fatal("apply should not be called") })
 	})
 }
+
+// #573 follow-up — runProjectSyncLoopBounded's explicit bound is what
+// keeps the NESTED sync loops (syncProjectIssues / syncProjectHotspots,
+// each called per-project from inside their task's own fan-out) from
+// putting Current()² requests in flight. See nestedSyncLoopConcurrency:
+// that aggregate matters because excess callers queue inside
+// throttleTransport's round trip, against the 60s HTTP client timeout.
+func TestRunProjectSyncLoopBounded(t *testing.T) {
+	// observeMaxInFlight runs the loop and reports the highest number of
+	// apply calls that were ever executing simultaneously.
+	observeMaxInFlight := func(t *testing.T, e *Executor, concurrency int, items int) int64 {
+		t.Helper()
+		var inFlight, maxInFlight atomic.Int64
+		runProjectSyncLoopBounded(context.Background(), e, make([]int, items), "sync:", 1000, concurrency,
+			func(_ context.Context, _ int) {
+				cur := inFlight.Add(1)
+				for {
+					prev := maxInFlight.Load()
+					if cur <= prev || maxInFlight.CompareAndSwap(prev, cur) {
+						break
+					}
+				}
+				// Hold the slot briefly so overlap is observable.
+				time.Sleep(2 * time.Millisecond)
+				inFlight.Add(-1)
+			})
+		return maxInFlight.Load()
+	}
+
+	t.Run("a positive bound caps in-flight work below the dynamic limit", func(t *testing.T) {
+		logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		// The executor's own limiter is deliberately much higher than the
+		// bound, so a regression that ignored the bound would show up as
+		// in-flight work far above it.
+		e := &Executor{ConcurrencyLimiter: NewFixedConcurrencyLimiter(50), Logger: logger}
+
+		const bound = 3
+		got := observeMaxInFlight(t, e, bound, 30)
+		if got > bound {
+			t.Errorf("max in-flight = %d, want <= the explicit bound %d", got, bound)
+		}
+		if got == 0 {
+			t.Fatal("apply was never called")
+		}
+	})
+
+	t.Run("a non-positive bound falls back to the executor's dynamic limiter", func(t *testing.T) {
+		logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		const dynamic = 4
+		e := &Executor{ConcurrencyLimiter: NewFixedConcurrencyLimiter(dynamic), Logger: logger}
+
+		got := observeMaxInFlight(t, e, 0, 30)
+		if got > dynamic {
+			t.Errorf("max in-flight = %d, want <= the executor's limit %d", got, dynamic)
+		}
+		if got == 0 {
+			t.Fatal("apply was never called")
+		}
+	})
+
+	t.Run("every item is still applied exactly once under a bound", func(t *testing.T) {
+		logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		e := &Executor{ConcurrencyLimiter: NewFixedConcurrencyLimiter(50), Logger: logger}
+
+		const items = 25
+		var applied atomic.Int64
+		runProjectSyncLoopBounded(context.Background(), e, make([]int, items), "sync:", 1000, 2,
+			func(_ context.Context, _ int) { applied.Add(1) })
+
+		if applied.Load() != items {
+			t.Errorf("apply called %d times, want %d", applied.Load(), items)
+		}
+	})
+}
+
 // #326: sortMigrateItems orders items by (orgField, sortField) for tasks
 // in the registry, and is a no-op for tasks not in the registry.
 func TestSortMigrateItems(t *testing.T) {

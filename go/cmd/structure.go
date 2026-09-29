@@ -23,8 +23,10 @@ var structureCmd = &cobra.Command{
 
 The export directory can be supplied directly via --export_directory or
 read from the same JSON config file the extract / migrate commands use
-via --config (issue #275). When --config defines exactly one SonarCloud
-organization, its key is pre-populated as sonarcloud_org_key.`,
+via --config (issue #275). When --config names a single target
+organization — either exactly one entry under sonarcloud.organizations,
+or target.default_organization in the unified shape — its key is
+pre-populated as sonarcloud_org_key (issue #566).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		defer common.LogCommandDuration(slog.Default(), "structure", time.Now())
 
@@ -33,22 +35,14 @@ organization, its key is pre-populated as sonarcloud_org_key.`,
 			return err
 		}
 
-		configFile, _ := cmd.Flags().GetString("config")
-		if configFile != "" {
-			orgs, err := migrate.LoadSonarCloudOrgsFromConfigFile(configFile)
-			if err != nil {
-				return err
-			}
-			if len(orgs) == 1 {
-				if err := structure.RunStructure(exportDir, orgs[0].Key); err != nil {
-					return err
-				}
-				printExportDirNotice(exportDir)
-				return nil
-			}
+		orgKey, err := resolveStructureOrgKey(cmd)
+		if err != nil {
+			return err
 		}
 
-		if err := structure.RunStructure(exportDir); err != nil {
+		// An empty orgKey leaves sonarcloud_org_key blank, exactly as
+		// a run without --config does.
+		if err := structure.RunStructure(exportDir, orgKey); err != nil {
 			return err
 		}
 		printExportDirNotice(exportDir)
@@ -56,9 +50,43 @@ organization, its key is pre-populated as sonarcloud_org_key.`,
 	},
 }
 
+// resolveStructureOrgKey returns the SonarQube Cloud organization key to
+// pre-populate into every organizations.csv row, or "" when the config
+// file names no single target organization.
+//
+// Both documented ways of naming one org are honoured (#566):
+//
+//   - shape 3: exactly one entry under sonarcloud.organizations.
+//   - shape 4: target.default_organization, which is also what a later
+//     `migrate --config` with the same file would stamp on the CSV
+//     itself (#281).
+//
+// Several entries under sonarcloud.organizations means the mapping is
+// genuinely per-server, so the operator still has to fill the CSV in by
+// hand and nothing is pre-populated.
+func resolveStructureOrgKey(cmd *cobra.Command) (string, error) {
+	configFile, _ := cmd.Flags().GetString("config")
+	if configFile == "" {
+		return "", nil
+	}
+
+	orgs, err := migrate.LoadSonarCloudOrgsFromConfigFile(configFile)
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case len(orgs) == 1:
+		return orgs[0].Key, nil
+	case len(orgs) > 1:
+		return "", nil
+	}
+
+	return migrate.LoadDefaultOrganizationFromConfigFile(configFile)
+}
+
 func init() {
 	structureCmd.Flags().String("export_directory", "", "Root directory containing all SonarQube exports")
-	structureCmd.Flags().String("config", "", "Path to JSON configuration file (same shape as extract --config); export_directory is read from it, and sonarcloud_org_key is pre-populated when one org is defined")
+	structureCmd.Flags().String("config", "", "Path to JSON configuration file (same shape as extract --config); export_directory is read from it, and sonarcloud_org_key is pre-populated when the file names a single target organization (sonarcloud.organizations or target.default_organization)")
 }
 
 // resolveStructureExportDir applies the same config-vs-flag precedence

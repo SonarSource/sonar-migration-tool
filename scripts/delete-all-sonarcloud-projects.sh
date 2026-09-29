@@ -10,9 +10,42 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
   exit 1
 fi
 
-ORG_KEY=$(jq -r '.sonarcloud.organizations[0].key'   "$CONFIG_FILE")
-SC_TOKEN=$(jq -r '.sonarcloud.organizations[0].token' "$CONFIG_FILE")
-SC_URL=$(jq -r '.sonarcloud.organizations[0].url'    "$CONFIG_FILE")
+# Returns the value of the first config key that is actually present.
+# jq -r prints the literal string "null" for a missing path, so reading a key
+# blindly hands "null" to curl instead of failing; treat null/empty as absent.
+cfg_first() {
+  local QUERY VALUE
+  for QUERY in "$@"; do
+    VALUE=$(jq -r "$QUERY // empty" "$CONFIG_FILE")
+    if [[ -n "$VALUE" && "$VALUE" != "null" ]]; then
+      echo "$VALUE"
+      return 0
+    fi
+  done
+  echo ""
+}
+
+# Prefer the unified source/target layout, fall back to the legacy
+# sonarcloud.organizations[] one.
+ORG_KEY=$(cfg_first '.target.default_organization' '.target.organization_key' '.sonarcloud.organizations[0].key')
+SC_TOKEN=$(cfg_first '.target.token' '.sonarcloud.organizations[0].token')
+SC_URL=$(cfg_first '.target.url' '.sonarcloud.organizations[0].url')
+
+if [[ -z "$ORG_KEY" ]]; then
+  echo "Error: no SonarCloud organization key in $CONFIG_FILE"
+  echo "Tried: .target.default_organization, .target.organization_key, .sonarcloud.organizations[0].key"
+  exit 1
+fi
+
+if [[ -z "$SC_TOKEN" ]]; then
+  echo "Error: no SonarCloud token in $CONFIG_FILE"
+  echo "Tried: .target.token, .sonarcloud.organizations[0].token"
+  exit 1
+fi
+
+# Only fall back to the public host when neither layout names a URL.
+SC_URL="${SC_URL:-https://sonarcloud.io}"
+SC_URL="${SC_URL%/}"
 
 echo "SonarCloud Org : $ORG_KEY"
 echo "SonarCloud URL : $SC_URL"

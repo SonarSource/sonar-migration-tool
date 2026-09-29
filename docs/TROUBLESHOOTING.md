@@ -62,7 +62,23 @@ sonar-migration-tool extract --source_url <URL> --source_token <TOKEN> --timeout
 **Solution**:
 
 1. Verify the SonarQube URL is accessible (try opening it in a browser or using `curl`).
-2. For self-signed certificates, use mTLS options:
+2. An `x509: certificate signed by unknown authority` error means the **server's own
+   certificate** is not signed by a CA your machine trusts — typically a self-signed
+   certificate on an internally hosted SonarQube Server. Either install that certificate
+   into the machine's trust store, or skip verification for the connection with
+   `--insecure` / `source.insecure` (#586). Only do this for a server you trust: it leaves
+   the connection open to man-in-the-middle interception.
+
+```bash
+sonar-migration-tool extract --source_url <URL> --source_token <TOKEN> \
+  --insecure \
+  --export_directory ./files/
+```
+
+3. If instead the server requires a **client certificate** to authenticate you (mutual
+   TLS), use the mTLS options. These prove your identity to the server; they do not make
+   the tool trust an untrusted server certificate, so they will not resolve the x509 error
+   above:
 
 ```bash
 sonar-migration-tool extract --source_url <URL> --source_token <TOKEN> \
@@ -241,6 +257,44 @@ curl -u "$SC_TOKEN:" \
 
 ---
 
+## A project migrated with exactly 10,000 issues
+<!-- updated: 2026-09-17_00:00:00 -->
+
+**Symptom.** A source project you know has far more than 10,000 issues arrives on SonarQube Cloud with exactly 10,000, or with some other suspiciously round shortfall. The migration report's Limitations section carries a bullet naming the project, and the `extract` run printed a warning block just before its "Extract Complete" line.
+
+**Cause.** SonarQube Server returns at most 10,000 results for any single search query — an Elasticsearch `index.max_result_window` limit, not a tool setting. Requesting a row past the 10,000th is an outright HTTP 400, so a query whose total is larger can only ever yield the first 10,000. Since [#574](https://github.com/SonarSource/sonar-migration-tool/issues/574) the tool works around this for issues by slicing the query into issue-creation-date ranges until each one fits, and it reports whatever it still could not retrieve rather than truncating in silence.
+
+**Confirm it.** The atomic-window case, the one slicing cannot fix, logs its own line from the slicer:
+
+```
+level=WARN msg="more issues share one creation second than the API will return - date slicing cannot subdivide further" project=my-project branch=main window="[2025-09-05T17:29:07+0000, 2025-09-05T17:29:08+0000)" total=17919 fetched=10000 lost=7919
+```
+
+Every other truncation is logged by the HTTP client, which names the endpoint and the reason instead of a window. This is what a component-tree ceiling looks like:
+
+```
+level=WARN msg="API response truncated - not all results were fetched" endpoint=api/measures/component_tree reason=page_limit_clamp scope="getProjectComponentTree my-project@main" total=24000 totalKnown=true fetched=10000 lost=14000
+```
+
+Either way, read the artefact the run leaves behind:
+
+```bash
+python3 -m json.tool ./files/<extract_id>/extract_truncation.json
+```
+
+Each record names the endpoint, the reason, the project and branch, and the `total` / `fetched` / `lost` counts. A run that lost nothing writes **no** `extract_truncation.json` at all, so the file's absence is the all-clear. The same numbers appear as a Limitations bullet in the migration report, and resuming with `--extract_id` merges the new run's records with the previous attempt's instead of overwriting them.
+
+**Fix.** For `api/measures/component_tree` and `api/hotspots/search` there is nothing to configure: neither endpoint accepts a creation-date parameter, so neither can be sliced, and the warning is the whole of the remedy. For issues, slicing is automatic and needs no flag — if the bullet still names `getProjectIssuesFull`, check its reason:
+
+- `page_limit_clamp` **with** `windowStart` / `windowEnd` on the record — a date window that fitted when the slicer probed it grew past the ceiling before the fetch, because issues were created on the source while the extract was running. Re-running the extract recovers them.
+- `page_limit_clamp` **without** a window, or `unknown_total` — the query could not be narrowed. On `getProjectIssuesFull` this is the slicer's own fallback record: it refused to slice (the source ignored the date filters, or the bisection hit its depth backstop) or the total came back unparseable. On any other task it simply means that task is not sliced at all. Either way the bullet tells you exactly how many rows were not fetched, so you can judge whether it matters.
+- `count_drift` — the source project's issue count changed while the extract was running. This is an accounting statement, not a claim that data is missing; re-run the extract against a quiet server to get a clean reconciliation. The residual has a sign, and the bullet says which way it went: a *surplus* means the extract holds more issues than the source's own count predicted, and nothing is missing on that account.
+- `atomic_window` — see below. This is the one case slicing cannot fix.
+
+**The one case slicing cannot fix: more than 10,000 issues sharing a single creation second.** A date range cannot be narrowed below one second (a zero-width range is rejected by the server), so if a single second holds more issues than the ceiling, the extra ones are unreachable through this API. This is not exotic: a project's **first** analysis stamps its entire pre-existing backlog with one timestamp, so any project whose first analysis found more than 10,000 issues has exactly this shape. On one measured project, 8,916 of 14,903 issues carried the identical creation timestamp. The bullet and the `atomic_window` record name the exact second and the exact number of issues left behind. If you need those issues, the practical options are to re-analyse the project on the source server so that later analyses spread the creation dates, or to accept the documented shortfall — the tool will not pretend it retrieved them.
+
+---
+
 ## CE Task "Issue whilst processing the report" (importProjectData)
 <!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
@@ -365,6 +419,29 @@ The CV report ships 143 `measures-{ref}.pb` files (aggregate metrics: `reliabili
 
 ---
 
+## Re-running `transfer` / `migrate` on a project that is already migrated
+<!-- updated: 2026-09-21 -->
+
+**Symptom** (fixed in v1.2, [#588](https://github.com/SonarSource/sonar-migration-tool/issues/588)): the first run succeeds, and a second run of the same command fails with
+
+```
+CE task failed: Report for commit '<a>' can't be processed: a newer report has already
+been processed, and processing older reports is not supported. The last processed report
+was for commit '<b>'.
+```
+
+When the main branch fails this way, the remaining branches are skipped too, so the re-run migrates nothing and the project is reported as Partially Migrated.
+
+**Cause**: every branch's report is backdated to the source branch's real last-analysis date ([#557](https://github.com/SonarSource/sonar-migration-tool/issues/557)), not to the migration run's own timestamp. A re-run against an unchanged source rebuilds a report carrying that same date, and the Compute Engine refuses a report dated at or before the one it already processed. The commit ids in the message are the synthetic `scmRevisionId` values `BuildMetadata` stamps into each report, so they differ every run and carry no ordering information of their own — the date is what the CE compares.
+
+**Behaviour now**: before importing a branch, `importAndRecordBranch` reads the analysis date SonarQube Cloud already holds for it (from the `/api/project_branches/list` call the task already makes) and skips the branch when that date is at or after the date this run would submit. The source has not changed, so the report would have been identical. The branch is recorded as `up_to_date`, the project still reports as Succeeded, and no duplicate analysis is added to the target's Activity. The check sits ahead of history replay ([#554](https://github.com/SonarSource/sonar-migration-tool/issues/554)) because every history point is older still and would be rejected the same way.
+
+**When a re-run does import again**: the source branch was analyzed again since the last migration, so its last-analysis date moved forward. A branch the target has never analyzed, a source branch that was never analyzed at all (its report is stamped "now"), and a first migration into an empty organization are all unaffected.
+
+**To force a full re-import**, delete the target project (or the branch) on SonarQube Cloud and run again. There is no flag for it.
+
+---
+
 ## Branch Migration Ordering and Failures
 <!-- updated: 2026-06-05_19:20:00 -->
 
@@ -400,13 +477,64 @@ sonar-migration-tool migrate ... --exclude_branches "feature/*" --exclude_branch
 
 The main branch is **never** excluded, regardless of patterns. See [ADVANCED-CONFIG.md](ADVANCED-CONFIG.md) for the full config reference.
 
+### Selecting branches by last analysis date
+
+Use `--branch_analyzed_after <YYYY-MM-DD>` (or `branch_analyzed_after` in the JSON config) to only select branches whose last analysis is on or after that date, on `extract`, `migrate`, or `transfer` (issue #583):
+
+```bash
+# Only migrate branches analyzed on or after 2025-01-01
+sonar-migration-tool migrate ... --branch_analyzed_after 2025-01-01
+
+# Or in config.json
+{
+  "target": {
+    "branch_analyzed_after": "2025-01-01"
+  }
+}
+```
+
+The project's main branch is **always** selected, even when it doesn't meet the date — if the filter would otherwise exclude every branch of a project, main is force-included instead. When that happens, the run log carries a `force-including main branch: does not meet --branch_analyzed_after filter` warning. During `migrate` (and the `migrate` phase of `transfer`), the generated `migration_summary.md` / PDF report also gets a "Force-Included Main Branches" table listing the affected projects, e.g.; during `extract`, the warning is only visible on stderr, since the report pipeline reads the events `migrate` writes, not extract's log output:
+
+```
+## Warnings, Retries & Skips
+
+### Force-Included Main Branches
+
+| Project      | Branch | Analysis Date | Cutoff     |
+|--------------|--------|---------------|------------|
+| my-project   | main   | 2022-03-14    | 2025-01-01 |
+```
+
+A malformed date aborts the run immediately with an explicit error (`invalid branch_analyzed_after value "..."`), and a cutoff more than 2 years (730 days) in the past logs a one-time warning that the filter may not exclude many branches. See [ADVANCED-CONFIG.md](ADVANCED-CONFIG.md) for the full config reference, including the `transfer`-specific note that the CLI flag sets both the extract and migrate phases at once.
+
 ### Resuming after a branch failure
 
 The tool tracks per-branch completion status. When resuming a failed migration with `--run_id`, branches that already succeeded are automatically skipped. Only failed or not-yet-attempted branches are retried.
 
+A branch recorded as `up_to_date` counts as succeeded and is skipped too: the target already holds an analysis at or after the date this run would submit, so there is nothing left to import. A branch dropped by the per-project branch limit is the exception — it is re-evaluated on every run, so raising `--max_branches_per_project` (or narrowing `--exclude_branches`, `--branch_regexp` or `--branch_analyzed_after` so fewer other branches compete for the limit) and resuming will migrate it.
+
+Each attempt appends its results to the run directory rather than overwriting the previous attempt's, so `<export_directory>/<run_id>/importProjectData/` keeps a record of every attempt. The migration report reads the most recent result for each branch, so a branch that failed and was then retried successfully is reported as migrated.
+
 ### Project-level parallelism
 
 Multiple projects are imported in parallel (bounded by concurrency). A failure in one project does not cancel or affect other projects — each project's branches are processed independently.
+
+---
+
+## Checking Whether a Change Broke Something
+
+Before opening a PR, run the live smoke suite in `go/smoke/` against the
+build you just produced:
+
+```bash
+make smoke-fast   # fast, no credentials needed
+make smoke        # runs against a real source SonarQube Server
+```
+
+Per-command logs land in `.smoke/<TestName>.log`, each recording the exact
+command run, its exit code, and scrubbed output — check there first when a
+run reports a failure. See [SMOKE-TESTING.md](SMOKE-TESTING.md) for the full
+tier breakdown and safety model.
 
 ---
 

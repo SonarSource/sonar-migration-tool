@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
 // runGlobalSettingsTest wires up the cloud / api mocks and the executor
@@ -348,11 +350,11 @@ func TestRunSetGlobalSettingsFallsBackToProjectsOnOrgLevelRejection(t *testing.T
 			// Mimic the real SQC 400 message verbatim — the SDK's
 			// IsOrgLevelRejection helper greps the body for it.
 			// Use SonarCloud's actual response shape: the apostrophe in
-		// "can't" is JSON-escaped as ' in the wire body. The SDK
-		// detector must match against the DECODED message, so this
-		// test verifies the integration end-to-end with realistic
-		// data instead of the simplified literal-apostrophe form.
-		http.Error(w, `{"errors":[{"msg":"Provided property can't be set at organization level: `+hit.key+`"}]}`, http.StatusBadRequest)
+			// "can't" is JSON-escaped as ' in the wire body. The SDK
+			// detector must match against the DECODED message, so this
+			// test verifies the integration end-to-end with realistic
+			// data instead of the simplified literal-apostrophe form.
+			http.Error(w, `{"errors":[{"msg":"Provided property can't be set at organization level: `+hit.key+`"}]}`, http.StatusBadRequest)
 		}
 		mu.Unlock()
 	})
@@ -445,6 +447,100 @@ func TestRunSetGlobalSettingsFallsBackToProjectsOnOrgLevelRejection(t *testing.T
 	}
 	if strings.Contains(rec.Outcomes[0].Detail, "projA") || strings.Contains(rec.Outcomes[0].Detail, "projB") {
 		t.Errorf("Detail must NOT list individual projects when fan-out applied to ALL, got %q", rec.Outcomes[0].Detail)
+	}
+}
+
+// #536: when --objects excludes the "projects" category, a setting that
+// would normally fall back to a per-project write (SQC's list_definitions
+// falsely claims org-scope, the org POST 400s) must come back Skipped
+// with a reason explaining projects weren't selected — NOT silently
+// fan out to projects. This must hold even when createProjects records
+// already exist on disk (simulating an earlier phased run): the gate is
+// config-driven (e.Objects), not a side effect of an empty project list.
+func TestRunSetGlobalSettingsSkipsProjectFallbackWhenProjectsNotSelected(t *testing.T) {
+	cloudMux := http.NewServeMux()
+
+	var (
+		mu          sync.Mutex
+		orgHits     []settingsHit
+		projectHits []settingsHit
+	)
+	cloudMux.HandleFunc("POST /api/settings/set", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		hit := settingsHit{key: r.FormValue("key"), value: r.FormValue("value")}
+		mu.Lock()
+		defer mu.Unlock()
+		if r.FormValue("component") != "" {
+			projectHits = append(projectHits, hit)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		orgHits = append(orgHits, hit)
+		http.Error(w, `{"errors":[{"msg":"Provided property can't be set at organization level: `+hit.key+`"}]}`, http.StatusBadRequest)
+	})
+	mountSettingsDefinitionsScoped(cloudMux,
+		[]map[string]any{{"key": "sonar.coverage.jacoco.xmlReportPaths", "type": "STRING", "multiValues": true}},
+		[]map[string]any{{"key": "sonar.coverage.jacoco.xmlReportPaths", "type": "STRING", "multiValues": true}},
+	)
+	addDefaultCloudHandler(cloudMux)
+	e := newCustomCloudTest(t, cloudMux)
+	// The "projects" category is NOT selected — only "settings" is.
+	e.Objects = map[string]bool{common.ObjectSettings: true}
+
+	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettings", []map[string]any{
+		{"key": "sonar.coverage.jacoco.xmlReportPaths", "values": []string{"**/jacoco*.xml"}},
+	})
+	writeExtractTaskJSONL(t, e.ExportDir, "extract-01", "getServerSettingsDefinitions", []map[string]any{
+		{"key": "sonar.coverage.jacoco.xmlReportPaths", "type": "STRING", "multiValues": true, "defaultValue": ""},
+	})
+	writeGlobalSettingsOrg(t, e)
+	// Simulate projects already existing from an earlier phased run —
+	// the gate must hold regardless.
+	pw, _ := e.Store.Writer("createProjects")
+	for _, key := range []string{"projA", "projB"} {
+		b, _ := json.Marshal(map[string]any{
+			"key": key, "server_url": testServerURL,
+			"sonarcloud_org_key": "org1", "cloud_project_key": "org1_" + key,
+		})
+		pw.WriteOne(b)
+	}
+
+	if err := runSetGlobalSettings(context.Background(), e); err != nil {
+		t.Fatalf("runSetGlobalSettings: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(projectHits) != 0 {
+		t.Fatalf("must NOT fan out to projects when \"projects\" isn't selected via --objects, got %d hits: %+v",
+			len(projectHits), projectHits)
+	}
+
+	out, _ := e.Store.ReadAll("setGlobalSettings")
+	if len(out) != 1 {
+		t.Fatalf("expected one setGlobalSettings record, got %d", len(out))
+	}
+	var rec struct {
+		Outcomes []struct {
+			Org    string `json:"org"`
+			Status string `json:"status"`
+			Detail string `json:"detail"`
+			Reason string `json:"reason"`
+		} `json:"outcomes"`
+	}
+	_ = json.Unmarshal(out[0], &rec)
+	if len(rec.Outcomes) != 1 {
+		t.Fatalf("expected one outcome, got %+v", rec.Outcomes)
+	}
+	got := rec.Outcomes[0]
+	if got.Status != outcomeSkipped {
+		t.Errorf("expected status=%q, got %+v", outcomeSkipped, got)
+	}
+	if got.Reason != skipReasonProjectsNotSelected {
+		t.Errorf("expected reason=%q, got %+v", skipReasonProjectsNotSelected, got)
+	}
+	if !strings.Contains(got.Detail, "not selected via --objects") {
+		t.Errorf("expected detail to explain projects weren't selected, got %q", got.Detail)
 	}
 }
 
@@ -616,9 +712,9 @@ func TestRunSetGlobalSettingsFanOutRetriesIndexingNotFound(t *testing.T) {
 	// test can assert "we retried, then succeeded".
 	const notFoundAttempts = 3
 	var (
-		mu              sync.Mutex
-		attemptsByProj  = map[string]int{}
-		successByProj   = map[string]int{}
+		mu             sync.Mutex
+		attemptsByProj = map[string]int{}
+		successByProj  = map[string]int{}
 	)
 	cloudMux.HandleFunc("POST /api/settings/set", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()

@@ -104,6 +104,9 @@ func mergeSeed(state, seed *WizardState) {
 	if state.IncludeIssueSync == nil && seed.IncludeIssueSync != nil {
 		state.IncludeIssueSync = seed.IncludeIssueSync
 	}
+	if state.Insecure == nil && seed.Insecure != nil {
+		state.Insecure = seed.Insecure
+	}
 
 	state.SourceToken = mergeSeedWins(state.SourceToken, seed.SourceToken)
 	state.TargetToken = mergeSeedWins(state.TargetToken, seed.TargetToken)

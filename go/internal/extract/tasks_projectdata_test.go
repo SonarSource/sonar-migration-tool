@@ -8,11 +8,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
 func TestBuildBranchMap(t *testing.T) {
@@ -25,7 +32,7 @@ func TestBuildBranchMap(t *testing.T) {
 		json.RawMessage(`{"projectKey":"p3","name":"","type":"LONG"}`),
 	}
 
-	result := buildBranchMap(branches)
+	result := buildBranchMap(branches, nil, nil)
 
 	if len(result["p1"]) != 2 {
 		t.Errorf("p1: expected 2 branches, got %d", len(result["p1"]))
@@ -45,7 +52,7 @@ func TestBuildBranchMap(t *testing.T) {
 }
 
 func TestBuildBranchMapEmpty(t *testing.T) {
-	result := buildBranchMap(nil)
+	result := buildBranchMap(nil, nil, nil)
 	if len(result) != 0 {
 		t.Errorf("expected empty map, got %v", result)
 	}
@@ -56,16 +63,76 @@ func TestBuildBranchMapShortFiltered(t *testing.T) {
 		json.RawMessage(`{"projectKey":"p1","name":"pr-123","type":"short"}`),
 		json.RawMessage(`{"projectKey":"p1","name":"pr-456","type":"SHORT"}`),
 	}
-	result := buildBranchMap(branches)
+	result := buildBranchMap(branches, nil, nil)
 	if len(result["p1"]) != 0 {
 		t.Errorf("expected no branches (all short), got %v", result["p1"])
 	}
 }
 
+// TestBuildBranchMapNilCutoffIsUnchanged is a regression guard (#583):
+// buildBranchMap's behavior with no --branch_analyzed_after must be
+// identical to before the filter existed.
+func TestBuildBranchMapNilCutoffIsUnchanged(t *testing.T) {
+	branches := []json.RawMessage{
+		json.RawMessage(`{"projectKey":"p1","name":"main","isMain":true,"analysisDate":"2020-01-01T00:00:00+0000","type":"LONG"}`),
+		json.RawMessage(`{"projectKey":"p1","name":"develop","analysisDate":"2020-01-01T00:00:00+0000","type":"LONG"}`),
+	}
+	result := buildBranchMap(branches, nil, nil)
+	if len(result["p1"]) != 2 {
+		t.Fatalf("nil cutoff must select every long-lived branch, got %v", result["p1"])
+	}
+}
+
+// TestBuildBranchMapExcludesOlderNonMainBranches verifies --branch_analyzed_after
+// (#583) filters out non-main branches analyzed before the cutoff.
+func TestBuildBranchMapExcludesOlderNonMainBranches(t *testing.T) {
+	branches := []json.RawMessage{
+		json.RawMessage(`{"projectKey":"p1","name":"main","isMain":true,"analysisDate":"2024-06-01T00:00:00+0000","type":"LONG"}`),
+		json.RawMessage(`{"projectKey":"p1","name":"old-feature","analysisDate":"2020-01-01T00:00:00+0000","type":"LONG"}`),
+		json.RawMessage(`{"projectKey":"p1","name":"new-feature","analysisDate":"2024-06-01T00:00:00+0000","type":"LONG"}`),
+	}
+	cutoff := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	result := buildBranchMap(branches, &cutoff, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	got := map[string]bool{}
+	for _, name := range result["p1"] {
+		got[name] = true
+	}
+	if !got["main"] || !got["new-feature"] || got["old-feature"] {
+		t.Fatalf("p1: got %v, want {main, new-feature} only", result["p1"])
+	}
+}
+
+// TestBuildBranchMapForcesMainAndLogsWarning verifies that when
+// --branch_analyzed_after (#583) would exclude every branch of a project,
+// the main branch is force-included and a warning is logged.
+func TestBuildBranchMapForcesMainAndLogsWarning(t *testing.T) {
+	branches := []json.RawMessage{
+		json.RawMessage(`{"projectKey":"p1","name":"main","isMain":true,"analysisDate":"2020-01-01T00:00:00+0000","type":"LONG"}`),
+		json.RawMessage(`{"projectKey":"p1","name":"old-feature","analysisDate":"2020-01-01T00:00:00+0000","type":"LONG"}`),
+	}
+	cutoff := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	var logBuf strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	result := buildBranchMap(branches, &cutoff, logger)
+	if len(result["p1"]) != 1 || result["p1"][0] != "main" {
+		t.Fatalf("p1: got %v, want [main] only (force-included)", result["p1"])
+	}
+	logged := logBuf.String()
+	if !strings.Contains(logged, common.ForcedMainBranchLogMessage) {
+		t.Errorf("log output missing force-main warning: %s", logged)
+	}
+	if !strings.Contains(logged, "project=p1") || !strings.Contains(logged, "branch=main") {
+		t.Errorf("log output missing project/branch attrs: %s", logged)
+	}
+}
+
 func TestProjectDataTasks(t *testing.T) {
 	tasks := projectDataTasks()
-	if len(tasks) != 6 {
-		t.Fatalf("expected 6 project data tasks, got %d", len(tasks))
+	if len(tasks) != 7 {
+		t.Fatalf("expected 7 project data tasks, got %d", len(tasks))
 	}
 
 	names := map[string]bool{}
@@ -79,6 +146,7 @@ func TestProjectDataTasks(t *testing.T) {
 		"getProjectSourceCode",
 		"getProjectSCMData",
 		"getProjectVersions",
+		"getProjectAnalysisHistory",
 	}
 	for _, name := range expected {
 		if !names[name] {
@@ -443,8 +511,8 @@ func TestProjectHotspotsFullTaskEnrichesToReviewHotspots(t *testing.T) {
 // must issue both queries explicitly and merge.
 func TestProjectHotspotsFullTaskQueriesBothStatuses(t *testing.T) {
 	var (
-		mu     sync.Mutex
-		seen   []string
+		mu   sync.Mutex
+		seen []string
 	)
 	srv, e := newSrvExecutor(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/hotspots/search" {
@@ -878,6 +946,33 @@ func TestProjectIssuesFullTaskNonFatal(t *testing.T) {
 	}
 }
 
+// #574: a plain 403/404 on /api/issues/search is a permission skip,
+// not a truncation. Recording one made a run that truncated nothing
+// write extract_truncation.json, print the end-of-run data-loss block
+// and add a Limitations bullet — and the incomplete_slice bullet it
+// picked says "the issues already written are on disk", which on this
+// path is false because nothing was fetched at all. The skip is
+// carried by its warn line, the way every other non-fatal per-project
+// denial is.
+func TestProjectIssuesFullPermissionSkipRecordsNoTruncation(t *testing.T) {
+	for _, status := range []int{403, 404} {
+		t.Run(fmt.Sprintf("HTTP %d on the issues search", status), func(t *testing.T) {
+			srv, e := newSrvExecutor(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+			})
+			defer srv.Close()
+
+			if err := projectIssuesFullTask()(ctx(t), e); err != nil {
+				t.Fatalf("expected a non-fatal skip, got error: %v", err)
+			}
+			if e.Truncation.HasRecords() {
+				t.Errorf("a permission skip must record no truncation, got %+v",
+					e.Truncation.State().Records)
+			}
+		})
+	}
+}
+
 func TestProjectVersionsTask(t *testing.T) {
 	srv, e := newSrvExecutor(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/navigation/component" {
@@ -948,4 +1043,320 @@ func newSrvExecutor(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *
 	w.WriteOne(b)
 	e.Store.Writer("getBranches")
 	return srv, e
+}
+
+// hotspotsSearchAboveCeilingHandler serves /api/hotspots/search with a paging
+// total above the result ceiling, one hotspot per page keyed by status and
+// page, and fails the test if a request ever carries a date parameter the
+// endpoint would silently ignore (#574).
+func hotspotsSearchAboveCeilingHandler(t *testing.T, total int) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/hotspots/search" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		for _, param := range []string{"createdAfter", "createdBefore"} {
+			if got := r.URL.Query().Get(param); got != "" {
+				t.Errorf("/api/hotspots/search must never be sent %s (got %q): the endpoint ignores it silently", param, got)
+			}
+		}
+		status := r.URL.Query().Get("status")
+		page := r.URL.Query().Get("p")
+		json.NewEncoder(w).Encode(map[string]any{
+			"hotspots": []map[string]any{
+				{"key": "hs-" + status + "-" + page, "status": status},
+			},
+			"paging": map[string]any{"pageSize": 500, "total": total},
+		})
+	}
+}
+
+// assertHotspotStatusTruncationRecord checks one per-status hotspot ceiling
+// record whole: the endpoint and reason that classify it, the task/project/
+// branch scope that attributes it, and the arithmetic of the loss it reports.
+func assertHotspotStatusTruncationRecord(t *testing.T, rec common.TruncationRecord, total int) {
+	t.Helper()
+	if rec.Endpoint != "api/hotspots/search" {
+		t.Errorf("endpoint: got %q, want %q", rec.Endpoint, "api/hotspots/search")
+	}
+	if rec.Reason != common.ReasonPageLimitClamp {
+		t.Errorf("reason: got %q, want %q", rec.Reason, common.ReasonPageLimitClamp)
+	}
+	if rec.Scope.Task != "getProjectHotspotsFull" || rec.Scope.ProjectKey != "p1" || rec.Scope.Branch != "main" {
+		t.Errorf("scope: got %+v, want task getProjectHotspotsFull p1@main", rec.Scope)
+	}
+	if !rec.TotalKnown || rec.Total != total {
+		t.Errorf("total: got %d (known=%t), want %d (known=true)", rec.Total, rec.TotalKnown, total)
+	}
+	if rec.Lost != total-rec.Fetched {
+		t.Errorf("lost: got %d, want %d (total %d - fetched %d)", rec.Lost, total-rec.Fetched, total, rec.Fetched)
+	}
+}
+
+// TestHotspotsTaskRecordsTruncationPerStatusAndNeverSendsDates guards
+// the worst trap in SPEC-006. /api/hotspots/search declares no
+// createdAfter / createdBefore and silently ignores unknown parameters,
+// so date-slicing it returns HTTP 200 with the same truncated set
+// forever while the log claims completeness. The ceiling here must be
+// reported, never worked around — and the two per-status fetches must
+// stay distinguishable, or a REVIEWED ceiling gets merged into the
+// TO_REVIEW record and one of the two losses disappears (#574).
+func TestHotspotsTaskRecordsTruncationPerStatusAndNeverSendsDates(t *testing.T) {
+	const total = 11000
+	srv, e := newSrvExecutor(t, hotspotsSearchAboveCeilingHandler(t, total))
+	defer srv.Close()
+	e.SkipIssueSync = true
+
+	tracker := NewTruncationTracker()
+	e.Raw.SetTruncationObserver(tracker.Record)
+
+	if err := projectHotspotsFullTask()(ctx(t), e); err != nil {
+		t.Fatalf("projectHotspotsFullTask: %v", err)
+	}
+
+	state := tracker.State()
+	if len(state.Records) != 2 {
+		t.Fatalf("expected one record per status, got %d: %+v", len(state.Records), state.Records)
+	}
+	byDetail := map[string]common.TruncationRecord{}
+	for _, rec := range state.Records {
+		byDetail[rec.Scope.Detail] = rec
+	}
+	for _, status := range []string{"TO_REVIEW", "REVIEWED"} {
+		rec, ok := byDetail["status="+status]
+		if !ok {
+			t.Fatalf("no record for status=%s, got %v", status, byDetail)
+		}
+		assertHotspotStatusTruncationRecord(t, rec, total)
+	}
+	if want := 2 * (total - byDetail["status=TO_REVIEW"].Fetched); state.TotalLost != want {
+		t.Errorf("totalLost: got %d, want %d", state.TotalLost, want)
+	}
+}
+
+// TestComponentTreeTaskRecordsTruncationWithProjectAndBranch prevents a
+// component-tree ceiling arriving in the report as an unattributed
+// number. The tree has no date axis, so this loss cannot be sliced away
+// and the only useful thing the tool can do is name the project and
+// branch whose files are missing — which is also what downstream source
+// and SCM blame will be short of (#574).
+func TestComponentTreeTaskRecordsTruncationWithProjectAndBranch(t *testing.T) {
+	const total = 20000
+	srv, e := newSrvExecutor(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/measures/component_tree" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		page := r.URL.Query().Get("p")
+		json.NewEncoder(w).Encode(map[string]any{
+			"components": []map[string]any{
+				{"key": "p1:src/File" + page + ".java", "name": "File" + page + ".java", "language": "java"},
+			},
+			"paging": map[string]any{"pageSize": 500, "total": total},
+		})
+	})
+	defer srv.Close()
+
+	tracker := NewTruncationTracker()
+	e.Raw.SetTruncationObserver(tracker.Record)
+
+	if err := projectComponentTreeTask()(ctx(t), e); err != nil {
+		t.Fatalf("projectComponentTreeTask: %v", err)
+	}
+
+	state := tracker.State()
+	if len(state.Records) != 1 {
+		t.Fatalf("expected exactly 1 truncation record, got %d: %+v", len(state.Records), state.Records)
+	}
+	rec := state.Records[0]
+	want := common.TruncationScope{Task: "getProjectComponentTree", ProjectKey: "p1", Branch: "main"}
+	if rec.Scope != want {
+		t.Errorf("scope: got %+v, want %+v", rec.Scope, want)
+	}
+	if rec.Endpoint != "api/measures/component_tree" {
+		t.Errorf("endpoint: got %q, want %q", rec.Endpoint, "api/measures/component_tree")
+	}
+	if rec.Reason != common.ReasonPageLimitClamp {
+		t.Errorf("reason: got %q, want %q", rec.Reason, common.ReasonPageLimitClamp)
+	}
+	if rec.Lost != total-rec.Fetched {
+		t.Errorf("lost: got %d, want %d (total %d - fetched %d)", rec.Lost, total-rec.Fetched, total, rec.Fetched)
+	}
+	// The scope has to survive into the rendered block, not just the record.
+	if line := truncationLine(rec); !strings.Contains(line, "getProjectComponentTree p1@main") {
+		t.Errorf("rendered line does not name the project and branch: %q", line)
+	}
+}
+
+// TestWebhookDeliveriesSamplingCapProducesNoRecord prevents a false
+// data-loss bullet in every report from an instance with a busy
+// webhook. The delivery log's 10-page cap is a deliberate 5,000-row
+// sample of a firehose nobody asked to migrate, not a workaround for
+// the result ceiling, so it must stay out of the artefact even though
+// the fetch is genuinely short (#574).
+func TestWebhookDeliveriesSamplingCapProducesNoRecord(t *testing.T) {
+	srv, e := newSrvExecutor(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/webhooks/deliveries" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		page := r.URL.Query().Get("p")
+		json.NewEncoder(w).Encode(map[string]any{
+			"deliveries": []map[string]any{{"id": "d" + page}},
+			"paging":     map[string]any{"pageSize": 500, "total": 50000},
+		})
+	})
+	defer srv.Close()
+
+	w, err := e.Store.Writer("getWebhooks")
+	if err != nil {
+		t.Fatalf("seeding getWebhooks: %v", err)
+	}
+	if err := w.WriteOne([]byte(`{"key":"wh-1"}`)); err != nil {
+		t.Fatalf("seeding getWebhooks: %v", err)
+	}
+
+	tracker := NewTruncationTracker()
+	e.Raw.SetTruncationObserver(tracker.Record)
+
+	if err := webhookDeliveries("getWebhookDeliveries", "getWebhooks")(ctx(t), e); err != nil {
+		t.Fatalf("webhookDeliveries: %v", err)
+	}
+
+	if tracker.HasRecords() {
+		t.Errorf("the delivery-log sampling cap must produce no truncation record, got %+v", tracker.State().Records)
+	}
+	// The cap suppresses the record, never the data it did fetch.
+	items, err := e.Store.ReadAll("getWebhookDeliveries")
+	if err != nil {
+		t.Fatalf("reading getWebhookDeliveries: %v", err)
+	}
+	if len(items) == 0 {
+		t.Error("expected the sampled deliveries to be written")
+	}
+}
+
+// TestIssuesTaskSlicesAboveTheCeiling is the end-to-end proof for the
+// task itself: 25,000 issues, more than twice what a single capped
+// fetch can return, all of them on disk afterwards. The assertion
+// compares SETS rather than order, because ChunkWriter names its files
+// results.N.jsonl and ReadAll returns them in LEXICAL order — 10 before
+// 2 — so an order-sensitive assertion here would fail on correct data
+// (#574).
+func TestIssuesTaskSlicesAboveTheCeiling(t *testing.T) {
+	const total = 25000
+	corpus := newIssueCorpus(t)
+	// Four days, so the walk has a real range to bisect rather than one
+	// atomic second.
+	corpus.addSpread(corpusStart, total, 4*24*time.Second, "iss")
+	corpus.sortIssues()
+
+	srv, e := newSrvExecutor(t, corpus.ServeHTTP)
+	defer srv.Close()
+	tracker := NewTruncationTracker()
+	e.Truncation = tracker
+	e.Raw.SetTruncationObserver(tracker.Record)
+
+	if err := projectIssuesFullTask()(ctx(t), e); err != nil {
+		t.Fatalf("projectIssuesFullTask: %v", err)
+	}
+
+	items, err := e.Store.ReadAll("getProjectIssuesFull")
+	if err != nil {
+		t.Fatalf("reading getProjectIssuesFull: %v", err)
+	}
+	keys := make(map[string]int, total)
+	for _, raw := range items {
+		keys[extractField(raw, "key")]++
+	}
+	if len(keys) != total {
+		t.Errorf("distinct issue keys written: got %d, want %d", len(keys), total)
+	}
+	for key, n := range keys {
+		if n != 1 {
+			t.Errorf("issue %s written %d times; the windows must not overlap", key, n)
+		}
+	}
+	if len(items) != total {
+		t.Errorf("records written: got %d, want %d", len(items), total)
+	}
+	// The enrichment the task applies has to survive the per-window
+	// sink, or the migrate side cannot attribute the issues.
+	if len(items) > 0 {
+		if got := extractField(items[0], "projectKey"); got != "p1" {
+			t.Errorf("projectKey on a written issue: got %q, want %q", got, "p1")
+		}
+		if got := extractField(items[0], "branch"); got != "main" {
+			t.Errorf("branch on a written issue: got %q, want %q", got, "main")
+		}
+	}
+	if tracker.HasRecords() {
+		t.Errorf("every issue was recovered, so nothing may be recorded: %+v", tracker.State().Records)
+	}
+}
+
+// TestIssuesTaskUnderTheCeilingIsByteIdenticalToToday is the
+// no-regression contract for the shape almost every project has. The
+// request count, the absence of any date parameter, the single chunk
+// file and the enrichment on every record all have to match what the
+// task produced before slicing existed — a project the old code
+// handled correctly must not pay a single extra request (#574).
+func TestIssuesTaskUnderTheCeilingIsByteIdenticalToToday(t *testing.T) {
+	corpus := newIssueCorpus(t)
+	corpus.addSpread(corpusStart, 3, time.Minute, "iss")
+
+	srv, e := newSrvExecutor(t, corpus.ServeHTTP)
+	defer srv.Close()
+	tracker := NewTruncationTracker()
+	e.Truncation = tracker
+	e.Raw.SetTruncationObserver(tracker.Record)
+
+	if err := projectIssuesFullTask()(ctx(t), e); err != nil {
+		t.Fatalf("projectIssuesFullTask: %v", err)
+	}
+
+	if got := corpus.requestCount(); got != 1 {
+		t.Errorf("requests: got %d, want 1 (exactly what the unsliced fetch cost): %v", got, corpus.allQueries())
+	}
+	if dated := corpus.datedQueries(); len(dated) != 0 {
+		t.Errorf("a project under the ceiling must send no date parameter, got %v", dated)
+	}
+
+	// One window means one chunk file, at the name the pre-#574 single
+	// WriteChunk produced.
+	entries, err := os.ReadDir(filepath.Join(e.Store.BaseDir(), "getProjectIssuesFull"))
+	if err != nil {
+		t.Fatalf("reading the task directory: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != testResultsFile {
+		names := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		t.Errorf("chunk files: got %v, want exactly [%s]", names, testResultsFile)
+	}
+
+	items, err := e.Store.ReadAll("getProjectIssuesFull")
+	if err != nil {
+		t.Fatalf("reading getProjectIssuesFull: %v", err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("records written: got %d, want 3", len(items))
+	}
+	for i, raw := range items {
+		for key, want := range map[string]string{
+			"key":        fmt.Sprintf("iss-%d", i),
+			"projectKey": "p1",
+			"branch":     "main",
+			"serverUrl":  e.ServerURL,
+		} {
+			if got := extractField(raw, key); got != want {
+				t.Errorf("record %d: %s = %q, want %q", i, key, got, want)
+			}
+		}
+	}
+	if tracker.HasRecords() {
+		t.Errorf("an untruncated task must record nothing, got %+v", tracker.State().Records)
+	}
 }

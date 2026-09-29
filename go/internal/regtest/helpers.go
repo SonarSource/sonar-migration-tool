@@ -122,6 +122,18 @@ func withNote(r CheckResult, note string) CheckResult {
 	return r
 }
 
+// withSqsAndSqcFeatureDivergence marks a mismatch as a known SQS_AND_SQC_FEATURE_DIVERGENCE
+// (a permanent, by-design difference between SonarQube Server and SonarQube
+// Cloud) rather than a migration defect — see
+// CheckResult.SqsAndSqcFeatureDivergence. note must state plainly what SQS
+// shows, what SQC shows, and the product reason they differ, so a reader
+// never has to guess whether this is a bug.
+func withSqsAndSqcFeatureDivergence(r CheckResult, note string) CheckResult {
+	r.SqsAndSqcFeatureDivergence = true
+	r.Notes = note
+	return r
+}
+
 // countWithFilter queries an issues/hotspots endpoint with a filter parameter.
 func countWithFilter(ctx context.Context, raw *common.RawClient, path string, baseParams url.Values, filterKey, filterValue string) (int, error) {
 	params := common.CloneParams(baseParams)

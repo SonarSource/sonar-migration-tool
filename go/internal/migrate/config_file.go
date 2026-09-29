@@ -5,9 +5,7 @@
 package migrate
 
 import (
-	"encoding/json"
-	"fmt"
-	"os"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
 // configFileShape is the union of the four documented config-file formats
@@ -58,6 +56,17 @@ type configFileShape struct {
 	// and back-linked, current behavior). Same FlexibleBool semantics as
 	// skip_issue_sync.
 	FastSync *FlexibleBool `json:"fast_sync"`
+	// MigrateHistory opts into the project-history migration PoC (#554).
+	// Defaults to false. Same FlexibleBool semantics as skip_issue_sync.
+	MigrateHistory *FlexibleBool `json:"migrate_history"`
+	// MaxIssueComments — see MigrateConfig.MaxIssueComments (#571).
+	MaxIssueComments int `json:"max_issue_comments"`
+	// BranchAnalyzedAfter — see MigrateConfig.BranchAnalyzedAfter (#583).
+	// Applies to shapes that have no source/target split (SonarCloud,
+	// command-sectioned, flat); the unified shape resolves it via
+	// unifiedTargetBlock.BranchAnalyzedAfter / resolveBranchAnalyzedAfter
+	// instead, since that shape can override it per-phase.
+	BranchAnalyzedAfter string `json:"branch_analyzed_after"`
 	// ConfirmedOrgs is reset-only: it additively pre-populates
 	// ResetConfig.ConfirmedOrgs (#550) for config-driven / programmatic
 	// callers that don't go through cmd/reset.go's interactive
@@ -66,6 +75,24 @@ type configFileShape struct {
 	// outer-wins-else-nested-"migrate" resolution (mirrors
 	// skip_issue_sync's precedence).
 	ConfirmedOrgs []string `json:"confirmed_orgs"`
+
+	// Objects and ProjectKey are top-level (global) fields regardless of
+	// shape — the issue documents "objects" as settable "at global
+	// level" (#536), mirroring extract's config_file.go. Objects, when
+	// present, limits migration to the selected object categories
+	// (settings, permission_templates, quality_profiles, quality_gates,
+	// projects, portfolios, groups, license_profiles — aliases
+	// qp/qg/pt/lp); validated and resolved into MigrateConfig.Objects by
+	// LoadMigrateConfigFile via common.ParseObjects. ProjectKey is the
+	// raw --project_key-equivalent regexp pattern, copied as-is into
+	// MigrateConfig.ProjectKeyFilter (migrate never resolves it to a
+	// concrete key list; createProjects filters locally).
+	Objects    []string `json:"objects"`
+	ProjectKey string   `json:"project_key"`
+	// BranchRegexp is the top-level regexp pattern restricting which
+	// branches extract/migrate/transfer process (#582). Mirrors
+	// ProjectKey's top-level/shape semantics.
+	BranchRegexp string `json:"branch_regexp"`
 
 	// Shape 2 (command-sectioned).
 	Migrate *configFileShape `json:"migrate"`
@@ -122,6 +149,18 @@ type unifiedTargetBlock struct {
 	UnsupportedLanguages string `json:"unsupported_languages"`
 	// FastSync — see configFileShape.FastSync (#527).
 	FastSync *FlexibleBool `json:"fast_sync"`
+	// MigrateHistory — see configFileShape.MigrateHistory (#554).
+	MigrateHistory *FlexibleBool `json:"migrate_history"`
+	// MaxIssueComments — see configFileShape.MaxIssueComments (#571).
+	MaxIssueComments int `json:"max_issue_comments"`
+	// BranchRegexp — see MigrateConfig.BranchRegexp (#582).
+	BranchRegexp string `json:"branch_regexp"`
+	// BranchAnalyzedAfter — see configFileShape.BranchAnalyzedAfter (#583).
+	// Pointer (not a plain string) so an explicit "" here can override a
+	// non-empty top-level value, distinguishing "target didn't set this"
+	// (nil, fall through to top-level) from "target explicitly wants no
+	// filter" (non-nil, even when the pointed-to value is "").
+	BranchAnalyzedAfter *string `json:"branch_analyzed_after"`
 }
 
 type sonarCloudBlock struct {
@@ -153,21 +192,12 @@ type settingsBlock struct {
 	Concurrency      int    `json:"concurrency"`
 	BuildConcurrency int    `json:"project_data_build_concurrency"`
 	Timeout          int    `json:"timeout"`
+	// MaxIssueComments — see configFileShape.MaxIssueComments (#571).
+	MaxIssueComments int `json:"max_issue_comments"`
 }
 
 func parseConfigFile(path string) (configFileShape, error) {
-	var shape configFileShape
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return shape, fmt.Errorf("reading config file: %w", err)
-	}
-	if len(data) == 0 {
-		return shape, fmt.Errorf("config file %s is empty", path)
-	}
-	if err := json.Unmarshal(data, &shape); err != nil {
-		return shape, fmt.Errorf("parsing config file: %w", err)
-	}
-	return shape, nil
+	return common.ParseJSONConfigFile[configFileShape](path)
 }
 
 func (s configFileShape) toMigrateConfig() MigrateConfig {
@@ -192,16 +222,34 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			cfg.ProjectKeyPattern = s.Target.ProjectKeyPattern
 			cfg.ExcludeBranches = s.Target.ExcludeBranches
 			cfg.UnsupportedLanguages = s.Target.UnsupportedLanguages
+			cfg.MaxIssueComments = s.Target.MaxIssueComments
+			cfg.BranchRegexp = s.Target.BranchRegexp
 		}
 		// #474 — target.unsupported_languages wins, else the top-level field.
 		cfg.UnsupportedLanguages = resolveUnsupportedLanguages(
 			cfg.UnsupportedLanguages, s.UnsupportedLanguages)
+		// #582 — target.branch_regexp wins, else the top-level field.
+		cfg.BranchRegexp = common.FirstNonEmpty(cfg.BranchRegexp, s.BranchRegexp)
 		// #527 — target.fast_sync wins, else the top-level field, else false.
 		var targetFastSync *FlexibleBool
 		if s.Target != nil {
 			targetFastSync = s.Target.FastSync
 		}
 		cfg.FastSync = resolveFastSync(targetFastSync, s.FastSync)
+		// #554 — target.migrate_history wins, else the top-level field, else false.
+		var targetMigrateHistory *FlexibleBool
+		if s.Target != nil {
+			targetMigrateHistory = s.Target.MigrateHistory
+		}
+		cfg.MigrateHistory = resolveMigrateHistory(targetMigrateHistory, s.MigrateHistory)
+		// #583 — target.branch_analyzed_after wins when explicitly present
+		// (even if empty, meaning "no filter for migrate"), else the
+		// top-level field, else "" (no filter).
+		var targetBranchAnalyzedAfter *string
+		if s.Target != nil {
+			targetBranchAnalyzedAfter = s.Target.BranchAnalyzedAfter
+		}
+		cfg.BranchAnalyzedAfter = resolveBranchAnalyzedAfter(targetBranchAnalyzedAfter, s.BranchAnalyzedAfter)
 		if cfg.Concurrency == 0 {
 			cfg.Concurrency = s.Concurrency
 		}
@@ -210,6 +258,9 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		}
 		if cfg.Timeout == 0 {
 			cfg.Timeout = s.Timeout
+		}
+		if cfg.MaxIssueComments == 0 {
+			cfg.MaxIssueComments = s.MaxIssueComments
 		}
 		cfg.ExportDirectory = s.ExportDirectory
 		// Top-level skip_issue_sync applies to every shape (#299).
@@ -221,11 +272,17 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		if s.SkipProjectDataMigration != nil && s.SkipProjectDataMigration.Set {
 			cfg.SkipProjectDataMigration = s.SkipProjectDataMigration.Value
 		}
+		cfg.objectsRaw = s.Objects
+		cfg.ProjectKeyFilter = s.ProjectKey
 		return cfg
 	case s.SonarCloud != nil:
 		cfg := s.SonarCloud.toMigrateConfig(s.Settings)
 		cfg.UnsupportedLanguages = resolveUnsupportedLanguages(
 			cfg.UnsupportedLanguages, s.UnsupportedLanguages)
+		// #582 — sonarCloudBlock.toMigrateConfig never sets BranchRegexp, so
+		// this is just the top-level field, but written with FirstNonEmpty
+		// for consistency with the unified-shape resolution above.
+		cfg.BranchRegexp = common.FirstNonEmpty(cfg.BranchRegexp, s.BranchRegexp)
 		if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
 			cfg.SkipIssueSync = s.SkipIssueSync.Value
 		}
@@ -235,6 +292,12 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		if s.FastSync != nil && s.FastSync.Set {
 			cfg.FastSync = s.FastSync.Value
 		}
+		if s.MigrateHistory != nil && s.MigrateHistory.Set {
+			cfg.MigrateHistory = s.MigrateHistory.Value
+		}
+		cfg.objectsRaw = s.Objects
+		cfg.ProjectKeyFilter = s.ProjectKey
+		cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
 		return cfg
 	case s.Migrate != nil:
 		cfg := s.Migrate.toMigrateConfig()
@@ -252,6 +315,28 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		if s.FastSync != nil && s.FastSync.Set {
 			cfg.FastSync = s.FastSync.Value
 		}
+		// Same outer-wins-else-inner semantics for migrate_history (#554).
+		if s.MigrateHistory != nil && s.MigrateHistory.Set {
+			cfg.MigrateHistory = s.MigrateHistory.Value
+		}
+		// #536: outer-level "objects" / "project_key" win over the same
+		// fields nested inside "migrate" — but fall back to the nested
+		// value (already captured above by the recursive call) when the
+		// outer level didn't set them.
+		if len(s.Objects) > 0 {
+			cfg.objectsRaw = s.Objects
+		}
+		if s.ProjectKey != "" {
+			cfg.ProjectKeyFilter = s.ProjectKey
+		}
+		// #582: same outer-wins-else-nested semantics for branch_regexp.
+		if s.BranchRegexp != "" {
+			cfg.BranchRegexp = s.BranchRegexp
+		}
+		// Same outer-wins-else-inner semantics for branch_analyzed_after (#583).
+		if s.BranchAnalyzedAfter != "" {
+			cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
+		}
 		return cfg
 	default:
 		cfg := MigrateConfig{
@@ -263,6 +348,7 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			Concurrency:        s.Concurrency,
 			BuildConcurrency:   s.BuildConcurrency,
 			Timeout:            s.Timeout,
+			MaxIssueComments:   s.MaxIssueComments,
 			RunID:              s.RunID,
 			TargetTask:         s.TargetTask,
 			SkipProfiles:       s.SkipProfiles,
@@ -271,6 +357,9 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			ExcludeBranches:    s.ExcludeBranches,
 			// #474 — flat shape reads the field directly.
 			UnsupportedLanguages: s.UnsupportedLanguages,
+			BranchRegexp:         s.BranchRegexp,
+			// #583 — flat shape reads the field directly.
+			BranchAnalyzedAfter: s.BranchAnalyzedAfter,
 		}
 		if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
 			cfg.SkipIssueSync = s.SkipIssueSync.Value
@@ -281,6 +370,11 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		if s.FastSync != nil && s.FastSync.Set {
 			cfg.FastSync = s.FastSync.Value
 		}
+		if s.MigrateHistory != nil && s.MigrateHistory.Set {
+			cfg.MigrateHistory = s.MigrateHistory.Value
+		}
+		cfg.objectsRaw = s.Objects
+		cfg.ProjectKeyFilter = s.ProjectKey
 		return cfg
 	}
 }
@@ -311,6 +405,7 @@ func (sc sonarCloudBlock) toMigrateConfig(settings *settingsBlock) MigrateConfig
 		cfg.Concurrency = settings.Concurrency
 		cfg.BuildConcurrency = settings.BuildConcurrency
 		cfg.Timeout = settings.Timeout
+		cfg.MaxIssueComments = settings.MaxIssueComments
 	}
 	return cfg
 }
@@ -343,6 +438,12 @@ func (s configFileShape) toResetConfig() ResetConfig {
 // LoadSonarCloudOrgsFromConfigFile returns the organizations list from a
 // side-sectioned config file. Returns nil when the file uses a different shape
 // or no organizations are defined.
+//
+// Only shape 3 carries per-organization credentials, so this deliberately
+// does NOT synthesize an entry from the unified shape's
+// target.default_organization — an entry with no token or URL would be a
+// lie. Callers that only need an organization key should fall back to
+// LoadDefaultOrganizationFromConfigFile when this returns nothing (#566).
 func LoadSonarCloudOrgsFromConfigFile(path string) ([]OrgConfigEntry, error) {
 	shape, err := parseConfigFile(path)
 	if err != nil {
@@ -354,14 +455,47 @@ func LoadSonarCloudOrgsFromConfigFile(path string) ([]OrgConfigEntry, error) {
 	return shape.SonarCloud.Organizations, nil
 }
 
+// LoadDefaultOrganizationFromConfigFile returns the SonarQube Cloud
+// organization key a migrate run would stamp onto every unmapped row of
+// organizations.csv — target.default_organization in the unified shape
+// (#281). Returns "" when the config file defines none.
+//
+// Resolution goes through toMigrateConfig rather than reading
+// shape.Target directly, so the helper keeps matching migrate exactly if
+// another shape starts carrying the field later. Used by structure and
+// predictive-report, which otherwise leave sonarcloud_org_key empty and
+// then report every entity as "Organization skipped" (#566).
+func LoadDefaultOrganizationFromConfigFile(path string) (string, error) {
+	shape, err := parseConfigFile(path)
+	if err != nil {
+		return "", err
+	}
+	return shape.toMigrateConfig().DefaultOrganization, nil
+}
+
 // LoadMigrateConfigFile parses a JSON config file in any of the three
-// documented shapes and returns the populated MigrateConfig.
+// documented shapes and returns the populated MigrateConfig. The
+// config-file "objects" array (any shape) is validated and resolved into
+// MigrateConfig.Objects via common.ParseObjects (#536); an unrecognized
+// value aborts with an error before any API call is made.
 func LoadMigrateConfigFile(path string) (MigrateConfig, error) {
 	shape, err := parseConfigFile(path)
 	if err != nil {
 		return MigrateConfig{}, err
 	}
-	return shape.toMigrateConfig(), nil
+	cfg := shape.toMigrateConfig()
+	objects, err := common.ParseObjects(cfg.objectsRaw)
+	if err != nil {
+		return MigrateConfig{}, err
+	}
+	cfg.Objects = objects
+	cfg.objectsRaw = nil
+	// Mirror cmd/migrate.go's applyMigrateProjectKeyFlag: the filter
+	// only applies when the "projects" category is selected (#536).
+	if cfg.Objects != nil && !cfg.Objects[common.ObjectProjects] {
+		cfg.ProjectKeyFilter = ""
+	}
+	return cfg, nil
 }
 
 // LoadResetConfigFile parses a JSON config file in any of the three

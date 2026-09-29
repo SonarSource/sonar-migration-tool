@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/scanreport"
 	pb "github.com/sonar-solutions/sonar-migration-tool/internal/scanreport/proto"
+	"github.com/sonar-solutions/sq-api-go/types"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -54,9 +56,24 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 	prog := common.NewProgressLogger(e.Logger, "importProjectData", len(projects))
 	e.Progress.Registry().Register("importProjectData", prog)
 
+	// A plain errgroup.SetLimit here would freeze at whatever the limiter's
+	// Current() happens to be right now for this task's entire run — which
+	// can be tens of minutes for a large instance — silently ignoring every
+	// later recalculation (#573). DynamicGate re-reads Current() on each
+	// admission instead.
+	//
+	// Bounded by CEPollConcurrencyLimiter, NOT ConcurrencyLimiter: a
+	// project's gate slot here is held across build -> submit -> PollCETask
+	// for every one of its branches (and, when enabled, the #554 history
+	// replay nested inside that same slot) — minutes of mostly sleeping
+	// between cheap polls, not one HTTP call's round-trip time. Sizing that
+	// off observed call latency (what ConcurrencyLimiter does) sees only
+	// the fast polls and drastically under-provisions concurrency; see
+	// pollBoundConcurrency's doc comment in concurrency.go.
+	gate := NewDynamicGate(importProjectDataGateLimiter(e))
 	g, gCtx := errgroup.WithContext(ctx)
-	g.SetLimit(cap(e.Sem))
 
+	var admitErr error
 	for _, proj := range projects {
 		if isFailedMigrateRecord(proj) {
 			continue
@@ -72,49 +89,158 @@ func runImportProjectData(ctx context.Context, e *Executor) error {
 
 		e.Logger.Debug("importing project data", "project", cloudKey)
 
+		if err := gate.Acquire(gCtx); err != nil {
+			admitErr = err
+			break
+		}
 		g.Go(func() error {
-			if gCtx.Err() != nil {
-				return gCtx.Err()
-			}
-
-			sqBranches := collectBranchInfo(e, serverURL, serverKey)
-			if len(sqBranches) == 0 {
-				sqBranches = []branchInfo{{Name: "main", IsMain: true}}
-			}
-			sortBranchesMainFirst(sqBranches)
-			sqBranches = filterBranches(sqBranches, e.ExcludeBranches)
-
-			scMainBranch := fetchSCMainBranch(gCtx, e, cloudKey)
-
-			// #474 — a rejected report used to be a Warn that left the task
-			// summary reporting nothing at all, so a transfer that migrated
-			// zero issues and zero branches still looked clean.
-			recordImportOutcome(e, counter, cloudKey,
-				importProjectBranches(gCtx, e, proj, sqBranches, scMainBranch, completed, w))
-			prog.Increment()
-			return nil
+			defer gate.Release()
+			return importProjectDataOne(gCtx, e, proj, cloudKey, serverURL, serverKey, completed, w, counter, prog)
 		})
 	}
-	return g.Wait()
+	if err := g.Wait(); err != nil {
+		return err
+	}
+	if admitErr != nil {
+		return admitErr
+	}
+	// A cancellation that lands after the loop admitted every project leaves
+	// admitErr nil, and g.Wait() nil too, because importProjectDataOne records
+	// per-project outcomes rather than returning them. Reporting success there
+	// lets migrate.go start the NEXT phase on an already-cancelled context,
+	// where syncIssueMetadata and syncHotspotMetadata create their task
+	// directories before their first ctx check, fail immediately, and are then
+	// dropped by filterCompleted's directory-exists gate on the next --run_id
+	// resume. With no sync tasks in the plan at all, the run instead prints
+	// "Migration Complete" and exits 0 on an interrupted migration.
+	//
+	// Note this task itself is never skipped by resume: filterCompleted
+	// exempts importProjectData (#393), and it redoes its own work per
+	// (project, branch) via loadCompletedBranches.
+	return ctx.Err()
 }
 
-// fetchSCMainBranch queries SonarCloud for the main branch name of a project.
-// Returns empty string if unavailable.
-func fetchSCMainBranch(ctx context.Context, e *Executor, cloudKey string) string {
+// importProjectDataGateLimiter picks the limiter that bounds
+// runImportProjectData's outer per-project gate: CEPollConcurrencyLimiter
+// when set, falling back to ConcurrencyLimiter otherwise (test fixtures,
+// and any other caller that never wires the former).
+func importProjectDataGateLimiter(e *Executor) *ConcurrencyLimiter {
+	if e.CEPollConcurrencyLimiter != nil {
+		return e.CEPollConcurrencyLimiter
+	}
+	return e.ConcurrencyLimiter
+}
+
+// resolveProjectBranches builds the final list of branches to import for
+// one project: collect from the source (defaulting to a synthetic main
+// branch when extract has no branch data), sort main first, apply the
+// glob exclude filter, the --branch_regexp include filter (#582), and
+// --branch_analyzed_after (#583) — logging a warning when the date filter
+// force-includes main — then enforce the hard per-project branch cap
+// (#584) on whatever survives those filters, recording any branches the
+// cap drops so the migration report can name them. Each stage
+// independently guarantees main survives it, so chaining them this way
+// still always leaves main in.
+func resolveProjectBranches(e *Executor, w *common.ChunkWriter, cloudKey, serverURL, serverKey string) []branchInfo {
+	sqBranches := collectBranchInfo(e, serverURL, serverKey)
+	if len(sqBranches) == 0 {
+		sqBranches = []branchInfo{{Name: "main", IsMain: true}}
+	}
+	sortBranchesMainFirst(sqBranches)
+	sqBranches = filterBranches(sqBranches, e.ExcludeBranches)
+	sqBranches = filterBranchesByRegexp(sqBranches, e.BranchRe)
+
+	var forcedMain string
+	var forcedMainDate time.Time
+	sqBranches, forcedMain, forcedMainDate = filterBranchesByAnalyzedAfter(sqBranches, e.BranchAnalyzedAfter)
+	if forcedMain != "" {
+		e.Logger.Warn(common.ForcedMainBranchLogMessage,
+			"project", cloudKey, "branch", forcedMain,
+			"analysisDate", forcedMainDate, "cutoff", e.BranchAnalyzedAfter)
+	}
+
+	var dropped []branchInfo
+	sqBranches, dropped = capBranches(sqBranches, MaxBranchesPerProject)
+	for _, d := range dropped {
+		recordBranchLimitSkip(w, cloudKey, d.Name)
+	}
+	return sqBranches
+}
+
+// importProjectDataOne imports project data for a single project's branches.
+// Split out of runImportProjectData so the per-project work (branch
+// discovery, the #583 analyzed-after filter, and outcome recording) isn't
+// nested inside the fan-out loop and goroutine.
+func importProjectDataOne(ctx context.Context, e *Executor, proj json.RawMessage, cloudKey, serverURL, serverKey string,
+	completed map[string]bool, w *common.ChunkWriter, counter *TaskCounter, prog *common.ProgressLogger) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	sqBranches := resolveProjectBranches(e, w, cloudKey, serverURL, serverKey)
+
+	// One list call per project: it yields both the target's main
+	// branch name and, for #588, the analysis date the target
+	// already holds for each branch.
+	scBranches := fetchTargetBranches(ctx, e, cloudKey)
+
+	// #474 — a rejected report used to be a Warn that left the task
+	// summary reporting nothing at all, so a transfer that migrated
+	// zero issues and zero branches still looked clean.
+	recordImportOutcome(e, counter, cloudKey,
+		importProjectBranches(ctx, e, proj, sqBranches, scBranches, completed, w))
+	prog.Increment()
+	return nil
+}
+
+// fetchTargetBranches lists the project's branches on SonarCloud. Returns nil
+// when the Cloud client is unavailable or the call fails; both callers treat an
+// unknown target as "nothing is there yet", which is the safe default for the
+// main-branch-name lookup and for the up-to-date check in importAndRecordBranch.
+func fetchTargetBranches(ctx context.Context, e *Executor, cloudKey string) []types.Branch {
 	if e.Cloud == nil || e.Cloud.Branches == nil {
-		return ""
+		return nil
 	}
 	scBranches, err := e.Cloud.Branches.List(ctx, cloudKey)
 	if err != nil {
 		e.Logger.Warn("failed to fetch SC branches, using SQ branch names", "project", cloudKey, "err", err)
-		return ""
+		return nil
 	}
-	for _, b := range scBranches {
+	return scBranches
+}
+
+// mainBranchName returns the main branch's name in a SonarCloud branch list,
+// or "" when the list carries no main branch.
+func mainBranchName(branches []types.Branch) string {
+	for _, b := range branches {
 		if b.IsMain {
 			return b.Name
 		}
 	}
 	return ""
+}
+
+// targetAnalysisDates maps each SonarCloud branch name to the date of the
+// analysis the target already holds for it. Branches with no analysis yet, or
+// with a date in a layout parseISODate does not recognise, are left out — an
+// absent entry reads as "never analyzed on the target".
+func targetAnalysisDates(branches []types.Branch) map[string]time.Time {
+	if len(branches) == 0 {
+		return nil
+	}
+	dates := make(map[string]time.Time, len(branches))
+	for _, b := range branches {
+		if d := parseISODate(b.AnalysisDate); !d.IsZero() {
+			dates[b.Name] = d
+		}
+	}
+	return dates
+}
+
+// fetchSCMainBranch queries SonarCloud for the main branch name of a project.
+// Returns empty string if unavailable.
+func fetchSCMainBranch(ctx context.Context, e *Executor, cloudKey string) string {
+	return mainBranchName(fetchTargetBranches(ctx, e, cloudKey))
 }
 
 // renameSCMainBranchToSource renames the project's SonarCloud main branch to
@@ -144,21 +270,24 @@ func renameSCMainBranchToSource(ctx context.Context, e *Executor, cloudKey, sour
 // importProjectBranches imports project data for every branch of one project.
 // Main branch is imported first; if it fails, remaining branches are skipped.
 func importProjectBranches(ctx context.Context, e *Executor, proj json.RawMessage,
-	sqBranches []branchInfo, scMainBranch string, completed map[string]bool, w *common.ChunkWriter) error {
+	sqBranches []branchInfo, scBranches []types.Branch, completed map[string]bool, w *common.ChunkWriter) error {
 
 	cloudKey := extractField(proj, "cloud_project_key")
 	orgKey := extractField(proj, "sonarcloud_org_key")
 	serverURL := extractField(proj, "server_url")
 	serverKey := extractField(proj, "key")
 
+	scMainBranch := mainBranchName(scBranches)
+
 	bctx := branchImportContext{
-		CloudKey:     cloudKey,
-		OrgKey:       orgKey,
-		ServerURL:    serverURL,
-		ServerKey:    serverKey,
-		SCMainBranch: scMainBranch,
-		Completed:    completed,
-		Writer:       w,
+		CloudKey:            cloudKey,
+		OrgKey:              orgKey,
+		ServerURL:           serverURL,
+		ServerKey:           serverKey,
+		SCMainBranch:        scMainBranch,
+		TargetAnalysisDates: targetAnalysisDates(scBranches),
+		Completed:           completed,
+		Writer:              w,
 	}
 
 	var mainBranch *branchInfo
@@ -183,15 +312,10 @@ func importProjectBranches(ctx context.Context, e *Executor, proj json.RawMessag
 
 	// Phase 1: import main branch (blocking gate).
 	if mainBranch != nil {
-		if err := importAndRecordBranch(ctx, e, bctx, *mainBranch); err != nil {
-			e.Logger.Warn("main branch failed, skipping remaining branches",
+		if err := gatedImportAndRecordBranch(ctx, e, bctx, *mainBranch); err != nil {
+			e.Logger.Warn("main branch not imported, skipping remaining branches",
 				"project", cloudKey, "err", err)
-			for _, nb := range nonMainBranches {
-				recordBranchResult(w, cloudKey, nb.Name, &importResult{
-					Status: "skipped", Error: "skipped: main branch CE failed",
-				})
-			}
-			return fmt.Errorf("main branch CE failed for %s: %w", cloudKey, err)
+			return recordPhase1Skips(w, cloudKey, nonMainBranches, ctx.Err() != nil, err)
 		}
 		// #428 — SonarCloud creates the project's main branch under its own
 		// default name (typically "master"), discarding the source main branch
@@ -203,11 +327,100 @@ func importProjectBranches(ctx context.Context, e *Executor, proj json.RawMessag
 		renameSCMainBranchToSource(ctx, e, cloudKey, mainBranch.Name)
 	}
 
-	// Phase 2: import non-main branches sequentially.
+	// Phase 2: import non-main branches in parallel.
+	//
+	// Safe to fan out only because Phase 1 above is a hard barrier. Main
+	// must be fully imported and renamed (#428) before any non-main branch
+	// is submitted: a non-main report carries branch characteristics that
+	// the CE rejects until a main analysis anchors the project, and
+	// PreCreateAnalysis points targetBranchName at bctx.MainTargetName,
+	// which only resolves on the target after renameSCMainBranchToSource.
+	//
+	// Nothing else is shared-mutable across branches: bctx is passed BY
+	// VALUE, both of its maps are read-only once built (Completed after
+	// loadCompletedBranches, TargetAnalysisDates after the
+	// targetAnalysisDates call above), and ChunkWriter is documented
+	// thread-safe (it hands each writer its own results.N.jsonl via atomic
+	// indexing). Per-branch outcomes are
+	// recorded independently inside importAndRecordBranch, so — exactly as
+	// when this loop was sequential — a non-main failure is logged against
+	// that branch and never fails the project.
+	//
+	// Bounded by the run-wide e.BranchGate, not a per-project limit: see
+	// Executor.BranchGate for why the bound has to be global.
+	// Both bail-outs below record a row rather than dropping the branch. The
+	// migration report is assembled purely by enumerating this store, with no
+	// pass that reconciles it against the branch list, so an unattempted
+	// branch that writes nothing simply vanishes from the report — and a
+	// project whose rows ALL vanish has no project-data rows at all, which
+	// attachProjectData reads as nothing-to-flag and renders as Succeeded.
+	g, gCtx := errgroup.WithContext(ctx)
 	for _, branch := range nonMainBranches {
-		_ = importAndRecordBranch(ctx, e, bctx, branch)
+		if err := e.BranchGate.Acquire(gCtx); err != nil {
+			recordBranchCancelled(w, cloudKey, branch.Name)
+			continue
+		}
+		g.Go(func() error {
+			defer e.BranchGate.Release()
+			if gCtx.Err() != nil {
+				recordBranchCancelled(w, cloudKey, branch.Name)
+				return nil
+			}
+			_ = importAndRecordBranch(gCtx, e, bctx, branch)
+			return nil
+		})
 	}
+	_ = g.Wait()
 	return nil
+}
+
+// recordBranchCancelled marks a branch the run never got to because the
+// context was cancelled. Acquire only ever fails on a done context, so the
+// caller's loop keeps walking the remaining branches to account for each of
+// them rather than stopping at the first.
+func recordBranchCancelled(w *common.ChunkWriter, cloudKey, branchName string) {
+	recordBranchResult(w, cloudKey, branchName, &importResult{
+		Status: "skipped", Error: "skipped: migration cancelled",
+	})
+}
+
+// recordPhase1Skips accounts for the non-main branches a project will not
+// attempt because its main branch did not import, and returns the error to
+// report for the project. A cancelled run is deliberately not labelled a main
+// branch rejection: reporting "main branch CE failed" for it sends the reader
+// hunting for a Compute Engine failure that never happened.
+func recordPhase1Skips(w *common.ChunkWriter, cloudKey string, nonMain []branchInfo, cancelled bool, err error) error {
+	if cancelled {
+		for _, nb := range nonMain {
+			recordBranchCancelled(w, cloudKey, nb.Name)
+		}
+		return fmt.Errorf("migration cancelled for %s: %w", cloudKey, err)
+	}
+	for _, nb := range nonMain {
+		recordBranchResult(w, cloudKey, nb.Name, &importResult{
+			Status: "skipped", Error: "skipped: main branch CE failed",
+		})
+	}
+	return fmt.Errorf("main branch CE failed for %s: %w", cloudKey, err)
+}
+
+// gatedImportAndRecordBranch runs one branch import while holding a slot in
+// the run-wide branch gate. Phase 2's fan-out below acquires the gate
+// itself so it can admit the next branch while earlier ones are still in
+// flight; this wrapper is for the sequential Phase 1 call.
+func gatedImportAndRecordBranch(ctx context.Context, e *Executor, bctx branchImportContext, branch branchInfo) error {
+	if err := e.BranchGate.Acquire(ctx); err != nil {
+		// Acquire fails only on a done context, and it fails BEFORE
+		// importAndRecordBranch, which is what would otherwise write this
+		// branch's row. Recording here is what keeps MAIN in the report: a
+		// main-only project that writes nothing at all has no project data
+		// rows, which attachProjectData reads as nothing to flag and renders
+		// as Succeeded.
+		recordBranchCancelled(bctx.Writer, bctx.CloudKey, branch.Name)
+		return err
+	}
+	defer e.BranchGate.Release()
+	return importAndRecordBranch(ctx, e, bctx, branch)
 }
 
 // resolveMainTargetName returns the project's main branch name on the target,
@@ -235,8 +448,63 @@ type branchImportContext struct {
 	// #428; the SC main branch name only when no source main is known). Non-main
 	// branches use it as their reference/merge branch on submit.
 	MainTargetName string
-	Completed      map[string]bool
-	Writer         *common.ChunkWriter
+	// TargetAnalysisDates holds, per SonarCloud branch name, the date of the
+	// analysis the target already carries. Read by targetBranchUpToDate to
+	// decide whether this run has anything left to submit for a branch (#588).
+	// Nil when the target project is new or its branch list could not be read,
+	// which reads as "nothing migrated yet" and imports everything.
+	TargetAnalysisDates map[string]time.Time
+	Completed           map[string]bool
+	Writer              *common.ChunkWriter
+}
+
+// BranchStatusUpToDate is the importProjectData record status for a branch the
+// target already holds at the date this run would have submitted (#588). It is
+// deliberately neither "success" nor "skipped": the branch IS migrated, so the
+// migration report must not degrade the project to Skipped, yet this run did
+// not import it. report/summary's collectProjectData treats it as a success.
+const BranchStatusUpToDate = "up_to_date"
+
+// BranchStatusCapped is the importProjectData record status for a branch
+// the per-project branch cap dropped before any import was attempted
+// (#584). Like BranchStatusUpToDate it is deliberately neither "success"
+// nor "skipped" so it cannot degrade the project's reported outcome; see
+// recordBranchLimitSkip.
+//
+// This was a bare string literal at its single write site and had no
+// matching case on the read side, so report/summary classified it as an
+// unrecognised status and rendered a capped-only project as "provisioned
+// but never analyzed". Both constants are exported for that reader
+// (report/summary already imports this package) so the two sides cannot
+// drift again (#604).
+const BranchStatusCapped = "capped"
+
+// targetBranchUpToDate reports whether SonarCloud already holds an analysis for
+// targetBranch that is at least as recent as the one this run would submit, and
+// returns that existing date.
+//
+// #588 — the current-snapshot import backdates its report to the source
+// branch's real last-analysis date (#557). Re-running transfer against an
+// unchanged source therefore rebuilds a report carrying the SAME date, and the
+// Compute Engine refuses it: "a newer report has already been processed, and
+// processing older reports is not supported". The report would have been
+// identical anyway, so skip it. Nudging the date forward instead would push a
+// duplicate analysis onto the branch's Activity on every re-run and lose the
+// true source date that #557 deliberately preserves.
+//
+// A source branch that was never analyzed (zero lastAnalysis) is never up to
+// date: buildBranchReport stamps such a report with "now", which always beats
+// whatever the target holds. A target date equal to the source's also counts as
+// up to date — the CE rejects an equal date as firmly as an older one.
+func targetBranchUpToDate(dates map[string]time.Time, targetBranch string, lastAnalysis time.Time) (time.Time, bool) {
+	if lastAnalysis.IsZero() {
+		return time.Time{}, false
+	}
+	existing, ok := dates[targetBranch]
+	if !ok {
+		return time.Time{}, false
+	}
+	return existing, !existing.Before(lastAnalysis)
 }
 
 func importAndRecordBranch(ctx context.Context, e *Executor, bctx branchImportContext, branch branchInfo) error {
@@ -249,6 +517,24 @@ func importAndRecordBranch(ctx context.Context, e *Executor, bctx branchImportCo
 	if branch.IsMain && bctx.SCMainBranch != "" {
 		targetBranch = bctx.SCMainBranch
 	}
+
+	// #588 — nothing new to submit for this branch. Must sit ahead of
+	// migrateBranchHistory: every history point is older still, so replaying
+	// them onto an already-populated branch would be rejected the same way.
+	if existing, ok := targetBranchUpToDate(bctx.TargetAnalysisDates, targetBranch, branch.LastAnalysisDate); ok {
+		e.Logger.Info("branch already up to date on the target, nothing to re-import",
+			"project", bctx.CloudKey, "branch", branch.Name, "target_branch", targetBranch,
+			"target_analysis_date", existing.Format(time.RFC3339),
+			"source_last_analysis_date", branch.LastAnalysisDate.Format(time.RFC3339))
+		recordBranchResult(bctx.Writer, bctx.CloudKey, branch.Name, &importResult{Status: BranchStatusUpToDate})
+		return nil
+	}
+
+	// #554 (PoC) — replay bounded project history before the regular
+	// current-snapshot import below. See migrateBranchHistory for why this
+	// must run first and why its errors are non-fatal.
+	migrateBranchHistory(ctx, e, bctx, branch, targetBranch)
+
 	// Non-main branches reference the main branch; the main branch references
 	// nothing (BuildMetadata falls back to its own name, preserving the working
 	// main-branch behavior).
@@ -257,14 +543,15 @@ func importAndRecordBranch(ctx context.Context, e *Executor, bctx branchImportCo
 		referenceBranch = bctx.MainTargetName
 	}
 	result, err := importBranch(ctx, e, importBranchInput{
-		CloudKey:        bctx.CloudKey,
-		OrgKey:          bctx.OrgKey,
-		ServerURL:       bctx.ServerURL,
-		ServerKey:       bctx.ServerKey,
-		Branch:          branch.Name,
-		TargetBranch:    targetBranch,
-		ReferenceBranch: referenceBranch,
-		IsMain:          branch.IsMain,
+		CloudKey:         bctx.CloudKey,
+		OrgKey:           bctx.OrgKey,
+		ServerURL:        bctx.ServerURL,
+		ServerKey:        bctx.ServerKey,
+		Branch:           branch.Name,
+		TargetBranch:     targetBranch,
+		ReferenceBranch:  referenceBranch,
+		IsMain:           branch.IsMain,
+		LastAnalysisDate: branch.LastAnalysisDate,
 	})
 	if err != nil {
 		logAPIWarn(e.Logger, "project data import failed", err, "project", bctx.CloudKey, "branch", branch.Name)
@@ -286,6 +573,8 @@ func recordBranchResult(w *common.ChunkWriter, cloudKey, branchName string, resu
 		// were dropped from the report because of them.
 		"unsupported_languages": result.UnsupportedLanguages,
 		"excluded_files":        result.ExcludedFiles,
+		// #597 — read back by loadSubmittedIssueIndex.
+		"submitted_issues": result.SubmittedIssueCount,
 	})
 	w.WriteOne(record) //nolint:errcheck
 }
@@ -299,6 +588,11 @@ type importBranchInput struct {
 	TargetBranch    string // SC branch name — used in protobuf metadata and CE submit
 	ReferenceBranch string // reference/merge branch (metadata field 11); empty for main
 	IsMain          bool   // main/default branch — suppresses branch characteristics on submit
+	// LastAnalysisDate backdates the current-snapshot report to the source
+	// branch's real last analysis date instead of the migration run's own
+	// timestamp. Zero when the source branch was never analyzed, in which
+	// case buildBranchReport falls back to "now".
+	LastAnalysisDate time.Time
 }
 
 type importResult struct {
@@ -320,6 +614,14 @@ type importResult struct {
 	// report because their language has no target quality profile (#474,
 	// --unsupported_languages=exclude).
 	ExcludedFiles int
+	// SubmittedIssueCount is the number of findings actually packaged into
+	// this branch's report — native issues, hotspots converted to issues and
+	// external issues, after dropIssuesWithInactiveRules — regardless of
+	// import status. Read by loadSubmittedIssueIndex (#597) so
+	// syncIssueMetadata/syncHotspotMetadata can tell "this project
+	// genuinely has nothing on the target" apart from "indexing hasn't
+	// caught up yet" before waiting on the latter.
+	SubmittedIssueCount int
 }
 
 func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*importResult, error) {
@@ -392,6 +694,7 @@ func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*i
 	return &importResult{
 		Status: "success", TaskID: result.TaskID, SourcePurged: meta.SourcePurged,
 		UnsupportedLanguages: meta.UnsupportedLanguages, ExcludedFiles: meta.ExcludedFiles,
+		SubmittedIssueCount: meta.SubmittedIssueCount,
 	}, nil
 }
 
@@ -415,6 +718,12 @@ type branchReportMeta struct {
 	// when the branch itself migrated successfully.
 	UnsupportedLanguages []string
 	ExcludedFiles        int
+	// SubmittedIssueCount carries every finding the report submits —
+	// native, hotspot-converted and external, post-drop — through to the
+	// importResult for #597. External issues count: syncIssueMetadata syncs
+	// them too, so a project with only external findings still needs the
+	// indexing wait.
+	SubmittedIssueCount int
 }
 
 // buildProtoSources maps each file component's source text onto its
@@ -599,6 +908,20 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	issues = append(issues, hotspotIssues...)
 
 	now := time.Now()
+	// Backdate the analysis itself to the source branch's real last-analysis
+	// date instead of stamping it with the migration run's own timestamp
+	// (review feedback on #557/#554: the current snapshot showed "today" in
+	// the target's Activity even though every other timestamp on the branch
+	// was historical). Unconditional — unlike history replay this is not
+	// gated behind --migrate_history. Falls back to "now" when the source
+	// branch was never analyzed (LastAnalysisDate zero). Everything else
+	// below (changeset fallback dates, active-rule createdAt/updatedAt)
+	// intentionally keeps using the real wall-clock "now" — only the
+	// analysis's own date changes.
+	analysisDate := now
+	if !input.LastAnalysisDate.IsZero() {
+		analysisDate = input.LastAnalysisDate
+	}
 
 	root, fileComps, cr := scanreport.BuildComponents(input.CloudKey, components)
 	pbSources := buildProtoSources(sources, cr)
@@ -646,7 +969,7 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 
 	reportData := &scanreport.ReportData{
 		Metadata: scanreport.BuildMetadata(scanreport.MetadataInput{
-			AnalysisDate:        now,
+			AnalysisDate:        analysisDate,
 			OrgKey:              input.OrgKey,
 			ProjectKey:          input.CloudKey,
 			BranchName:          targetBranch,
@@ -699,6 +1022,7 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	return zipBytes, branchReportMeta{
 		ProjectVersion: projectVersion, SourcePurged: sourcePurged,
 		UnsupportedLanguages: unsupportedLangKeys, ExcludedFiles: excludedFiles,
+		SubmittedIssueCount: len(issues) + len(extIssues),
 	}, nil, nil
 }
 
@@ -778,6 +1102,11 @@ func fixComponentLineCounts(components []scanreport.ComponentInput, sourceLinesB
 type branchInfo struct {
 	Name   string
 	IsMain bool
+	// LastAnalysisDate is the source branch's real last-analysis date (the
+	// api/project_branches/list "analysisDate" field), used to backdate the
+	// current-snapshot import instead of stamping it with the migration
+	// run's own timestamp. Zero when the source branch was never analyzed.
+	LastAnalysisDate time.Time
 }
 
 // collectBranchInfo reads extracted branch data for a project, returning
@@ -794,7 +1123,8 @@ func collectBranchInfo(e *Executor, serverURL, serverKey string) []branchInfo {
 		name := extractField(item.Data, "name")
 		if name != "" {
 			isMain := common.ExtractBool(item.Data, "isMain")
-			branches = append(branches, branchInfo{Name: name, IsMain: isMain})
+			lastAnalysisDate := parseISODate(extractField(item.Data, "analysisDate"))
+			branches = append(branches, branchInfo{Name: name, IsMain: isMain, LastAnalysisDate: lastAnalysisDate})
 		}
 	}
 	return branches
@@ -830,6 +1160,28 @@ func filterBranches(branches []branchInfo, excludePatterns []string) []branchInf
 	return filtered
 }
 
+// filterBranchesByRegexp keeps only branches whose name matches re,
+// except the main branch which is always kept regardless of match (same
+// bypass as filterBranches). re == nil means "no filter, keep everything".
+// #582.
+func filterBranchesByRegexp(branches []branchInfo, re *regexp.Regexp) []branchInfo {
+	if re == nil {
+		return branches
+	}
+	var filtered []branchInfo
+	for _, b := range branches {
+		if b.IsMain {
+			filtered = append(filtered, b)
+			continue
+		}
+		if !re.MatchString(b.Name) {
+			continue
+		}
+		filtered = append(filtered, b)
+	}
+	return filtered
+}
+
 func matchesAnyGlob(name string, patterns []string) bool {
 	for _, p := range patterns {
 		if matched, _ := filepath.Match(p, name); matched {
@@ -839,6 +1191,146 @@ func matchesAnyGlob(name string, patterns []string) bool {
 	return false
 }
 
+// releaseBranchPattern identifies long-lived release branches (#584):
+// "Release" or "release" followed by anything, e.g. "release/2.0",
+// "Release-1.0".
+var releaseBranchPattern = regexp.MustCompile(`^[Rr]elease`)
+
+// isPriorityBranchName reports whether name is one of the branch names
+// always prioritized ahead of release branches and everything else
+// (#584). Exact-case match: the main branch itself is already covered by
+// branchInfo.IsMain regardless of its name, so this only needs to catch
+// additional long-lived branches literally named "master" or "develop".
+func isPriorityBranchName(name string) bool {
+	switch name {
+	case "main", "master", "develop":
+		return true
+	}
+	return false
+}
+
+// capBranches enforces MaxBranchesPerProject (#584): a hard safeguard on
+// how many long-lived branches one project migrates, regardless of how
+// many survive main-first sorting and glob/regexp/date filtering upstream.
+//
+// Branches are kept in priority order: the main branch and any branch
+// literally named "master" or "develop" first, then branches matching
+// releaseBranchPattern most-recently-analyzed first, then everything else
+// most-recently-analyzed first. Returns the branches to keep (at most
+// maxBranches) and the branches the cap dropped, so the caller can report
+// them.
+func capBranches(branches []branchInfo, maxBranches int) (kept, dropped []branchInfo) {
+	if len(branches) <= maxBranches {
+		return branches, nil
+	}
+
+	var primary, release, rest []branchInfo
+	for _, b := range branches {
+		switch {
+		case b.IsMain || isPriorityBranchName(b.Name):
+			primary = append(primary, b)
+		case releaseBranchPattern.MatchString(b.Name):
+			release = append(release, b)
+		default:
+			rest = append(rest, b)
+		}
+	}
+	sortBranchesByRecency(release)
+	sortBranchesByRecency(rest)
+
+	ordered := append(append(primary, release...), rest...)
+	return ordered[:maxBranches], ordered[maxBranches:]
+}
+
+// sortBranchesByRecency orders branches most-recently-analyzed first
+// (#584's tie-break within the release and catch-all tiers). A branch
+// that was never analyzed (zero LastAnalysisDate) sorts last.
+func sortBranchesByRecency(branches []branchInfo) {
+	slices.SortStableFunc(branches, func(a, b branchInfo) int {
+		switch {
+		case a.LastAnalysisDate.After(b.LastAnalysisDate):
+			return -1
+		case a.LastAnalysisDate.Before(b.LastAnalysisDate):
+			return 1
+		default:
+			return 0
+		}
+	})
+}
+
+// recordBranchLimitSkip records that a branch was dropped by the
+// per-project branch cap (#584) before any import was attempted. Written
+// as its own record — deliberately NOT through recordBranchResult's
+// status field — so the cap never contributes a "skipped"/"failed" status
+// to collectProjectData's worst-outcome-wins per-project result
+// (go/internal/report/summary/collect.go): trimming a long tail of
+// branches must not make an otherwise fully-successful project report as
+// Skipped or Failed.
+func recordBranchLimitSkip(w *common.ChunkWriter, cloudKey, branchName string) {
+	record, _ := json.Marshal(map[string]any{
+		"cloud_project_key":     cloudKey,
+		"branch":                branchName,
+		"status":                BranchStatusCapped,
+		"branch_limit_exceeded": true,
+	})
+	w.WriteOne(record) //nolint:errcheck
+}
+
+// filterBranchesByAnalyzedAfter applies --branch_analyzed_after (#583) to
+// branches already resolved for one project. Kept as an independent stage
+// from filterBranches (the --exclude_branches glob filter) so the two
+// compose by simple chaining, and so a future #582 (--branches) filter can
+// chain the same way. A nil cutoff is a no-op. Returns the kept branches
+// and, when non-empty, the name/date of a main branch that was
+// force-included despite not meeting the cutoff, for the caller to log and
+// surface in the report.
+func filterBranchesByAnalyzedAfter(branches []branchInfo, cutoff *time.Time) (kept []branchInfo, forcedMain string, forcedMainDate time.Time) {
+	if cutoff == nil {
+		return branches, "", time.Time{}
+	}
+	infos := make([]common.BranchDateInfo, len(branches))
+	for i, b := range branches {
+		infos[i] = common.BranchDateInfo{Name: b.Name, IsMain: b.IsMain, AnalysisDate: b.LastAnalysisDate}
+	}
+	res := common.SelectBranchesAnalyzedAfter(infos, cutoff)
+	keptNames := make(map[string]bool, len(res.Kept))
+	for _, k := range res.Kept {
+		keptNames[k.Name] = true
+	}
+	for _, b := range branches {
+		if keptNames[b.Name] {
+			kept = append(kept, b)
+		}
+	}
+	return kept, res.ForcedMainBranch, res.ForcedMainDate
+}
+
+// loadCompletedBranches reads the importProjectData rows a previous
+// attempt on this run directory left behind and returns the set of
+// (project, branch) pairs a resume has no work left to do for.
+//
+// Terminal statuses and why each is, or is not, "complete" (#605):
+//
+//   - "success" — imported by an earlier attempt. Complete.
+//   - BranchStatusUpToDate — #588 found the target already holding an
+//     analysis at or after the date this run would submit. The branch IS
+//     migrated, and re-attempting it only rebuilds the report and re-reads
+//     the target's branch list to reach the same conclusion. Complete.
+//   - BranchStatusCapped — the #584 per-project cap dropped the branch.
+//     Deliberately NOT complete. A branch dropped by the per-project branch
+//     limit is the exception — it is re-evaluated on every run, so raising
+//     `--max_branches_per_project` (or narrowing `--exclude_branches`,
+//     `--branch_regexp` or `--branch_analyzed_after` so fewer other branches
+//     compete for the limit) and resuming will migrate it. Treating it as
+//     complete would pin it as skipped for the life of the run directory.
+//     Re-evaluating costs nothing: selection is list arithmetic, with no
+//     report build and no target lookup.
+//   - "failed", "skipped" (including "skipped: migration cancelled") —
+//     not complete, which is the whole point of resuming.
+//
+// Duplicate rows for one branch need no resolution here: a later attempt
+// never downgrades a branch it skipped, so it writes no row at all for an
+// already-complete branch, and the union of successes cannot regress.
 func loadCompletedBranches(store *common.DataStore) map[string]bool {
 	items, err := store.ReadAll("importProjectData")
 	if err != nil || len(items) == 0 {
@@ -846,7 +1338,8 @@ func loadCompletedBranches(store *common.DataStore) map[string]bool {
 	}
 	done := make(map[string]bool)
 	for _, item := range items {
-		if extractField(item, "status") == "success" {
+		switch extractField(item, "status") {
+		case "success", BranchStatusUpToDate:
 			key := extractField(item, "cloud_project_key") + ":" + extractField(item, "branch")
 			done[key] = true
 		}
@@ -1011,30 +1504,30 @@ func classifyExternalIssue(data json.RawMessage) (scanreport.ExternalIssueInput,
 	}
 	impacts := extractImpactInputs(data, "impacts")
 	return scanreport.ExternalIssueInput{
-			EngineID:           engineID,
-			RuleID:             key,
-			Message:            extractField(data, "message"),
-			Severity:           severity,
-			Type:               issueType,
-			StartLine:          extractInt32(data, "textRange", "startLine"),
-			EndLine:            extractInt32(data, "textRange", "endLine"),
-			StartOff:           extractInt32(data, "textRange", "startOffset"),
-			EndOff:             extractInt32(data, "textRange", "endOffset"),
-			Component:          extractField(data, "component"),
-			CreationDate:       parseISODate(extractField(data, "creationDate")),
-			Effort:             effort,
-			CleanCodeAttribute: cleanCode,
-			Impacts:            impacts,
-		}, scanreport.AdHocRuleInput{
-			EngineID:           engineID,
-			RuleID:             key,
-			Name:               key,
-			Description:        fmt.Sprintf("Rule from %s plugin", engineID),
-			Severity:           severity,
-			Type:               issueType,
-			CleanCodeAttribute: cleanCode,
-			Impacts:            impacts,
-		}, true
+		EngineID:           engineID,
+		RuleID:             key,
+		Message:            extractField(data, "message"),
+		Severity:           severity,
+		Type:               issueType,
+		StartLine:          extractInt32(data, "textRange", "startLine"),
+		EndLine:            extractInt32(data, "textRange", "endLine"),
+		StartOff:           extractInt32(data, "textRange", "startOffset"),
+		EndOff:             extractInt32(data, "textRange", "endOffset"),
+		Component:          extractField(data, "component"),
+		CreationDate:       parseISODate(extractField(data, "creationDate")),
+		Effort:             effort,
+		CleanCodeAttribute: cleanCode,
+		Impacts:            impacts,
+	}, scanreport.AdHocRuleInput{
+		EngineID:           engineID,
+		RuleID:             key,
+		Name:               key,
+		Description:        fmt.Sprintf("Rule from %s plugin", engineID),
+		Severity:           severity,
+		Type:               issueType,
+		CleanCodeAttribute: cleanCode,
+		Impacts:            impacts,
+	}, true
 }
 
 // extractImpactInputs parses an MQR "impacts" array (e.g. from

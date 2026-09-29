@@ -16,6 +16,7 @@ func newPredictiveReportTestCmd() *cobra.Command {
 	f := cmd.Flags()
 	f.String("config", "", "")
 	f.String("export_directory", "", "")
+	f.String("default_organization", "", "")
 	return cmd
 }
 
@@ -92,6 +93,102 @@ func TestPredictiveReport_MissingConfigFileError(t *testing.T) {
 	_ = cmd.Flags().Set("config", "/path/that/does/not/exist.json")
 
 	if _, err := resolvePredictiveReportExportDir(cmd); err == nil {
+		t.Error("expected error when --config points at a missing file")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// default organization resolution (#566)
+// ---------------------------------------------------------------------------
+
+// #566: predictive-report never applied default_organization, so a
+// unified config that named its target only that way produced a PDF
+// claiming 0 entities would migrate. It now uses migrate's precedence:
+// the CLI flag wins, otherwise target.default_organization.
+func TestPredictiveReport_ResolveDefaultOrg(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		setFlag bool
+		flag    string
+		want    string
+	}{
+		{
+			name:    "unified_config_supplies_it",
+			content: `{"target": {"url": "https://sonarcloud.io/", "token": "t", "default_organization": "my-org"}}`,
+			want:    "my-org",
+		},
+		{
+			name:    "flag_wins_over_config",
+			content: `{"target": {"url": "https://sonarcloud.io/", "token": "t", "default_organization": "cfg-org"}}`,
+			setFlag: true,
+			flag:    "cli-org",
+			want:    "cli-org",
+		},
+		{
+			name:    "explicitly_empty_flag_wins_over_config",
+			content: `{"target": {"url": "https://sonarcloud.io/", "token": "t", "default_organization": "cfg-org"}}`,
+			setFlag: true,
+			flag:    "",
+			want:    "",
+		},
+		{
+			name:    "absent_in_config_is_empty",
+			content: `{"export_directory": "/cfg/files"}`,
+			want:    "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := newPredictiveReportTestCmd()
+			_ = cmd.Flags().Set("config", writePredictiveConfigFile(t, tc.content))
+			if tc.setFlag {
+				_ = cmd.Flags().Set("default_organization", tc.flag)
+			}
+
+			got, err := resolvePredictiveReportDefaultOrg(cmd)
+			if err != nil {
+				t.Fatalf("resolvePredictiveReportDefaultOrg: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("default organization: got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The flag alone works with no config file at all.
+func TestPredictiveReport_ResolveDefaultOrgFlagWithoutConfig(t *testing.T) {
+	cmd := newPredictiveReportTestCmd()
+	_ = cmd.Flags().Set("default_organization", "cli-org")
+
+	got, err := resolvePredictiveReportDefaultOrg(cmd)
+	if err != nil {
+		t.Fatalf("resolvePredictiveReportDefaultOrg: %v", err)
+	}
+	if got != "cli-org" {
+		t.Errorf("default organization: got %q, want cli-org", got)
+	}
+}
+
+// Neither flag nor config means no default, which is a valid state:
+// predict warns instead of silently reporting nothing migrated.
+func TestPredictiveReport_ResolveDefaultOrgAbsentIsEmpty(t *testing.T) {
+	got, err := resolvePredictiveReportDefaultOrg(newPredictiveReportTestCmd())
+	if err != nil {
+		t.Fatalf("resolvePredictiveReportDefaultOrg: %v", err)
+	}
+	if got != "" {
+		t.Errorf("default organization: got %q, want empty", got)
+	}
+}
+
+func TestPredictiveReport_ResolveDefaultOrgMissingConfigFileError(t *testing.T) {
+	cmd := newPredictiveReportTestCmd()
+	_ = cmd.Flags().Set("config", "/path/that/does/not/exist.json")
+
+	if _, err := resolvePredictiveReportDefaultOrg(cmd); err == nil {
 		t.Error("expected error when --config points at a missing file")
 	}
 }

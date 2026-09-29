@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"os"
+	"time"
 )
 
 // Option is a functional option for configuring a Client.
@@ -15,22 +16,29 @@ type Option func(*clientConfig)
 
 // clientConfig holds optional Client configuration assembled from Option values.
 type clientConfig struct {
-	tlsConfig      *tls.Config
-	certErr        error // deferred cert loading error, reported on first request
-	maxConns       int
-	timeoutSecs    int
-	retryLogFn     RetryLogFunc
-	recoveryLogFn  RecoveryLogFunc
-	debugLogFn     DebugLogFunc
-	requestLogFn   RequestLogFunc
-	rateLimitObsFn RateLimitObserver
+	tlsConfig *tls.Config
+	// insecureSkipVerify is kept separate from tlsConfig so that
+	// WithInsecureSkipVerify and WithClientCert compose in any order:
+	// buildTransport applies it to whichever *tls.Config it ends up with.
+	insecureSkipVerify bool
+	certErr            error // deferred cert loading error, reported on first request
+	maxConns           int
+	timeoutSecs        int
+	retryLogFn         RetryLogFunc
+	recoveryLogFn      RecoveryLogFunc
+	debugLogFn         DebugLogFunc
+	requestLogFn       RequestLogFunc
+	rateLimitObsFn     RateLimitObserver
+	rateLimiter        *SlidingWindowLimiter
+	latencyObsFn       LatencyObserver
 }
 
 // DebugLogFunc is invoked once per request/response pair with the verbatim
-// HTTP method, URL, sanitized header set, request body, response status, and
-// response body. The Authorization header is replaced with "<redacted>"
-// before the callback fires.
-type DebugLogFunc func(method, url string, headers map[string][]string, reqBody []byte, respStatus int, respBody []byte, err error)
+// HTTP method, URL, sanitized header set, request body, response status,
+// response body, and wall-clock duration of the round trip. The
+// Authorization header is replaced with "<redacted>" before the callback
+// fires.
+type DebugLogFunc func(method, url string, headers map[string][]string, reqBody []byte, respStatus int, respBody []byte, duration time.Duration, err error)
 
 func defaultClientConfig() *clientConfig {
 	return &clientConfig{
@@ -69,6 +77,19 @@ func WithClientCert(pemFile, keyFile, _ string) Option {
 			cfg.tlsConfig = &tls.Config{} //nolint:gosec
 		}
 		cfg.tlsConfig.Certificates = append(cfg.tlsConfig.Certificates, cert)
+	}
+}
+
+// WithInsecureSkipVerify disables TLS certificate verification for this
+// client: the server's certificate chain and host name are not checked.
+//
+// Intended only for a trusted internal server whose certificate is
+// self-signed or otherwise not signed by a trusted CA (#586). It makes the
+// connection vulnerable to man-in-the-middle interception, so never use it
+// against a public endpoint.
+func WithInsecureSkipVerify() Option {
+	return func(cfg *clientConfig) {
+		cfg.insecureSkipVerify = true
 	}
 }
 
@@ -132,5 +153,28 @@ func WithRateLimitObserver(fn RateLimitObserver) Option {
 func WithRequestLogger(fn RequestLogFunc) Option {
 	return func(c *clientConfig) {
 		c.requestLogFn = fn
+	}
+}
+
+// WithAPIRateLimiter installs a proactive rate limiter that throttles
+// every physical HTTP attempt (including retries) to at most the
+// limiter's configured calls-per-minute, before the request ever hits
+// the wire. This complements retryTransport's reactive 429 handling by
+// avoiding the rate limit in the first place. nil (the default) leaves
+// throttling disabled.
+func WithAPIRateLimiter(limiter *SlidingWindowLimiter) Option {
+	return func(cfg *clientConfig) {
+		cfg.rateLimiter = limiter
+	}
+}
+
+// WithLatencyObserver installs a callback that fires once per physical
+// HTTP round trip (every attempt including retries) with that attempt's
+// wall-clock duration. The migration tool uses this to sample per-call
+// API latency, e.g. to seed ETA estimation. The callback is invoked from
+// arbitrary goroutines and must be safe for concurrent use.
+func WithLatencyObserver(fn LatencyObserver) Option {
+	return func(cfg *clientConfig) {
+		cfg.latencyObsFn = fn
 	}
 }

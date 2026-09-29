@@ -114,6 +114,7 @@ sonar-migration-tool extract --source_url <URL> --source_token <TOKEN> --export_
 | `--extract_type` | Type of extract to run |
 | `--export_directory` | Output directory (default: `./migration-files`) |
 | `--skip_project_data_migration` | Skip the issue / source / SCM-blame extract (project data is extracted by default) |
+| `--branch_regexp` | Regexp pattern of branch names to extract, implicitly anchored (`^...$`) — a plain name matches only itself. Omit to extract every branch. The main branch is always extracted regardless of match. |
 | `--pem_file_path` | Client certificate PEM file (mTLS) |
 | `--key_file_path` | Client certificate key file (mTLS) |
 | `--cert_password` | Client certificate password (mTLS) |
@@ -149,7 +150,9 @@ http://localhost:9000,my-cloud-org-key
 
 Save the file when you are done.
 
-> **Shortcut for single-org migrations:** if every project on every server is going to land in the same SonarQube Cloud organization, you can skip this step and pass `--default_organization <org-key>` (or set `target.default_organization` in the config file) when running `migrate` in Step 6. The tool fills `sonarcloud_org_key` for every row in `organizations.csv` automatically. If you have already mapped any row by hand, the flag is ignored and a `WARN` is logged. (Issue #281.)
+> **Sending individual projects elsewhere:** `organizations.csv` has one row per DevOps binding, so every project that was never bound on SonarQube Server shares the server-URL row and lands in the same organization. To dispatch those projects across several organizations, fill in the `sonarcloud_org_key` column in `projects.csv` — see [Mapping unbound SonarQube Server projects](MAPPING-UNBOUND-PROJECTS.md). A project bound to GitHub.com, GitLab.com, Bitbucket Cloud or Azure DevOps Services cannot be redirected and the override is ignored with a `WARN`. (Issue #612.)
+
+> **Shortcut for single-org migrations:** if every project on every server is going to land in the same SonarQube Cloud organization, you can skip this step and pass `--default_organization <org-key>` (or set `target.default_organization` in the config file) when running `migrate` in Step 6. The tool fills `sonarcloud_org_key` for every row in `organizations.csv` automatically. If you have already mapped any row by hand, the flag is ignored and a `WARN` is logged. (Issue #281.) Running `structure --config` with that same config file fills the column in straight away, and `predictive-report` applies the same default, so a preview run agrees with the migration. (Issue #566.)
 
 ### Step 5 — Mappings
 
@@ -193,6 +196,7 @@ sonar-migration-tool migrate --target_token <TOKEN> --enterprise_key <ENTERPRISE
 | `--skip_profiles` | Skip quality profile migration/provisioning |
 | `--default_organization` | SonarQube Cloud organization key applied to every project when `organizations.csv` has no mapping. Ignored (with a WARN) if any row already carries a `sonarcloud_org_key`. Useful for small instances where every SQS project migrates into one SQC org. |
 | `--edition` | SonarQube Cloud license edition |
+| `--branch_regexp` | Regexp pattern of branch names to migrate, implicitly anchored (`^...$`) — a plain name matches only itself. If not set, implicitly operates on whatever branches were actually extracted. The main branch is always migrated regardless of match. |
 | `--target_url` | SonarQube Cloud URL (default: `https://sonarcloud.io/`) |
 | `--concurrency` | Max concurrent requests |
 | `--export_directory` | Directory containing SonarQube exports (default: `./migration-files`) |
@@ -245,7 +249,9 @@ sonar-migration-tool predictive-report --export_directory ./files/
 sonar-migration-tool predictive-report --config extract-config.json
 ```
 
-Output: `<export_directory>/predictive_migration_summary.pdf`. The `--config` flag accepts the same configuration file shape as `extract` or `migrate` — only the `export_directory` field is read. An explicit `--export_directory` flag overrides whatever the config file carries.
+Output: `<export_directory>/predictive_migration_summary.pdf`. The `--config` flag accepts the same configuration file shape as `extract` or `migrate`; `export_directory` and `target.default_organization` are read from it. An explicit `--export_directory` flag overrides whatever the config file carries.
+
+If `organizations.csv` carries no `sonarcloud_org_key` on any row, the target organization is taken from `--default_organization` or the config file's `target.default_organization` and stamped onto every row first, exactly as `migrate` would, so the prediction matches the migration it predicts. An already-mapped `organizations.csv` always wins, and the supplied default is then ignored with a `WARN`. When nothing is mapped and no default is available, a `WARN` says so rather than the report silently claiming that nothing will migrate. Neither step calls SonarQube Cloud. (Issue #566.) A per-project `sonarcloud_org_key` in `projects.csv` is honoured too, so the report predicts each project in the organization the override sends it to. (Issue #612.)
 
 The Global Settings section is included with the SQS-only settings predicted to be Skipped (Setting Key column, sorted alphabetically). SonarQube Cloud API errors or rate-limiting cannot be predicted ahead of time, so they have no row in the Failed bucket.
 
@@ -307,7 +313,7 @@ sonar-migration-tool reset <TOKEN> <ENTERPRISE_KEY> --export_directory ./files/
 | `requests.log` | Log of all API requests made during extraction |
 | `results.*.jsonl` | Raw extracted data in JSON Lines format (one file per entity) |
 | `organizations.csv` | Server-to-organization mapping (you edit this) |
-| `projects.csv` | List of all extracted projects |
+| `projects.csv` | List of all extracted projects. Its `sonarcloud_org_key` column is an optional per-project organization override you may edit — see [Mapping unbound SonarQube Server projects](MAPPING-UNBOUND-PROJECTS.md) |
 | `gates.csv` | Quality Gate mappings |
 | `profiles.csv` | Quality Profile mappings |
 | `groups.csv` | Group mappings |

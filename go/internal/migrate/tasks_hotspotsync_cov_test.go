@@ -5,12 +5,16 @@
 package migrate
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/scanreport"
 )
@@ -349,6 +353,80 @@ func TestRunSyncHotspotMetadataTask(t *testing.T) {
 	}
 	if got := extractField(items[0], "cloud_project_key"); got != "cloud-proj" {
 		t.Errorf("cloud_project_key = %q, want cloud-proj", got)
+	}
+}
+
+// #620 review: this is the end-to-end case the earlier (reverted)
+// analysisDate probe silently broke, and unit-testing waitForCloudIndexing
+// in isolation could not catch it — the probe result was stubbed, not
+// exercised through a real caller. Here the mock's project-wide indexing
+// probe (no "rules" param) always reports 0, exactly like a real project
+// whose findings all landed on inactive target rules, and importProjectData
+// is seeded with submitted_issues: 0 for the project. syncProjectHotspots
+// must recognise up front that there is nothing to wait for and skip the
+// backoff entirely — proven by a short-timeout context: if the fix
+// regressed to actually waiting, the context would expire and the sync
+// would report an error instead of succeeding.
+func TestSyncProjectHotspotsSkipsIndexingWaitWhenNothingWasSubmitted(t *testing.T) {
+	dir := t.TempDir()
+	writeHotspotExtract(t, dir, []map[string]any{
+		{
+			"key": "hs-1", "ruleKey": "java:S2092", "component": "proj1:src/Main.java",
+			"project": "proj1", "line": 7, "branch": "main",
+			"status": "REVIEWED", "resolution": "SAFE",
+			"serverUrl": testServerURL,
+		},
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/issues/search", func(w http.ResponseWriter, _ *http.Request) {
+		// Always 0 — the target genuinely has no issues for this project,
+		// so a real wait here would never end on its own.
+		json.NewEncoder(w).Encode(map[string]any{
+			"issues": []map[string]any{},
+			"paging": map[string]any{"pageIndex": 1, "pageSize": 1, "total": 0},
+		})
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{})
+	})
+	cloudSrv := httptest.NewServer(mux)
+	t.Cleanup(cloudSrv.Close)
+	apiSrv := newMockAPIServer()
+	t.Cleanup(apiSrv.Close)
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+
+	w, err := e.Store.Writer("importProjectData")
+	if err != nil {
+		t.Fatalf("Store.Writer: %v", err)
+	}
+	rec, _ := json.Marshal(map[string]any{
+		"cloud_project_key": "cloud-proj", "branch": "main", "status": "success",
+		"submitted_issues": 0,
+	})
+	if err := w.WriteOne(rec); err != nil {
+		t.Fatalf("seed importProjectData record: %v", err)
+	}
+
+	var logBuf bytes.Buffer
+	e.Logger = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	res := syncProjectHotspots(ctx, e, syncHotspotInput{
+		CloudKey: "cloud-proj", OrgKey: "cloud-org",
+		ServerURL: testServerURL, ServerKey: "proj1",
+		Submitted: loadSubmittedIssueIndex(e),
+	})
+	if res.Error != "" {
+		t.Fatalf("unexpected error (the wait ran instead of being skipped): %s", res.Error)
+	}
+	out := logBuf.String()
+	if !strings.Contains(out, "import submitted no findings for this project, nothing to wait for") {
+		t.Errorf("expected the skip-the-wait log line, got: %s", out)
+	}
+	if strings.Contains(out, "waiting for Cloud indexing to catch up") {
+		t.Errorf("must not have entered the backoff at all, got: %s", out)
 	}
 }
 

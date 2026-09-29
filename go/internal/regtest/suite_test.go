@@ -335,3 +335,49 @@ func TestLoadConfigFile_SkipsBlankAndSkippedOrgRows(t *testing.T) {
 		t.Errorf("SCOrg = %q, want %q (SKIPPED/blank rows must be ignored)", cfg.SCOrg, "resolved-org")
 	}
 }
+
+// TestBuildReport_VerdictYellowWhenOnlySqsAndSqcFeatureDivergence ensures a
+// run whose only mismatches are known SQS_AND_SQC_FEATURE_DIVERGENCE results
+// reports YELLOW, not FAIL, and that such a result is never double-counted
+// as Failed.
+func TestBuildReport_VerdictYellowWhenOnlySqsAndSqcFeatureDivergence(t *testing.T) {
+	s := &Suite{
+		cfg: Config{SQSURL: "http://sqs.local", SCURL: "http://sc.local", SCOrg: "org"},
+		results: []CheckResult{
+			{Category: "Groups", Name: "Group count", Match: true},
+			{Category: "Rules", Name: "Rule count", Match: false, SqsAndSqcFeatureDivergence: true, Notes: "known SQS_AND_SQC_FEATURE_DIVERGENCE"},
+		},
+	}
+	report := s.buildReport(time.Now())
+	if report.Verdict != "YELLOW" {
+		t.Errorf("Verdict = %q, want YELLOW", report.Verdict)
+	}
+	if report.SqsAndSqcFeatureDivergence != 1 {
+		t.Errorf("SqsAndSqcFeatureDivergence = %d, want 1", report.SqsAndSqcFeatureDivergence)
+	}
+	if report.Failed != 0 {
+		t.Errorf("Failed = %d, want 0 (a SqsAndSqcFeatureDivergence result must not also count as Failed)", report.Failed)
+	}
+	if report.Passed != 1 {
+		t.Errorf("Passed = %d, want 1", report.Passed)
+	}
+}
+
+// TestBuildReport_VerdictFailBeatsYellow ensures a genuine failure alongside
+// a known SQS_AND_SQC_FEATURE_DIVERGENCE still fails the run — a divergence
+// must never mask an unrelated real regression.
+func TestBuildReport_VerdictFailBeatsYellow(t *testing.T) {
+	s := &Suite{
+		results: []CheckResult{
+			{Category: "Rules", Name: "Rule count", Match: false, SqsAndSqcFeatureDivergence: true, Notes: "known SQS_AND_SQC_FEATURE_DIVERGENCE"},
+			{Category: "Issues", Name: "Total issues", Match: false},
+		},
+	}
+	report := s.buildReport(time.Now())
+	if report.Verdict != "FAIL" {
+		t.Errorf("Verdict = %q, want FAIL (a real failure must not be masked by a SQS_AND_SQC_FEATURE_DIVERGENCE)", report.Verdict)
+	}
+	if report.Failed != 1 || report.SqsAndSqcFeatureDivergence != 1 {
+		t.Errorf("Failed = %d, SqsAndSqcFeatureDivergence = %d, want 1 and 1", report.Failed, report.SqsAndSqcFeatureDivergence)
+	}
+}

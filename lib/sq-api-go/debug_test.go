@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -29,7 +30,7 @@ func TestDebugLoggerSeesAuthAndUserAgent(t *testing.T) {
 	var gotHeaders map[string][]string
 	var calls int
 	c := sqapi.NewServerClient(ts.URL, "my-token", 10.7, sqapi.WithDebugLogger(
-		func(method, url string, headers map[string][]string, reqBody []byte, respStatus int, respBody []byte, err error) {
+		func(method, url string, headers map[string][]string, reqBody []byte, respStatus int, respBody []byte, duration time.Duration, err error) {
 			calls++
 			gotHeaders = headers
 		},

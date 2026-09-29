@@ -9,9 +9,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"log/slog"
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"golang.org/x/sync/errgroup"
@@ -65,6 +67,14 @@ func projectDataTasks() []TaskDef {
 			Dependencies: []string{"getProjects", "getBranches"},
 			Run:          projectVersionsTask(),
 		},
+		{
+			// #554 — PoC project-history migration. Opt-in via
+			// --migrate_history; a pure no-op (zero API calls) otherwise.
+			Name:         "getProjectAnalysisHistory",
+			Editions:     AllEditions,
+			Dependencies: []string{"getProjects", "getBranches"},
+			Run:          projectAnalysisHistoryTask(),
+		},
 	}
 }
 
@@ -98,25 +108,50 @@ func projectIssuesFullTask() func(ctx context.Context, e *Executor) error {
 				} else {
 					params.Set("issueStatuses", "OPEN,CONFIRMED,FALSE_POSITIVE,ACCEPTED")
 				}
-				items, err := e.Raw.GetPaginated(ctx, PaginatedOpts{
-					Path:      issuesSearchAPI,
-					Params:    params,
-					ResultKey: "issues",
-					PageLimit: 20, // SonarQube caps at 10,000 results
-				})
-				if err != nil {
-					if isNonFatalHTTPErr(err) {
-						e.Logger.Warn("getProjectIssuesFull skipped", "project", projectKey, "branch", branch, "err", err)
-						return nil
-					}
-					return err
-				}
+				// meta is built before the fetch so the per-window sink
+				// can capture it: fetchProjectIssues hands over one
+				// window at a time precisely so each chunk is enriched
+				// and written as it arrives, rather than the whole
+				// project being held in memory at once (#574).
 				meta := map[string]any{
 					"projectKey": projectKey,
 					"branch":     branch,
 					"serverUrl":  e.ServerURL,
 				}
-				return w.WriteChunk(enrichAll(items, meta))
+				// Every parameter above is inherited, never rebuilt:
+				// fetchProjectIssues clones this set and sets only
+				// createdAfter / createdBefore, and keeps the 20-page
+				// cap on every request it makes. A project under the
+				// result ceiling costs exactly the requests it did
+				// before #574, with no date parameter on any of them.
+				err := fetchProjectIssues(ctx, e, projectKey, branch, params,
+					func(items []json.RawMessage) error {
+						return w.WriteChunk(enrichAll(items, meta))
+					})
+				if err != nil {
+					if isNonFatalHTTPErr(err) {
+						// Logged, and deliberately NOT recorded as a
+						// truncation. A 403/404 here is a permission
+						// skip: no ceiling was hit, nothing was
+						// fetched and nothing reached disk. Recording
+						// it made a run that truncated nothing write
+						// extract_truncation.json, print the
+						// end-of-run data-loss block and add a
+						// Limitations bullet whose incomplete_slice
+						// wording promises "the issues already
+						// written are on disk" when there were none.
+						// A walk that genuinely dies part-way is a
+						// different thing and still records itself,
+						// from the slicer, with real counts. This
+						// skip travels the same way as every other
+						// non-fatal per-project denial, including the
+						// per-status hotspots skip below (#574).
+						e.Logger.Warn("getProjectIssuesFull skipped", "project", projectKey, "branch", branch, "err", err)
+						return nil
+					}
+					return err
+				}
+				return nil
 			})
 	}
 }
@@ -156,6 +191,19 @@ func projectHotspotsFullTask() func(ctx context.Context, e *Executor) error {
 						Params:    params,
 						ResultKey: "hotspots",
 						PageLimit: 20,
+						// Warning only, never sliced: /api/hotspots/search
+						// declares no createdAfter/createdBefore and
+						// silently ignores unknown parameters, so a date
+						// window here returns HTTP 200 with the same
+						// truncated set forever. Detail keeps the two
+						// per-status fetches apart so a REVIEWED ceiling
+						// is not merged into the TO_REVIEW record (#574).
+						Scope: TruncationScope{
+							Task:       "getProjectHotspotsFull",
+							ProjectKey: projectKey,
+							Branch:     branch,
+							Detail:     "status=" + status,
+						},
 					})
 					if err != nil {
 						if isNonFatalHTTPErr(err) {
@@ -305,6 +353,17 @@ func projectComponentTreeTask() func(ctx context.Context, e *Executor) error {
 					Params:    params,
 					ResultKey: "components",
 					PageLimit: 20, // SonarQube caps at 10,000 results
+					// Warning only: the component tree has no date axis
+					// at all, so its natural partition is the component
+					// subtree — a different algorithm with a much wider
+					// blast radius (source and SCM blame both hang off
+					// these components). Reported, not worked around
+					// (#574).
+					Scope: TruncationScope{
+						Task:       "getProjectComponentTree",
+						ProjectKey: projectKey,
+						Branch:     branch,
+					},
 				})
 				if err != nil {
 					if isNonFatalHTTPErr(err) {
@@ -593,7 +652,7 @@ func forEachProjectBranch(ctx context.Context, e *Executor, taskName string,
 		return fmt.Errorf("%s: reading branches: %w", taskName, err)
 	}
 
-	branchMap := buildBranchMap(branches)
+	branchMap := buildBranchMap(branches, e.BranchAnalyzedAfter, e.Logger)
 
 	w, err := e.Store.Writer(taskName)
 	if err != nil {
@@ -649,9 +708,34 @@ func iterateBranches(ctx context.Context, e *Executor, w *ChunkWriter,
 	return nil
 }
 
-// buildBranchMap builds a map of projectKey -> []branchName from extracted branch data.
-func buildBranchMap(branches []json.RawMessage) map[string][]string {
-	result := make(map[string][]string)
+// buildBranchMap builds a map of projectKey -> []branchName from extracted
+// branch data, excluding short-lived/PR branches and, when cutoff is
+// non-nil, applying the --branch_analyzed_after filter (#583): only
+// branches analyzed on or after cutoff are selected, except the project's
+// main branch, which is always kept — force-included, with a
+// common.ForcedMainBranchLogMessage warning on logger, if the date rule
+// alone would otherwise have excluded every branch of the project.
+func buildBranchMap(branches []json.RawMessage, cutoff *time.Time, logger *slog.Logger) map[string][]string {
+	metaByProject := groupBranchMeta(branches)
+	result := make(map[string][]string, len(metaByProject))
+	for projectKey, metas := range metaByProject {
+		res := common.SelectBranchesAnalyzedAfter(metas, cutoff)
+		if res.ForcedMainBranch != "" && logger != nil {
+			logger.Warn(common.ForcedMainBranchLogMessage,
+				"project", projectKey, "branch", res.ForcedMainBranch,
+				"analysisDate", res.ForcedMainDate, "cutoff", cutoff)
+		}
+		for _, b := range res.Kept {
+			result[projectKey] = append(result[projectKey], b.Name)
+		}
+	}
+	return result
+}
+
+// groupBranchMeta extracts name/isMain/analysisDate per project from raw
+// getBranches records, excluding short-lived/PR (SHORT) branches.
+func groupBranchMeta(branches []json.RawMessage) map[string][]common.BranchDateInfo {
+	result := make(map[string][]common.BranchDateInfo)
 	for _, item := range branches {
 		projectKey := extractField(item, "projectKey")
 		name := extractField(item, "name")
@@ -663,7 +747,11 @@ func buildBranchMap(branches []json.RawMessage) map[string][]string {
 		if branchType == "SHORT" {
 			continue
 		}
-		result[projectKey] = append(result[projectKey], name)
+		result[projectKey] = append(result[projectKey], common.BranchDateInfo{
+			Name:         name,
+			IsMain:       common.ExtractBool(item, "isMain"),
+			AnalysisDate: common.ParseAnalysisDate(extractField(item, "analysisDate")),
+		})
 	}
 	return result
 }

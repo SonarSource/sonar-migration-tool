@@ -16,3 +16,9 @@ import "log/slog"
 func ApplyMemoryLimit(_ *slog.Logger) (int64, string) {
 	return 0, ""
 }
+
+// MemoryBudget is a no-op on non-Linux platforms — see ApplyMemoryLimit's
+// doc for why. Callers fall back to a fixed conservative default.
+func MemoryBudget() (int64, string) {
+	return 0, ""
+}

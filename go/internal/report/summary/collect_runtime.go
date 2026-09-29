@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/analysis"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/migrate"
 )
 
@@ -107,11 +109,18 @@ type runMetaPhase struct {
 }
 
 type runMetaTask struct {
-	Phase           int     `json:"phase"`
-	Name            string  `json:"name"`
-	DurationSeconds float64 `json:"duration_seconds"`
-	OK              bool    `json:"ok"`
-	Err             string  `json:"err"`
+	Phase           int       `json:"phase"`
+	Name            string    `json:"name"`
+	DurationSeconds float64   `json:"duration_seconds"`
+	StartedAt       time.Time `json:"started_at"`
+	OK              bool      `json:"ok"`
+	Err             string    `json:"err"`
+
+	// Per-item tallies (absent in runs recorded before they were
+	// written, which decode to zero and render as they always did).
+	Succeeded          int64 `json:"succeeded"`
+	Failed             int64 `json:"failed"`
+	ActionableFailures int64 `json:"actionable_failures"`
 }
 
 // logEventLine mirrors one run_events.jsonl record (shared contract A).
@@ -167,11 +176,15 @@ func collectRunMeta(runDir string, rt *runtimeData) {
 	}
 	for _, t := range meta.Tasks {
 		rt.Tasks = append(rt.Tasks, TaskTiming{
-			Phase:    t.Phase,
-			Task:     t.Name,
-			Duration: secondsToDuration(t.DurationSeconds),
-			OK:       t.OK,
-			Err:      t.Err,
+			Phase:              t.Phase,
+			Task:               t.Name,
+			Duration:           secondsToDuration(t.DurationSeconds),
+			StartedAt:          t.StartedAt,
+			OK:                 t.OK,
+			Err:                t.Err,
+			Succeeded:          t.Succeeded,
+			Failed:             t.Failed,
+			ActionableFailures: t.ActionableFailures,
 		})
 	}
 
@@ -184,20 +197,150 @@ func collectRunMeta(runDir string, rt *runtimeData) {
 	})
 }
 
+// branchKey identifies one branch of one project.
+//
+// The project is part of the key because branch names are not unique
+// across a migration — nearly every project has a "main". Keying on the
+// bare name merged them all into a single row.
+type branchKey struct {
+	project string
+	branch  string
+}
+
 // eventAggregator holds the in-order, deterministic state accumulated
 // while streaming run_events.jsonl. Retries are keyed by method+endpoint
 // (with retryOrder preserving first-seen order before the final stable
-// Count-descending sort); branches are keyed by branch/project name.
+// Count-descending sort); branches are keyed by project+branch.
 type eventAggregator struct {
 	retries    map[string]*RetryStat
 	retryOrder []string
-	branches   map[string]*BranchStat
+	branches   map[branchKey]*BranchStat
+
+	// aliases redirects one name for a branch onto the key its row
+	// actually lives under. A project's main branch is packaged under its
+	// source name but submitted under the target name, then renamed to
+	// match the source once imported — so one branch arrives under two
+	// names. Without the redirect it produced two rows: one holding the
+	// issue and component counts, the other holding only the CE task id.
+	aliases map[branchKey]branchKey
+
+	// selfNamed holds the names a packaged event claimed as its OWN
+	// source branch. Such a name belongs to a branch in its own right
+	// and must never be redirected: a project can have both a "master"
+	// (its main) and a separate "main", and the alias registered for the
+	// main branch's rename would otherwise swallow the real "main".
+	selfNamed map[branchKey]bool
 }
 
 func newEventAggregator() *eventAggregator {
 	return &eventAggregator{
 		retries:  map[string]*RetryStat{},
-		branches: map[string]*BranchStat{},
+		branches: map[branchKey]*BranchStat{},
+		aliases:  map[branchKey]branchKey{},
+
+		selfNamed: map[branchKey]bool{},
+	}
+}
+
+// branchFor returns the row for one branch of one project, following any
+// alias registered for it and creating the row on first use so events
+// that arrive in any order share it.
+func (agg *eventAggregator) branchFor(project, branch string) *BranchStat {
+	k := branchKey{project: project, branch: branch}
+	if canonical, ok := agg.aliases[k]; ok {
+		k = canonical
+	}
+	bs, ok := agg.branches[k]
+	if !ok {
+		bs = &BranchStat{Project: k.project, Branch: k.branch}
+		agg.branches[k] = bs
+	}
+	return bs
+}
+
+// claimBranchName records that a packaged event named `branch` as its own
+// source branch, dropping any alias already pointing that name elsewhere.
+//
+// The main branch is packaged under its source name but submitted under
+// SonarQube Cloud's, so the two are aliased together. When a project's
+// source main is "master" while SonarQube Cloud's is "main", that alias
+// is main->master — and a second, genuinely distinct branch called "main"
+// then resolved through it, overwriting the main branch's issue and
+// component counts and emitting no row of its own.
+func (agg *eventAggregator) claimBranchName(project, branch string) {
+	if branch == "" {
+		return
+	}
+	k := branchKey{project: project, branch: branch}
+	agg.selfNamed[k] = true
+	delete(agg.aliases, k)
+}
+
+// aliasBranch records that `from` and `to` name the same branch of
+// `project`, folding an already-collected `from` row into `to`.
+//
+// Safe in either event order: called before the row exists it just
+// registers the redirect, and called after it merges what was collected
+// under the other name.
+func (agg *eventAggregator) aliasBranch(project, from, to string) {
+	if from == "" || to == "" || from == to {
+		return
+	}
+	fromKey := branchKey{project: project, branch: from}
+	// Some packaged event named `from` as its own source branch, so it is
+	// a branch of its own and keeps its own row. Redirecting it here is
+	// how the row collapse this keying fixes came back one level down.
+	if agg.selfNamed[fromKey] {
+		return
+	}
+	toKey := branchKey{project: project, branch: to}
+	agg.aliases[fromKey] = toKey
+
+	stale, ok := agg.branches[fromKey]
+	if !ok {
+		return
+	}
+	delete(agg.branches, fromKey)
+	if target, ok := agg.branches[toKey]; ok {
+		mergeBranchStat(target, stale)
+		return
+	}
+	stale.Project, stale.Branch = project, to
+	agg.branches[toKey] = stale
+}
+
+// mergeBranchStat folds src into dst, keeping whatever dst already knows.
+// Only ever called for two names of one branch, where in practice each
+// field was carried by exactly one of them.
+func mergeBranchStat(dst, src *BranchStat) {
+	if dst.Type == "" {
+		dst.Type = src.Type
+	}
+	if dst.TaskID == "" {
+		dst.TaskID = src.TaskID
+	}
+	if dst.SkipReason == "" {
+		dst.SkipReason = src.SkipReason
+	}
+	if dst.Issues == 0 {
+		dst.Issues = src.Issues
+	}
+	if dst.ExternalIssues == 0 {
+		dst.ExternalIssues = src.ExternalIssues
+	}
+	if dst.Components == 0 {
+		dst.Components = src.Components
+	}
+	if dst.ActiveRules == 0 {
+		dst.ActiveRules = src.ActiveRules
+	}
+	if dst.ZipBytes == 0 {
+		dst.ZipBytes = src.ZipBytes
+	}
+	// "packaged" is the stronger statement and wins, the same precedence
+	// applyTaskSubmitted has always applied.
+	if dst.Status != "packaged" && src.Status != "" {
+		dst.Status = src.Status
 	}
 }
 
@@ -208,7 +351,13 @@ func (agg *eventAggregator) apply(ev logEventLine, rt *runtimeData) {
 	switch {
 	case ev.Message == "retrying request":
 		agg.applyRetry(ev, rt)
-	case strings.HasPrefix(ev.Message, "skipping branch: source code not retrievable"):
+	// Two prefixes because the engine's wording changed to "migrating
+	// branch without source: ..." while this matcher still only knew the
+	// original "skipping branch: ...", so the skip ledger silently stopped
+	// being populated by real runs. Both are accepted rather than swapping
+	// one for the other, so reports over older run directories keep working.
+	case strings.HasPrefix(ev.Message, "skipping branch: source code not retrievable"),
+		strings.HasPrefix(ev.Message, "migrating branch without source: source code not retrievable"):
 		agg.applyBranchSkip(ev, rt)
 	case strings.HasPrefix(ev.Message, "addGateConditions: source metric has no SonarQube Cloud equivalent"):
 		agg.applyGateConditionSkip(ev, rt)
@@ -220,6 +369,8 @@ func (agg *eventAggregator) apply(ev logEventLine, rt *runtimeData) {
 		agg.applyTaskSubmitted(ev)
 	case ev.Message == "analysis pre-created (branch anchored on target)":
 		agg.applyAnalysisPreCreated(ev)
+	case ev.Message == common.ForcedMainBranchLogMessage:
+		agg.applyForcedMainBranch(ev, rt)
 	}
 }
 
@@ -238,7 +389,7 @@ func (agg *eventAggregator) applyRetry(ev logEventLine, rt *runtimeData) {
 	if attempt := evInt(a, "attempt"); attempt > rs.MaxAttempt {
 		rs.MaxAttempt = attempt
 	}
-	rs.LastStatus = evStr(a, "status")
+	rs.LastStatus = evScalarStr(a, "status")
 	rt.Throughput.TotalRetries++
 }
 
@@ -250,9 +401,38 @@ func (agg *eventAggregator) applyBranchSkip(ev logEventLine, rt *runtimeData) {
 		Findings: evInt(a, "findings"),
 		Reason:   ev.Message,
 	})
-	bs := branchFor(agg.branches, branch)
+	bs := agg.branchFor(evStr(a, "project"), branch)
 	bs.Status = "skipped"
 	bs.SkipReason = ev.Message
+}
+
+// applyForcedMainBranch records a project whose main branch was
+// force-included despite not meeting --branch_analyzed_after (#583). Both
+// the analysisDate and cutoff attrs are logged as *time.Time (analysisDate
+// absent for a branch that was never analyzed), which slog's JSON handler
+// renders on the wire as a full RFC3339 timestamp (e.g.
+// "2024-01-01T00:00:00Z") — not the plain YYYY-MM-DD the operator passed
+// on the CLI. Both are reparsed and reformatted here so the report shows
+// the same clean date either side used; a zero/unparseable analysisDate
+// reads "never analyzed" rather than the zero-time string, and an
+// unparseable cutoff (should not happen from this tool's own logging)
+// falls back to whatever was on the wire rather than going blank.
+func (agg *eventAggregator) applyForcedMainBranch(ev logEventLine, rt *runtimeData) {
+	a := ev.Attrs
+	analysisDate := "never analyzed"
+	if parsed := common.ParseAnalysisDate(evScalarStr(a, "analysisDate")); !parsed.IsZero() {
+		analysisDate = parsed.Format("2006-01-02")
+	}
+	cutoff := evScalarStr(a, "cutoff")
+	if parsed := common.ParseAnalysisDate(cutoff); !parsed.IsZero() {
+		cutoff = parsed.Format("2006-01-02")
+	}
+	rt.Warnings.ForcedMainBranches = append(rt.Warnings.ForcedMainBranches, ForcedMainBranch{
+		Project:      evStr(a, "project"),
+		Branch:       evStr(a, "branch"),
+		AnalysisDate: analysisDate,
+		Cutoff:       cutoff,
+	})
 }
 
 func (agg *eventAggregator) applyGateConditionSkip(ev logEventLine, rt *runtimeData) {
@@ -284,8 +464,20 @@ func (agg *eventAggregator) applyGateConditionRemap(ev logEventLine, rt *runtime
 
 func (agg *eventAggregator) applyReportPackaged(ev logEventLine) {
 	a := ev.Attrs
-	key := firstNonEmpty(evStr(a, "sourceBranch"), evStr(a, "targetBranch"), evStr(a, "project"))
-	bs := branchFor(agg.branches, key)
+	project := evStr(a, "project")
+	target := evStr(a, "targetBranch")
+	// Canonicalize on the source branch name: that is the name the branch
+	// ends up carrying on the target, because the main branch is renamed
+	// to match the source once its data is imported. The target name is
+	// aliased onto it so the CE submission, which only knows the target
+	// name, lands on this same row.
+	branch := firstNonEmpty(evStr(a, "sourceBranch"), target, project)
+	// Claimed before the alias is registered, so this branch keeps its
+	// own row whichever order the two events arrive in.
+	agg.claimBranchName(project, branch)
+	agg.aliasBranch(project, target, branch)
+
+	bs := agg.branchFor(project, branch)
 	bs.Issues = evInt(a, "issues")
 	bs.ExternalIssues = evInt(a, "externalIssues")
 	bs.Components = evInt(a, "components")
@@ -296,7 +488,7 @@ func (agg *eventAggregator) applyReportPackaged(ev logEventLine) {
 
 func (agg *eventAggregator) applyTaskSubmitted(ev logEventLine) {
 	a := ev.Attrs
-	bs := branchFor(agg.branches, evStr(a, "targetBranch"))
+	bs := agg.branchFor(evStr(a, "project"), evStr(a, "targetBranch"))
 	bs.TaskID = evStr(a, "taskId")
 	if bs.Status != "packaged" {
 		bs.Status = "submitted"
@@ -305,7 +497,7 @@ func (agg *eventAggregator) applyTaskSubmitted(ev logEventLine) {
 
 func (agg *eventAggregator) applyAnalysisPreCreated(ev logEventLine) {
 	a := ev.Attrs
-	bs := branchFor(agg.branches, evStr(a, "branch"))
+	bs := agg.branchFor(evStr(a, "project"), evStr(a, "branch"))
 	bs.Type = evStr(a, "branchType")
 }
 
@@ -344,11 +536,15 @@ func collectRunEvents(runDir string, rt *runtimeData) {
 		return rt.Warnings.Retries[i].Count > rt.Warnings.Retries[j].Count
 	})
 
-	// Branches: ascending by Branch name; accumulate throughput totals.
+	// Branches: grouped by project, ascending by branch within it, so a
+	// multi-project run reads project by project.
 	for _, bs := range agg.branches {
 		rt.Branches = append(rt.Branches, *bs)
 	}
 	sort.Slice(rt.Branches, func(i, j int) bool {
+		if rt.Branches[i].Project != rt.Branches[j].Project {
+			return rt.Branches[i].Project < rt.Branches[j].Project
+		}
 		return rt.Branches[i].Branch < rt.Branches[j].Branch
 	})
 	for _, bs := range rt.Branches {
@@ -387,6 +583,7 @@ func collectFailureRows(runDir string, rt *runtimeData) {
 			URL:          row.URL,
 			HTTPStatus:   row.HTTPStatus,
 			ErrorMessage: row.ErrorMessage,
+			Project:      row.Project,
 			Cause:        string(v.Class),
 			Why:          v.Why,
 			Remediation:  v.Remediation,
@@ -397,7 +594,10 @@ func collectFailureRows(runDir string, rt *runtimeData) {
 		if rt.Failures[i].EntityType != rt.Failures[j].EntityType {
 			return rt.Failures[i].EntityType < rt.Failures[j].EntityType
 		}
-		return rt.Failures[i].EntityName < rt.Failures[j].EntityName
+		if rt.Failures[i].EntityName != rt.Failures[j].EntityName {
+			return rt.Failures[i].EntityName < rt.Failures[j].EntityName
+		}
+		return rt.Failures[i].Project < rt.Failures[j].Project
 	})
 	rt.FailureCauses = groupFailureCauses(rt.Failures)
 }
@@ -452,18 +652,6 @@ func groupFailureCauses(rows []FailureRow) []FailureCause {
 	return out
 }
 
-// branchFor returns the BranchStat for the given key, creating it (with
-// Branch set to the key) on first use so events that arrive in any order
-// share one row.
-func branchFor(m map[string]*BranchStat, key string) *BranchStat {
-	bs, ok := m[key]
-	if !ok {
-		bs = &BranchStat{Branch: key}
-		m[key] = bs
-	}
-	return bs
-}
-
 // secondsToDuration converts a float seconds value to a time.Duration
 // without losing sub-second precision.
 func secondsToDuration(seconds float64) time.Duration {
@@ -493,6 +681,32 @@ func evStr(attrs map[string]any, key string) string {
 		}
 	}
 	return ""
+}
+
+// evScalarStr reads an attr that may have been logged as either a string
+// or a number and renders it for display.
+//
+// evStr alone is not enough for these: an HTTP status is logged as
+// status=500, which decodes to float64, so reading it as a string yielded
+// "" and the retry ledger's "Last Status" column was blank on every row —
+// dropping the one field that says why the request was retried.
+func evScalarStr(attrs map[string]any, key string) string {
+	if attrs == nil {
+		return ""
+	}
+	switch v := attrs[key].(type) {
+	case string:
+		return v
+	case float64:
+		if v == math.Trunc(v) {
+			return strconv.FormatInt(int64(v), 10)
+		}
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case bool:
+		return strconv.FormatBool(v)
+	default:
+		return ""
+	}
 }
 
 // evFloat reads a numeric attr. JSON numbers decode as float64.

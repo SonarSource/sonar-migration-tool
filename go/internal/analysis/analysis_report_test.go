@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 const (
@@ -198,7 +200,15 @@ func TestExtractErrorMessage(t *testing.T) {
 		{"SQ error string", map[string]any{"response": errJSON}, "Project already exists"},
 		{"multiple errors", map[string]any{"response": multiErrJSON}, "Error 1; Error 2"},
 		{"no response", map[string]any{}, ""},
-		{"non-JSON response", map[string]any{"response": "Internal Server Error"}, ""},
+		// A response that is not SonarQube's {"errors":[...]} envelope is
+		// summarized rather than dropped. Returning "" here left the
+		// report's Error column blank for every failure that did not come
+		// from SonarQube itself, so a gateway 403 served as an HTML page
+		// showed a bare status and no reason at all.
+		{"non-JSON response", map[string]any{"response": "Internal Server Error"}, "Internal Server Error"},
+		{"HTML error page", map[string]any{"response": "<html><head><TITLE>ERROR: The request could not be satisfied</TITLE></head>" +
+			"<body><H1>403 ERROR</H1><H2>The request could not be satisfied.</H2>Request blocked.</body></html>"},
+			"ERROR: The request could not be satisfied: 403 ERROR: The request could not be satisfied."},
 		{"content field", map[string]any{"content": `{"errors": [{"msg": "From content"}]}`}, "From content"},
 		{"response as dict", map[string]any{"response": map[string]any{"errors": []any{map[string]any{"msg": "Already a dict"}}}}, "Already a dict"},
 	}
@@ -524,6 +534,25 @@ func TestURLEntityMapCoverage(t *testing.T) {
 		}
 		if classifyEntityType(url) == "Unknown" {
 			t.Errorf("URL classified as Unknown: %s", url)
+		}
+	}
+}
+
+// summarizeNonJSONError's whole reason to exist is the body that is not
+// JSON — a gateway or proxy error page, which is exactly the input that
+// carries non-ASCII text. Capping it with a byte slice cuts inside a
+// multi-byte rune whenever the boundary falls there, and the broken rune
+// flows on into final_analysis_report.csv and the report's Error column.
+func TestSummarizeNonJSONErrorCutsOnARuneBoundary(t *testing.T) {
+	// Walk the cut point through every offset within a 2- and a 3-byte
+	// rune, so the test does not pass by landing on a clean boundary.
+	for _, r := range []string{"é", "€"} {
+		for _, prefix := range []string{"", "x", "xx", "xxx"} {
+			body := prefix + strings.Repeat(r, 300)
+			got := summarizeNonJSONError(body)
+			if !utf8.ValidString(got) {
+				t.Errorf("rune %q prefix %q: summary is not valid UTF-8: %q", r, prefix, got)
+			}
 		}
 	}
 }

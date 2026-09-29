@@ -276,7 +276,8 @@ For the complete list of **every configuration field and CLI flag** — its role
 
 - 📘 [Architecture overview](docs/ARCHITECTURE.md) — how the tool is built.
 - ⚙️ [Advanced configuration reference](docs/ADVANCED-CONFIG.md) — every config field and CLI flag, plus legacy config shapes.
-- 🧪 [Regression testing protocol](docs/REGRESSION-TESTING.md) — verify changes against live SonarQube + SonarQube Cloud.
+- 🧪 [Regression testing protocol](docs/REGRESSION-TESTING-PLAN.md) — verify changes against live SonarQube + SonarQube Cloud. Automated by `make smoke-full`.
+- 💨 [Live smoke test suite](docs/SMOKE-TESTING.md) — end-to-end tests that run every command against real SonarQube Server + SonarQube Cloud instances. The local pre-PR gate.
 
 ---
 

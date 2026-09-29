@@ -7,6 +7,7 @@ package summary
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -112,11 +113,12 @@ func renderMarkdownExecutiveSummary(sb *strings.Builder, summary *MigrationSumma
 		{Header: outcomeNearPerfect, Key: "nearPerfect"},
 		{Header: outcomePartial, Key: "partial"},
 		{Header: outcomeFailed, Key: "failed"},
+		{Header: outcomeExpected, Key: "expected"},
 		{Header: outcomeSkipped, Key: "skipped"},
 	}
 
 	var rows []map[string]any
-	var totalPerfect, totalNear, totalPartial, totalFailed, totalSkipped int
+	var totalPerfect, totalNear, totalPartial, totalFailed, totalExpected, totalSkipped int
 	for _, sec := range summary.Sections {
 		if summary.OmitSections[sec.Name] {
 			continue
@@ -124,12 +126,18 @@ func renderMarkdownExecutiveSummary(sb *strings.Builder, summary *MigrationSumma
 		perfect := len(sec.Succeeded)
 		near := len(sec.NearPerfect)
 		partial := len(sec.Partial)
-		failed := len(sec.Failed)
+		// Failed counts only what needs acting on; the rest is reported
+		// separately so a re-run into a populated organization does not
+		// look like a failing one.
+		actionable, expectedItems := sec.SplitFailed()
+		failed := len(actionable)
+		expected := len(expectedItems)
 		skipped := len(sec.Skipped)
 		totalPerfect += perfect
 		totalNear += near
 		totalPartial += partial
 		totalFailed += failed
+		totalExpected += expected
 		totalSkipped += skipped
 		rows = append(rows, map[string]any{
 			"objects":     mdCell(sec.Name),
@@ -137,6 +145,7 @@ func renderMarkdownExecutiveSummary(sb *strings.Builder, summary *MigrationSumma
 			"nearPerfect": near,
 			"partial":     partial,
 			"failed":      failed,
+			"expected":    expected,
 			"skipped":     skipped,
 		})
 	}
@@ -146,6 +155,7 @@ func renderMarkdownExecutiveSummary(sb *strings.Builder, summary *MigrationSumma
 		"nearPerfect": totalNear,
 		"partial":     totalPartial,
 		"failed":      totalFailed,
+		"expected":    totalExpected,
 		"skipped":     totalSkipped,
 	})
 
@@ -247,6 +257,7 @@ func renderMarkdownBottlenecks(sb *strings.Builder, summary *MigrationSummary) {
 			{Header: "Phase", Key: "phase"},
 			{Header: "Duration", Key: "duration"},
 			{Header: "OK", Key: "ok"},
+			{Header: "Failed Items", Key: "failedItems"},
 		}
 		rows := make([]map[string]any, 0, len(summary.Tasks))
 		for _, t := range summary.Tasks {
@@ -255,6 +266,10 @@ func renderMarkdownBottlenecks(sb *strings.Builder, summary *MigrationSummary) {
 				"phase":    t.Phase,
 				"duration": fmtDuration(t.Duration),
 				"ok":       t.OK,
+				// Shown next to OK so a "No" says how much of the task
+				// failed. Blank rather than 0 on the clean majority of
+				// rows, so the eye goes to the ones that are not.
+				"failedItems": fmtFailedItems(t),
 			})
 		}
 		sb.WriteString(report.GenerateSection(columns, rows,
@@ -264,6 +279,7 @@ func renderMarkdownBottlenecks(sb *strings.Builder, summary *MigrationSummary) {
 
 	if len(summary.Branches) > 0 {
 		columns := []report.Column{
+			{Header: "Project", Key: "project"},
 			{Header: "Branch", Key: "branch"},
 			{Header: "Type", Key: "type"},
 			{Header: "Status", Key: "status"},
@@ -272,15 +288,35 @@ func renderMarkdownBottlenecks(sb *strings.Builder, summary *MigrationSummary) {
 		rows := make([]map[string]any, 0, len(summary.Branches))
 		for _, b := range summary.Branches {
 			rows = append(rows, map[string]any{
-				"branch": mdCell(b.Branch),
-				"type":   mdCell(b.Type),
-				"status": mdCell(b.Status),
-				"taskId": mdCell(b.TaskID),
+				"project": mdCell(b.Project),
+				"branch":  mdCell(b.Branch),
+				"type":    mdCell(b.Type),
+				"status":  mdCell(b.Status),
+				"taskId":  mdCell(b.TaskID),
 			})
 		}
 		sb.WriteString(report.GenerateSection(columns, rows,
 			report.WithTitle("Per-Branch CE", 3)))
 		sb.WriteString("\n")
+	}
+}
+
+// fmtFailedItems renders a task's failed-item count for the Slowest Tasks
+// table, distinguishing failures that need attention from the by-design
+// and already-done ones nobody has to act on.
+//
+// Returns "" for a task that failed nothing, so the column stays quiet on
+// the rows where there is nothing to say.
+func fmtFailedItems(t TaskTiming) string {
+	switch {
+	case t.Failed == 0:
+		return ""
+	case t.ActionableFailures == 0:
+		return fmt.Sprintf("%d (none actionable)", t.Failed)
+	case t.ActionableFailures == t.Failed:
+		return strconv.FormatInt(t.Failed, 10)
+	default:
+		return fmt.Sprintf("%d (%d actionable)", t.Failed, t.ActionableFailures)
 	}
 }
 
@@ -294,6 +330,7 @@ func renderMarkdownFailureLedger(sb *strings.Builder, summary *MigrationSummary)
 	columns := []report.Column{
 		{Header: "Entity Type", Key: "entityType"},
 		{Header: "Name", Key: "name"},
+		{Header: "Project", Key: "project"},
 		{Header: "Organization", Key: "organization"},
 		{Header: "HTTP", Key: "http"},
 		{Header: "Cause", Key: "cause"},
@@ -304,6 +341,7 @@ func renderMarkdownFailureLedger(sb *strings.Builder, summary *MigrationSummary)
 		rows = append(rows, map[string]any{
 			"entityType":   mdCell(f.EntityType),
 			"name":         mdCell(f.EntityName),
+			"project":      mdCell(f.Project),
 			"organization": mdCell(f.Organization),
 			"http":         mdCell(f.HTTPStatus),
 			"cause":        mdCell(failureCauseLabel(f.Cause)),
@@ -380,93 +418,136 @@ func plural(n int, one, many string) string {
 func renderMarkdownWarnings(sb *strings.Builder, summary *MigrationSummary) {
 	w := summary.Warnings
 	if len(w.Retries) == 0 && len(w.BranchSkips) == 0 &&
-		len(w.GateConditions) == 0 && len(w.MetricRemaps) == 0 {
+		len(w.GateConditions) == 0 && len(w.MetricRemaps) == 0 &&
+		len(w.ForcedMainBranches) == 0 {
 		return
 	}
 
 	sb.WriteString("## Warnings, Retries & Skips\n\n")
 
-	if len(w.Retries) > 0 {
-		columns := []report.Column{
-			{Header: "Method", Key: "method"},
-			{Header: "Endpoint", Key: "endpoint"},
-			{Header: "Count", Key: "count"},
-			{Header: "Max Attempt", Key: "maxAttempt"},
-			{Header: "Last Status", Key: "lastStatus"},
-		}
-		rows := make([]map[string]any, 0, len(w.Retries))
-		for _, r := range w.Retries {
-			rows = append(rows, map[string]any{
-				"method":     mdCell(r.Method),
-				"endpoint":   mdCell(r.Endpoint),
-				"count":      r.Count,
-				"maxAttempt": r.MaxAttempt,
-				"lastStatus": mdCell(r.LastStatus),
-			})
-		}
-		sb.WriteString(report.GenerateSection(columns, rows,
-			report.WithTitle("Retries", 3)))
-		sb.WriteString("\n")
-	}
+	renderMarkdownRetries(sb, w.Retries)
+	renderMarkdownBranchSkips(sb, w.BranchSkips)
+	renderMarkdownGateConditions(sb, w.GateConditions)
+	renderMarkdownMetricRemaps(sb, w.MetricRemaps)
+	renderMarkdownForcedMainBranches(sb, w.ForcedMainBranches)
+}
 
-	if len(w.BranchSkips) > 0 {
-		columns := []report.Column{
-			{Header: "Branch", Key: "branch"},
-			{Header: "Findings", Key: "findings"},
-			{Header: "Reason", Key: "reason"},
-		}
-		rows := make([]map[string]any, 0, len(w.BranchSkips))
-		for _, s := range w.BranchSkips {
-			rows = append(rows, map[string]any{
-				"branch":   mdCell(s.Branch),
-				"findings": s.Findings,
-				"reason":   mdCell(s.Reason),
-			})
-		}
-		sb.WriteString(report.GenerateSection(columns, rows,
-			report.WithTitle("Branch Skips", 3)))
-		sb.WriteString("\n")
+func renderMarkdownRetries(sb *strings.Builder, retries []RetryStat) {
+	if len(retries) == 0 {
+		return
 	}
+	columns := []report.Column{
+		{Header: "Method", Key: "method"},
+		{Header: "Endpoint", Key: "endpoint"},
+		{Header: "Count", Key: "count"},
+		{Header: "Max Attempt", Key: "maxAttempt"},
+		{Header: "Last Status", Key: "lastStatus"},
+	}
+	rows := make([]map[string]any, 0, len(retries))
+	for _, r := range retries {
+		rows = append(rows, map[string]any{
+			"method":     mdCell(r.Method),
+			"endpoint":   mdCell(r.Endpoint),
+			"count":      r.Count,
+			"maxAttempt": r.MaxAttempt,
+			"lastStatus": mdCell(r.LastStatus),
+		})
+	}
+	sb.WriteString(report.GenerateSection(columns, rows,
+		report.WithTitle("Retries", 3)))
+	sb.WriteString("\n")
+}
 
-	if len(w.GateConditions) > 0 {
-		columns := []report.Column{
-			{Header: "Gate", Key: "gate"},
-			{Header: "Metric", Key: "metric"},
-			{Header: "Action", Key: "action"},
-			{Header: "Note", Key: "note"},
-		}
-		rows := make([]map[string]any, 0, len(w.GateConditions))
-		for _, g := range w.GateConditions {
-			rows = append(rows, map[string]any{
-				"gate":   mdCell(g.Gate),
-				"metric": mdCell(g.Metric),
-				"action": mdCell(g.Action),
-				"note":   mdCell(g.Note),
-			})
-		}
-		sb.WriteString(report.GenerateSection(columns, rows,
-			report.WithTitle("Gate Condition Skips", 3)))
-		sb.WriteString("\n")
+func renderMarkdownBranchSkips(sb *strings.Builder, skips []BranchSkip) {
+	if len(skips) == 0 {
+		return
 	}
+	columns := []report.Column{
+		{Header: "Branch", Key: "branch"},
+		{Header: "Findings", Key: "findings"},
+		{Header: "Reason", Key: "reason"},
+	}
+	rows := make([]map[string]any, 0, len(skips))
+	for _, s := range skips {
+		rows = append(rows, map[string]any{
+			"branch":   mdCell(s.Branch),
+			"findings": s.Findings,
+			"reason":   mdCell(s.Reason),
+		})
+	}
+	sb.WriteString(report.GenerateSection(columns, rows,
+		report.WithTitle("Branch Skips", 3)))
+	sb.WriteString("\n")
+}
 
-	if len(w.MetricRemaps) > 0 {
-		columns := []report.Column{
-			{Header: "Gate", Key: "gate"},
-			{Header: "Source Metric", Key: "sourceMetric"},
-			{Header: "Target Metric", Key: "targetMetric"},
-		}
-		rows := make([]map[string]any, 0, len(w.MetricRemaps))
-		for _, m := range w.MetricRemaps {
-			rows = append(rows, map[string]any{
-				"gate":         mdCell(m.Gate),
-				"sourceMetric": mdCell(m.SourceMetric),
-				"targetMetric": mdCell(m.TargetMetric),
-			})
-		}
-		sb.WriteString(report.GenerateSection(columns, rows,
-			report.WithTitle("Metric Remaps", 3)))
-		sb.WriteString("\n")
+func renderMarkdownGateConditions(sb *strings.Builder, conditions []GateConditionSkip) {
+	if len(conditions) == 0 {
+		return
 	}
+	columns := []report.Column{
+		{Header: "Gate", Key: "gate"},
+		{Header: "Metric", Key: "metric"},
+		{Header: "Action", Key: "action"},
+		{Header: "Note", Key: "note"},
+	}
+	rows := make([]map[string]any, 0, len(conditions))
+	for _, g := range conditions {
+		rows = append(rows, map[string]any{
+			"gate":   mdCell(g.Gate),
+			"metric": mdCell(g.Metric),
+			"action": mdCell(g.Action),
+			"note":   mdCell(g.Note),
+		})
+	}
+	sb.WriteString(report.GenerateSection(columns, rows,
+		report.WithTitle("Gate Condition Skips", 3)))
+	sb.WriteString("\n")
+}
+
+func renderMarkdownMetricRemaps(sb *strings.Builder, remaps []MetricRemap) {
+	if len(remaps) == 0 {
+		return
+	}
+	columns := []report.Column{
+		{Header: "Gate", Key: "gate"},
+		{Header: "Source Metric", Key: "sourceMetric"},
+		{Header: "Target Metric", Key: "targetMetric"},
+	}
+	rows := make([]map[string]any, 0, len(remaps))
+	for _, m := range remaps {
+		rows = append(rows, map[string]any{
+			"gate":         mdCell(m.Gate),
+			"sourceMetric": mdCell(m.SourceMetric),
+			"targetMetric": mdCell(m.TargetMetric),
+		})
+	}
+	sb.WriteString(report.GenerateSection(columns, rows,
+		report.WithTitle("Metric Remaps", 3)))
+	sb.WriteString("\n")
+}
+
+func renderMarkdownForcedMainBranches(sb *strings.Builder, forced []ForcedMainBranch) {
+	if len(forced) == 0 {
+		return
+	}
+	columns := []report.Column{
+		{Header: "Project", Key: "project"},
+		{Header: "Branch", Key: "branch"},
+		{Header: "Analysis Date", Key: "analysisDate"},
+		{Header: "Cutoff", Key: "cutoff"},
+	}
+	rows := make([]map[string]any, 0, len(forced))
+	for _, f := range forced {
+		rows = append(rows, map[string]any{
+			"project":      mdCell(f.Project),
+			"branch":       mdCell(f.Branch),
+			"analysisDate": mdCell(f.AnalysisDate),
+			"cutoff":       mdCell(f.Cutoff),
+		})
+	}
+	sb.WriteString(report.GenerateSection(columns, rows,
+		report.WithTitle("Force-Included Main Branches", 3)))
+	sb.WriteString("\n")
 }
 
 // renderMarkdownBranchProjectData writes the "## Branch Project Data" table.
@@ -477,6 +558,7 @@ func renderMarkdownBranchProjectData(sb *strings.Builder, summary *MigrationSumm
 	}
 
 	columns := []report.Column{
+		{Header: "Project", Key: "project"},
 		{Header: "Branch", Key: "branch"},
 		{Header: "Type", Key: "type"},
 		{Header: "Status", Key: "status"},
@@ -491,6 +573,7 @@ func renderMarkdownBranchProjectData(sb *strings.Builder, summary *MigrationSumm
 	rows := make([]map[string]any, 0, len(summary.Branches))
 	for _, b := range summary.Branches {
 		rows = append(rows, map[string]any{
+			"project":        mdCell(b.Project),
 			"branch":         mdCell(b.Branch),
 			"type":           mdCell(b.Type),
 			"status":         mdCell(b.Status),

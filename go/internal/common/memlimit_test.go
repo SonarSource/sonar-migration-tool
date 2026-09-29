@@ -316,6 +316,22 @@ func TestApplyMemoryLimitNilLogger(t *testing.T) {
 	}
 }
 
+// MemoryBudget is the exported wrapper #573's AdaptiveBuildConcurrency
+// builds on; on Linux it probes the real root, elsewhere it is a no-op.
+// Either way it must not panic, and a nonzero budget must name its source.
+func TestMemoryBudgetExportedIsSafe(t *testing.T) {
+	budget, source := MemoryBudget()
+	if budget < 0 {
+		t.Errorf("MemoryBudget returned negative budget %d", budget)
+	}
+	if budget == 0 && source != "" {
+		t.Errorf("no budget detected but source = %q", source)
+	}
+	if budget > 0 && source == "" {
+		t.Errorf("budget %d detected but source is empty", budget)
+	}
+}
+
 // ApplyMemoryLimit is the exported wrapper; on Linux it probes the real
 // root, elsewhere it is a no-op. Either way it must not panic and must not
 // return a limit below the floor.

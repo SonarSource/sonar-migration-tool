@@ -94,6 +94,42 @@ func TestMapOrganizationStructure(t *testing.T) {
 	if orgs[0].SonarQubeOrgKey != "org1" {
 		t.Errorf("expected org1, got %q", orgs[0].SonarQubeOrgKey)
 	}
+	if orgs[0].SonarCloudOrgKey != "" {
+		t.Errorf("without a defaultOrgKey the target column stays blank, got %q", orgs[0].SonarCloudOrgKey)
+	}
+}
+
+// The defaultOrgKey branch had no test, so nothing caught structure
+// --config failing to supply one for three of the four config shapes
+// (#566). An empty argument must behave exactly like no argument.
+func TestMapOrganizationStructure_DefaultOrgKey(t *testing.T) {
+	bindings := []Binding{
+		{Key: "org1", ALM: "github", URL: "https://api.github.com", ServerURL: testSQURL, IsCloud: true, ProjectCount: 5},
+		{Key: "org2", ALM: "", URL: "", ServerURL: "https://sq2.example.com/", IsCloud: false, ProjectCount: 3},
+	}
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "populated", args: []string{"my-org"}, want: "my-org"},
+		{name: "explicitly_empty", args: []string{""}, want: ""},
+		{name: "omitted", args: nil, want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			orgs := MapOrganizationStructure(bindings, tc.args...)
+			if len(orgs) != 2 {
+				t.Fatalf("expected 2 orgs, got %d", len(orgs))
+			}
+			for _, o := range orgs {
+				if o.SonarCloudOrgKey != tc.want {
+					t.Errorf("%s: SonarCloudOrgKey got %q, want %q",
+						o.SonarQubeOrgKey, o.SonarCloudOrgKey, tc.want)
+				}
+			}
+		})
+	}
 }
 
 func TestMapProfiles(t *testing.T) {

@@ -8,11 +8,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -31,10 +34,10 @@ func TestDedupActiveRules(t *testing.T) {
 	// triples. The CE rejects a profile that activates the same rule twice, so
 	// dedup must keep exactly one per triple while preserving distinct rules.
 	in := []scanreport.ActiveRuleInput{
-		{RuleRepo: "python", RuleKey: "S100", QProfileKey: "qpPy", Language: "py"}, // from "Sonar way"
-		{RuleRepo: "python", RuleKey: "S100", QProfileKey: "qpPy", Language: "py"}, // dup from "Olivier Way"
-		{RuleRepo: "python", RuleKey: "S100", QProfileKey: "qpPy", Language: "py"}, // dup x3
-		{RuleRepo: "python", RuleKey: "S200", QProfileKey: "qpPy", Language: "py"}, // distinct rule
+		{RuleRepo: "python", RuleKey: "S100", QProfileKey: "qpPy", Language: "py"},     // from "Sonar way"
+		{RuleRepo: "python", RuleKey: "S100", QProfileKey: "qpPy", Language: "py"},     // dup from "Olivier Way"
+		{RuleRepo: "python", RuleKey: "S100", QProfileKey: "qpPy", Language: "py"},     // dup x3
+		{RuleRepo: "python", RuleKey: "S200", QProfileKey: "qpPy", Language: "py"},     // distinct rule
 		{RuleRepo: "docker", RuleKey: "S100", QProfileKey: "qpDk", Language: "docker"}, // distinct repo+profile
 	}
 	out := dedupActiveRules(in)
@@ -392,9 +395,9 @@ func setupProjectDataExtract(t *testing.T, dir string) {
 			"key": "issue-1", "rule": "java:S100", "message": "Rename method",
 			"severity": "MAJOR", "component": "proj1:src/Main.java",
 			"projectKey": "proj1", "branch": "main",
-			"textRange":  map[string]any{"startLine": 5, "endLine": 5, "startOffset": 0, "endOffset": 10},
+			"textRange":    map[string]any{"startLine": 5, "endLine": 5, "startOffset": 0, "endOffset": 10},
 			"creationDate": "2024-06-15T10:00:00+0000",
-			"serverUrl": testServerURL,
+			"serverUrl":    testServerURL,
 		},
 		{
 			"key": "issue-2", "rule": "java:S200", "message": "Other issue",
@@ -413,8 +416,8 @@ func setupProjectDataExtract(t *testing.T, dir string) {
 		},
 		{
 			"key": "proj1:src/Util.java", "name": "Util.java", "path": "src/Util.java",
-			"language": "java",
-			"measures": []map[string]any{{"metric": "ncloc", "value": "30"}},
+			"language":   "java",
+			"measures":   []map[string]any{{"metric": "ncloc", "value": "30"}},
 			"projectKey": "proj1", "branch": "main",
 			"serverUrl": testServerURL,
 		},
@@ -447,8 +450,8 @@ func setupProjectDataExtract(t *testing.T, dir string) {
 			"key": "hotspot-1", "ruleKey": "java:S2092", "message": "Make this cookie secure",
 			"component": "proj1:src/Main.java", "project": "proj1", "branch": "main",
 			"vulnerabilityProbability": "HIGH",
-			"creationDate": "2024-03-10T08:00:00+0000",
-			"serverUrl": testServerURL,
+			"creationDate":             "2024-03-10T08:00:00+0000",
+			"serverUrl":                testServerURL,
 		},
 	})
 }
@@ -458,11 +461,44 @@ func newProjectDataExecutor(t *testing.T, dir string) *Executor {
 	runDir := filepath.Join(dir, "run-test")
 	os.MkdirAll(runDir, 0o755)
 	return &Executor{
-		Store:     common.NewDataStore(runDir),
-		ExportDir: dir,
-		Mapping:   structure.ExtractMapping{testServerURL: "extract-01"},
-		Sem:       make(chan struct{}, 5),
-		Logger:    slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 1})),
+		Store:              common.NewDataStore(runDir),
+		ExportDir:          dir,
+		Mapping:            structure.ExtractMapping{testServerURL: "extract-01"},
+		ConcurrencyLimiter: NewFixedConcurrencyLimiter(5),
+		Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 1})),
+	}
+}
+
+// TestImportProjectDataGateLimiter_PrefersCEPollConcurrencyLimiter proves
+// runImportProjectData's outer gate is bounded by CEPollConcurrencyLimiter
+// when set, not ConcurrencyLimiter — the whole point of this fix (a
+// project's gate slot is held across build->submit->PollCETask, so it
+// needs a limiter sized off the poll cadence, not raw HTTP call latency).
+func TestImportProjectDataGateLimiter_PrefersCEPollConcurrencyLimiter(t *testing.T) {
+	e := &Executor{
+		ConcurrencyLimiter:       NewFixedConcurrencyLimiter(5),
+		CEPollConcurrencyLimiter: NewFixedConcurrencyLimiter(250),
+	}
+	got := importProjectDataGateLimiter(e)
+	if got.Current() != 250 {
+		t.Fatalf("importProjectDataGateLimiter() = limiter with Current() %d, want 250 (CEPollConcurrencyLimiter)", got.Current())
+	}
+}
+
+// TestImportProjectDataGateLimiter_FallsBackToConcurrencyLimiter proves
+// callers that never wire CEPollConcurrencyLimiter (test fixtures today;
+// potentially other future callers) still get a working limiter rather
+// than a nil one that would panic DynamicGate.
+func TestImportProjectDataGateLimiter_FallsBackToConcurrencyLimiter(t *testing.T) {
+	e := &Executor{
+		ConcurrencyLimiter: NewFixedConcurrencyLimiter(5),
+	}
+	got := importProjectDataGateLimiter(e)
+	if got == nil {
+		t.Fatal("importProjectDataGateLimiter() = nil, want fallback to ConcurrencyLimiter")
+	}
+	if got.Current() != 5 {
+		t.Fatalf("importProjectDataGateLimiter() = limiter with Current() %d, want 5 (ConcurrencyLimiter fallback)", got.Current())
 	}
 }
 
@@ -997,7 +1033,7 @@ func TestToExtractedIssues(t *testing.T) {
 			RuleKey:      "S100",
 			Component:    "proj1:src/Main.java",
 			StartLine:    5,
-			EndLine:       5,
+			EndLine:      5,
 		},
 	}
 
@@ -1220,6 +1256,89 @@ func TestImportBranch(t *testing.T) {
 	if result.TaskID != "AX-test-123" {
 		t.Errorf("expected AX-test-123, got %s", result.TaskID)
 	}
+	// #597: SubmittedIssueCount must carry the real post-drop total through
+	// from branchReportMeta. The fixture's one native issue (java:S100) is
+	// active and kept; its one hotspot (java:S2092) is not in
+	// getActiveProfileRules and is dropped by dropHotspotsWithInactiveRules,
+	// so the total is native-only.
+	if result.SubmittedIssueCount != 1 {
+		t.Errorf("SubmittedIssueCount = %d, want 1 (1 kept native issue, 1 hotspot dropped for an inactive rule)", result.SubmittedIssueCount)
+	}
+}
+
+// #620 review: external issues are submitted in the same report and synced
+// by syncIssueMetadata, so they must count. Without them, a project whose
+// only findings are external records submitted_issues 0, skips the indexing
+// wait, and loses its triage sync whenever indexing lags.
+func TestImportBranchCountsExternalIssuesAsSubmitted(t *testing.T) {
+	dir := t.TempDir()
+	setupProjectDataExtract(t, dir)
+	// Same native issues as the shared fixture, plus one external issue on
+	// the main branch.
+	writeJSONL(filepath.Join(dir, "extract-01", "getProjectIssuesFull"), []map[string]any{
+		{
+			"key": "issue-1", "rule": "java:S100", "message": "Rename method",
+			"severity": "MAJOR", "component": "proj1:src/Main.java",
+			"projectKey": "proj1", "branch": "main",
+			"textRange":    map[string]any{"startLine": 5, "endLine": 5, "startOffset": 0, "endOffset": 10},
+			"creationDate": "2024-06-15T10:00:00+0000",
+			"serverUrl":    testServerURL,
+		},
+		{
+			"key": "ext-1", "rule": "external_eslint:no-unused-vars", "message": "Unused variable",
+			"severity": "MINOR", "type": "CODE_SMELL", "component": "proj1:src/Util.java",
+			"projectKey": "proj1", "branch": "main",
+			"textRange":    map[string]any{"startLine": 1, "endLine": 1, "startOffset": 0, "endOffset": 5},
+			"creationDate": "2024-06-15T10:00:00+0000",
+			"serverUrl":    testServerURL,
+		},
+	})
+
+	srv := newCEMockServer()
+	defer srv.Close()
+	e := newProjectDataExecutor(t, dir)
+	e.CloudURL = srv.URL + "/"
+	e.Raw = common.NewRawClient(srv.Client(), srv.URL+"/")
+	e.APIURL = srv.URL + "/"
+	e.RawAPI = common.NewRawClient(srv.Client(), srv.URL+"/")
+
+	result, err := importBranch(context.Background(), e, importBranchInput{
+		CloudKey: "cloud-proj1", OrgKey: "cloud-org1",
+		ServerURL: testServerURL, ServerKey: "proj1",
+		Branch: "main", ReferenceBranch: "master",
+	})
+	if err != nil {
+		t.Fatalf("importBranch: %v", err)
+	}
+	if result.SubmittedIssueCount != 2 {
+		t.Errorf("SubmittedIssueCount = %d, want 2 (1 native + 1 external; the hotspot is dropped for an inactive rule)", result.SubmittedIssueCount)
+	}
+}
+
+// recordBranchResult must round-trip SubmittedIssueCount into the
+// "submitted_issues" field loadSubmittedIssueIndex reads back (#597).
+func TestRecordBranchResultWritesSubmittedIssueCount(t *testing.T) {
+	dir := t.TempDir()
+	store := common.NewDataStore(dir)
+	w, err := store.Writer("importProjectData")
+	if err != nil {
+		t.Fatalf("Store.Writer: %v", err)
+	}
+	recordBranchResult(w, "cloud-proj1", "main", &importResult{Status: "success", SubmittedIssueCount: 7})
+
+	items, err := store.ReadAll("importProjectData")
+	if err != nil {
+		t.Fatalf("Store.ReadAll: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(items))
+	}
+	if got := extractInt32Field(items[0], "submitted_issues"); got != 7 {
+		t.Errorf("submitted_issues = %d, want 7", got)
+	}
+	if got := extractField(items[0], "cloud_project_key"); got != "cloud-proj1" {
+		t.Errorf("cloud_project_key = %q, want cloud-proj1", got)
+	}
 }
 
 func TestImportBranchSkipsNoComponents(t *testing.T) {
@@ -1316,6 +1435,48 @@ func TestRunImportProjectDataSkipsEmptyKeys(t *testing.T) {
 	}
 }
 
+// TestRunImportProjectDataReportsCancellation pins the task's return value
+// for a run cancelled after every project was already admitted. The gate
+// never blocks in that window, so admitErr stays nil, and
+// importProjectDataOne records per-project outcomes rather than returning
+// them, so g.Wait() is nil too. Reporting success there lets migrate.go start
+// the next phase on an already-cancelled context, where the trailing metadata
+// syncs create their task directories, fail, and are then dropped as already
+// done by the next --run_id resume.
+func TestRunImportProjectDataReportsCancellation(t *testing.T) {
+	dir := t.TempDir()
+	setupProjectDataExtract(t, dir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Cancelling on the first request guarantees the project's goroutine is
+	// already past its entry ctx check, which is the case the task used to
+	// report as success.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		cancel()
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	}))
+	defer srv.Close()
+
+	e := newProjectDataExecutor(t, dir)
+	e.CloudURL = srv.URL + "/"
+	e.Raw = common.NewRawClient(srv.Client(), srv.URL+"/")
+
+	w, _ := e.Store.Writer("createProjects")
+	b, _ := json.Marshal(map[string]any{
+		"key":                "proj1",
+		"cloud_project_key":  "cloud-proj1",
+		"sonarcloud_org_key": "cloud-org1",
+		"server_url":         testServerURL,
+	})
+	w.WriteOne(b)
+
+	if err := runImportProjectData(ctx, e); !errors.Is(err, context.Canceled) {
+		t.Fatalf("runImportProjectData on a cancelled run = %v, want context.Canceled", err)
+	}
+}
+
 // --- New tests for branch migration fixes ---
 
 func TestSortBranchesMainFirst(t *testing.T) {
@@ -1407,6 +1568,158 @@ func TestFilterBranches(t *testing.T) {
 	}
 }
 
+func TestFilterBranchesByRegexp(t *testing.T) {
+	branches := []branchInfo{
+		{Name: "main", IsMain: true},
+		{Name: "develop"},
+		{Name: "feature/foo"},
+		{Name: "release/1.0"},
+	}
+
+	// nil regex — no filter, everything kept.
+	result := filterBranchesByRegexp(branches, nil)
+	if len(result) != 4 {
+		t.Errorf("nil regex: expected 4, got %d", len(result))
+	}
+
+	// Only "feature/*" branches match; non-matching non-main branches dropped,
+	// matching branch kept, main kept despite not matching.
+	re := regexp.MustCompile(`^feature/.*$`)
+	result = filterBranchesByRegexp(branches, re)
+	var names []string
+	for _, b := range result {
+		names = append(names, b.Name)
+	}
+	if len(result) != 2 {
+		t.Errorf("regex feature/.*: expected 2 branches, got %d (%v)", len(result), names)
+	}
+	foundMain, foundFeature := false, false
+	for _, b := range result {
+		switch b.Name {
+		case "main":
+			foundMain = true
+		case "feature/foo":
+			foundFeature = true
+		case "develop", "release/1.0":
+			t.Errorf("non-matching non-main branch should be dropped: %s", b.Name)
+		}
+	}
+	if !foundMain {
+		t.Error("main branch should always be kept regardless of match")
+	}
+	if !foundFeature {
+		t.Error("matching branch should be kept")
+	}
+}
+
+func TestFilterBranchesByAnalyzedAfter_NilCutoffIsNoOp(t *testing.T) {
+	branches := []branchInfo{
+		{Name: "main", IsMain: true, LastAnalysisDate: mustParseDate(t, "2020-01-01")},
+		{Name: "old-feature", LastAnalysisDate: mustParseDate(t, "2020-01-01")},
+	}
+	kept, forcedMain, _ := filterBranchesByAnalyzedAfter(branches, nil)
+	if len(kept) != 2 || forcedMain != "" {
+		t.Fatalf("nil cutoff must be a no-op passthrough, got kept=%v forcedMain=%q", kept, forcedMain)
+	}
+}
+
+func TestFilterBranchesByAnalyzedAfter_ExcludesOlderNonMainBranches(t *testing.T) {
+	cutoff := mustParseDate(t, "2024-01-01")
+	branches := []branchInfo{
+		{Name: "main", IsMain: true, LastAnalysisDate: mustParseDate(t, "2024-06-01")},
+		{Name: "old-feature", LastAnalysisDate: mustParseDate(t, "2023-01-01")},
+		{Name: "on-boundary", LastAnalysisDate: mustParseDate(t, "2024-01-01")},
+	}
+	kept, forcedMain, _ := filterBranchesByAnalyzedAfter(branches, &cutoff)
+	if forcedMain != "" {
+		t.Fatalf("main met the cutoff, should not be forced, got forcedMain=%q", forcedMain)
+	}
+	names := map[string]bool{}
+	for _, b := range kept {
+		names[b.Name] = true
+	}
+	if !names["main"] || !names["on-boundary"] || names["old-feature"] {
+		t.Fatalf("kept = %+v, want {main, on-boundary} (on-or-after semantics)", kept)
+	}
+}
+
+func TestFilterBranchesByAnalyzedAfter_ForcesMainWhenEverythingExcluded(t *testing.T) {
+	cutoff := mustParseDate(t, "2024-01-01")
+	branches := []branchInfo{
+		{Name: "main", IsMain: true, LastAnalysisDate: mustParseDate(t, "2020-01-01")},
+		{Name: "old-feature", LastAnalysisDate: mustParseDate(t, "2020-01-01")},
+	}
+	kept, forcedMain, forcedMainDate := filterBranchesByAnalyzedAfter(branches, &cutoff)
+	if forcedMain != "main" {
+		t.Fatalf("forcedMain = %q, want %q", forcedMain, "main")
+	}
+	if !forcedMainDate.Equal(mustParseDate(t, "2020-01-01")) {
+		t.Fatalf("forcedMainDate = %v, want 2020-01-01", forcedMainDate)
+	}
+	if len(kept) != 1 || kept[0].Name != "main" {
+		t.Fatalf("kept = %+v, want only main", kept)
+	}
+}
+
+func TestFilterBranchesByAnalyzedAfter_MainMeetingCutoffIsNotForced(t *testing.T) {
+	cutoff := mustParseDate(t, "2024-01-01")
+	branches := []branchInfo{
+		{Name: "main", IsMain: true, LastAnalysisDate: mustParseDate(t, "2024-06-01")},
+		{Name: "old-feature", LastAnalysisDate: mustParseDate(t, "2020-01-01")},
+	}
+	kept, forcedMain, _ := filterBranchesByAnalyzedAfter(branches, &cutoff)
+	if forcedMain != "" {
+		t.Fatalf("main already met the cutoff, must not be forced, got forcedMain=%q", forcedMain)
+	}
+	if len(kept) != 1 || kept[0].Name != "main" {
+		t.Fatalf("kept = %+v, want only main (unforced)", kept)
+	}
+}
+
+// TestFilterBranchesByAnalyzedAfter_ChainsAfterExcludeGlob proves the two
+// filter stages AND correctly (#583): a branch dropped by the glob filter
+// stays dropped, and a branch surviving the glob filter but failing the
+// date filter is still removed. This is the proxy test for composing with
+// a future #582 (--branches) filter, which is expected to chain the same
+// way.
+func TestFilterBranchesByAnalyzedAfter_ChainsAfterExcludeGlob(t *testing.T) {
+	cutoff := mustParseDate(t, "2024-01-01")
+	branches := []branchInfo{
+		{Name: "main", IsMain: true, LastAnalysisDate: mustParseDate(t, "2024-06-01")},
+		{Name: "feature/excluded-by-glob", LastAnalysisDate: mustParseDate(t, "2024-06-01")},
+		{Name: "feature/survives-glob-fails-date", LastAnalysisDate: mustParseDate(t, "2020-01-01")},
+		{Name: "release/1.0", LastAnalysisDate: mustParseDate(t, "2024-06-01")},
+	}
+
+	afterGlob := filterBranches(branches, []string{"feature/excluded-by-glob"})
+	kept, forcedMain, _ := filterBranchesByAnalyzedAfter(afterGlob, &cutoff)
+	if forcedMain != "" {
+		t.Fatalf("main and release/1.0 meet the cutoff, nothing should be forced, got forcedMain=%q", forcedMain)
+	}
+	names := map[string]bool{}
+	for _, b := range kept {
+		names[b.Name] = true
+	}
+	if names["feature/excluded-by-glob"] {
+		t.Errorf("glob-excluded branch must not be resurrected by the date filter")
+	}
+	if names["feature/survives-glob-fails-date"] {
+		t.Errorf("branch surviving the glob filter but failing the date filter must still be removed")
+	}
+	if !names["main"] || !names["release/1.0"] {
+		t.Fatalf("kept = %+v, want {main, release/1.0}", kept)
+	}
+}
+
+func mustParseDate(t *testing.T, s string) time.Time {
+	t.Helper()
+	d, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		t.Fatalf("mustParseDate(%q): %v", s, err)
+	}
+	return d
+}
+
 func TestMatchesAnyGlob(t *testing.T) {
 	if !matchesAnyGlob("feature/foo", []string{"feature/*"}) {
 		t.Error("expected feature/foo to match feature/*")
@@ -1424,6 +1737,154 @@ func TestMatchesAnyGlob(t *testing.T) {
 	}
 }
 
+// capBranchesTestRefDate anchors the relative dates built by
+// capBranchesDaysAgo, so TestCapBranches* cases stay stable regardless of
+// when they run.
+var capBranchesTestRefDate = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+func capBranchesDaysAgo(n int) time.Time {
+	return capBranchesTestRefDate.AddDate(0, 0, -n)
+}
+
+func branchNames(branches []branchInfo) []string {
+	names := make([]string, len(branches))
+	for i, b := range branches {
+		names[i] = b.Name
+	}
+	return names
+}
+
+func TestCapBranches_UnderLimitReturnsEverythingUnchanged(t *testing.T) {
+	branches := []branchInfo{
+		{Name: "main", IsMain: true},
+		{Name: "develop"},
+		{Name: "feature/foo"},
+	}
+	kept, dropped := capBranches(branches, 10)
+	if len(kept) != 3 || len(dropped) != 0 {
+		t.Errorf("expected 3 kept, 0 dropped; got %d kept, %d dropped", len(kept), len(dropped))
+	}
+}
+
+func TestCapBranches_PriorityNamesAlwaysKept(t *testing.T) {
+	branches := []branchInfo{
+		{Name: "main", IsMain: true, LastAnalysisDate: capBranchesDaysAgo(100)},
+		{Name: "master", LastAnalysisDate: capBranchesDaysAgo(100)},
+		{Name: "develop", LastAnalysisDate: capBranchesDaysAgo(100)},
+		{Name: "release/1.0", LastAnalysisDate: capBranchesDaysAgo(1)},
+		{Name: "release/2.0", LastAnalysisDate: capBranchesDaysAgo(2)},
+		{Name: "feature/a", LastAnalysisDate: capBranchesDaysAgo(1)},
+		{Name: "feature/b", LastAnalysisDate: capBranchesDaysAgo(2)},
+	}
+	kept, dropped := capBranches(branches, 3)
+	if len(kept) != 3 || len(dropped) != 4 {
+		t.Fatalf("expected 3 kept, 4 dropped; got %d kept, %d dropped", len(kept), len(dropped))
+	}
+	keptNames := branchNames(kept)
+	for _, want := range []string{"main", "master", "develop"} {
+		if !slices.Contains(keptNames, want) {
+			t.Errorf("expected %s to be kept, kept=%v", want, keptNames)
+		}
+	}
+}
+
+func TestCapBranches_ReleaseBranchesPrioritizedByRecency(t *testing.T) {
+	branches := []branchInfo{
+		{Name: "main", IsMain: true, LastAnalysisDate: capBranchesDaysAgo(100)},
+		{Name: "release/1.0", LastAnalysisDate: capBranchesDaysAgo(10)},
+		{Name: "release/2.0", LastAnalysisDate: capBranchesDaysAgo(1)},
+		{Name: "Release-legacy", LastAnalysisDate: capBranchesDaysAgo(20)},
+		{Name: "feature/newest", LastAnalysisDate: capBranchesDaysAgo(2)},
+		{Name: "feature/older", LastAnalysisDate: capBranchesDaysAgo(5)},
+	}
+	kept, dropped := capBranches(branches, 4)
+	if len(kept) != 4 || len(dropped) != 2 {
+		t.Fatalf("expected 4 kept, 2 dropped; got %d kept, %d dropped", len(kept), len(dropped))
+	}
+	want := []string{"main", "release/2.0", "release/1.0", "Release-legacy"}
+	if got := branchNames(kept); !slices.Equal(got, want) {
+		t.Errorf("expected order %v, got %v", want, got)
+	}
+	droppedNames := branchNames(dropped)
+	if !slices.Contains(droppedNames, "feature/newest") || !slices.Contains(droppedNames, "feature/older") {
+		t.Errorf("expected both feature branches to be dropped, dropped=%v", droppedNames)
+	}
+}
+
+func TestCapBranches_OtherBranchesPrioritizedByRecency(t *testing.T) {
+	branches := []branchInfo{
+		{Name: "main", IsMain: true},
+		{Name: "feature/oldest", LastAnalysisDate: capBranchesDaysAgo(30)},
+		{Name: "feature/newest", LastAnalysisDate: capBranchesDaysAgo(1)},
+		{Name: "feature/never-analyzed"},
+	}
+	kept, dropped := capBranches(branches, 2)
+	if len(kept) != 2 || len(dropped) != 2 {
+		t.Fatalf("expected 2 kept, 2 dropped; got %d kept, %d dropped", len(kept), len(dropped))
+	}
+	if want := []string{"main", "feature/newest"}; !slices.Equal(branchNames(kept), want) {
+		t.Errorf("expected %v, got %v", want, branchNames(kept))
+	}
+}
+
+func TestIsPriorityBranchName(t *testing.T) {
+	for _, name := range []string{"main", "master", "develop"} {
+		if !isPriorityBranchName(name) {
+			t.Errorf("expected %q to be a priority branch name", name)
+		}
+	}
+	for _, name := range []string{"Main", "MASTER", "Develop", "release/1.0", "feature/x"} {
+		if isPriorityBranchName(name) {
+			t.Errorf("expected %q NOT to be a priority branch name (exact-case only)", name)
+		}
+	}
+}
+
+func TestReleaseBranchPattern(t *testing.T) {
+	for _, name := range []string{"release/1.0", "Release-1.0", "release", "Release"} {
+		if !releaseBranchPattern.MatchString(name) {
+			t.Errorf("expected %q to match the release branch pattern", name)
+		}
+	}
+	for _, name := range []string{"prerelease/1.0", "feature/release-notes", "main"} {
+		if releaseBranchPattern.MatchString(name) {
+			t.Errorf("expected %q NOT to match the release branch pattern", name)
+		}
+	}
+}
+
+func TestRecordBranchLimitSkip(t *testing.T) {
+	dir := t.TempDir()
+	store := common.NewDataStore(dir)
+	w, _ := store.Writer("importProjectData")
+
+	recordBranchLimitSkip(w, "cloud-proj1", "feature/dropped")
+
+	items, err := store.ReadAll("importProjectData")
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(items))
+	}
+	if key := extractField(items[0], "cloud_project_key"); key != "cloud-proj1" {
+		t.Errorf("cloud_project_key: expected cloud-proj1, got %s", key)
+	}
+	if branch := extractField(items[0], "branch"); branch != "feature/dropped" {
+		t.Errorf("branch: expected feature/dropped, got %s", branch)
+	}
+	// Deliberately NOT "skipped"/"failed": recordBranchLimitSkip must not
+	// contribute to collectProjectData's worst-outcome-wins status so that
+	// a project with other successfully-migrated branches still reports
+	// as Succeeded (#584).
+	if status := extractField(items[0], "status"); status == "skipped" || status == "failed" || status == "success" {
+		t.Errorf("status %q must not be one of the statuses collectProjectData interprets", status)
+	}
+	if !common.ExtractBool(items[0], "branch_limit_exceeded") {
+		t.Error("expected branch_limit_exceeded=true")
+	}
+}
+
 func TestLoadCompletedBranches(t *testing.T) {
 	dir := t.TempDir()
 	store := common.NewDataStore(dir)
@@ -1433,6 +1894,9 @@ func TestLoadCompletedBranches(t *testing.T) {
 		{"cloud_project_key": "proj1", "branch": "main", "status": "success"},
 		{"cloud_project_key": "proj1", "branch": "develop", "status": "failed"},
 		{"cloud_project_key": "proj1", "branch": "release", "status": "skipped"},
+		{"cloud_project_key": "proj1", "branch": "cancelled", "status": "skipped", "error": "skipped: migration cancelled"},
+		{"cloud_project_key": "proj1", "branch": "already-there", "status": BranchStatusUpToDate},
+		{"cloud_project_key": "proj1", "branch": "over-the-cap", "status": BranchStatusCapped, "branch_limit_exceeded": true},
 		{"cloud_project_key": "proj2", "branch": "main", "status": "success"},
 	} {
 		b, _ := json.Marshal(rec)
@@ -1452,8 +1916,75 @@ func TestLoadCompletedBranches(t *testing.T) {
 	if completed["proj1:release"] {
 		t.Error("proj1:release (skipped) should not be completed")
 	}
+	if completed["proj1:cancelled"] {
+		t.Error("proj1:cancelled (skipped by a cancelled run, #603) should not be completed")
+	}
+	// #605 — an up_to_date branch IS migrated: #588 found the target
+	// already holding an analysis at or after the date this run would
+	// submit. Re-attempting it rebuilds the report and re-reads the
+	// target's branch list only to reach the same conclusion, so a
+	// resume must treat it as done.
+	if !completed["proj1:already-there"] {
+		t.Error("proj1:already-there (up_to_date) should be completed — re-attempting it is pure waste")
+	}
+	// #605 — capped is deliberately NOT complete. The #584 cap is applied
+	// during branch selection, so a capped branch only reaches
+	// shouldSkipBranch at all when the operator raised
+	// --max_branches_per_project (or loosened a branch filter) and
+	// resumed. That is exactly when it must migrate; marking it complete
+	// would pin it as skipped for the life of the run directory.
+	if completed["proj1:over-the-cap"] {
+		t.Error("proj1:over-the-cap (capped) must NOT be completed — the cap is re-evaluated every run")
+	}
 	if !completed["proj2:main"] {
 		t.Error("proj2:main should be completed")
+	}
+}
+
+// #605 + #604 together: after a resume, an up_to_date branch must be
+// skipped, and a capped branch must be re-offered — reading across BOTH
+// attempts' rows, which now coexist in the run directory because chunk
+// writers append (#604).
+func TestLoadCompletedBranchesAcrossResume(t *testing.T) {
+	dir := t.TempDir()
+	store := common.NewDataStore(dir)
+
+	write := func(recs ...map[string]any) {
+		w, err := store.Writer("importProjectData")
+		if err != nil {
+			t.Fatalf("Writer: %v", err)
+		}
+		for _, rec := range recs {
+			b, _ := json.Marshal(rec)
+			if err := w.WriteOne(b); err != nil {
+				t.Fatalf("WriteOne: %v", err)
+			}
+		}
+	}
+
+	// Attempt 1: one branch imported, one cut short by a cancellation,
+	// one dropped by the branch cap.
+	write(
+		map[string]any{"cloud_project_key": "proj1", "branch": "main", "status": "success"},
+		map[string]any{"cloud_project_key": "proj1", "branch": "develop", "status": "skipped", "error": "skipped: migration cancelled"},
+		map[string]any{"cloud_project_key": "proj1", "branch": "old", "status": BranchStatusCapped, "branch_limit_exceeded": true},
+	)
+	// Attempt 2 (--run_id resume): the retried branch is already on the
+	// target, so #588 records it up_to_date. A fresh writer on the same
+	// directory must not clobber attempt 1.
+	write(
+		map[string]any{"cloud_project_key": "proj1", "branch": "develop", "status": BranchStatusUpToDate},
+	)
+
+	completed := loadCompletedBranches(store)
+	if !completed["proj1:main"] {
+		t.Error("proj1:main was imported by attempt 1 and must stay complete after the resume")
+	}
+	if !completed["proj1:develop"] {
+		t.Error("proj1:develop finished up_to_date on the resume and must now be complete")
+	}
+	if completed["proj1:old"] {
+		t.Error("proj1:old was capped and must remain available for a later run with a higher cap")
 	}
 }
 
@@ -1597,7 +2128,7 @@ func TestImportProjectBranchesMainCEFailAborts(t *testing.T) {
 		{Name: "develop", IsMain: false},
 	}
 
-	err := importProjectBranches(context.Background(), e, proj, branches, "", nil, w)
+	err := importProjectBranches(context.Background(), e, proj, branches, nil, nil, w)
 	if err == nil {
 		t.Fatal("expected error when main branch CE fails")
 	}
@@ -1669,7 +2200,7 @@ func TestImportProjectBranchesMainFirst(t *testing.T) {
 	}
 	sortBranchesMainFirst(branches)
 
-	err := importProjectBranches(context.Background(), e, proj, branches, "", nil, w)
+	err := importProjectBranches(context.Background(), e, proj, branches, nil, nil, w)
 	if err != nil {
 		t.Fatalf("importProjectBranches: %v", err)
 	}
@@ -1713,7 +2244,7 @@ func TestImportSkipsCompletedBranches(t *testing.T) {
 		{Name: "develop", IsMain: false},
 	}
 
-	err := importProjectBranches(context.Background(), e, proj, branches, "", completed, w)
+	err := importProjectBranches(context.Background(), e, proj, branches, nil, completed, w)
 	if err != nil {
 		t.Fatalf("importProjectBranches: %v", err)
 	}
@@ -1763,8 +2294,8 @@ func TestStripNullBytes(t *testing.T) {
 // an issue references a column offset beyond the empty line length.
 func TestZeroOffsetsForPurgedComponents(t *testing.T) {
 	cr := scanreport.NewComponentRef()
-	cr.Get("purged-file:App.php")  // ref 1 — will be in purgedRefs
-	cr.Get("real-file:Foo.java")   // ref 2 — not purged
+	cr.Get("purged-file:App.php") // ref 1 — will be in purgedRefs
+	cr.Get("real-file:Foo.java")  // ref 2 — not purged
 
 	purgedRefs := map[int32]struct{}{1: {}}
 

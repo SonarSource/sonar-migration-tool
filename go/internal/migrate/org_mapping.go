@@ -45,7 +45,7 @@ const orgCSVFileName = "organizations.csv"
 // SonarQube Cloud API via validateOrgExists (issue #550). If the org
 // doesn't exist, this returns that error and organizations.csv is left
 // completely untouched — a prior bug validated defaultOrg only AFTER
-// writeOrgCSVWithDefault had already persisted it, so a wrong
+// WriteOrgCSVWithDefault had already persisted it, so a wrong
 // --default_organization on a failed run got written to disk, and a
 // retry with a corrected value then found the file already "mapped"
 // (hasMapping above) and silently ignored the correction.
@@ -91,7 +91,7 @@ func applyOrgMapping(ctx context.Context, lookup orgLookup, exportDir, defaultOr
 	}
 
 	// Apply defaultOrg to every row and write back.
-	if err := writeOrgCSVWithDefault(csvPath, rows, defaultOrg); err != nil {
+	if err := WriteOrgCSVWithDefault(csvPath, rows, defaultOrg); err != nil {
 		return false, fmt.Errorf("applying default_organization to organizations.csv: %w", err)
 	}
 	logger.Info("organizations.csv was empty — every project will migrate to the provided default organization",
@@ -104,11 +104,18 @@ func missingMappingError(csvPath string) error {
 		`No organization mapping has been defined, please review the %q file`, csvPath))
 }
 
-// writeOrgCSVWithDefault rewrites the file so every row's
+// WriteOrgCSVWithDefault rewrites the file so every row's
 // sonarcloud_org_key cell carries defaultOrg, preserving all other
 // columns and their order. The file is read once to recover the
 // canonical header order — map iteration would otherwise scramble it.
-func writeOrgCSVWithDefault(path string, rows []map[string]any, defaultOrg string) error {
+//
+// Exported because the predictive report needs the same rewrite (#566).
+// It is pure local file I/O: no context, no orgLookup, no SonarQube
+// Cloud request. The live existence check is validateOrgExists, kept
+// deliberately separate so predict can apply the default without
+// breaking predictive-report's "no Cloud API calls" contract (#235).
+// Callers that DO talk to Cloud must run validateOrgExists first (#550).
+func WriteOrgCSVWithDefault(path string, rows []map[string]any, defaultOrg string) error {
 	headers, err := readOrgCSVHeaders(path)
 	if err != nil {
 		return err
@@ -194,6 +201,29 @@ func validateOrgExists(ctx context.Context, lookup orgLookup, orgKey, enterprise
 func validateOrgsExist(ctx context.Context, lookup orgLookup, exportDir, enterpriseKey, defaultOrg string, appliedDefault bool) error {
 	csvPath := filepath.Join(exportDir, orgCSVFileName)
 
+	// #612: a per-project override in projects.csv names an organization
+	// organizations.csv may never mention, so it has to be checked on its
+	// own. Checked before the organizations.csv keys because a typo in a
+	// hand-edited projects.csv is the newer and likelier mistake, and
+	// because the appliedDefault path below would otherwise skip it
+	// entirely.
+	overrides, err := projectOrgOverrides(exportDir)
+	if err != nil {
+		return err
+	}
+	if len(overrides) > 0 {
+		known, err := orgsByKey(ctx, lookup, overrides)
+		if err != nil {
+			return fmt.Errorf("looking up organizations in SonarQube Cloud: %w", err)
+		}
+		projectsPath := filepath.Join(exportDir, structure.ProjectsCSVFileName)
+		for _, k := range overrides {
+			if _, ok := known[k]; !ok {
+				return csvOrgMissingError(k, projectsPath, enterpriseKey)
+			}
+		}
+	}
+
 	if appliedDefault {
 		return validateOrgExists(ctx, lookup, defaultOrg, enterpriseKey)
 	}
@@ -207,7 +237,7 @@ func validateOrgsExist(ctx context.Context, lookup orgLookup, exportDir, enterpr
 	for _, row := range rows {
 		k, _ := row["sonarcloud_org_key"].(string)
 		k = strings.TrimSpace(k)
-		if k == "" || k == "SKIPPED" || seen[k] {
+		if k == "" || k == skippedOrgSentinel || seen[k] {
 			continue
 		}
 		seen[k] = true
@@ -226,6 +256,37 @@ func validateOrgsExist(ctx context.Context, lookup orgLookup, exportDir, enterpr
 		}
 	}
 	return nil
+}
+
+// projectOrgOverrides returns the distinct per-project organization
+// overrides from projects.csv that the migration will actually honour,
+// in file order (#612). Overrides refused because the project is
+// DevOps-bound are left out: they never become a target organization, so
+// validating or probing them would report a problem the run does not have.
+//
+// A missing projects.csv yields no overrides rather than an error — the
+// callers run before the pipeline reaches it, and its absence is already
+// reported where it matters.
+func projectOrgOverrides(exportDir string) ([]string, error) {
+	rows, err := structure.LoadCSV(exportDir, structure.ProjectsCSVFileName)
+	if err != nil {
+		return nil, fmt.Errorf("loading %s: %w", structure.ProjectsCSVFileName, err)
+	}
+	seen := make(map[string]bool, len(rows))
+	ordered := make([]string, 0)
+	for _, row := range rows {
+		// An empty mappedOrg makes the honoured override the only
+		// possible return value, so this reuses the exact rule migrate
+		// applies rather than re-deriving it.
+		org, _ := structure.ResolveProjectOrg(row, "")
+		org = strings.TrimSpace(org)
+		if org == "" || org == skippedOrgSentinel || seen[org] {
+			continue
+		}
+		seen[org] = true
+		ordered = append(ordered, org)
+	}
+	return ordered, nil
 }
 
 // orgsByKey returns a set of organization keys that the SQC search
@@ -316,26 +377,40 @@ func readOrgCSVHeaders(path string) ([]string, error) {
 // validateOrgsExist: the default organization when one was applied,
 // otherwise every mapped key in organizations.csv.
 func migrateOrgKeys(cfg MigrateConfig, appliedDefault bool) ([]string, error) {
-	if appliedDefault {
-		if cfg.DefaultOrganization == "" {
-			return nil, nil
-		}
-		return []string{cfg.DefaultOrganization}, nil
-	}
-	rows, err := structure.LoadCSV(cfg.ExportDirectory, orgCSVFileName)
-	if err != nil {
-		return nil, fmt.Errorf("loading organizations.csv: %w", err)
-	}
 	seen := make(map[string]bool)
 	ordered := make([]string, 0)
-	for _, row := range rows {
-		k, _ := row["sonarcloud_org_key"].(string)
+	add := func(k string) {
 		k = strings.TrimSpace(k)
-		if k == "" || k == "SKIPPED" || seen[k] {
-			continue
+		if k == "" || k == skippedOrgSentinel || seen[k] {
+			return
 		}
 		seen[k] = true
 		ordered = append(ordered, k)
+	}
+
+	if appliedDefault {
+		add(cfg.DefaultOrganization)
+	} else {
+		rows, err := structure.LoadCSV(cfg.ExportDirectory, orgCSVFileName)
+		if err != nil {
+			return nil, fmt.Errorf("loading organizations.csv: %w", err)
+		}
+		for _, row := range rows {
+			k, _ := row["sonarcloud_org_key"].(string)
+			add(k)
+		}
+	}
+
+	// #612: a per-project override can name an organization
+	// organizations.csv never mentions, and warnUnboundOrgs has to probe
+	// its DevOps binding too — a project redirected into an unbound
+	// organization loses its bindings just the same.
+	overrides, err := projectOrgOverrides(cfg.ExportDirectory)
+	if err != nil {
+		return nil, err
+	}
+	for _, k := range overrides {
+		add(k)
 	}
 	return ordered, nil
 }

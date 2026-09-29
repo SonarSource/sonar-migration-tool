@@ -6,6 +6,7 @@ package common
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,6 +94,21 @@ func TestExtractBool(t *testing.T) {
 	}
 	if ExtractBool(raw, "missing") {
 		t.Error("expected false for missing key")
+	}
+}
+
+func TestFirstNonEmpty(t *testing.T) {
+	if got := FirstNonEmpty("", "second", "third"); got != "second" {
+		t.Errorf("expected the first non-empty value, got %q", got)
+	}
+	if got := FirstNonEmpty("first", "second"); got != "first" {
+		t.Errorf("expected the earlier value to win over a later non-empty one, got %q", got)
+	}
+	if got := FirstNonEmpty("", ""); got != "" {
+		t.Errorf("expected empty string when every value is empty, got %q", got)
+	}
+	if got := FirstNonEmpty(); got != "" {
+		t.Errorf("expected empty string for no arguments, got %q", got)
 	}
 }
 
@@ -229,6 +245,129 @@ func TestChunkWriterConcurrent(t *testing.T) {
 	}
 }
 
+// #604 regression: a ChunkWriter opened on a directory an earlier run
+// already wrote to must APPEND past the highest existing chunk, not
+// restart at results.1 and truncate it.
+//
+// This is the gap that let #604 in. A --run_id resume re-runs
+// importProjectData against the first attempt's directory; because the
+// index restarted at 0, a resume that wrote FEWER rows than the first
+// attempt overwrote the rows it re-wrote and left the first attempt's
+// tail in place. The run directory then held a mix of both attempts with
+// the stale rows outnumbering the fresh ones, and the migration report
+// bucketed a fully-migrated project as Skipped or Failed off the stale
+// tail.
+func TestChunkWriterAppendsToExistingDir(t *testing.T) {
+	taskDir := filepath.Join(t.TempDir(), "importProjectData")
+
+	first, err := NewChunkWriter(taskDir)
+	if err != nil {
+		t.Fatalf("first NewChunkWriter: %v", err)
+	}
+	for _, branch := range []string{"main", "develop", "release"} {
+		if err := first.WriteOne(json.RawMessage(`{"run":1,"branch":"` + branch + `"}`)); err != nil {
+			t.Fatalf("first run WriteOne: %v", err)
+		}
+	}
+
+	// The resume writes fewer rows than the first attempt — the exact
+	// shape that used to corrupt the directory.
+	second, err := NewChunkWriter(taskDir)
+	if err != nil {
+		t.Fatalf("second NewChunkWriter: %v", err)
+	}
+	if err := second.WriteOne(json.RawMessage(`{"run":2,"branch":"develop"}`)); err != nil {
+		t.Fatalf("second run WriteOne: %v", err)
+	}
+
+	for _, name := range []string{"results.1.jsonl", "results.2.jsonl", "results.3.jsonl", "results.4.jsonl"} {
+		if _, err := os.Stat(filepath.Join(taskDir, name)); err != nil {
+			t.Errorf("expected %s to exist after the resume: %v", name, err)
+		}
+	}
+
+	// Nothing the first attempt wrote may have been destroyed.
+	got, err := os.ReadFile(filepath.Join(taskDir, "results.1.jsonl"))
+	if err != nil {
+		t.Fatalf("reading results.1.jsonl: %v", err)
+	}
+	if !strings.Contains(string(got), `"run":1`) {
+		t.Errorf("results.1.jsonl was overwritten by the resume: %s", got)
+	}
+
+	ds := NewDataStore(filepath.Dir(taskDir))
+	items, err := ds.ReadAll("importProjectData")
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(items) != 4 {
+		t.Fatalf("expected 4 records (3 from run 1, 1 from run 2), got %d: %v", len(items), items)
+	}
+	// The resume's row must be LAST, so a reader resolving duplicates by
+	// last-one-wins sees the retry rather than the stale first attempt.
+	if !strings.Contains(string(items[3]), `"run":2`) {
+		t.Errorf("last record should be the resume's row, got %s", items[3])
+	}
+}
+
+// Only results.N.jsonl participates in the index. A neighbouring file
+// must neither raise the starting index nor stop the writer.
+func TestChunkWriterIgnoresNonChunkFiles(t *testing.T) {
+	taskDir := filepath.Join(t.TempDir(), "task")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"results.jsonl", "results.0.jsonl", "results.abc.jsonl", "notes.txt", "results.7.json"} {
+		if err := os.WriteFile(filepath.Join(taskDir, name), []byte("{}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	w, err := NewChunkWriter(taskDir)
+	if err != nil {
+		t.Fatalf("NewChunkWriter: %v", err)
+	}
+	if err := w.WriteOne(json.RawMessage(`{"fresh":true}`)); err != nil {
+		t.Fatalf("WriteOne: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(taskDir, "results.1.jsonl")); err != nil {
+		t.Errorf("expected the first write to land on results.1.jsonl: %v", err)
+	}
+}
+
+// #604: chunk files must be read in numeric index order. os.ReadDir
+// returns them lexicographically, where results.10.jsonl sorts before
+// results.2.jsonl — which would make "the last row wins" resolve to the
+// wrong attempt as soon as a task writes ten chunks.
+func TestDataStoreReadsChunksInNumericOrder(t *testing.T) {
+	dir := t.TempDir()
+	ds := NewDataStore(dir)
+	w, err := ds.Writer("orderedTask")
+	if err != nil {
+		t.Fatalf("Writer: %v", err)
+	}
+	const chunks = 12
+	for i := 1; i <= chunks; i++ {
+		if err := w.WriteOne(json.RawMessage(fmt.Sprintf(`{"n":%d}`, i))); err != nil {
+			t.Fatalf("WriteOne %d: %v", i, err)
+		}
+	}
+
+	items, err := ds.ReadAll("orderedTask")
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(items) != chunks {
+		t.Fatalf("expected %d records, got %d", chunks, len(items))
+	}
+	for i, item := range items {
+		want := fmt.Sprintf(`{"n":%d}`, i+1)
+		if string(item) != want {
+			t.Errorf("record %d = %s, want %s (chunk files read out of order)", i, item, want)
+		}
+	}
+}
+
 // testTaskDef implements TaskMeta for testing.
 type testTaskDef struct {
 	name string
@@ -236,7 +375,7 @@ type testTaskDef struct {
 	deps []string
 }
 
-func (t *testTaskDef) TaskName() string      { return t.name }
+func (t *testTaskDef) TaskName() string        { return t.name }
 func (t *testTaskDef) TaskEditions() []Edition { return t.eds }
 func (t *testTaskDef) TaskDeps() []string      { return t.deps }
 
@@ -316,6 +455,86 @@ func TestResolveDependenciesGenericMissing(t *testing.T) {
 	result := ResolveDependenciesGeneric([]string{"a"}, reg)
 	if result != nil {
 		t.Error("expected nil for unresolvable")
+	}
+}
+
+// #536: a target's dependency on an excluded task must not pull that
+// task (or its own dependencies) into the result — reproduces
+// setGlobalSettings depending on createProjects, which must not force
+// project creation when --objects excludes "projects".
+func TestResolveDependenciesExcludingGeneric(t *testing.T) {
+	reg := map[string]*testTaskDef{
+		"generateOrgMappings": {name: "generateOrgMappings"},
+		"createProjects":      {name: "createProjects", deps: []string{"generateOrgMappings"}},
+		"setGlobalSettings":   {name: "setGlobalSettings", deps: []string{"generateOrgMappings", "createProjects"}},
+	}
+	excluded := map[string]bool{"createProjects": true}
+
+	result := ResolveDependenciesExcludingGeneric([]string{"setGlobalSettings"}, reg, excluded)
+	if result == nil {
+		t.Fatal("expected non-nil")
+	}
+	if result["createProjects"] {
+		t.Error("excluded task createProjects must not be in the result")
+	}
+	if !result["setGlobalSettings"] || !result["generateOrgMappings"] {
+		t.Errorf("expected setGlobalSettings and its non-excluded dependency, got %v", result)
+	}
+}
+
+// An excluded task passed directly as a target is also dropped, not
+// just when reached transitively.
+func TestResolveDependenciesExcludingGeneric_ExcludedTarget(t *testing.T) {
+	reg := map[string]*testTaskDef{
+		"a": {name: "a"},
+		"b": {name: "b"},
+	}
+	result := ResolveDependenciesExcludingGeneric([]string{"a", "b"}, reg, map[string]bool{"a": true})
+	if result == nil {
+		t.Fatal("expected non-nil")
+	}
+	if result["a"] {
+		t.Error("excluded target must not be in the result")
+	}
+	if !result["b"] {
+		t.Error("expected non-excluded target b in the result")
+	}
+}
+
+// A dependency that's excluded doesn't need to exist in the registry —
+// exclusion is checked before the registry lookup that would otherwise
+// report it missing.
+func TestResolveDependenciesExcludingGeneric_ExcludedDepNotInRegistry(t *testing.T) {
+	reg := map[string]*testTaskDef{
+		"a": {name: "a", deps: []string{"neverRegistered"}},
+	}
+	result := ResolveDependenciesExcludingGeneric([]string{"a"}, reg, map[string]bool{"neverRegistered": true})
+	if result == nil {
+		t.Fatal("expected non-nil — excluded dep should not trigger the missing-dependency error path")
+	}
+	if !result["a"] {
+		t.Error("expected a in the result")
+	}
+}
+
+// Non-excluded dependencies still resolve normally alongside excluded
+// ones — exclusion only vacuously satisfies the excluded names, it
+// doesn't disable resolution of the rest of the graph.
+func TestResolveDependenciesExcludingGeneric_MixedGraph(t *testing.T) {
+	reg := map[string]*testTaskDef{
+		"a": {name: "a"},
+		"b": {name: "b", deps: []string{"a"}},
+		"c": {name: "c", deps: []string{"a", "excludedDep"}},
+	}
+	result := ResolveDependenciesExcludingGeneric([]string{"b", "c"}, reg, map[string]bool{"excludedDep": true})
+	if result == nil {
+		t.Fatal("expected non-nil")
+	}
+	if !result["a"] || !result["b"] || !result["c"] {
+		t.Errorf("expected a, b, c in the result, got %v", result)
+	}
+	if result["excludedDep"] {
+		t.Error("excludedDep must not be in the result")
 	}
 }
 

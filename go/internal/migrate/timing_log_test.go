@@ -18,7 +18,7 @@ func newTimingTestEnv(t *testing.T) (*Executor, *bytes.Buffer, *RunTimings) {
 	t.Helper()
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	e := &Executor{Sem: make(chan struct{}, 4), Logger: logger}
+	e := &Executor{ConcurrencyLimiter: NewFixedConcurrencyLimiter(4), Logger: logger}
 	return e, &buf, &RunTimings{}
 }
 

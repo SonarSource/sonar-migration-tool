@@ -67,9 +67,9 @@ func setupTestMigrateDir(t *testing.T) (string, *Executor) {
 
 	store := common.NewDataStore(runDir)
 	e := &Executor{
-		Store:     store,
-		ExportDir: dir,
-		Sem:       make(chan struct{}, 5),
+		Store:              store,
+		ExportDir:          dir,
+		ConcurrencyLimiter: NewFixedConcurrencyLimiter(5),
 	}
 	return dir, e
 }

@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"time"
 )
 
 // debugTransport wraps another RoundTripper and invokes fn for every
@@ -26,17 +27,21 @@ func (t *debugTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		buf, err := io.ReadAll(req.Body)
 		_ = req.Body.Close()
 		if err != nil {
-			t.fn(req.Method, req.URL.String(), redactHeaders(req.Header), nil, 0, nil, err)
+			t.fn(req.Method, req.URL.String(), redactHeaders(req.Header), nil, 0, nil, 0, err)
 			return nil, err
 		}
 		reqBody = buf
 		req.Body = io.NopCloser(bytes.NewReader(buf))
 	}
 
+	// Clock starts here so the logged duration covers only the network
+	// round trip (and, below, draining the response body), not the request
+	// body buffering above.
+	start := time.Now()
 	resp, err := t.inner.RoundTrip(req)
 
 	if err != nil {
-		t.fn(req.Method, req.URL.String(), redactHeaders(req.Header), reqBody, 0, nil, err)
+		t.fn(req.Method, req.URL.String(), redactHeaders(req.Header), reqBody, 0, nil, time.Since(start), err)
 		return resp, err
 	}
 
@@ -46,7 +51,7 @@ func (t *debugTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		buf, readErr := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		if readErr != nil {
-			t.fn(req.Method, req.URL.String(), redactHeaders(req.Header), reqBody, resp.StatusCode, nil, readErr)
+			t.fn(req.Method, req.URL.String(), redactHeaders(req.Header), reqBody, resp.StatusCode, nil, time.Since(start), readErr)
 			resp.Body = io.NopCloser(bytes.NewReader(nil))
 			return resp, nil
 		}
@@ -54,7 +59,7 @@ func (t *debugTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		resp.Body = io.NopCloser(bytes.NewReader(buf))
 	}
 
-	t.fn(req.Method, req.URL.String(), redactHeaders(req.Header), reqBody, resp.StatusCode, respBody, nil)
+	t.fn(req.Method, req.URL.String(), redactHeaders(req.Header), reqBody, resp.StatusCode, respBody, time.Since(start), nil)
 	return resp, nil
 }
 

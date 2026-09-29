@@ -45,6 +45,7 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 	ncdBranchOverrideSet := collectNCDBranchOverrides(store)
 	syncStatsMap := collectSyncStats(store)
 	branchSourcePurgedMap := collectBranchSourcePurged(store)
+	branchLimitSkippedMap := collectBranchLimitSkips(store)
 	extractMapping, _ := structure.GetUniqueExtracts(exportDir)
 	// #353 — per-object dropped-user-permission counts: SonarQube Cloud
 	// has no API to grant permissions to individual users, so any user
@@ -98,6 +99,13 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 			attachBranchSourcePurged(section.Succeeded, branchSourcePurgedMap)
 			attachBranchSourcePurged(section.NearPerfect, branchSourcePurgedMap)
 			attachBranchSourcePurged(section.Partial, branchSourcePurgedMap)
+			// #584 — note branches dropped by the per-project hard branch
+			// cap in each affected project's Details column. Applied to
+			// all routed buckets; the outcome itself is unchanged (the
+			// branches within the cap still migrate normally).
+			attachBranchLimitSkips(section.Succeeded, branchLimitSkippedMap)
+			attachBranchLimitSkips(section.NearPerfect, branchLimitSkippedMap)
+			attachBranchLimitSkips(section.Partial, branchLimitSkippedMap)
 		}
 		// #353 — attach the dropped-user-permission count marker to
 		// every entity in every routed bucket so the per-row Details
@@ -223,6 +231,10 @@ func collectProjectKeyReport(store *common.DataStore, pattern string) *ProjectKe
 //   - Project new-code-definition types not supported on SonarQube
 //     Cloud — currently reference_branch and specific_analysis. The
 //     migrated project is left with the org default (#135).
+//   - Source responses SonarQube truncated during extraction — one
+//     bullet per (task, cause), each naming the exact count that could
+//     not be retrieved, so the loss is stated rather than implied by a
+//     short "Issues" column (#574).
 func collectLimitations(runDir, exportDir string, mapping structure.ExtractMapping) []string {
 	var out []string
 	if appCount := countExtractItems(exportDir, mapping, "getApplications"); appCount > 0 {
@@ -238,6 +250,7 @@ func collectLimitations(runDir, exportDir string, mapping structure.ExtractMappi
 	out = append(out, collectSASTCustomizationLimitation(exportDir, mapping)...)
 	out = append(out, collectUserPermissionLimitations(exportDir, mapping)...)
 	out = append(out, collectGlobalSettingMappingLimitations(exportDir, mapping)...)
+	out = append(out, collectTruncationLimitations(exportDir, mapping)...)
 	return out
 }
 
@@ -591,6 +604,7 @@ func collectSection(store *common.DataStore, def sectionDef,
 	succeeded := collectSucceeded(store, def)
 	skipped := collectSkipped(store, def)
 	failed := collectFailed(failuresByType, def)
+	failed = dropFailuresAlreadySucceeded(failed, succeeded)
 	attachFailedSourceKeys(failed, store, def)
 
 	// #525: createProjects can diagnose some failures precisely (a target
@@ -773,6 +787,11 @@ func collectExtractSkipped(def sectionDef, exportDir string,
 	}
 
 	mappedKeys := buildMappedKeys(def, store)
+	// Only ever populated for the Quality Profiles section, and only by a
+	// real migrate run — the predictive report's synthetic run directory
+	// never writes this sidecar (#309), so builtInDiffs is nil there and
+	// every built-in row keeps the static text below.
+	builtInDiffs := readBuiltInProfileDiffs(store)
 
 	var result []EntityItem
 	seen := make(map[string]bool)
@@ -790,10 +809,14 @@ func collectExtractSkipped(def sectionDef, exportDir string,
 		seen[key] = true
 
 		if isBuiltIn {
+			detail := "Built-in, not migrated"
+			if d, ok := builtInDiffs[item.ServerURL+"|"+name+"|"+language]; ok {
+				detail = formatBuiltInProfileDiff(d.RulesAdded, d.RulesRemoved)
+			}
 			result = append(result, EntityItem{
 				Name:       name,
 				Language:   language,
-				Detail:     "Built-in, not migrated",
+				Detail:     detail,
 				SkipReason: SkipReasonBuiltIn,
 			})
 			continue
@@ -854,9 +877,57 @@ func collectFailed(failuresByType map[string][]analysis.ReportRow, def sectionDe
 			Name:         row.EntityName,
 			Organization: row.Organization,
 			ErrorMessage: row.ErrorMessage,
+			Cause:        classifyFailureCause(row.HTTPStatus, row.ErrorMessage),
 		})
 	}
 	return result
+}
+
+// dropFailuresAlreadySucceeded removes requests.log-derived failure rows
+// for an entity (matched by Name+Organization) that also has a row in
+// Succeeded. The generic requests.log scan (collectFailed) has no idea a
+// create task recovered from a 400 — either via its own lookup-and-reuse
+// fallback (createProfiles' "already exists" handling) or because #165's
+// fan-in de-dup already collapsed several source-org attempts targeting
+// the same cloud entity onto one successful row — so without this it
+// reports one Failed row per recovered attempt for an entity that is, in
+// the end, correctly migrated and already listed as Succeeded.
+func dropFailuresAlreadySucceeded(failed, succeeded []EntityItem) []EntityItem {
+	if len(failed) == 0 || len(succeeded) == 0 {
+		return failed
+	}
+	ok := make(map[string]bool, len(succeeded))
+	for _, s := range succeeded {
+		ok[s.Name+"\x00"+s.Organization] = true
+	}
+	out := failed[:0:0]
+	for _, f := range failed {
+		// Only a create that recovered from an "already exists" 400 is safe
+		// to drop. Any other error is a genuine failure that may belong to a
+		// different entity sharing the name (requests.log rows carry no
+		// language, so "All rules"/java collides with "All rules"/php).
+		if ok[f.Name+"\x00"+f.Organization] &&
+			strings.Contains(strings.ToLower(f.ErrorMessage), "already exists") {
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// classifyFailureCause labels a failed entity with the run's own failure
+// classification, so a section can separate the failures that need acting
+// on from the ones the migration is content with.
+//
+// Every builder of a Failed item has to set this. While one of them did
+// not, an entity that merely already existed on the target still counted
+// against the executive summary's failure total, which is the whole
+// problem the classification exists to solve. status may be "" where the
+// builder only kept the message; the message-shaped rules recognise the
+// benign cases either way.
+func classifyFailureCause(status, message string) string {
+	code, _ := strconv.Atoi(status)
+	return string(migrate.ClassifyHTTPFailure(code, message).Class)
 }
 
 // collectExplicitFailures reads def.OutputTask for records the task itself
@@ -882,6 +953,14 @@ func collectExplicitFailures(store *common.DataStore, def sectionDef) []EntityIt
 			Organization: jsonStr(item, "sonarcloud_org_key"),
 			ErrorMessage: jsonStr(item, "error"),
 			SourceKey:    jsonStr(item, def.SourceKeyField),
+			// Only a class the task recorded for itself. This message is
+			// prose written for a human: the cross-org key conflict opens
+			// "project key %q already exists under a different ...
+			// organization", and re-deriving a class from that sentence
+			// matched "already exists" and called a project that did not
+			// migrate — and cannot until someone frees the key — benign.
+			// Unset stays actionable, which is the right default.
+			Cause: jsonStr(item, "cause"),
 		})
 	}
 	return result
@@ -959,13 +1038,69 @@ type projectDataOutcome struct {
 	NeverAnalyzed bool
 }
 
+// Terminal statuses an importProjectData row can carry. statusUpToDate
+// (#588) and statusCapped (#584) are aliases of the migrate-side
+// constants rather than fresh literals: this package is the only reader
+// of those two statuses, and every bug they have caused so far came from
+// the reader and the writer holding separate copies of the string (#604).
+const (
+	statusSuccess   = "success"
+	statusUpToDate  = migrate.BranchStatusUpToDate
+	statusCapped    = migrate.BranchStatusCapped
+	statusFailed    = "failed"
+	statusSkipped   = "skipped"
+	fieldProjectKey = "cloud_project_key"
+	fieldBranch     = "branch"
+)
+
+// readProjectDataRows returns the importProjectData records reduced to the
+// final row per (cloud_project_key, branch), in first-seen order.
+//
+// Every reader of this task goes through here, because a resumed run
+// leaves more than one row per branch on disk (#604). Before the
+// ChunkWriter fix the second attempt silently truncated part of the first
+// attempt's output and left the rest; now both attempts are kept, chunk
+// files are read in write order, and the last row for a branch is the one
+// that describes where that branch actually ended up. A branch retried
+// after a cancellation therefore reads as the success it became, not as
+// the cancellation it started out as.
+//
+// First-seen order is preserved rather than last-seen so the report still
+// lists branches in the order the first attempt met them, which is the
+// order an operator watched them go by.
+func readProjectDataRows(store *common.DataStore) []json.RawMessage {
+	items, err := store.ReadAll("importProjectData")
+	if err != nil || len(items) == 0 {
+		return nil
+	}
+	return resolveProjectDataRows(items)
+}
+
+// resolveProjectDataRows collapses duplicate (project, branch) rows to the
+// last one, keeping first-seen order. Split out from readProjectDataRows
+// so it can be tested on hand-built records without a store.
+func resolveProjectDataRows(items []json.RawMessage) []json.RawMessage {
+	at := make(map[string]int, len(items))
+	resolved := make([]json.RawMessage, 0, len(items))
+	for _, item := range items {
+		key := jsonStr(item, fieldProjectKey) + "\x00" + jsonStr(item, fieldBranch)
+		if pos, seen := at[key]; seen {
+			resolved[pos] = item
+			continue
+		}
+		at[key] = len(resolved)
+		resolved = append(resolved, item)
+	}
+	return resolved
+}
+
 // collectProjectData reads importProjectData JSONL and returns the
 // per-project outcome. A project may have multiple branch records;
 // the worst non-success outcome wins (failed > skipped > success),
 // because that's the signal an operator should see in the report.
 func collectProjectData(store *common.DataStore) map[string]projectDataOutcome {
-	items, err := store.ReadAll("importProjectData")
-	if err != nil || len(items) == 0 {
+	items := readProjectDataRows(store)
+	if len(items) == 0 {
 		return nil
 	}
 	type acc struct {
@@ -975,12 +1110,12 @@ func collectProjectData(store *common.DataStore) map[string]projectDataOutcome {
 	}
 	by := make(map[string]*acc)
 	for _, item := range items {
-		key := jsonStr(item, "cloud_project_key")
+		key := jsonStr(item, fieldProjectKey)
 		if key == "" {
 			continue
 		}
 		state := jsonStr(item, "status")
-		branch := jsonStr(item, "branch")
+		branch := jsonStr(item, fieldBranch)
 		errMsg := jsonStr(item, "error")
 		bucket := by[key]
 		if bucket == nil {
@@ -999,10 +1134,10 @@ func collectProjectData(store *common.DataStore) map[string]projectDataOutcome {
 	result := make(map[string]projectDataOutcome, len(by))
 	for key, a := range by {
 		switch {
-		case len(a.states["failed"]) > 0:
-			result[key] = projectDataOutcome{State: "failed", Reason: projectDataFailureReason(a.errs["failed"])}
-		case len(a.states["skipped"]) > 0:
-			skipErr := a.errs["skipped"]
+		case len(a.states[statusFailed]) > 0:
+			result[key] = projectDataOutcome{State: "failed", Reason: projectDataFailureReason(a.errs[statusFailed])}
+		case len(a.states[statusSkipped]) > 0:
+			skipErr := a.errs[statusSkipped]
 			if skipErr == "" {
 				// #432 — provisioned but never analyzed: the project's
 				// settings still migrate and the outcome must NOT be
@@ -1015,8 +1150,26 @@ func collectProjectData(store *common.DataStore) map[string]projectDataOutcome {
 			} else {
 				result[key] = projectDataOutcome{State: "skipped", Reason: projectDataSkipReason(skipErr)}
 			}
-		case len(a.states["success"]) > 0:
+		// "up_to_date" (#588) means the target already carried this branch's
+		// analysis, so a re-run had nothing to submit. The branch is migrated;
+		// counting it anywhere but success would report a healthy project as
+		// Skipped purely because the operator ran transfer twice.
+		case len(a.states[statusSuccess]) > 0 || len(a.states[statusUpToDate]) > 0:
 			result[key] = projectDataOutcome{State: "success"}
+		// Every branch was dropped by the per-project cap (#584), so
+		// nothing was imported: "skipped" is the honest state. It must sit
+		// below the success arm — a project with both capped and imported
+		// branches migrated fine and stays Succeeded — and it needs its own
+		// arm rather than the default below, which would blame the source
+		// for being "provisioned but never analyzed" when the truth is that
+		// this run's own cap dropped the branches (#604).
+		case len(a.states[statusCapped]) > 0:
+			result[key] = projectDataOutcome{
+				State: "skipped",
+				Reason: "Every branch was dropped by the per-project branch limit, no project data migrated — " +
+					"this project has more long-lived branches than the migration's hard limit of " +
+					strconv.Itoa(migrate.MaxBranchesPerProject),
+			}
 		default:
 			// State string we don't recognise — surface as skipped so
 			// the report still warns the operator instead of silently
@@ -1382,24 +1535,30 @@ func encodeSyncStats(c projectSyncCounts) string {
 	return strings.Join(parts, ",")
 }
 
-// collectBranchSourcePurged reads importProjectData JSONL and returns,
-// per cloud project key, the ordered list of branch names whose source
-// text was purged on the source server and were therefore migrated
-// without it (issue #425). Branches are de-duplicated and kept in
-// first-seen order so the report lists each affected branch once.
-func collectBranchSourcePurged(store *common.DataStore) map[string][]string {
-	items, err := store.ReadAll("importProjectData")
-	if err != nil || len(items) == 0 {
+// collectBranchesByBoolMarker reads importProjectData JSONL and returns,
+// per cloud project key, the ordered list of branch names whose record
+// carries boolField=true. Branches are de-duplicated and kept in
+// first-seen order so the report lists each affected branch once. Shared
+// by collectBranchSourcePurged (#425) and collectBranchLimitSkips (#584),
+// which differ only in which bool field they key on.
+// Reading through readProjectDataRows matters here as well as for the
+// outcome: a branch the cap dropped on the first attempt and a resume
+// then migrated (because the cap was raised) must stop being listed as
+// dropped, and the same holds for a source_purged branch whose source
+// came back (#604).
+func collectBranchesByBoolMarker(store *common.DataStore, boolField string) map[string][]string {
+	items := readProjectDataRows(store)
+	if len(items) == 0 {
 		return nil
 	}
 	result := make(map[string][]string)
 	seen := make(map[string]bool)
 	for _, item := range items {
-		if !jsonBool(item, "source_purged") {
+		if !jsonBool(item, boolField) {
 			continue
 		}
-		key := jsonStr(item, "cloud_project_key")
-		branch := jsonStr(item, "branch")
+		key := jsonStr(item, fieldProjectKey)
+		branch := jsonStr(item, fieldBranch)
 		if key == "" || branch == "" {
 			continue
 		}
@@ -1416,6 +1575,34 @@ func collectBranchSourcePurged(store *common.DataStore) map[string][]string {
 	return result
 }
 
+// attachBranchMarker appends a "|<marker>:branchA,branchB" suffix to each
+// affected project's Detail field, for whichever affected-branches map the
+// caller collected. Shared by attachBranchSourcePurged (#425) and
+// attachBranchLimitSkips (#584), which differ only in the marker name and
+// the map of affected branches; the outcome itself is never changed by
+// either — both are informational notes.
+func attachBranchMarker(projects []EntityItem, markedMap map[string][]string, marker string) {
+	if len(markedMap) == 0 || len(projects) == 0 {
+		return
+	}
+	for i := range projects {
+		key := projectCloudKey(projects[i].Detail)
+		branches, ok := markedMap[key]
+		if !ok || len(branches) == 0 {
+			continue
+		}
+		projects[i].Detail = projects[i].Detail + "|" + marker + ":" + strings.Join(branches, ",")
+	}
+}
+
+// collectBranchSourcePurged reads importProjectData JSONL and returns,
+// per cloud project key, the ordered list of branch names whose source
+// text was purged on the source server and were therefore migrated
+// without it (issue #425).
+func collectBranchSourcePurged(store *common.DataStore) map[string][]string {
+	return collectBranchesByBoolMarker(store, "source_purged")
+}
+
 // attachBranchSourcePurged appends a "|srcPurged:branchA,branchB" marker
 // to each affected project's Detail field. The renderer turns it into a
 // one-line "Source code of branch(es) X, Y is missing (likely purged in
@@ -1424,17 +1611,24 @@ func collectBranchSourcePurged(store *common.DataStore) map[string][]string {
 // project's outcome is unchanged — the branches still migrate their
 // measures and issues.
 func attachBranchSourcePurged(projects []EntityItem, purgedMap map[string][]string) {
-	if len(purgedMap) == 0 || len(projects) == 0 {
-		return
-	}
-	for i := range projects {
-		key := projectCloudKey(projects[i].Detail)
-		branches, ok := purgedMap[key]
-		if !ok || len(branches) == 0 {
-			continue
-		}
-		projects[i].Detail = projects[i].Detail + "|srcPurged:" + strings.Join(branches, ",")
-	}
+	attachBranchMarker(projects, purgedMap, "srcPurged")
+}
+
+// collectBranchLimitSkips reads importProjectData JSONL and returns, per
+// cloud project key, the ordered list of branch names dropped by the
+// per-project hard branch cap (issue #584) rather than migrated.
+func collectBranchLimitSkips(store *common.DataStore) map[string][]string {
+	return collectBranchesByBoolMarker(store, "branch_limit_exceeded")
+}
+
+// attachBranchLimitSkips appends a "|branchLimit:branchA,branchB" marker
+// to each affected project's Detail field. The renderer turns it into a
+// one-line note that this project has more long-lived branches than the
+// migration's hard cap, naming the branches that were not migrated
+// (issue #584). The project's outcome is unchanged — the branches within
+// the cap still migrate normally.
+func attachBranchLimitSkips(projects []EntityItem, droppedMap map[string][]string) {
+	attachBranchMarker(projects, droppedMap, "branchLimit")
 }
 
 // collectNCDFallback reads the setNewCodePeriods JSONL and returns a
@@ -1692,6 +1886,14 @@ func collectGlobalSettings(store *common.DataStore, def sectionDef) Section {
 				skipped = append(skipped, item)
 			case "failed":
 				item.ErrorMessage = oc.Reason
+				// Prefer the class the task recorded. Falling back to
+				// the message means only the message-shaped benign
+				// cases are recognised; anything unrecognised stays a
+				// failure, which is the right way round for a default.
+				item.Cause = oc.Cause
+				if item.Cause == "" {
+					item.Cause = classifyFailureCause("", oc.Reason)
+				}
 				if ncdRecord {
 					nearPerfect = append(nearPerfect, item)
 				} else {
@@ -1729,6 +1931,10 @@ type outcomeRecord struct {
 	Status string `json:"status"`
 	Detail string `json:"detail"`
 	Reason string `json:"reason"`
+	// Cause is the failure class the task recorded, when it knew it.
+	// Preferred over re-deriving one from Reason, which is prose written
+	// for a human and need not resemble any platform error message.
+	Cause string `json:"cause"`
 }
 
 // appendBuiltInGroupSkips injects a single Skipped EntityItem into the

@@ -13,6 +13,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/extract"
 	"testing"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
@@ -63,12 +66,23 @@ func newTransferTestCmd() *cobra.Command {
 	f.String(flagEdition, "", "")
 	f.String(flagExportDir, "./migration-files/", "")
 	f.Int(flagConcurrency, 0, "")
+	f.Int(flagAPIMaxRatePerMin, 0, "")
 	f.Int(flagTimeout, 0, "")
 	f.String(flagPEMFilePath, "", "")
 	f.String(flagKeyFilePath, "", "")
 	f.String(flagCertPassword, "", "")
+	f.Bool(flagInsecure, false, "")
 	f.Bool(flagDebug, false, "")
 	f.Bool(flagFastSync, false, "")
+	// #554 — history flags. Without these registered the harness stops
+	// mirroring transferCmd: pflag's Changed() silently reports false for
+	// a flag that does not exist, so resolveTransferConfig's history
+	// branches would be unreachable from any test.
+	f.Bool(flagMigrateHistory, false, "")
+	f.Int(flagHistoryMaxPoints, 0, "")
+	// Mirrors transferCmd's real default: the sentinel, not 0.
+	f.Int(flagHistoryMinIntervalDays, extract.HistoryUnset, "")
+	f.String(flagBranchAnalyzedAfter, "", "")
 	return cmd
 }
 
@@ -131,6 +145,11 @@ func TestResolveTransferConfig_UnifiedConfigShape(t *testing.T) {
 		pemFilePath:         "/cert/pem",
 		keyFilePath:         "/cert/key",
 		certPassword:        "p4ss",
+		// #554: this config sets no history_min_interval_days, so it must
+		// arrive as the "caller said nothing" sentinel rather than 0 — 0 is
+		// itself a valid request ("no spacing rule") and would otherwise be
+		// indistinguishable from an absent key.
+		historyMinIntervalDays: extract.HistoryUnset,
 	}
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("got %+v\nwant %+v", cfg, want)
@@ -313,6 +332,136 @@ func TestResolveTransferConfig_SingleSideConcurrencyTimeoutFallsBackToOtherSide(
 	}
 	if cfg.sourceTimeout != 30 {
 		t.Errorf("sourceTimeout: got %d, want 30 (borrowed from target)", cfg.sourceTimeout)
+	}
+}
+
+// Issue #583: unlike concurrency/timeout, --branch_analyzed_after must NOT
+// fall back from one side to the other — an unset filter ("select every
+// branch") is itself a meaningful, deliberate value, and the issue's own
+// examples rely on extract and migrate being allowed different cutoffs.
+// Setting only source.branch_analyzed_after in the config file must leave
+// the target side unset, not borrow source's value.
+func TestResolveTransferConfig_BranchAnalyzedAfterNoLeakageBetweenSides(t *testing.T) {
+	path := writeTransferConfig(t, `{
+		"source": {
+			"url": "https://sq.example.com",
+			"token": "sq-token",
+			"branch_analyzed_after": "2024-01-01"
+		},
+		"target": {
+			"url": "https://sonarcloud.io/",
+			"token": "sc-token",
+			"default_organization": "my-org"
+		}
+	}`)
+
+	cmd := newTransferTestCmd()
+	if err := cmd.ParseFlags([]string{"-c", path}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := resolveTransferConfig(cmd)
+	if err != nil {
+		t.Fatalf("resolveTransferConfig: %v", err)
+	}
+
+	if cfg.branchAnalyzedAfterSource != "2024-01-01" {
+		t.Errorf("branchAnalyzedAfterSource: got %q, want %q", cfg.branchAnalyzedAfterSource, "2024-01-01")
+	}
+	if cfg.branchAnalyzedAfterTarget != "" {
+		t.Errorf("branchAnalyzedAfterTarget: got %q, want \"\" (must not leak from source)", cfg.branchAnalyzedAfterTarget)
+	}
+}
+
+// Issue #583: source and target must be able to carry genuinely different
+// --branch_analyzed_after cutoffs from the config file, per the issue's own
+// worked examples (extract broad or unset, migrate narrower, or vice versa).
+func TestResolveTransferConfig_BranchAnalyzedAfterBothSidesDiffer(t *testing.T) {
+	path := writeTransferConfig(t, `{
+		"source": {
+			"url": "https://sq.example.com",
+			"token": "sq-token",
+			"branch_analyzed_after": "2024-01-01"
+		},
+		"target": {
+			"url": "https://sonarcloud.io/",
+			"token": "sc-token",
+			"default_organization": "my-org",
+			"branch_analyzed_after": "2025-06-01"
+		}
+	}`)
+
+	cmd := newTransferTestCmd()
+	if err := cmd.ParseFlags([]string{"-c", path}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := resolveTransferConfig(cmd)
+	if err != nil {
+		t.Fatalf("resolveTransferConfig: %v", err)
+	}
+
+	if cfg.branchAnalyzedAfterSource != "2024-01-01" {
+		t.Errorf("branchAnalyzedAfterSource: got %q, want %q", cfg.branchAnalyzedAfterSource, "2024-01-01")
+	}
+	if cfg.branchAnalyzedAfterTarget != "2025-06-01" {
+		t.Errorf("branchAnalyzedAfterTarget: got %q, want %q", cfg.branchAnalyzedAfterTarget, "2025-06-01")
+	}
+}
+
+// Issue #583: the single transfer CLI flag sets both phases identically
+// when passed, overriding whatever the config file had for either side —
+// mirroring how --concurrency/--timeout behave via applyFlagIntBothSides.
+func TestResolveTransferConfig_BranchAnalyzedAfterCLIFlagSetsBothSides(t *testing.T) {
+	path := writeTransferConfig(t, `{
+		"source": {
+			"url": "https://sq.example.com",
+			"token": "sq-token",
+			"branch_analyzed_after": "2020-01-01"
+		},
+		"target": {
+			"url": "https://sonarcloud.io/",
+			"token": "sc-token",
+			"default_organization": "my-org"
+		}
+	}`)
+
+	cmd := newTransferTestCmd()
+	args := []string{"-c", path, "--" + flagBranchAnalyzedAfter, "2026-01-01"}
+	if err := cmd.ParseFlags(args); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := resolveTransferConfig(cmd)
+	if err != nil {
+		t.Fatalf("resolveTransferConfig: %v", err)
+	}
+
+	if cfg.branchAnalyzedAfterSource != "2026-01-01" {
+		t.Errorf("branchAnalyzedAfterSource: got %q, want %q", cfg.branchAnalyzedAfterSource, "2026-01-01")
+	}
+	if cfg.branchAnalyzedAfterTarget != "2026-01-01" {
+		t.Errorf("branchAnalyzedAfterTarget: got %q, want %q", cfg.branchAnalyzedAfterTarget, "2026-01-01")
+	}
+}
+
+// Issue #583: validateTransferConfig must reject a malformed cutoff on
+// either side with an explicit, side-labeled error.
+func TestValidateTransferConfig_InvalidBranchAnalyzedAfter(t *testing.T) {
+	cfg := transferConfig{
+		sourceURL:                 "https://sq.example.com",
+		sourceToken:               "sq-token",
+		targetToken:               "sc-token",
+		defaultOrganization:       "my-org",
+		projectKey:                "my-project",
+		branchAnalyzedAfterSource: "not-a-date",
+	}
+	err := validateTransferConfig(cfg)
+	if err == nil {
+		t.Fatal("expected an error for an invalid source-side branch_analyzed_after")
+	}
+	if !strings.Contains(err.Error(), flagBranchAnalyzedAfter) || !strings.Contains(err.Error(), "source") {
+		t.Errorf("error %q does not clearly identify the source-side --%s flag", err.Error(), flagBranchAnalyzedAfter)
 	}
 }
 
@@ -613,7 +762,7 @@ func TestTransferTargetTasksResolveToProjectScopedPlan(t *testing.T) {
 		common.EditionEnterprise,
 	)
 
-	targets := migrate.MigrateTargetTasks(reg, "", false, false, false, false, transferTargetTasks)
+	targets := migrate.MigrateTargetTasks(reg, "", migrate.MigrateTargetTasksFlags{SkipProfiles: false, IncludeProjectData: false, SkipIssueSync: false, SkipProjectDataMigration: false}, transferTargetTasks, nil)
 	if len(targets) != len(transferTargetTasks) {
 		t.Fatalf("explicit transfer targets not honored verbatim: got %v", targets)
 	}
@@ -750,5 +899,55 @@ func TestResolveTransferProjectKeys_NoMatchIsAnError(t *testing.T) {
 	}
 	if !contains(err.Error(), "BANKING_.+") {
 		t.Errorf("error %q should name the pattern", err.Error())
+	}
+}
+
+// #586 — --insecure flows from the config file's source block and from the
+// CLI, and (unlike the one-way --skip_* opt-outs) an explicit
+// --insecure=false on the CLI turns a config-file "insecure": true back off.
+func TestResolveTransferConfig_InsecureFlag(t *testing.T) {
+	cfgWith := func(t *testing.T, insecure string) string {
+		t.Helper()
+		return writeTransferConfig(t, `{
+			"source": {"url": "u", "token": "t", "insecure": `+insecure+`},
+			"target": {"token": "tt", "default_organization": "org"}
+		}`)
+	}
+
+	cases := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"absent everywhere", []string{}, false},
+		{"CLI only", []string{"--" + flagInsecure}, true},
+		{"config file only", []string{"-c", "CFG_TRUE"}, true},
+		{"config false, CLI true", []string{"-c", "CFG_FALSE", "--" + flagInsecure}, true},
+		{"config true, CLI false", []string{"-c", "CFG_TRUE", "--" + flagInsecure + "=false"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			args := make([]string, len(tc.args))
+			copy(args, tc.args)
+			for i, a := range args {
+				switch a {
+				case "CFG_TRUE":
+					args[i] = cfgWith(t, "true")
+				case "CFG_FALSE":
+					args[i] = cfgWith(t, "false")
+				}
+			}
+			cmd := newTransferTestCmd()
+			if err := cmd.ParseFlags(args); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := resolveTransferConfig(cmd)
+			if err != nil {
+				t.Fatalf("resolveTransferConfig: %v", err)
+			}
+			if cfg.insecure != tc.want {
+				t.Errorf("insecure = %v, want %v", cfg.insecure, tc.want)
+			}
+		})
 	}
 }

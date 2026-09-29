@@ -136,3 +136,39 @@ func TestCollectSummary_ExplicitProjectFailure_ReplacesGenericRequestsLogRow(t *
 		t.Errorf("generic requests.log message should have been replaced, got %q", projSection.Failed[0].ErrorMessage)
 	}
 }
+
+// The cross-org conflict is a project that did not migrate and will not
+// until someone renames the project holding its key. It has to stay on
+// the actionable side of SplitFailed: the sentence says "already exists",
+// but re-deriving a class from prose this tool wrote for a human is how a
+// blocking failure gets rendered as "No Action Needed" and dropped from
+// the section's failure count.
+func TestCollectSummary_CrossOrgKeyConflictStaysActionable(t *testing.T) {
+	dir := t.TempDir()
+	writeTaskJSONL(t, dir, "createProjects", []map[string]any{
+		{
+			"key": "src-proj-1", "name": "FailProj", "sonarcloud_org_key": "org1",
+			"cloud_project_key": "org1_FailProj",
+			"status":            "failed",
+			"error": `project key "org1_FailProj" already exists under a different ` +
+				`SonarQube Cloud organization than "org1"`,
+		},
+	})
+
+	summary, err := CollectSummary(dir, "")
+	if err != nil {
+		t.Fatalf("CollectSummary: %v", err)
+	}
+	projSection := findSection(summary, "Projects")
+	if projSection == nil {
+		t.Fatal("missing Projects section")
+	}
+
+	actionable, expected := projSection.SplitFailed()
+	if len(expected) != 0 {
+		t.Errorf("a project that did not migrate was counted as needing no action: %+v", expected)
+	}
+	if len(actionable) != 1 {
+		t.Fatalf("expected the conflict to remain an actionable failure, got %+v", actionable)
+	}
+}

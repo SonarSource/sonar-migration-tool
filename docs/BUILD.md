@@ -56,11 +56,28 @@ go test ./internal/predict/...
 go test ./internal/report/summary/...
 ```
 
+`go test ./...` deliberately does not run the live smoke suite: every file in
+`go/smoke/` is behind a `//go:build smoke` build tag, so the package correctly
+prints `[no test files]` in a normal run — that's expected, not a problem. See
+[SMOKE-TESTING.md](SMOKE-TESTING.md) for the suite itself, and the
+`make smoke-fast` / `make smoke` / `make smoke-full` targets to run it.
+
 For the architecture overview and package map, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Regression testing
 
-The end-to-end regression suite lives in [`REGRESSION-TESTING.md`](REGRESSION-TESTING.md). It exercises a full migration against a real SQS + SQC pair and compares the result against a recorded baseline.
+The end-to-end regression protocol lives in [`REGRESSION-TESTING-PLAN.md`](REGRESSION-TESTING-PLAN.md). It exercises a full migration against a real SQS + SQC pair and verifies the result with the `regtest` command.
+
+That protocol is automated by the live smoke suite in `go/smoke/`:
+
+```bash
+make smoke-fast   # Tier 0: no network, no credentials
+make smoke        # Tiers 0, 1 and 3: needs the source SonarQube Server
+SMOKE_ALLOW_DESTRUCTIVE=1 make smoke-full   # all tiers, destructive
+```
+
+See [SMOKE-TESTING.md](SMOKE-TESTING.md) for the full reference — tiers,
+environment variables, and the safety model that gates the destructive path.
 
 ## Contributing from a fork
 <!-- updated: 2026-07-28_10:25:08 -->

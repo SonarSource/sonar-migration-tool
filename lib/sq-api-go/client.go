@@ -22,6 +22,12 @@
 //	    "https://sonar.example.com", "squ_mytoken", 9.9,
 //	    sqapi.WithClientCert("/path/to/cert.pem", "/path/to/key.pem", ""),
 //	)
+//
+//	// Trusted internal server with a self-signed certificate
+//	client := sqapi.NewServerClient(
+//	    "https://sonar.internal", "squ_mytoken", 10.7,
+//	    sqapi.WithInsecureSkipVerify(),
+//	)
 package sqapi
 
 import (
@@ -112,7 +118,7 @@ func newClient(baseURL, token string, version float64, opts ...Option) *Client {
 
 // buildTransport constructs the layered RoundTripper stack:
 //
-//	authTransport → userAgentTransport → debugTransport (optional) → retryTransport → http.Transport (with optional TLS)
+//	authTransport → userAgentTransport → debugTransport (optional) → requestLogTransport (optional) → retryTransport → throttleTransport (optional) → http.Transport (with optional TLS)
 //
 // authTransport and userAgentTransport sit outside debugTransport (rather
 // than the other way around) because both inject their header by cloning
@@ -120,6 +126,17 @@ func newClient(baseURL, token string, version float64, opts ...Option) *Client {
 // never see if it wrapped them from the outside. Retry sits innermost so
 // debugTransport still logs exactly once per logical call, using the
 // final response after any retries.
+//
+// throttleTransport, when configured via WithAPIRateLimiter and/or
+// WithLatencyObserver, wraps only the base http.Transport rather than
+// sitting anywhere else in the stack. That placement is deliberate: it
+// must see every physical HTTP attempt — including ones retryTransport
+// re-issues after a 429/5xx — because each attempt consumes SonarQube
+// Cloud's rate budget, and each attempt's real wall-clock cost is what
+// WithLatencyObserver callers want sampled. When neither option is set,
+// retry.inner points directly at base with zero added indirection, so
+// SonarQube Server clients (which never set these options, e.g. the
+// extract package) see byte-for-byte unchanged behavior.
 func buildTransport(cfg *clientConfig, token string, version float64) http.RoundTripper {
 	tlsCfg := cfg.tlsConfig
 	if tlsCfg == nil {
@@ -127,6 +144,11 @@ func buildTransport(cfg *clientConfig, token string, version float64) http.Round
 	} else if tlsCfg.MinVersion == 0 {
 		tlsCfg.MinVersion = tls.VersionTLS12
 	}
+	// #586 — opt-in via WithInsecureSkipVerify. Assigning unconditionally is
+	// safe: when the option was not used the value is false, which is the
+	// field's zero value, so the config stays byte-identical to what every
+	// existing caller already got.
+	tlsCfg.InsecureSkipVerify = cfg.insecureSkipVerify //nolint:gosec // G402: deliberate, caller opted in for a self-signed internal server
 
 	// Clone the stdlib default rather than building a bare Transport:
 	// a zero-value http.Transport has no dial, TLS-handshake or
@@ -151,8 +173,21 @@ func buildTransport(cfg *clientConfig, token string, version float64) http.Round
 	// unless it stays explicitly on.
 	base.ForceAttemptHTTP2 = true
 
+	// throttleTransport, when configured, must wrap only base — not the
+	// other way around — so it sees every physical attempt including
+	// retries. Leaving retryInner as base directly when neither option
+	// is set keeps SonarQube Server clients byte-for-byte unchanged.
+	var retryInner http.RoundTripper = base
+	if cfg.rateLimiter != nil || cfg.latencyObsFn != nil {
+		retryInner = &throttleTransport{
+			inner:    base,
+			limiter:  cfg.rateLimiter,
+			observer: cfg.latencyObsFn,
+		}
+	}
+
 	retry := &retryTransport{
-		inner:         base,
+		inner:         retryInner,
 		backoff:       defaultBackoff,
 		sqcBackoff:    sqc429Backoff,
 		nonSQCBackoff: nonSQC429Backoff,

@@ -60,3 +60,16 @@ func TestProjectDataTaskNamesFullyCategorized(t *testing.T) {
 		}
 	}
 }
+
+// #554: getProjectAnalysisHistory must be excluded whenever "projects" is
+// not among the selected --objects categories, and included when it is.
+func TestExcludedExtractTasks_ProjectAnalysisHistory(t *testing.T) {
+	objects := map[string]bool{common.ObjectSettings: true}
+	if excludedExtractTasks(objects)["getProjectAnalysisHistory"] != true {
+		t.Error("getProjectAnalysisHistory should be excluded when \"projects\" is not selected")
+	}
+	objects = map[string]bool{common.ObjectProjects: true}
+	if excludedExtractTasks(objects)["getProjectAnalysisHistory"] {
+		t.Error("getProjectAnalysisHistory should not be excluded when \"projects\" is selected")
+	}
+}

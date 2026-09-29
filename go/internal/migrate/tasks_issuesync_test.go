@@ -8,13 +8,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 )
 
@@ -98,6 +102,133 @@ func TestIsAlreadyMigratedIssueComment(t *testing.T) {
 				t.Errorf("isAlreadyMigratedIssueComment(%q, ...) = %v, want %v", tc.body, got, tc.want)
 			}
 		})
+	}
+}
+
+// #571: capIssueComments must keep only the most recent maxComments
+// comments, sorted back into chronological order, regardless of the
+// input's original ordering.
+func TestCapIssueComments(t *testing.T) {
+	c := func(createdAt string) issueComment { return issueComment{CreatedAt: createdAt} }
+	createdAtsOf := func(comments []issueComment) []string {
+		out := make([]string, len(comments))
+		for i, cm := range comments {
+			out[i] = cm.CreatedAt
+		}
+		return out
+	}
+
+	tests := []struct {
+		name string
+		in   []issueComment
+		max  int
+		want []string
+	}{
+		{
+			name: "under cap returns input unchanged",
+			in:   []issueComment{c("2024-01-01"), c("2024-01-02")},
+			max:  5,
+			want: []string{"2024-01-01", "2024-01-02"},
+		},
+		{
+			name: "zero max means no cap",
+			in:   []issueComment{c("2024-01-01"), c("2024-01-02"), c("2024-01-03")},
+			max:  0,
+			want: []string{"2024-01-01", "2024-01-02", "2024-01-03"},
+		},
+		{
+			name: "negative max means no cap",
+			in:   []issueComment{c("2024-01-01")},
+			max:  -1,
+			want: []string{"2024-01-01"},
+		},
+		{
+			name: "exact cap returns input unchanged",
+			in:   []issueComment{c("2024-01-01"), c("2024-01-02")},
+			max:  2,
+			want: []string{"2024-01-01", "2024-01-02"},
+		},
+		{
+			name: "over cap keeps the most recent, re-sorted chronologically",
+			in:   []issueComment{c("2024-01-03"), c("2024-01-01"), c("2024-01-02")},
+			max:  2,
+			want: []string{"2024-01-02", "2024-01-03"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := createdAtsOf(capIssueComments(tc.in, tc.max))
+			if !equalStrings(got, tc.want) {
+				t.Errorf("capIssueComments(...) = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// newCommentSyncServer returns a cloud stub that records every
+// /api/issues/add_comment "text" payload.
+func newCommentSyncServer(t *testing.T) (*httptest.Server, *[]string) {
+	t.Helper()
+	var seen []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/issues/add_comment", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		seen = append(seen, r.Form.Get("text"))
+		w.WriteHeader(http.StatusOK)
+	})
+	return httptest.NewServer(mux), &seen
+}
+
+// #571: syncIssueComments only replays the maxComments most recent source
+// comments — every comment is an extra add_comment API call, so an issue
+// with a long discussion thread must not send them all.
+func TestSyncIssueCommentsCapsToMostRecent(t *testing.T) {
+	cloudSrv, seen := newCommentSyncServer(t)
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+	e := newTestExecutor(cloudSrv, apiSrv, t.TempDir())
+
+	source := []issueComment{
+		{Login: "alice", Markdown: "first", CreatedAt: "2024-01-01T00:00:00+0000"},
+		{Login: "bob", Markdown: "second", CreatedAt: "2024-01-02T00:00:00+0000"},
+		{Login: "carol", Markdown: "third", CreatedAt: "2024-01-03T00:00:00+0000"},
+	}
+
+	if syncIssueComments(context.Background(), e, "cloud-1", source, nil, 2) {
+		t.Fatal("syncIssueComments reported failure on 200 responses")
+	}
+	if len(*seen) != 2 {
+		t.Fatalf("want 2 add_comment calls (capped to 2), got %d: %v", len(*seen), *seen)
+	}
+	if !strings.Contains((*seen)[0], "second") || !strings.Contains((*seen)[1], "third") {
+		t.Errorf("expected the two most recent comments (second, third) to be replayed in order, got %v", *seen)
+	}
+}
+
+// A maxComments of 0 (or below) must not cap anything — this is the
+// zero-value Executor.MaxIssueComments used by test fixtures that don't
+// exercise #571 directly, and it must reproduce the pre-#571 behavior of
+// replaying every comment.
+func TestSyncIssueCommentsUncappedReplaysEveryComment(t *testing.T) {
+	cloudSrv, seen := newCommentSyncServer(t)
+	defer cloudSrv.Close()
+	apiSrv := newMockAPIServer()
+	defer apiSrv.Close()
+	e := newTestExecutor(cloudSrv, apiSrv, t.TempDir())
+
+	source := []issueComment{
+		{Login: "alice", Markdown: "first", CreatedAt: "2024-01-01T00:00:00+0000"},
+		{Login: "bob", Markdown: "second", CreatedAt: "2024-01-02T00:00:00+0000"},
+		{Login: "carol", Markdown: "third", CreatedAt: "2024-01-03T00:00:00+0000"},
+	}
+
+	if syncIssueComments(context.Background(), e, "cloud-1", source, nil, 0) {
+		t.Fatal("syncIssueComments reported failure on 200 responses")
+	}
+	if len(*seen) != 3 {
+		t.Fatalf("want all 3 add_comment calls when uncapped, got %d: %v", len(*seen), *seen)
 	}
 }
 
@@ -1056,8 +1187,10 @@ func TestSyncProjectIssuesTagsMatchedAndCountsNotFound(t *testing.T) {
 		},
 	})
 
-	stats := syncProjectIssues(context.Background(), e, "cloud-proj", "cloud-org",
-		testServerURL, "demo-rules", NewTaskCounter("test"), loadRuleTagDefaults(e))
+	stats := syncProjectIssues(context.Background(), e, syncIssuesInput{
+		CloudKey: "cloud-proj", OrgKey: "cloud-org", ServerURL: testServerURL, ServerKey: "demo-rules",
+		Counter: NewTaskCounter("test"), RuleDefaults: loadRuleTagDefaults(e),
+	})
 
 	if stats.Actionable != 2 {
 		t.Errorf("actionable: want 2, got %d", stats.Actionable)
@@ -1132,8 +1265,10 @@ func TestSyncProjectIssuesNoWarnWhenAllMatched(t *testing.T) {
 	var logBuf bytes.Buffer
 	e.Logger = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	stats := syncProjectIssues(context.Background(), e, "cloud-proj", "cloud-org",
-		testServerURL, "demo-rules", NewTaskCounter("test"), loadRuleTagDefaults(e))
+	stats := syncProjectIssues(context.Background(), e, syncIssuesInput{
+		CloudKey: "cloud-proj", OrgKey: "cloud-org", ServerURL: testServerURL, ServerKey: "demo-rules",
+		Counter: NewTaskCounter("test"), RuleDefaults: loadRuleTagDefaults(e),
+	})
 
 	if stats.A != 1 || stats.B != 0 || stats.C != 0 {
 		t.Errorf("want synced=1 ambiguous=0 not_found=0, got a=%d b=%d c=%d", stats.A, stats.B, stats.C)
@@ -1157,8 +1292,10 @@ func TestSyncProjectIssuesNoSourceIssues(t *testing.T) {
 	defer apiSrv.Close()
 	e := newTestExecutor(cloudSrv, apiSrv, dir)
 
-	stats := syncProjectIssues(context.Background(), e, "cloud-proj", "cloud-org",
-		testServerURL, "demo-rules", NewTaskCounter("test"), loadRuleTagDefaults(e))
+	stats := syncProjectIssues(context.Background(), e, syncIssuesInput{
+		CloudKey: "cloud-proj", OrgKey: "cloud-org", ServerURL: testServerURL, ServerKey: "demo-rules",
+		Counter: NewTaskCounter("test"), RuleDefaults: loadRuleTagDefaults(e),
+	})
 	if stats.Actionable != 0 || stats.A != 0 || stats.C != 0 {
 		t.Errorf("want fully zeroed stats, got %+v", stats)
 	}
@@ -1183,8 +1320,10 @@ func TestSyncProjectIssuesNoActionableIssues(t *testing.T) {
 	defer apiSrv.Close()
 	e := newTestExecutor(cloudSrv, apiSrv, dir)
 
-	stats := syncProjectIssues(context.Background(), e, "cloud-proj", "cloud-org",
-		testServerURL, "demo-rules", NewTaskCounter("test"), loadRuleTagDefaults(e))
+	stats := syncProjectIssues(context.Background(), e, syncIssuesInput{
+		CloudKey: "cloud-proj", OrgKey: "cloud-org", ServerURL: testServerURL, ServerKey: "demo-rules",
+		Counter: NewTaskCounter("test"), RuleDefaults: loadRuleTagDefaults(e),
+	})
 	if stats.Actionable != 0 {
 		t.Errorf("a rule-default-only issue must not be actionable, got %d", stats.Actionable)
 	}
@@ -1215,5 +1354,258 @@ func TestLoadMatchableIssuesCarriesScorerFields(t *testing.T) {
 	iss := got[0]
 	if iss.Message != "Do not do this" || iss.Type != "BUG" || iss.Severity != "MAJOR" || iss.Author != "dev@example.com" {
 		t.Errorf("loadMatchableIssues: scorer fields not carried through, got %+v", iss)
+	}
+}
+
+// waitForCloudIndexing must return immediately, without logging anything,
+// when the first fetch already reports a non-zero total — the common case
+// (Cloud already indexed) must not pay for a retry log line.
+func TestWaitForCloudIndexingSucceedsImmediatelyWithoutLogging(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	calls := 0
+	err := waitForCloudIndexing(context.Background(), logger, "syncIssueMetadata", "proj-a", func() (int, error) {
+		calls++
+		return 5, nil
+	})
+	if err != nil {
+		t.Fatalf("waitForCloudIndexing: unexpected error: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("fetchFn calls = %d, want 1", calls)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("expected no log output on immediate success, got: %s", buf.String())
+	}
+}
+
+// A fetchFn error must propagate immediately without any retry-wait log
+// line — the loop's error path returns before ever reaching the log call.
+func TestWaitForCloudIndexingPropagatesFetchError(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	wantErr := errors.New("boom")
+
+	err := waitForCloudIndexing(context.Background(), logger, "syncIssueMetadata", "proj-a", func() (int, error) {
+		return 0, wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Errorf("err = %v, want %v", err, wantErr)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("expected no log output when fetchFn errors, got: %s", buf.String())
+	}
+}
+
+// #526-adjacent fix: when Cloud hasn't indexed yet (total == 0), the retry
+// wait must be logged — task/project-scoped — rather than silent, since the
+// backoff can otherwise run for minutes with zero visible activity. Uses an
+// already-canceled context so the test doesn't pay for the real 10s delay:
+// the log line fires before the select on ctx.Done()/time.After(delay).
+func TestWaitForCloudIndexingLogsBeforeRetrying(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := waitForCloudIndexing(ctx, logger, "syncHotspotMetadata", "proj-b", func() (int, error) {
+		return 0, nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "syncHotspotMetadata: waiting for Cloud indexing to catch up") {
+		t.Errorf("expected a waiting-for-indexing log line, got: %s", out)
+	}
+	if !strings.Contains(out, "project=proj-b") {
+		t.Errorf("expected the log line to be project-scoped, got: %s", out)
+	}
+}
+
+// #620 review: an earlier version of #597's fix tried to resolve the
+// "is zero real" ambiguity inside waitForCloudIndexing itself, via a probe
+// asking whether the target branch had a completed analysis. That probe
+// was wrong — analysisDate is set the moment the CE task finishes, which
+// is always true by the time either sync task starts, so the probe fired
+// true on attempt 1 regardless of real indexing lag and quietly removed
+// the wait. waitForCloudIndexing now takes no such probe; the ambiguity is
+// resolved by the caller, via submittedIssueIndex, before it is
+// ever called. This test pins that reversion: keeping waiting is the only
+// behaviour available when the count is zero.
+func TestWaitForCloudIndexingHasNoAnalysisProbe(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := waitForCloudIndexing(ctx, logger, "syncIssueMetadata", "proj-slow", func() (int, error) {
+		return 0, nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+	if !strings.Contains(buf.String(), "waiting for Cloud indexing to catch up") {
+		t.Errorf("expected the retry wait to still be logged, got: %s", buf.String())
+	}
+}
+
+// loadSubmittedIssueIndex sums submitted_issues per cloud_project_key, and
+// nothingSubmitted is true only for a project whose records sum to zero.
+func TestSubmittedIssueIndexSumsAcrossBranches(t *testing.T) {
+	e := newTestExecutor(newMockCloudServer(), newMockAPIServer(), t.TempDir())
+	w, err := e.Store.Writer("importProjectData")
+	if err != nil {
+		t.Fatalf("Store.Writer: %v", err)
+	}
+	writeImportRecord(t, w, "proj-a", "main", 3)
+	writeImportRecord(t, w, "proj-a", "develop", 2)
+	writeImportRecord(t, w, "proj-empty", "main", 0)
+	writeImportRecord(t, w, "proj-empty", "develop", 0)
+
+	idx := loadSubmittedIssueIndex(e)
+	if got := idx.counts["proj-a"]; got != 5 {
+		t.Errorf("proj-a count = %d, want 5 (3 + 2 across its two branches)", got)
+	}
+	if idx.nothingSubmitted("proj-a") {
+		t.Error("proj-a submitted 5 findings, so it must keep waiting")
+	}
+	if !idx.nothingSubmitted("proj-empty") {
+		t.Error("proj-empty submitted 0 findings on every branch, so it must skip the wait")
+	}
+}
+
+// A project with no importProjectData record at all is unknown, not empty.
+// This is the standalone sync-issues case (importProjectData never runs),
+// and a project whose import never recorded anything: both keep waiting.
+func TestSubmittedIssueIndexWaitsForAProjectWithNoRecord(t *testing.T) {
+	e := newTestExecutor(newMockCloudServer(), newMockAPIServer(), t.TempDir())
+	if loadSubmittedIssueIndex(e).nothingSubmitted("never-imported") {
+		t.Error("a project with no import record must wait, not skip")
+	}
+	if (submittedIssueIndex{}).nothingSubmitted("anything") {
+		t.Error("the zero-value index must never skip the wait")
+	}
+}
+
+// A record written before #597 carries no submitted_issues field. A resumed
+// run can read one back, and its true count is unknowable, so the project
+// must keep waiting even when every other record for it says zero.
+func TestSubmittedIssueIndexWaitsWhenAnyRecordLacksTheField(t *testing.T) {
+	e := newTestExecutor(newMockCloudServer(), newMockAPIServer(), t.TempDir())
+	w, err := e.Store.Writer("importProjectData")
+	if err != nil {
+		t.Fatalf("Store.Writer: %v", err)
+	}
+	legacy, _ := json.Marshal(map[string]any{
+		"cloud_project_key": "proj-legacy", "branch": "main", "status": "success",
+	})
+	if err := w.WriteOne(legacy); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	writeImportRecord(t, w, "proj-legacy", "develop", 0)
+
+	if loadSubmittedIssueIndex(e).nothingSubmitted("proj-legacy") {
+		t.Error("a project with a pre-#597 record must wait, not skip")
+	}
+}
+
+// #620 review: a store read failure is no evidence that nothing was
+// submitted. It must be logged and fall back to waiting for every project,
+// never to skipping. A plain file where the task directory belongs makes
+// os.ReadDir fail with something other than not-exist, which is exactly the
+// case ReadAll reports as an error.
+func TestSubmittedIssueIndexFallsBackToWaitingOnReadError(t *testing.T) {
+	e := newTestExecutor(newMockCloudServer(), newMockAPIServer(), t.TempDir())
+	var logBuf bytes.Buffer
+	e.Logger = slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	taskDir := filepath.Join(e.Store.BaseDir(), "importProjectData")
+	if err := os.MkdirAll(filepath.Dir(taskDir), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(taskDir, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("write blocker file: %v", err)
+	}
+
+	idx := loadSubmittedIssueIndex(e)
+	if idx.loaded {
+		t.Fatal("index reports loaded despite the read failure")
+	}
+	if idx.nothingSubmitted("proj-a") {
+		t.Error("a read failure must fall back to waiting, not skipping")
+	}
+	if !strings.Contains(logBuf.String(), "every project will wait for Cloud indexing as before") {
+		t.Errorf("expected the read failure to be logged, got: %s", logBuf.String())
+	}
+}
+
+// #620 review: the end-to-end counterpart to the submittedIssueIndex
+// unit tests above. The mock's project-wide indexing probe (no "rules"
+// param) always reports 0, exactly like a project whose findings all
+// landed on inactive target rules, and importProjectData is seeded with
+// submitted_issues: 0. syncProjectIssues must skip the wait entirely
+// rather than entering the real backoff — proven by a short-timeout
+// context that would otherwise turn a regression into a failure rather
+// than an 8-minute hang.
+func TestSyncProjectIssuesSkipsIndexingWaitWhenNothingWasSubmitted(t *testing.T) {
+	dir := t.TempDir()
+	setupIssueTagExtract(t, dir)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/issues/search", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"issues": []map[string]any{},
+			"paging": map[string]any{"pageIndex": 1, "pageSize": 1, "total": 0},
+		})
+	})
+	mux.HandleFunc("POST /api/issues/set_tags", func(w http.ResponseWriter, _ *http.Request) {})
+	mux.HandleFunc("POST /api/issues/add_comment", func(w http.ResponseWriter, _ *http.Request) {})
+	cloudSrv := httptest.NewServer(mux)
+	t.Cleanup(cloudSrv.Close)
+	apiSrv := newMockAPIServer()
+	t.Cleanup(apiSrv.Close)
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+
+	w, err := e.Store.Writer("importProjectData")
+	if err != nil {
+		t.Fatalf("Store.Writer: %v", err)
+	}
+	writeImportRecord(t, w, "cloud-proj", "main", 0)
+
+	var logBuf bytes.Buffer
+	e.Logger = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	stats := syncProjectIssues(ctx, e, syncIssuesInput{
+		CloudKey: "cloud-proj", OrgKey: "cloud-org", ServerURL: testServerURL, ServerKey: "demo-rules",
+		Counter: NewTaskCounter("test"), RuleDefaults: loadRuleTagDefaults(e), Submitted: loadSubmittedIssueIndex(e),
+	})
+	if stats.Actionable == 0 {
+		t.Fatal("setup fixture produced no actionable issues; the wait would never have been reached")
+	}
+
+	out := logBuf.String()
+	if !strings.Contains(out, "import submitted no findings for this project, nothing to wait for") {
+		t.Errorf("expected the skip-the-wait log line, got: %s", out)
+	}
+	if strings.Contains(out, "waiting for Cloud indexing to catch up") {
+		t.Errorf("must not have entered the backoff at all, got: %s", out)
+	}
+}
+
+func writeImportRecord(t *testing.T, w *common.ChunkWriter, cloudKey, branch string, submitted int) {
+	t.Helper()
+	rec, _ := json.Marshal(map[string]any{
+		"cloud_project_key": cloudKey, "branch": branch, "status": "success",
+		"submitted_issues": submitted,
+	})
+	if err := w.WriteOne(rec); err != nil {
+		t.Fatalf("seed importProjectData record: %v", err)
 	}
 }

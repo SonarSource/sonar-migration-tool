@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
@@ -29,8 +30,12 @@ type SyncIssuesConfig struct {
 	EnterpriseKey string
 
 	ExportDirectory string
-	Concurrency     int
-	Timeout         int
+	// Concurrency — see MigrateConfig.Concurrency (#573): only seeds the
+	// starting point for the dynamic ConcurrencyLimiter.
+	Concurrency int
+	// APIMaxRatePerMin — see MigrateConfig.APIMaxRatePerMin (#573).
+	APIMaxRatePerMin int
+	Timeout          int
 
 	// ProjectKeyPattern must match the pattern used when the target
 	// projects were created, so the rendered keys resolve to the same
@@ -50,14 +55,23 @@ type SyncIssuesConfig struct {
 
 	// FastSync — see MigrateConfig.FastSync (#527).
 	FastSync bool
+
+	// MaxIssueComments — see MigrateConfig.MaxIssueComments (#571).
+	MaxIssueComments int
 }
 
 func (cfg *SyncIssuesConfig) applyDefaults() {
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 25
 	}
+	if cfg.APIMaxRatePerMin <= 0 {
+		cfg.APIMaxRatePerMin = 1500
+	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 60
+	}
+	if cfg.MaxIssueComments == 0 {
+		cfg.MaxIssueComments = DefaultMaxIssueComments
 	}
 	if cfg.ExportDirectory == "" {
 		cfg.ExportDirectory = "./migration-files/"
@@ -113,6 +127,13 @@ func RunSyncIssues(ctx context.Context, cfg SyncIssuesConfig) (SyncIssuesSummary
 
 	var summary SyncIssuesSummary
 
+	// #571: reject up front — cmd/sync_issues.go already validates this at
+	// build-config time, but a config-file-only caller may reach
+	// RunSyncIssues without going through that check.
+	if err := ValidateMaxIssueComments(cfg.MaxIssueComments); err != nil {
+		return summary, err
+	}
+
 	level := slog.LevelInfo
 	if cfg.Debug {
 		level = slog.LevelDebug
@@ -124,7 +145,15 @@ func RunSyncIssues(ctx context.Context, cfg SyncIssuesConfig) (SyncIssuesSummary
 	}
 
 	cloudURL := cfg.URL
-	clientOpts := []sqapi.Option{sqapi.WithTimeout(cfg.Timeout)}
+	// One SlidingWindowLimiter and one ConcurrencyLimiter, wired the same
+	// way as newMigrateClients (#573).
+	concurrencyLimiter := newConcurrencyLimiter(cfg.Concurrency, cfg.APIMaxRatePerMin, logger)
+	apiRateLimiter := sqapi.NewSlidingWindowLimiter(cfg.APIMaxRatePerMin)
+	clientOpts := []sqapi.Option{
+		sqapi.WithTimeout(cfg.Timeout),
+		sqapi.WithAPIRateLimiter(apiRateLimiter),
+		sqapi.WithLatencyObserver(concurrencyLimiter.Observe),
+	}
 	if cfg.Debug {
 		clientOpts = append(clientOpts, sqapi.WithDebugLogger(common.NewHTTPDebugLogger(logger)))
 	}
@@ -163,15 +192,21 @@ func RunSyncIssues(ctx context.Context, cfg SyncIssuesConfig) (SyncIssuesSummary
 	}
 
 	e := &Executor{
-		Cloud:             cc,
-		Raw:               raw,
-		ExportDir:         cfg.ExportDirectory,
-		Mapping:           mapping,
-		Sem:               make(chan struct{}, cfg.Concurrency),
-		ProjectKeyPattern: cfg.ProjectKeyPattern,
-		FastSync:          cfg.FastSync,
-		Logger:            logger,
+		Cloud:              cc,
+		Raw:                raw,
+		ExportDir:          cfg.ExportDirectory,
+		Mapping:            mapping,
+		ConcurrencyLimiter: concurrencyLimiter,
+		ProjectKeyPattern:  cfg.ProjectKeyPattern,
+		FastSync:           cfg.FastSync,
+		MaxIssueComments:   cfg.MaxIssueComments,
+		Logger:             logger,
 	}
+
+	// Dynamic concurrency re-evaluation (#573) — no-op when ConcurrencyLimiter
+	// is fixed (--concurrency was explicitly set).
+	e.ConcurrencyLimiter.Start(ctx, 30*time.Second)
+	defer e.ConcurrencyLimiter.Stop()
 
 	ruleDefaults := loadRuleTagDefaults(e)
 	counter := NewTaskCounter("syncIssues")
@@ -183,7 +218,12 @@ func RunSyncIssues(ctx context.Context, cfg SyncIssuesConfig) (SyncIssuesSummary
 		func(gctx context.Context, t syncTarget) {
 			logger.Info("sync-issues: syncing project", "source_key", t.Key, "cloud_project_key", t.CloudProjectKey, "org", t.OrgKey)
 
-			iStats := syncProjectIssues(gctx, e, t.CloudProjectKey, t.OrgKey, t.ServerURL, t.Key, counter, ruleDefaults)
+			// No importProjectData runs here, so there is nothing to index: the
+			// zero submittedIssueIndex keeps the original always-wait path (#597).
+			iStats := syncProjectIssues(gctx, e, syncIssuesInput{
+				CloudKey: t.CloudProjectKey, OrgKey: t.OrgKey, ServerURL: t.ServerURL, ServerKey: t.Key,
+				Counter: counter, RuleDefaults: ruleDefaults, Submitted: submittedIssueIndex{},
+			})
 			issuesActionable.Add(iStats.Actionable)
 			issuesSynced.Add(iStats.A)
 			issuesMismatch.Add(iStats.B)
@@ -225,11 +265,14 @@ func RunSyncIssues(ctx context.Context, cfg SyncIssuesConfig) (SyncIssuesSummary
 // resolveSyncTargets reads projects.csv + organizations.csv from exportDir
 // and computes each project's target SonarQube Cloud project key, exactly
 // mirroring what the createProjects task does (tasks_create.go:68) so
-// sync-issues resolves to the SAME already-migrated Cloud project.
+// sync-issues resolves to the SAME already-migrated Cloud project — the
+// per-project organization override (#612) included, since it feeds
+// RenderProjectKey and therefore changes the resulting project key
+// whenever the pattern carries <ORGANIZATION_KEY>.
 // Projects whose org is unmapped (shouldSkipOrg) or that aren't in
 // projectKeys (when non-empty) are excluded.
 func resolveSyncTargets(exportDir, pattern string, projectKeys []string) ([]syncTarget, error) {
-	rows, err := structure.LoadCSV(exportDir, "projects.csv")
+	rows, err := structure.LoadCSV(exportDir, structure.ProjectsCSVFileName)
 	if err != nil {
 		return nil, fmt.Errorf("loading projects.csv: %w", err)
 	}
@@ -257,7 +300,10 @@ func resolveSyncTargets(exportDir, pattern string, projectKeys []string) ([]sync
 		}
 		serverURL, _ := row["server_url"].(string)
 		sourceOrgKey, _ := row["sonarqube_org_key"].(string)
-		orgKey := orgLookup[sourceOrgKey]
+		// #612: honour the per-project organization override, or
+		// sync-issues would look for an overridden project in the
+		// organization it was NOT migrated into and find nothing.
+		orgKey, _ := structure.ResolveProjectOrg(row, orgLookup[sourceOrgKey])
 		if shouldSkipOrg(orgKey) {
 			continue
 		}
