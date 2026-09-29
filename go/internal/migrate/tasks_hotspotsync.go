@@ -383,6 +383,7 @@ func distinctRuleKeys(hotspots []matchableHotspot) []string {
 // It iterates over every project created during migration and synchronises
 // hotspot statuses and comments from the SonarQube Server extract to Cloud.
 func runSyncHotspotMetadata(ctx context.Context, e *Executor) error {
+	submitted := loadSubmittedIssueIndex(e)
 	return forEachMigrateItem(ctx, e, "syncHotspotMetadata", "createProjects",
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
 			if isFailedMigrateRecord(item) {
@@ -402,6 +403,7 @@ func runSyncHotspotMetadata(ctx context.Context, e *Executor) error {
 				OrgKey:    orgKey,
 				ServerURL: serverURL,
 				ServerKey: serverKey,
+				Submitted: submitted,
 			})
 
 			record, _ := json.Marshal(map[string]any{
@@ -426,6 +428,9 @@ type syncHotspotInput struct {
 	OrgKey    string
 	ServerURL string
 	ServerKey string
+	// Submitted is shared across every project in the task (#597). Its zero
+	// value keeps the original always-wait behaviour.
+	Submitted submittedIssueIndex
 }
 
 // syncHotspotResult holds the per-project sync outcome. Stats carries
@@ -563,7 +568,7 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 	// Skipped up front when this run's import submitted zero findings for
 	// the project — the classic case being every hotspot dropped on an
 	// inactive target rule (#597).
-	if n := projectSubmittedIssueCount(e, input.CloudKey); n == 0 {
+	if input.Submitted.nothingSubmitted(input.CloudKey) {
 		e.Logger.Info("syncHotspotMetadata: import submitted no findings for this project, nothing to wait for",
 			"project", input.CloudKey)
 	} else {

@@ -416,6 +416,7 @@ func TestSyncProjectHotspotsSkipsIndexingWaitWhenNothingWasSubmitted(t *testing.
 	res := syncProjectHotspots(ctx, e, syncHotspotInput{
 		CloudKey: "cloud-proj", OrgKey: "cloud-org",
 		ServerURL: testServerURL, ServerKey: "proj1",
+		Submitted: loadSubmittedIssueIndex(e),
 	})
 	if res.Error != "" {
 		t.Fatalf("unexpected error (the wait ran instead of being skipped): %s", res.Error)

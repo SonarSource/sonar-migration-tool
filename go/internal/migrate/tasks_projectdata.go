@@ -573,7 +573,7 @@ func recordBranchResult(w *common.ChunkWriter, cloudKey, branchName string, resu
 		// were dropped from the report because of them.
 		"unsupported_languages": result.UnsupportedLanguages,
 		"excluded_files":        result.ExcludedFiles,
-		// #597 — read back by projectSubmittedIssueCount.
+		// #597 — read back by loadSubmittedIssueIndex.
 		"submitted_issues": result.SubmittedIssueCount,
 	})
 	w.WriteOne(record) //nolint:errcheck
@@ -615,9 +615,9 @@ type importResult struct {
 	// --unsupported_languages=exclude).
 	ExcludedFiles int
 	// SubmittedIssueCount is the number of findings actually packaged into
-	// this branch's report — native issues plus hotspots converted to
-	// issues, both after dropIssuesWithInactiveRules — regardless of
-	// import status. Read by projectSubmittedIssueCount (#597) so
+	// this branch's report — native issues, hotspots converted to issues and
+	// external issues, after dropIssuesWithInactiveRules — regardless of
+	// import status. Read by loadSubmittedIssueIndex (#597) so
 	// syncIssueMetadata/syncHotspotMetadata can tell "this project
 	// genuinely has nothing on the target" apart from "indexing hasn't
 	// caught up yet" before waiting on the latter.
@@ -718,8 +718,11 @@ type branchReportMeta struct {
 	// when the branch itself migrated successfully.
 	UnsupportedLanguages []string
 	ExcludedFiles        int
-	// SubmittedIssueCount carries len(issues) — native plus hotspot-
-	// converted, post-drop — through to the importResult for #597.
+	// SubmittedIssueCount carries every finding the report submits —
+	// native, hotspot-converted and external, post-drop — through to the
+	// importResult for #597. External issues count: syncIssueMetadata syncs
+	// them too, so a project with only external findings still needs the
+	// indexing wait.
 	SubmittedIssueCount int
 }
 
@@ -1019,7 +1022,7 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	return zipBytes, branchReportMeta{
 		ProjectVersion: projectVersion, SourcePurged: sourcePurged,
 		UnsupportedLanguages: unsupportedLangKeys, ExcludedFiles: excludedFiles,
-		SubmittedIssueCount: len(issues),
+		SubmittedIssueCount: len(issues) + len(extIssues),
 	}, nil, nil
 }
 

@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1186,8 +1187,10 @@ func TestSyncProjectIssuesTagsMatchedAndCountsNotFound(t *testing.T) {
 		},
 	})
 
-	stats := syncProjectIssues(context.Background(), e, "cloud-proj", "cloud-org",
-		testServerURL, "demo-rules", NewTaskCounter("test"), loadRuleTagDefaults(e))
+	stats := syncProjectIssues(context.Background(), e, syncIssuesInput{
+		CloudKey: "cloud-proj", OrgKey: "cloud-org", ServerURL: testServerURL, ServerKey: "demo-rules",
+		Counter: NewTaskCounter("test"), RuleDefaults: loadRuleTagDefaults(e),
+	})
 
 	if stats.Actionable != 2 {
 		t.Errorf("actionable: want 2, got %d", stats.Actionable)
@@ -1262,8 +1265,10 @@ func TestSyncProjectIssuesNoWarnWhenAllMatched(t *testing.T) {
 	var logBuf bytes.Buffer
 	e.Logger = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	stats := syncProjectIssues(context.Background(), e, "cloud-proj", "cloud-org",
-		testServerURL, "demo-rules", NewTaskCounter("test"), loadRuleTagDefaults(e))
+	stats := syncProjectIssues(context.Background(), e, syncIssuesInput{
+		CloudKey: "cloud-proj", OrgKey: "cloud-org", ServerURL: testServerURL, ServerKey: "demo-rules",
+		Counter: NewTaskCounter("test"), RuleDefaults: loadRuleTagDefaults(e),
+	})
 
 	if stats.A != 1 || stats.B != 0 || stats.C != 0 {
 		t.Errorf("want synced=1 ambiguous=0 not_found=0, got a=%d b=%d c=%d", stats.A, stats.B, stats.C)
@@ -1287,8 +1292,10 @@ func TestSyncProjectIssuesNoSourceIssues(t *testing.T) {
 	defer apiSrv.Close()
 	e := newTestExecutor(cloudSrv, apiSrv, dir)
 
-	stats := syncProjectIssues(context.Background(), e, "cloud-proj", "cloud-org",
-		testServerURL, "demo-rules", NewTaskCounter("test"), loadRuleTagDefaults(e))
+	stats := syncProjectIssues(context.Background(), e, syncIssuesInput{
+		CloudKey: "cloud-proj", OrgKey: "cloud-org", ServerURL: testServerURL, ServerKey: "demo-rules",
+		Counter: NewTaskCounter("test"), RuleDefaults: loadRuleTagDefaults(e),
+	})
 	if stats.Actionable != 0 || stats.A != 0 || stats.C != 0 {
 		t.Errorf("want fully zeroed stats, got %+v", stats)
 	}
@@ -1313,8 +1320,10 @@ func TestSyncProjectIssuesNoActionableIssues(t *testing.T) {
 	defer apiSrv.Close()
 	e := newTestExecutor(cloudSrv, apiSrv, dir)
 
-	stats := syncProjectIssues(context.Background(), e, "cloud-proj", "cloud-org",
-		testServerURL, "demo-rules", NewTaskCounter("test"), loadRuleTagDefaults(e))
+	stats := syncProjectIssues(context.Background(), e, syncIssuesInput{
+		CloudKey: "cloud-proj", OrgKey: "cloud-org", ServerURL: testServerURL, ServerKey: "demo-rules",
+		Counter: NewTaskCounter("test"), RuleDefaults: loadRuleTagDefaults(e),
+	})
 	if stats.Actionable != 0 {
 		t.Errorf("a rule-default-only issue must not be actionable, got %d", stats.Actionable)
 	}
@@ -1423,7 +1432,7 @@ func TestWaitForCloudIndexingLogsBeforeRetrying(t *testing.T) {
 // is always true by the time either sync task starts, so the probe fired
 // true on attempt 1 regardless of real indexing lag and quietly removed
 // the wait. waitForCloudIndexing now takes no such probe; the ambiguity is
-// resolved by the caller, via projectSubmittedIssueCount, before it is
+// resolved by the caller, via submittedIssueIndex, before it is
 // ever called. This test pins that reversion: keeping waiting is the only
 // behaviour available when the count is zero.
 func TestWaitForCloudIndexingHasNoAnalysisProbe(t *testing.T) {
@@ -1444,10 +1453,9 @@ func TestWaitForCloudIndexingHasNoAnalysisProbe(t *testing.T) {
 	}
 }
 
-// projectSubmittedIssueCount sums submitted_issues across every
-// importProjectData record for the given cloud_project_key, ignoring
-// records for other projects.
-func TestProjectSubmittedIssueCountSumsAcrossBranches(t *testing.T) {
+// loadSubmittedIssueIndex sums submitted_issues per cloud_project_key, and
+// nothingSubmitted is true only for a project whose records sum to zero.
+func TestSubmittedIssueIndexSumsAcrossBranches(t *testing.T) {
 	e := newTestExecutor(newMockCloudServer(), newMockAPIServer(), t.TempDir())
 	w, err := e.Store.Writer("importProjectData")
 	if err != nil {
@@ -1455,50 +1463,87 @@ func TestProjectSubmittedIssueCountSumsAcrossBranches(t *testing.T) {
 	}
 	writeImportRecord(t, w, "proj-a", "main", 3)
 	writeImportRecord(t, w, "proj-a", "develop", 2)
-	writeImportRecord(t, w, "proj-b", "main", 100)
+	writeImportRecord(t, w, "proj-empty", "main", 0)
+	writeImportRecord(t, w, "proj-empty", "develop", 0)
 
-	if got := projectSubmittedIssueCount(e, "proj-a"); got != 5 {
-		t.Errorf("proj-a: got %d, want 5 (3 + 2 across its two branches)", got)
+	idx := loadSubmittedIssueIndex(e)
+	if got := idx.counts["proj-a"]; got != 5 {
+		t.Errorf("proj-a count = %d, want 5 (3 + 2 across its two branches)", got)
 	}
-	if got := projectSubmittedIssueCount(e, "proj-b"); got != 100 {
-		t.Errorf("proj-b: got %d, want 100", got)
+	if idx.nothingSubmitted("proj-a") {
+		t.Error("proj-a submitted 5 findings, so it must keep waiting")
+	}
+	if !idx.nothingSubmitted("proj-empty") {
+		t.Error("proj-empty submitted 0 findings on every branch, so it must skip the wait")
 	}
 }
 
-// A project with no importProjectData records at all — never created, or
-// a --project_key filter excluded it — must read back as 0 rather than
-// erroring, since the caller only uses this to decide whether to skip the
-// indexing wait.
-func TestProjectSubmittedIssueCountReturnsZeroForUnknownProject(t *testing.T) {
+// A project with no importProjectData record at all is unknown, not empty.
+// This is the standalone sync-issues case (importProjectData never runs),
+// and a project whose import never recorded anything: both keep waiting.
+func TestSubmittedIssueIndexWaitsForAProjectWithNoRecord(t *testing.T) {
 	e := newTestExecutor(newMockCloudServer(), newMockAPIServer(), t.TempDir())
-	if got := projectSubmittedIssueCount(e, "never-imported"); got != 0 {
-		t.Errorf("got %d, want 0", got)
+	if loadSubmittedIssueIndex(e).nothingSubmitted("never-imported") {
+		t.Error("a project with no import record must wait, not skip")
+	}
+	if (submittedIssueIndex{}).nothingSubmitted("anything") {
+		t.Error("the zero-value index must never skip the wait")
 	}
 }
 
-// A branch whose record predates #597 (or was written by an up_to_date,
-// skipped, or failed import, none of which set submitted_issues) must
-// contribute 0 rather than erroring — the field is simply absent from the
-// JSON.
-func TestProjectSubmittedIssueCountTreatsMissingFieldAsZero(t *testing.T) {
+// A record written before #597 carries no submitted_issues field. A resumed
+// run can read one back, and its true count is unknowable, so the project
+// must keep waiting even when every other record for it says zero.
+func TestSubmittedIssueIndexWaitsWhenAnyRecordLacksTheField(t *testing.T) {
 	e := newTestExecutor(newMockCloudServer(), newMockAPIServer(), t.TempDir())
 	w, err := e.Store.Writer("importProjectData")
 	if err != nil {
 		t.Fatalf("Store.Writer: %v", err)
 	}
-	rec, _ := json.Marshal(map[string]any{
-		"cloud_project_key": "proj-legacy", "branch": "main", "status": "up_to_date",
+	legacy, _ := json.Marshal(map[string]any{
+		"cloud_project_key": "proj-legacy", "branch": "main", "status": "success",
 	})
-	if err := w.WriteOne(rec); err != nil {
+	if err := w.WriteOne(legacy); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
+	writeImportRecord(t, w, "proj-legacy", "develop", 0)
 
-	if got := projectSubmittedIssueCount(e, "proj-legacy"); got != 0 {
-		t.Errorf("got %d, want 0", got)
+	if loadSubmittedIssueIndex(e).nothingSubmitted("proj-legacy") {
+		t.Error("a project with a pre-#597 record must wait, not skip")
 	}
 }
 
-// #620 review: the end-to-end counterpart to the projectSubmittedIssueCount
+// #620 review: a store read failure is no evidence that nothing was
+// submitted. It must be logged and fall back to waiting for every project,
+// never to skipping. A plain file where the task directory belongs makes
+// os.ReadDir fail with something other than not-exist, which is exactly the
+// case ReadAll reports as an error.
+func TestSubmittedIssueIndexFallsBackToWaitingOnReadError(t *testing.T) {
+	e := newTestExecutor(newMockCloudServer(), newMockAPIServer(), t.TempDir())
+	var logBuf bytes.Buffer
+	e.Logger = slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	taskDir := filepath.Join(e.Store.BaseDir(), "importProjectData")
+	if err := os.MkdirAll(filepath.Dir(taskDir), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(taskDir, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("write blocker file: %v", err)
+	}
+
+	idx := loadSubmittedIssueIndex(e)
+	if idx.loaded {
+		t.Fatal("index reports loaded despite the read failure")
+	}
+	if idx.nothingSubmitted("proj-a") {
+		t.Error("a read failure must fall back to waiting, not skipping")
+	}
+	if !strings.Contains(logBuf.String(), "every project will wait for Cloud indexing as before") {
+		t.Errorf("expected the read failure to be logged, got: %s", logBuf.String())
+	}
+}
+
+// #620 review: the end-to-end counterpart to the submittedIssueIndex
 // unit tests above. The mock's project-wide indexing probe (no "rules"
 // param) always reports 0, exactly like a project whose findings all
 // landed on inactive target rules, and importProjectData is seeded with
@@ -1537,8 +1582,10 @@ func TestSyncProjectIssuesSkipsIndexingWaitWhenNothingWasSubmitted(t *testing.T)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	stats := syncProjectIssues(ctx, e, "cloud-proj", "cloud-org",
-		testServerURL, "demo-rules", NewTaskCounter("test"), loadRuleTagDefaults(e))
+	stats := syncProjectIssues(ctx, e, syncIssuesInput{
+		CloudKey: "cloud-proj", OrgKey: "cloud-org", ServerURL: testServerURL, ServerKey: "demo-rules",
+		Counter: NewTaskCounter("test"), RuleDefaults: loadRuleTagDefaults(e), Submitted: loadSubmittedIssueIndex(e),
+	})
 	if stats.Actionable == 0 {
 		t.Fatal("setup fixture produced no actionable issues; the wait would never have been reached")
 	}

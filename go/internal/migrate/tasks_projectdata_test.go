@@ -1266,8 +1266,57 @@ func TestImportBranch(t *testing.T) {
 	}
 }
 
+// #620 review: external issues are submitted in the same report and synced
+// by syncIssueMetadata, so they must count. Without them, a project whose
+// only findings are external records submitted_issues 0, skips the indexing
+// wait, and loses its triage sync whenever indexing lags.
+func TestImportBranchCountsExternalIssuesAsSubmitted(t *testing.T) {
+	dir := t.TempDir()
+	setupProjectDataExtract(t, dir)
+	// Same native issues as the shared fixture, plus one external issue on
+	// the main branch.
+	writeJSONL(filepath.Join(dir, "extract-01", "getProjectIssuesFull"), []map[string]any{
+		{
+			"key": "issue-1", "rule": "java:S100", "message": "Rename method",
+			"severity": "MAJOR", "component": "proj1:src/Main.java",
+			"projectKey": "proj1", "branch": "main",
+			"textRange":    map[string]any{"startLine": 5, "endLine": 5, "startOffset": 0, "endOffset": 10},
+			"creationDate": "2024-06-15T10:00:00+0000",
+			"serverUrl":    testServerURL,
+		},
+		{
+			"key": "ext-1", "rule": "external_eslint:no-unused-vars", "message": "Unused variable",
+			"severity": "MINOR", "type": "CODE_SMELL", "component": "proj1:src/Util.java",
+			"projectKey": "proj1", "branch": "main",
+			"textRange":    map[string]any{"startLine": 1, "endLine": 1, "startOffset": 0, "endOffset": 5},
+			"creationDate": "2024-06-15T10:00:00+0000",
+			"serverUrl":    testServerURL,
+		},
+	})
+
+	srv := newCEMockServer()
+	defer srv.Close()
+	e := newProjectDataExecutor(t, dir)
+	e.CloudURL = srv.URL + "/"
+	e.Raw = common.NewRawClient(srv.Client(), srv.URL+"/")
+	e.APIURL = srv.URL + "/"
+	e.RawAPI = common.NewRawClient(srv.Client(), srv.URL+"/")
+
+	result, err := importBranch(context.Background(), e, importBranchInput{
+		CloudKey: "cloud-proj1", OrgKey: "cloud-org1",
+		ServerURL: testServerURL, ServerKey: "proj1",
+		Branch: "main", ReferenceBranch: "master",
+	})
+	if err != nil {
+		t.Fatalf("importBranch: %v", err)
+	}
+	if result.SubmittedIssueCount != 2 {
+		t.Errorf("SubmittedIssueCount = %d, want 2 (1 native + 1 external; the hotspot is dropped for an inactive rule)", result.SubmittedIssueCount)
+	}
+}
+
 // recordBranchResult must round-trip SubmittedIssueCount into the
-// "submitted_issues" field projectSubmittedIssueCount reads back (#597).
+// "submitted_issues" field loadSubmittedIssueIndex reads back (#597).
 func TestRecordBranchResultWritesSubmittedIssueCount(t *testing.T) {
 	dir := t.TempDir()
 	store := common.NewDataStore(dir)
