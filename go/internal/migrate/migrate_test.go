@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
@@ -64,6 +65,55 @@ func TestRunMigrateAcceptsValidBranchRegexp(t *testing.T) {
 
 	if _, err := RunMigrate(context.Background(), cfg); err != nil {
 		t.Fatalf("RunMigrate failed with a valid BranchRegexp: %v", err)
+	}
+}
+
+// #597: scaledIssueSyncDuration must leave the seeded constant alone for
+// n <= 0 and for any n whose scaled value would not exceed it, and return
+// the scaled value only once it genuinely wins. The threshold below is
+// exact for today's constants (seed 3s, rate 0.572s/project): 5 projects
+// scale to 2.86s, which loses to the constant; 6 scale to 3.432s, which
+// wins. If either constant is re-mined, this test's expected values must
+// move with it — that is the point of asserting the exact numbers rather
+// than only the ok/not-ok boundary.
+func TestScaledIssueSyncDuration(t *testing.T) {
+	seed := common.ExpectedTaskDuration("syncIssueMetadata")
+	rate := common.SecondsPerProjectIssueSync
+
+	cases := []struct {
+		name   string
+		n      int
+		wantOK bool
+		want   time.Duration
+	}{
+		{"no projects in scope", 0, false, 0},
+		{"scaled value at or below the seed loses", 5, false, 0},
+		{"scaled value above the seed wins", 6, true, time.Duration(6 * rate * float64(time.Second))},
+		{"a large run scales proportionally", 100, true, time.Duration(100 * rate * float64(time.Second))},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := scaledIssueSyncDuration(c.n)
+			if ok != c.wantOK {
+				t.Fatalf("scaledIssueSyncDuration(%d) ok = %v, want %v", c.n, ok, c.wantOK)
+			}
+			if ok && got != c.want {
+				t.Errorf("scaledIssueSyncDuration(%d) = %v, want %v", c.n, got, c.want)
+			}
+			if !ok && got != 0 {
+				t.Errorf("scaledIssueSyncDuration(%d) returned %v alongside ok=false, want 0", c.n, got)
+			}
+		})
+	}
+
+	// Sanity-check the exact boundary assumed above still holds against
+	// the live constants, so this test fails loudly — rather than
+	// silently testing the wrong n — if either constant moves.
+	if scaled := time.Duration(5 * rate * float64(time.Second)); scaled > seed {
+		t.Fatalf("assumption broken: 5 projects (%v) now exceeds the seed (%v); update this test's n values", scaled, seed)
+	}
+	if scaled := time.Duration(6 * rate * float64(time.Second)); scaled <= seed {
+		t.Fatalf("assumption broken: 6 projects (%v) no longer exceeds the seed (%v); update this test's n values", scaled, seed)
 	}
 }
 

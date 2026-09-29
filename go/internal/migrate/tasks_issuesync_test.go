@@ -15,7 +15,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 )
 
@@ -1357,7 +1359,7 @@ func TestWaitForCloudIndexingSucceedsImmediatelyWithoutLogging(t *testing.T) {
 	err := waitForCloudIndexing(context.Background(), logger, "syncIssueMetadata", "proj-a", func() (int, error) {
 		calls++
 		return 5, nil
-	}, nil)
+	})
 	if err != nil {
 		t.Fatalf("waitForCloudIndexing: unexpected error: %v", err)
 	}
@@ -1378,7 +1380,7 @@ func TestWaitForCloudIndexingPropagatesFetchError(t *testing.T) {
 
 	err := waitForCloudIndexing(context.Background(), logger, "syncIssueMetadata", "proj-a", func() (int, error) {
 		return 0, wantErr
-	}, nil)
+	})
 	if !errors.Is(err, wantErr) {
 		t.Errorf("err = %v, want %v", err, wantErr)
 	}
@@ -1401,7 +1403,7 @@ func TestWaitForCloudIndexingLogsBeforeRetrying(t *testing.T) {
 
 	err := waitForCloudIndexing(ctx, logger, "syncHotspotMetadata", "proj-b", func() (int, error) {
 		return 0, nil
-	}, nil)
+	})
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("err = %v, want context.Canceled", err)
 	}
@@ -1414,67 +1416,26 @@ func TestWaitForCloudIndexingLogsBeforeRetrying(t *testing.T) {
 	}
 }
 
-// #597: a zero issue count is ambiguous. When the analysis-completion probe
-// confirms the target has finished analysing, zero is the real answer and
-// the loop must stop immediately instead of burning the full ~8m17s
-// backoff. This is the case that cost 75% of one real 11-minute run.
-func TestWaitForCloudIndexingStopsWhenTargetAnalysisIsComplete(t *testing.T) {
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, nil))
-
-	// A canceled context proves no sleep happened: the retry path selects
-	// on ctx.Done() and would return context.Canceled instead of nil.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	probes := 0
-	err := waitForCloudIndexing(ctx, logger, "syncHotspotMetadata", "proj-empty",
-		func() (int, error) { return 0, nil },
-		func() (bool, error) { probes++; return true, nil })
-	if err != nil {
-		t.Fatalf("waitForCloudIndexing: unexpected error: %v", err)
-	}
-	if probes != 1 {
-		t.Errorf("analysisDoneFn calls = %d, want 1", probes)
-	}
-	out := buf.String()
-	if !strings.Contains(out, "target analysis is complete and the project has no indexed issues") {
-		t.Errorf("expected the nothing-to-wait-for log line, got: %s", out)
-	}
-	if strings.Contains(out, "waiting for Cloud indexing to catch up") {
-		t.Errorf("must not log a retry wait once the analysis is confirmed complete, got: %s", out)
-	}
-}
-
-// The probe must not change the happy path: when the first fetch already
-// reports indexed issues, the extra Cloud call is never made.
-func TestWaitForCloudIndexingSkipsProbeWhenIssuesAreAlreadyIndexed(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
-
-	probes := 0
-	err := waitForCloudIndexing(context.Background(), logger, "syncIssueMetadata", "proj-a",
-		func() (int, error) { return 7, nil },
-		func() (bool, error) { probes++; return true, nil })
-	if err != nil {
-		t.Fatalf("waitForCloudIndexing: unexpected error: %v", err)
-	}
-	if probes != 0 {
-		t.Errorf("analysisDoneFn calls = %d, want 0 — the probe costs an API call and is only needed on a zero count", probes)
-	}
-}
-
-// When the target has genuinely not finished analysing yet, the probe says
-// so and the loop keeps its original backoff behaviour.
-func TestWaitForCloudIndexingKeepsWaitingWhenAnalysisIsNotDone(t *testing.T) {
+// #620 review: an earlier version of #597's fix tried to resolve the
+// "is zero real" ambiguity inside waitForCloudIndexing itself, via a probe
+// asking whether the target branch had a completed analysis. That probe
+// was wrong — analysisDate is set the moment the CE task finishes, which
+// is always true by the time either sync task starts, so the probe fired
+// true on attempt 1 regardless of real indexing lag and quietly removed
+// the wait. waitForCloudIndexing now takes no such probe; the ambiguity is
+// resolved by the caller, via projectSubmittedIssueCount, before it is
+// ever called. This test pins that reversion: keeping waiting is the only
+// behaviour available when the count is zero.
+func TestWaitForCloudIndexingHasNoAnalysisProbe(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := waitForCloudIndexing(ctx, logger, "syncIssueMetadata", "proj-slow",
-		func() (int, error) { return 0, nil },
-		func() (bool, error) { return false, nil })
+	err := waitForCloudIndexing(ctx, logger, "syncIssueMetadata", "proj-slow", func() (int, error) {
+		return 0, nil
+	})
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("err = %v, want context.Canceled", err)
 	}
@@ -1483,26 +1444,121 @@ func TestWaitForCloudIndexingKeepsWaitingWhenAnalysisIsNotDone(t *testing.T) {
 	}
 }
 
-// A probe failure is a diagnostic failure, not a sync failure: it must warn
-// and fall back to the original count-only backoff.
-func TestWaitForCloudIndexingFallsBackWhenProbeErrors(t *testing.T) {
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, nil))
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	err := waitForCloudIndexing(ctx, logger, "syncIssueMetadata", "proj-probe-broken",
-		func() (int, error) { return 0, nil },
-		func() (bool, error) { return false, errors.New("probe boom") })
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("err = %v, want context.Canceled — a probe error must not abort the sync", err)
+// projectSubmittedIssueCount sums submitted_issues across every
+// importProjectData record for the given cloud_project_key, ignoring
+// records for other projects.
+func TestProjectSubmittedIssueCountSumsAcrossBranches(t *testing.T) {
+	e := newTestExecutor(newMockCloudServer(), newMockAPIServer(), t.TempDir())
+	w, err := e.Store.Writer("importProjectData")
+	if err != nil {
+		t.Fatalf("Store.Writer: %v", err)
 	}
-	out := buf.String()
-	if !strings.Contains(out, "analysis-completion probe failed") {
-		t.Errorf("expected a probe-failure warning, got: %s", out)
+	writeImportRecord(t, w, "proj-a", "main", 3)
+	writeImportRecord(t, w, "proj-a", "develop", 2)
+	writeImportRecord(t, w, "proj-b", "main", 100)
+
+	if got := projectSubmittedIssueCount(e, "proj-a"); got != 5 {
+		t.Errorf("proj-a: got %d, want 5 (3 + 2 across its two branches)", got)
 	}
-	if !strings.Contains(out, "waiting for Cloud indexing to catch up") {
-		t.Errorf("expected the count-only backoff to continue, got: %s", out)
+	if got := projectSubmittedIssueCount(e, "proj-b"); got != 100 {
+		t.Errorf("proj-b: got %d, want 100", got)
+	}
+}
+
+// A project with no importProjectData records at all — never created, or
+// a --project_key filter excluded it — must read back as 0 rather than
+// erroring, since the caller only uses this to decide whether to skip the
+// indexing wait.
+func TestProjectSubmittedIssueCountReturnsZeroForUnknownProject(t *testing.T) {
+	e := newTestExecutor(newMockCloudServer(), newMockAPIServer(), t.TempDir())
+	if got := projectSubmittedIssueCount(e, "never-imported"); got != 0 {
+		t.Errorf("got %d, want 0", got)
+	}
+}
+
+// A branch whose record predates #597 (or was written by an up_to_date,
+// skipped, or failed import, none of which set submitted_issues) must
+// contribute 0 rather than erroring — the field is simply absent from the
+// JSON.
+func TestProjectSubmittedIssueCountTreatsMissingFieldAsZero(t *testing.T) {
+	e := newTestExecutor(newMockCloudServer(), newMockAPIServer(), t.TempDir())
+	w, err := e.Store.Writer("importProjectData")
+	if err != nil {
+		t.Fatalf("Store.Writer: %v", err)
+	}
+	rec, _ := json.Marshal(map[string]any{
+		"cloud_project_key": "proj-legacy", "branch": "main", "status": "up_to_date",
+	})
+	if err := w.WriteOne(rec); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if got := projectSubmittedIssueCount(e, "proj-legacy"); got != 0 {
+		t.Errorf("got %d, want 0", got)
+	}
+}
+
+// #620 review: the end-to-end counterpart to the projectSubmittedIssueCount
+// unit tests above. The mock's project-wide indexing probe (no "rules"
+// param) always reports 0, exactly like a project whose findings all
+// landed on inactive target rules, and importProjectData is seeded with
+// submitted_issues: 0. syncProjectIssues must skip the wait entirely
+// rather than entering the real backoff — proven by a short-timeout
+// context that would otherwise turn a regression into a failure rather
+// than an 8-minute hang.
+func TestSyncProjectIssuesSkipsIndexingWaitWhenNothingWasSubmitted(t *testing.T) {
+	dir := t.TempDir()
+	setupIssueTagExtract(t, dir)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/issues/search", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"issues": []map[string]any{},
+			"paging": map[string]any{"pageIndex": 1, "pageSize": 1, "total": 0},
+		})
+	})
+	mux.HandleFunc("POST /api/issues/set_tags", func(w http.ResponseWriter, _ *http.Request) {})
+	mux.HandleFunc("POST /api/issues/add_comment", func(w http.ResponseWriter, _ *http.Request) {})
+	cloudSrv := httptest.NewServer(mux)
+	t.Cleanup(cloudSrv.Close)
+	apiSrv := newMockAPIServer()
+	t.Cleanup(apiSrv.Close)
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+
+	w, err := e.Store.Writer("importProjectData")
+	if err != nil {
+		t.Fatalf("Store.Writer: %v", err)
+	}
+	writeImportRecord(t, w, "cloud-proj", "main", 0)
+
+	var logBuf bytes.Buffer
+	e.Logger = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	stats := syncProjectIssues(ctx, e, "cloud-proj", "cloud-org",
+		testServerURL, "demo-rules", NewTaskCounter("test"), loadRuleTagDefaults(e))
+	if stats.Actionable == 0 {
+		t.Fatal("setup fixture produced no actionable issues; the wait would never have been reached")
+	}
+
+	out := logBuf.String()
+	if !strings.Contains(out, "import submitted no findings for this project, nothing to wait for") {
+		t.Errorf("expected the skip-the-wait log line, got: %s", out)
+	}
+	if strings.Contains(out, "waiting for Cloud indexing to catch up") {
+		t.Errorf("must not have entered the backoff at all, got: %s", out)
+	}
+}
+
+func writeImportRecord(t *testing.T, w *common.ChunkWriter, cloudKey, branch string, submitted int) {
+	t.Helper()
+	rec, _ := json.Marshal(map[string]any{
+		"cloud_project_key": cloudKey, "branch": branch, "status": "success",
+		"submitted_issues": submitted,
+	})
+	if err := w.WriteOne(rec); err != nil {
+		t.Fatalf("seed importProjectData record: %v", err)
 	}
 }

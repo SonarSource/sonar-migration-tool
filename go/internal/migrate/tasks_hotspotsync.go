@@ -560,12 +560,20 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 
 	// 2. Wait for Cloud indexing — proves the CE task is done. Counted over
 	// issues, not hotspots: the imported findings are issues on the target.
-	_ = waitForCloudIndexing(ctx, e.Logger, "syncHotspotMetadata", input.CloudKey, func() (int, error) {
-		params := url.Values{}
-		params.Set("componentKeys", input.CloudKey)
-		params.Set("organization", input.OrgKey)
-		return e.Cloud.Issues.Count(ctx, params)
-	}, targetAnalysisComplete(ctx, e, input.CloudKey))
+	// Skipped up front when this run's import submitted zero findings for
+	// the project — the classic case being every hotspot dropped on an
+	// inactive target rule (#597).
+	if n := projectSubmittedIssueCount(e, input.CloudKey); n == 0 {
+		e.Logger.Info("syncHotspotMetadata: import submitted no findings for this project, nothing to wait for",
+			"project", input.CloudKey)
+	} else {
+		_ = waitForCloudIndexing(ctx, e.Logger, "syncHotspotMetadata", input.CloudKey, func() (int, error) {
+			params := url.Values{}
+			params.Set("componentKeys", input.CloudKey)
+			params.Set("organization", input.OrgKey)
+			return e.Cloud.Issues.Count(ctx, params)
+		})
+	}
 
 	e.Logger.Info("syncHotspotMetadata: syncing hotspots as issues",
 		"project", input.CloudKey,

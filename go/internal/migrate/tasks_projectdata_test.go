@@ -1256,6 +1256,40 @@ func TestImportBranch(t *testing.T) {
 	if result.TaskID != "AX-test-123" {
 		t.Errorf("expected AX-test-123, got %s", result.TaskID)
 	}
+	// #597: SubmittedIssueCount must carry the real post-drop total through
+	// from branchReportMeta. The fixture's one native issue (java:S100) is
+	// active and kept; its one hotspot (java:S2092) is not in
+	// getActiveProfileRules and is dropped by dropHotspotsWithInactiveRules,
+	// so the total is native-only.
+	if result.SubmittedIssueCount != 1 {
+		t.Errorf("SubmittedIssueCount = %d, want 1 (1 kept native issue, 1 hotspot dropped for an inactive rule)", result.SubmittedIssueCount)
+	}
+}
+
+// recordBranchResult must round-trip SubmittedIssueCount into the
+// "submitted_issues" field projectSubmittedIssueCount reads back (#597).
+func TestRecordBranchResultWritesSubmittedIssueCount(t *testing.T) {
+	dir := t.TempDir()
+	store := common.NewDataStore(dir)
+	w, err := store.Writer("importProjectData")
+	if err != nil {
+		t.Fatalf("Store.Writer: %v", err)
+	}
+	recordBranchResult(w, "cloud-proj1", "main", &importResult{Status: "success", SubmittedIssueCount: 7})
+
+	items, err := store.ReadAll("importProjectData")
+	if err != nil {
+		t.Fatalf("Store.ReadAll: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(items))
+	}
+	if got := extractInt32Field(items[0], "submitted_issues"); got != 7 {
+		t.Errorf("submitted_issues = %d, want 7", got)
+	}
+	if got := extractField(items[0], "cloud_project_key"); got != "cloud-proj1" {
+		t.Errorf("cloud_project_key = %q, want cloud-proj1", got)
+	}
 }
 
 func TestImportBranchSkipsNoComponents(t *testing.T) {

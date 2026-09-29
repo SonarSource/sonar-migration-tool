@@ -382,8 +382,7 @@ func countDistinctBranches(issues []matchableIssue) int {
 // ---------------------------------------------------------------------------
 
 // waitForCloudIndexing polls fetchFn with exponential backoff until a
-// non-zero total is returned, analysisDoneFn confirms the target has a
-// completed analysis, or the maximum number of retries is exhausted.
+// non-zero total is returned or the maximum number of retries is exhausted.
 //
 // This accommodates the delay between CE task completion and the issues
 // becoming searchable via /api/issues/search. If the max retries are
@@ -391,31 +390,32 @@ func countDistinctBranches(issues []matchableIssue) int {
 // sync proceeds with zero matches — the alternative would be a hard
 // failure that blocks later projects unnecessarily.
 //
-// analysisDoneFn exists because a zero count is ambiguous and, until #597,
-// this loop could not tell the two cases apart (#597):
+// A zero count is ambiguous on its own — it means either "not searchable
+// yet, keep waiting" or "this project genuinely has no issues on the
+// target, and the count can never rise." This function does not try to
+// tell the two apart; callers must rule the second case out BEFORE calling
+// it, using projectSubmittedIssueCount (#597), and skip the call entirely
+// when nothing was submitted. See that function's doc comment for why: a
+// project whose every finding was dropped on an inactive target rule
+// burned the full 8m17s backoff here and then did nothing, on 7 of the 17
+// migrate runs archived for #597.
 //
-//   - the compute engine result is not searchable yet, so wait; or
-//   - the project genuinely carries no issues on the target, in which case
-//     the count can never rise and every retry is pure waste.
+// An earlier version of this fix tried to resolve the ambiguity inside
+// this function, by probing whether the target branch had a completed
+// analysis. That probe was wrong: SonarQube Cloud's Compute Engine writes
+// a branch's analysisDate as soon as the CE task itself finishes, which is
+// exactly the event this wait exists to wait *past* — every project's
+// analysisDate is already set by the time either sync task starts, so the
+// probe returned true on attempt 1 regardless of whether search indexing
+// had caught up, silently removing the wait for the very case (real
+// indexing lag) it was built to survive. Caught in review on #620.
 //
-// The second case is not hypothetical. A project whose every finding was
-// dropped on an inactive target rule ("converted=0 droppedInactiveRule=3")
-// burned the full 8m17s backoff and then did nothing, on 7 of the 17
-// migrate runs archived for #597 — about 58 minutes of dead wall clock, and
-// 75% of one 11-minute run. It also made syncHotspotMetadata look like a
-// ~497s size-independent task when it really costs ~0.01s.
-//
-// The probe asks a question that has a useful answer either way: does the
-// target project report a completed analysis? A probe error is non-fatal
-// and falls back to the old count-only backoff, because a sync should not
-// fail over a diagnostic call.
-//
-// Retries are still logged (task/project-scoped) because the backoff can
-// run up to ~8 minutes (10+20+40+60*7s) with no other activity for this
-// project: without a log line here, that wait is indistinguishable from a
-// hang — the run-wide progress percentage can't move either, since it only
+// Retries are logged (task/project-scoped) because the backoff can run up
+// to ~8 minutes (10+20+40+60*7s) with no other activity for this project:
+// without a log line here, that wait is indistinguishable from a hang —
+// the run-wide progress percentage can't move either, since it only
 // advances once this project's whole sync completes.
-func waitForCloudIndexing(ctx context.Context, logger *slog.Logger, task, projectKey string, fetchFn func() (int, error), analysisDoneFn func() (bool, error)) error {
+func waitForCloudIndexing(ctx context.Context, logger *slog.Logger, task, projectKey string, fetchFn func() (int, error)) error {
 	const (
 		initialDelay = 10 * time.Second
 		maxDelay     = 60 * time.Second
@@ -430,18 +430,6 @@ func waitForCloudIndexing(ctx context.Context, logger *slog.Logger, task, projec
 		}
 		if total > 0 {
 			return nil
-		}
-		if analysisDoneFn != nil {
-			done, probeErr := analysisDoneFn()
-			switch {
-			case probeErr != nil:
-				logAPIWarn(logger, fmt.Sprintf("%s: analysis-completion probe failed, falling back to the count-only backoff", task),
-					probeErr, "project", projectKey, "attempt", attempt+1)
-			case done:
-				logger.Info(fmt.Sprintf("%s: target analysis is complete and the project has no indexed issues, nothing to wait for", task),
-					"project", projectKey, "attempt", attempt+1)
-				return nil
-			}
 		}
 		logger.Info(fmt.Sprintf("%s: waiting for Cloud indexing to catch up", task),
 			"project", projectKey, "attempt", attempt+1, "max_attempts", maxRetries, "retry_in", delay)
@@ -460,26 +448,40 @@ func waitForCloudIndexing(ctx context.Context, logger *slog.Logger, task, projec
 	return nil
 }
 
-// targetAnalysisComplete returns a probe reporting whether the target
-// project has at least one branch carrying an analysis date, i.e. the
-// compute-engine task importProjectData submitted has landed (#597).
+// projectSubmittedIssueCount sums, across every branch importProjectData
+// recorded for cloudKey in this run (or an earlier attempt of a resumed
+// run — the store accumulates), the number of findings actually packaged
+// into that branch's scanner report: native issues plus hotspots
+// converted to issues, both after dropIssuesWithInactiveRules (#597).
 //
-// This is the question waitForCloudIndexing actually wants answered. The
-// issue count it polls is only a proxy for it, and a proxy that is stuck at
-// zero for any project that legitimately has no issues.
-func targetAnalysisComplete(ctx context.Context, e *Executor, cloudKey string) func() (bool, error) {
-	return func() (bool, error) {
-		branches, err := e.Cloud.Branches.List(ctx, cloudKey)
-		if err != nil {
-			return false, err
-		}
-		for _, b := range branches {
-			if b.AnalysisDate != "" {
-				return true, nil
-			}
-		}
-		return false, nil
+// This is the authoritative "did we submit anything for this project"
+// signal, as opposed to the target's branch analysisDate (set the moment
+// the CE task finishes, before indexing) or the target's issue count
+// (subject to the very indexing lag waitForCloudIndexing exists for). It
+// lets a caller rule out "genuinely nothing to index" before calling
+// waitForCloudIndexing at all, rather than trying to detect that case from
+// inside the wait with an ambiguous signal — see waitForCloudIndexing's
+// doc comment for the probe design that got this wrong on #620.
+//
+// A branch record that predates this field (an up_to_date, skipped, or
+// failed branch, or one imported before #597) reads back as 0, which only
+// ever under-counts: it cannot turn a project that really has issues into
+// a false "nothing submitted", because any such project's issue count was
+// already non-zero before this run and waitForCloudIndexing's first fetch
+// returns immediately without ever consulting this count.
+func projectSubmittedIssueCount(e *Executor, cloudKey string) int {
+	records, err := e.Store.ReadAll("importProjectData")
+	if err != nil {
+		return 0
 	}
+	total := 0
+	for _, rec := range records {
+		if extractField(rec, "cloud_project_key") != cloudKey {
+			continue
+		}
+		total += int(extractInt32Field(rec, "submitted_issues"))
+	}
+	return total
 }
 
 // ---------------------------------------------------------------------------
@@ -601,13 +603,18 @@ func syncProjectIssues(ctx context.Context, e *Executor, cloudKey, orgKey, serve
 	}
 
 	// 2. Wait for Cloud indexing — proves the CE task is done so per-
-	// issue searches return real data.
-	if err := waitForCloudIndexing(ctx, e.Logger, "syncIssueMetadata", cloudKey, func() (int, error) {
+	// issue searches return real data. Skipped up front when this run's
+	// import submitted zero findings for the project: the target's issue
+	// count can then never rise, so every retry would be pure waste (#597).
+	if n := projectSubmittedIssueCount(e, cloudKey); n == 0 {
+		e.Logger.Info("syncIssueMetadata: import submitted no findings for this project, nothing to wait for",
+			"project", cloudKey)
+	} else if err := waitForCloudIndexing(ctx, e.Logger, "syncIssueMetadata", cloudKey, func() (int, error) {
 		params := url.Values{}
 		params.Set("componentKeys", cloudKey)
 		params.Set("organization", orgKey)
 		return e.Cloud.Issues.Count(ctx, params)
-	}, targetAnalysisComplete(ctx, e, cloudKey)); err != nil {
+	}); err != nil {
 		logAPIWarn(e.Logger, "syncIssueMetadata: indexing wait failed", err, "project", cloudKey)
 		return stats
 	}
