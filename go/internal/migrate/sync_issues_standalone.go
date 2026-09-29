@@ -218,7 +218,12 @@ func RunSyncIssues(ctx context.Context, cfg SyncIssuesConfig) (SyncIssuesSummary
 		func(gctx context.Context, t syncTarget) {
 			logger.Info("sync-issues: syncing project", "source_key", t.Key, "cloud_project_key", t.CloudProjectKey, "org", t.OrgKey)
 
-			iStats := syncProjectIssues(gctx, e, t.CloudProjectKey, t.OrgKey, t.ServerURL, t.Key, counter, ruleDefaults)
+			// No importProjectData runs here, so there is nothing to index: the
+			// zero submittedIssueIndex keeps the original always-wait path (#597).
+			iStats := syncProjectIssues(gctx, e, syncIssuesInput{
+				CloudKey: t.CloudProjectKey, OrgKey: t.OrgKey, ServerURL: t.ServerURL, ServerKey: t.Key,
+				Counter: counter, RuleDefaults: ruleDefaults, Submitted: submittedIssueIndex{},
+			})
 			issuesActionable.Add(iStats.Actionable)
 			issuesSynced.Add(iStats.A)
 			issuesMismatch.Add(iStats.B)

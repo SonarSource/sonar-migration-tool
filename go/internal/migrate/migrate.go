@@ -573,6 +573,8 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 			time.Duration(float64(totalPoints)*common.SecondsPerHistoryPoint*float64(time.Second)))
 	}
 
+	seedProjectScaledIssueSyncDuration(executor)
+
 	executor.Progress.OnUpdate(cfg.ProgressCallback)
 	executor.Progress.Start(ctx, 10*time.Second)
 	defer executor.Progress.Stop()
@@ -596,6 +598,39 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 
 	fmt.Printf("%s %s - Migration Complete: %s\n", version.ToolName, version.Version, runIDOut)
 	return runIDOut, nil
+}
+
+// seedProjectScaledIssueSyncDuration applies scaledIssueSyncDuration's
+// result to e's tracker, if any. Split out of RunMigrate, which was
+// already at its cognitive-complexity budget, so this seeding logic
+// carries its own rather than pushing that function over it.
+func seedProjectScaledIssueSyncDuration(e *Executor) {
+	if d, ok := scaledIssueSyncDuration(projectsInScope(e)); ok {
+		e.Progress.SetExpectedDuration("syncIssueMetadata", d)
+	}
+}
+
+// scaledIssueSyncDuration computes syncIssueMetadata's expected duration
+// scaled by n, the number of projects in scope (#597) — the only migrate
+// task whose duration has a positive fit against a size the migrate path
+// knows for free (R^2 0.36 on project count over 17 archived runs; every
+// other task scored negative, i.e. worse than a constant).
+//
+// ok is false, meaning "leave the seeded constant alone", when n <= 0 (no
+// projects to scale by) or when the scaled value would not exceed the
+// constant — a one- or two-project run keeps the constant rather than
+// seeding well under a second, because the fit is real but weak, and
+// under-seeding the task would hand the ETA the same wrong-proportions
+// problem #598 set out to fix.
+func scaledIssueSyncDuration(n int) (time.Duration, bool) {
+	if n <= 0 {
+		return 0, false
+	}
+	scaled := time.Duration(float64(n) * common.SecondsPerProjectIssueSync * float64(time.Second))
+	if scaled <= common.ExpectedTaskDuration("syncIssueMetadata") {
+		return 0, false
+	}
+	return scaled, true
 }
 
 // validateMigrateConfig validates the project-key renaming pattern syntax

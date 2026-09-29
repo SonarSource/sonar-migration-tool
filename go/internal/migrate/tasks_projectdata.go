@@ -573,6 +573,8 @@ func recordBranchResult(w *common.ChunkWriter, cloudKey, branchName string, resu
 		// were dropped from the report because of them.
 		"unsupported_languages": result.UnsupportedLanguages,
 		"excluded_files":        result.ExcludedFiles,
+		// #597 — read back by loadSubmittedIssueIndex.
+		"submitted_issues": result.SubmittedIssueCount,
 	})
 	w.WriteOne(record) //nolint:errcheck
 }
@@ -612,6 +614,14 @@ type importResult struct {
 	// report because their language has no target quality profile (#474,
 	// --unsupported_languages=exclude).
 	ExcludedFiles int
+	// SubmittedIssueCount is the number of findings actually packaged into
+	// this branch's report — native issues, hotspots converted to issues and
+	// external issues, after dropIssuesWithInactiveRules — regardless of
+	// import status. Read by loadSubmittedIssueIndex (#597) so
+	// syncIssueMetadata/syncHotspotMetadata can tell "this project
+	// genuinely has nothing on the target" apart from "indexing hasn't
+	// caught up yet" before waiting on the latter.
+	SubmittedIssueCount int
 }
 
 func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*importResult, error) {
@@ -684,6 +694,7 @@ func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*i
 	return &importResult{
 		Status: "success", TaskID: result.TaskID, SourcePurged: meta.SourcePurged,
 		UnsupportedLanguages: meta.UnsupportedLanguages, ExcludedFiles: meta.ExcludedFiles,
+		SubmittedIssueCount: meta.SubmittedIssueCount,
 	}, nil
 }
 
@@ -707,6 +718,12 @@ type branchReportMeta struct {
 	// when the branch itself migrated successfully.
 	UnsupportedLanguages []string
 	ExcludedFiles        int
+	// SubmittedIssueCount carries every finding the report submits —
+	// native, hotspot-converted and external, post-drop — through to the
+	// importResult for #597. External issues count: syncIssueMetadata syncs
+	// them too, so a project with only external findings still needs the
+	// indexing wait.
+	SubmittedIssueCount int
 }
 
 // buildProtoSources maps each file component's source text onto its
@@ -1005,6 +1022,7 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	return zipBytes, branchReportMeta{
 		ProjectVersion: projectVersion, SourcePurged: sourcePurged,
 		UnsupportedLanguages: unsupportedLangKeys, ExcludedFiles: excludedFiles,
+		SubmittedIssueCount: len(issues) + len(extIssues),
 	}, nil, nil
 }
 

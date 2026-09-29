@@ -108,6 +108,38 @@ func readExtractItems(e *Executor, taskKey string) ([]structure.ExtractItem, err
 	return structure.ReadExtractData(e.ExportDir, e.Mapping, taskKey)
 }
 
+// projectsInScope counts the extracted projects this run will actually
+// migrate, honouring --project_key the same way runCreateProjects does
+// (#536). A pure read of already-extracted data with no API calls, so
+// RunMigrate can size per-project task seeds before a single task has
+// started (#597) — the same shape as projectHistoryPointTotal.
+//
+// It counts source projects, not (project, target org) pairs, so a run that
+// fans one source project out across several target orgs is under-counted —
+// and since #612 a project can also be redirected to a specific org by its
+// own projects.csv cell. That is deliberate: the caller floors the seed at
+// the task's constant, so an under-count cannot produce an absurdly small
+// expected duration, and a seed does not justify replaying resolveRowOrg's
+// mapping here.
+func projectsInScope(e *Executor) int {
+	projects, err := readExtractItems(e, "getProjects")
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, p := range projects {
+		key := extractField(p.Data, "key")
+		if key == "" {
+			continue
+		}
+		if e.ProjectKeyRe != nil && !e.ProjectKeyRe.MatchString(key) {
+			continue
+		}
+		n++
+	}
+	return n
+}
+
 // extractScope is the (server, project, branch) slice of an extract task
 // that one project-data loader cares about. An empty Branch matches every
 // branch.

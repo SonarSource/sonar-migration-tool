@@ -390,6 +390,26 @@ func countDistinctBranches(issues []matchableIssue) int {
 // sync proceeds with zero matches — the alternative would be a hard
 // failure that blocks later projects unnecessarily.
 //
+// A zero count is ambiguous on its own — it means either "not searchable
+// yet, keep waiting" or "this project genuinely has no issues on the
+// target, and the count can never rise." This function does not try to
+// tell the two apart; callers must rule the second case out BEFORE calling
+// it, using submittedIssueIndex.nothingSubmitted (#597), and skip the call entirely
+// when nothing was submitted. See that function's doc comment for why: a
+// project whose every finding was dropped on an inactive target rule
+// burned the full 8m17s backoff here and then did nothing, on 7 of the 17
+// migrate runs archived for #597.
+//
+// An earlier version of this fix tried to resolve the ambiguity inside
+// this function, by probing whether the target branch had a completed
+// analysis. That probe was wrong: SonarQube Cloud's Compute Engine writes
+// a branch's analysisDate as soon as the CE task itself finishes, which is
+// exactly the event this wait exists to wait *past* — every project's
+// analysisDate is already set by the time either sync task starts, so the
+// probe returned true on attempt 1 regardless of whether search indexing
+// had caught up, silently removing the wait for the very case (real
+// indexing lag) it was built to survive. Caught in review on #620.
+//
 // Retries are logged (task/project-scoped) because the backoff can run up
 // to ~8 minutes (10+20+40+60*7s) with no other activity for this project:
 // without a log line here, that wait is indistinguishable from a hang —
@@ -428,6 +448,91 @@ func waitForCloudIndexing(ctx context.Context, logger *slog.Logger, task, projec
 	return nil
 }
 
+// submittedIssueIndex records, per target project, how many findings
+// importProjectData packaged into that project's scanner reports during
+// this run (#597): native issues, hotspots converted to issues, and
+// external issues, all after dropIssuesWithInactiveRules.
+//
+// It exists so syncIssueMetadata and syncHotspotMetadata can rule out the
+// one case where a zero issue count on the target is a fact rather than
+// indexing lag, and skip waitForCloudIndexing for it. The signal comes from
+// the source side on purpose. Both target-side signals tried are wrong:
+// the issue count is subject to the very lag the wait exists for, and a
+// branch's analysisDate is set the moment the CE task finishes, before
+// indexing (#620 review).
+//
+// Built once per task by loadSubmittedIssueIndex, the same way
+// loadRuleTagDefaults builds its index, and read-only afterwards, so it is
+// safe to share across the per-project fan-out.
+//
+// The zero value means "nothing known", and nothingSubmitted then always
+// reports false, so a caller that has no index keeps the original
+// always-wait behaviour. The standalone sync-issues command relies on that:
+// it never runs importProjectData, so it has no records to read.
+type submittedIssueIndex struct {
+	loaded bool
+	// counts sums submitted_issues per cloud_project_key.
+	counts map[string]int
+	// unknown marks a project with at least one record that carries no
+	// submitted_issues field, i.e. one written before #597 and read back by
+	// a resumed run. Its true count is unknowable, so it keeps waiting.
+	unknown map[string]bool
+}
+
+// loadSubmittedIssueIndex reads every importProjectData record once.
+//
+// A read failure is logged and yields the zero value, which falls back to
+// waiting for every project. It must not yield "nothing submitted": that
+// is the least conservative answer available, and an I/O error is no
+// evidence for it.
+func loadSubmittedIssueIndex(e *Executor) submittedIssueIndex {
+	records, err := e.Store.ReadAll("importProjectData")
+	if err != nil {
+		e.Logger.Warn("could not read importProjectData results; every project will wait for Cloud indexing as before",
+			"err", err)
+		return submittedIssueIndex{}
+	}
+	idx := submittedIssueIndex{loaded: true, counts: map[string]int{}, unknown: map[string]bool{}}
+	for _, rec := range records {
+		key := extractField(rec, "cloud_project_key")
+		if key == "" {
+			continue
+		}
+		n, ok := submittedIssuesField(rec)
+		if !ok {
+			idx.unknown[key] = true
+		}
+		idx.counts[key] += n
+	}
+	return idx
+}
+
+// submittedIssuesField reads a record's submitted_issues value, and whether
+// the field was present at all.
+func submittedIssuesField(rec json.RawMessage) (int, bool) {
+	var r struct {
+		SubmittedIssues *int `json:"submitted_issues"`
+	}
+	if err := json.Unmarshal(rec, &r); err != nil || r.SubmittedIssues == nil {
+		return 0, false
+	}
+	return *r.SubmittedIssues, true
+}
+
+// nothingSubmitted reports whether cloudKey is known to have had zero
+// findings submitted to the target in this run, so waitForCloudIndexing
+// can be skipped. It is true only when the index loaded, the project has
+// at least one import record, every one of those records carries the
+// field, and they sum to zero. Anything less certain reports false and the
+// caller waits exactly as it did before #597.
+func (x submittedIssueIndex) nothingSubmitted(cloudKey string) bool {
+	if !x.loaded || x.unknown[cloudKey] {
+		return false
+	}
+	n, seen := x.counts[cloudKey]
+	return seen && n == 0
+}
+
 // ---------------------------------------------------------------------------
 // Expected error classification
 // ---------------------------------------------------------------------------
@@ -459,6 +564,7 @@ func isExpectedTransitionError(err error) bool {
 func runSyncIssueMetadata(ctx context.Context, e *Executor) error {
 	counter := TaskCounterFromContext(ctx)
 	ruleDefaults := loadRuleTagDefaults(e)
+	submitted := loadSubmittedIssueIndex(e)
 	err := forEachMigrateItem(ctx, e, "syncIssueMetadata", "createProjects",
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
 			if isFailedMigrateRecord(item) {
@@ -471,7 +577,10 @@ func runSyncIssueMetadata(ctx context.Context, e *Executor) error {
 			if cloudKey == "" || orgKey == "" {
 				return nil
 			}
-			stats := syncProjectIssues(ctx, e, cloudKey, orgKey, serverURL, serverKey, counter, ruleDefaults)
+			stats := syncProjectIssues(ctx, e, syncIssuesInput{
+				CloudKey: cloudKey, OrgKey: orgKey, ServerURL: serverURL, ServerKey: serverKey,
+				Counter: counter, RuleDefaults: ruleDefaults, Submitted: submitted,
+			})
 			record, _ := json.Marshal(map[string]any{
 				"cloud_project_key": cloudKey,
 				"synced":            stats.A,
@@ -506,6 +615,18 @@ type projectSyncStats struct {
 	AckDemoted int64
 }
 
+// syncIssuesInput bundles syncProjectIssues' per-project arguments,
+// keeping it under go:S107's parameter-count limit (#620 review) and
+// matching syncHotspotInput's existing shape for the sibling task.
+type syncIssuesInput struct {
+	CloudKey, OrgKey, ServerURL, ServerKey string
+	Counter                                *TaskCounter
+	RuleDefaults                           *ruleTagDefaults
+	// Submitted is shared across every project in the task (#597). Its
+	// zero value keeps the original always-wait behaviour.
+	Submitted submittedIssueIndex
+}
+
 // ---------------------------------------------------------------------------
 // Per-project sync
 // ---------------------------------------------------------------------------
@@ -525,13 +646,13 @@ type projectSyncStats struct {
 // issue and resolves it in memory. For projects where actionable is in
 // the dozens, this is dramatically faster — and the 10k cap no longer
 // bites large projects whose total issue count exceeds it.
-func syncProjectIssues(ctx context.Context, e *Executor, cloudKey, orgKey, serverURL, serverKey string, counter *TaskCounter, ruleDefaults *ruleTagDefaults) projectSyncStats {
+func syncProjectIssues(ctx context.Context, e *Executor, input syncIssuesInput) projectSyncStats {
 	var stats projectSyncStats
 
 	// 1. Load source issues + pre-filter to actionable.
-	sourceIssues := loadMatchableIssues(e, serverURL, serverKey, ruleDefaults)
+	sourceIssues := loadMatchableIssues(e, input.ServerURL, input.ServerKey, input.RuleDefaults)
 	if len(sourceIssues) == 0 {
-		e.Logger.Debug("syncIssueMetadata: no source issues", "project", cloudKey)
+		e.Logger.Debug("syncIssueMetadata: no source issues", "project", input.CloudKey)
 		return stats
 	}
 	var actionable []matchableIssue
@@ -542,25 +663,30 @@ func syncProjectIssues(ctx context.Context, e *Executor, cloudKey, orgKey, serve
 	}
 	stats.Actionable = int64(len(actionable))
 	if len(actionable) == 0 {
-		e.Logger.Debug("syncIssueMetadata: no actionable source issues after filter", "project", cloudKey, "source_total", len(sourceIssues))
+		e.Logger.Debug("syncIssueMetadata: no actionable source issues after filter", "project", input.CloudKey, "source_total", len(sourceIssues))
 		return stats
 	}
 
 	// 2. Wait for Cloud indexing — proves the CE task is done so per-
-	// issue searches return real data.
-	if err := waitForCloudIndexing(ctx, e.Logger, "syncIssueMetadata", cloudKey, func() (int, error) {
+	// issue searches return real data. Skipped up front when this run's
+	// import submitted zero findings for the project: the target's issue
+	// count can then never rise, so every retry would be pure waste (#597).
+	if input.Submitted.nothingSubmitted(input.CloudKey) {
+		e.Logger.Info("syncIssueMetadata: import submitted no findings for this project, nothing to wait for",
+			"project", input.CloudKey)
+	} else if err := waitForCloudIndexing(ctx, e.Logger, "syncIssueMetadata", input.CloudKey, func() (int, error) {
 		params := url.Values{}
-		params.Set("componentKeys", cloudKey)
-		params.Set("organization", orgKey)
+		params.Set("componentKeys", input.CloudKey)
+		params.Set("organization", input.OrgKey)
 		return e.Cloud.Issues.Count(ctx, params)
 	}); err != nil {
-		logAPIWarn(e.Logger, "syncIssueMetadata: indexing wait failed", err, "project", cloudKey)
+		logAPIWarn(e.Logger, "syncIssueMetadata: indexing wait failed", err, "project", input.CloudKey)
 		return stats
 	}
 
 	breakdown := classifyActionableReasons(actionable)
 	e.Logger.Info("syncIssueMetadata: syncing pairs",
-		"project", cloudKey,
+		"project", input.CloudKey,
 		"source_total", len(sourceIssues),
 		"actionable", len(actionable),
 		"branches", countDistinctBranches(sourceIssues),
@@ -576,17 +702,17 @@ func syncProjectIssues(ctx context.Context, e *Executor, cloudKey, orgKey, serve
 	// source by value, and stats.{A,B,C} use atomic adds.
 	// Public base URL for back-links — prefer the SQS sonar.core.serverBaseURL
 	// setting over the (often localhost) connection URL (#321).
-	baseURL := resolveSourceBaseURL(e, serverURL)
+	baseURL := resolveSourceBaseURL(e, input.ServerURL)
 
 	var a, b, c atomic.Int64
-	label := "Project key " + cloudKey + " issue sync:"
+	label := "Project key " + input.CloudKey + " issue sync:"
 	// Bounded, not dynamic: this loop is nested inside
 	// runSyncIssueMetadata's own per-project fan-out, so both levels
 	// reading Current() would put Current()² calls in flight — see
 	// nestedSyncLoopConcurrency.
 	runProjectSyncLoopBounded(ctx, e, actionable, label, 20, nestedSyncLoopConcurrency,
 		func(gctx context.Context, src matchableIssue) {
-			outcome := resolveAndSyncIssue(gctx, e, cloudKey, orgKey, baseURL, serverKey, src, counter)
+			outcome := resolveAndSyncIssue(gctx, e, input.CloudKey, input.OrgKey, baseURL, input.ServerKey, src, input.Counter)
 			switch outcome {
 			case syncOutcomeSynced:
 				a.Add(1)
@@ -607,7 +733,7 @@ func syncProjectIssues(ctx context.Context, e *Executor, cloudKey, orgKey, serve
 	// default-verbosity run.
 	if stats.B+stats.C > 0 {
 		e.Logger.Warn("syncIssueMetadata: triaged source issues without a unique Cloud counterpart — their status, comments and tags were NOT migrated (run with --debug for the per-issue rule/file/line)",
-			"project", cloudKey,
+			"project", input.CloudKey,
 			"actionable", stats.Actionable,
 			"synced", stats.A,
 			"ambiguous_line", stats.B,
