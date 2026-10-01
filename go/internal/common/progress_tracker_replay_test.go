@@ -182,7 +182,7 @@ func TestTrackerETAIsCloseToLinearOnRecordedRun(t *testing.T) {
 	if len(ticks) < 8 {
 		t.Fatalf("got %d ticks, want at least 8 — the fixture should cover a ~98s run", len(ticks))
 	}
-	assertCloseToLinear(t, ticks, recordedMigrateTotal.Seconds(), 10)
+	assertCloseToLinear(t, ticks, recordedMigrateTotal.Seconds(), normalRun)
 }
 
 // TestTrackerProgressNeverGoesBackwardsOnRecordedRun: whatever the ETA
