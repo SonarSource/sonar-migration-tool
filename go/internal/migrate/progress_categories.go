@@ -6,8 +6,8 @@ package migrate
 
 import "github.com/sonar-solutions/sonar-migration-tool/internal/common"
 
-// migrateProjectDataOnlyTasks is the ProjectData bucket for progress
-// weighting (#520) — just importProjectData. migrateIssueSyncTasks
+// migrateProjectDataOnlyTasks is the ProjectData bucket (#520) — just
+// importProjectData. migrateIssueSyncTasks
 // (planner.go) already lists exactly {syncHotspotMetadata,
 // syncIssueMetadata} and is reused directly as the IssueSync bucket.
 var migrateProjectDataOnlyTasks = map[string]bool{
@@ -38,8 +38,8 @@ var migrateProjectConfigTasks = map[string]bool{
 	"setProjectBinding":                    true,
 }
 
-// CategorizeTask buckets a migrate task name for run-wide progress
-// weighting (#520). Anything not explicitly listed is CategoryGeneral —
+// CategorizeTask buckets a migrate task name into one of the four stages
+// the run report's phase breakdown shows (#520). Anything not explicitly listed is CategoryGeneral —
 // mapping-generation, org-level create/configure/permission/portfolio/rule
 // tasks, and delete/reset tasks, none of which loop over projects as their
 // primary axis.

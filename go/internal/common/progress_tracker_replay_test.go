@@ -5,7 +5,6 @@
 package common
 
 import (
-	"math"
 	"testing"
 	"time"
 )
@@ -87,6 +86,11 @@ var recordedMigrateRun = []struct {
 
 const recordedMigrateTotal = 98134 * time.Millisecond
 
+// recordedMigratePhaseStartsMs is when each of that run's six phases
+// began, read off the same log. The tracker's ETA follows the plan's
+// phases (#621), so the replay hands it the plan in its real shape.
+var recordedMigratePhaseStartsMs = []int{2266, 2270, 5819, 8907, 9877, 87106}
+
 // replayRecordedRun drives the fixture through a Tracker on a virtual
 // clock and returns one (eta, trueRemaining) pair per interval tick.
 // Deterministic: no sleeps, no wall-clock reads, so the numbers the
@@ -100,30 +104,23 @@ type replayTick struct {
 	trueRemaining float64
 }
 
-// pctETA is the estimate the pre-#564 code produced at this tick:
-// extrapolate the total run length from the reported percentage, then
-// subtract what has elapsed. Recomputed here from the same snapshot the
-// work-based ETA came from, so the two are compared on identical inputs.
-func (r replayTick) pctETA() float64 {
-	total := r.elapsed * (100 / r.percent)
-	if total < r.elapsed {
-		total = r.elapsed
-	}
-	return total - r.elapsed
-}
-
 func replayRecordedRun(t *testing.T, interval time.Duration) (ticks []replayTick) {
 	t.Helper()
 
 	origin := time.Date(2026, 9, 22, 16, 18, 29, 0, time.UTC)
 	vnow := origin
 
-	names := make([]string, 0, len(recordedMigrateRun))
+	plan := make([][]string, len(recordedMigratePhaseStartsMs))
 	for _, task := range recordedMigrateRun {
-		names = append(names, task.name)
+		phase := 0
+		for i, startMs := range recordedMigratePhaseStartsMs {
+			if task.startMs >= startMs {
+				phase = i
+			}
+		}
+		plan[phase] = append(plan[phase], task.name)
 	}
-	tr := NewTracker(testLogger(), [][]string{names}, categorizeRecordedTask,
-		DefaultCategoryWeights, ExpectedTaskDuration)
+	tr := NewTracker(testLogger(), plan, ExpectedTaskDuration)
 	tr.start = origin
 	tr.now = func() time.Time { return vnow }
 
@@ -176,60 +173,16 @@ func replayRecordedRun(t *testing.T, interval time.Duration) (ticks []replayTick
 	return ticks
 }
 
-// categorizeRecordedTask mirrors migrate.CategorizeTask for the fixture's
-// task names. Duplicated rather than imported because common cannot
-// depend on migrate; only the three non-General tasks in this timeline
-// need naming.
-func categorizeRecordedTask(name string) TaskCategory {
-	switch name {
-	case "importProjectData":
-		return CategoryProjectData
-	case "syncIssueMetadata", "syncHotspotMetadata":
-		return CategoryIssueSync
-	case "createProjects", "getProjectIds", "setProjectProfiles", "setProjectGates",
-		"setProjectGroupPermissions", "setProjectSettings", "setProjectTags",
-		"setProjectLinks", "setProjectSourceLink", "setProjectWebhooks",
-		"setNewCodePeriods", "grantMigrationUserProjectPermissions",
-		"matchProjectRepos", "setProjectBinding":
-		return CategoryProjectConfig
-	default:
-		return CategoryGeneral
-	}
-}
-
-// TestTrackerETABeatsPercentageExtrapolationOnRecordedRun is the
-// regression guard for #564's ETA rework: on a real run's timeline, the
-// ETA derived from expected work remaining must be closer to the truth,
-// on average, than extrapolating from the reported percentage the way the
-// pre-#564 code did.
-//
-// Asserted as a comparison rather than against a fixed second count on
-// purpose. An absolute bound needs a magic number that either fails to
-// separate the two formulas or has to be retuned whenever the seeds move;
-// this states the actual claim, cannot be satisfied by reverting the
-// change, and stays meaningful if SeedTaskDurations is ever re-mined.
-func TestTrackerETABeatsPercentageExtrapolationOnRecordedRun(t *testing.T) {
+// TestTrackerETAIsCloseToLinearOnRecordedRun holds the one-project run to
+// the same bar as #621's 78-project one (see assertCloseToLinear): it is
+// the opposite shape, with seeds far too big rather than far too small,
+// and the fix for one must not break the other.
+func TestTrackerETAIsCloseToLinearOnRecordedRun(t *testing.T) {
 	ticks := replayRecordedRun(t, 10*time.Second)
 	if len(ticks) < 8 {
 		t.Fatalf("got %d ticks, want at least 8 — the fixture should cover a ~98s run", len(ticks))
 	}
-
-	var work, pct float64
-	for _, tk := range ticks {
-		work += math.Abs(tk.eta - tk.trueRemaining)
-		pct += math.Abs(tk.pctETA() - tk.trueRemaining)
-	}
-	work /= float64(len(ticks))
-	pct /= float64(len(ticks))
-
-	t.Logf("mean absolute ETA error over %d ticks: work-based %.1fs, percentage-based %.1fs", len(ticks), work, pct)
-	if work >= pct {
-		t.Errorf("work-based ETA error %.1fs is not better than percentage extrapolation's %.1fs", work, pct)
-		for i, tk := range ticks {
-			t.Logf("  tick %d: true %.1fs left — work-based %.0fs (%+.1f), percentage-based %.0fs (%+.1f)",
-				i+1, tk.trueRemaining, tk.eta, tk.eta-tk.trueRemaining, tk.pctETA(), tk.pctETA()-tk.trueRemaining)
-		}
-	}
+	assertCloseToLinear(t, ticks, recordedMigrateTotal.Seconds(), 10)
 }
 
 // TestTrackerProgressNeverGoesBackwardsOnRecordedRun: whatever the ETA

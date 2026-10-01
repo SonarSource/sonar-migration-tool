@@ -557,7 +557,7 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 
 	// Overall progress/ETA logging (#520) — every 10s for the duration of
 	// the run, stopped once phases finish (success or error).
-	executor.Progress = common.NewTracker(logger, phases, CategorizeTask, common.DefaultCategoryWeights, common.ExpectedTaskDuration)
+	executor.Progress = common.NewTracker(logger, phases, common.ExpectedTaskDuration)
 
 	// #554/#564: project-history replay runs inline inside importProjectData
 	// rather than as its own TaskDef, so without this it's invisible to the
@@ -568,7 +568,7 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 	if totalPoints := projectHistoryPointTotal(executor); totalPoints > 0 {
 		executor.HistoryProgress = common.NewProgressLogger(logger, "migrateProjectHistory", totalPoints)
 		executor.Progress.Registry().Register("migrateProjectHistory", executor.HistoryProgress)
-		executor.Progress.AddPseudoTask(common.CategoryProjectData, "migrateProjectHistory")
+		executor.Progress.AddPseudoTask("migrateProjectHistory", "importProjectData")
 		executor.Progress.SetExpectedDuration("migrateProjectHistory",
 			time.Duration(float64(totalPoints)*common.SecondsPerHistoryPoint*float64(time.Second)))
 	}
