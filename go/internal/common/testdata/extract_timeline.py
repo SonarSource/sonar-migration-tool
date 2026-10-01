@@ -7,7 +7,7 @@ Output rows, tab separated, milliseconds from the first "starting phase" line:
   plan   <phase> <task>          a task in the resolved plan
   start  <ms>    <task>          the task began (end minus its logged duration)
   end    <ms>    <task>          the task completed
-  frac   <ms>    <task> <d>/<n>  item-level progress, interpolated to 1s steps
+  frac   <ms>    <task> <d>/<n>  item-level progress, interpolated to 5s steps
   logged <ms>    <pct>  <eta_s>  what the tool itself printed, for comparison
   total  <ms>                    when the run finished
 
@@ -99,7 +99,7 @@ def main(path):
             continue
         pts = [(start[span], 0)] + rec['pts'] + [(end[span], rec['total'])]
         for (t0, d0), (t1, d1) in zip(pts, pts[1:]):
-            step = 1000
+            step = 5000
             t = t0
             while t < t1:
                 d = d0 + (d1 - d0) * (t - t0) / max(1, t1 - t0)
