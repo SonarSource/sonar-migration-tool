@@ -976,6 +976,81 @@ func TestLoadMigrateConfigFileObjectsAndProjectKey_CommandSectionedFallsBackToNe
 	}
 }
 
+// #592: "project_key_regexp" is the deprecated "project_key"'s
+// replacement. Both round-trip; project_key_regexp wins when both are set.
+func TestLoadMigrateConfigFileProjectKeyRegexp_FlatShape(t *testing.T) {
+	body := `{
+  "objects": ["projects"],
+  "project_key_regexp": "BANKING_.+"
+}`
+	cfg, err := LoadMigrateConfigFile(writeConfigFixture(t, body))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.ProjectKeyFilter != "BANKING_.+" {
+		t.Errorf("ProjectKeyFilter: got %q", cfg.ProjectKeyFilter)
+	}
+}
+
+func TestLoadMigrateConfigFileProjectKeyRegexp_DeprecatedProjectKeyStillWorks(t *testing.T) {
+	body := `{
+  "objects": ["projects"],
+  "project_key": "LEGACY_.+"
+}`
+	cfg, err := LoadMigrateConfigFile(writeConfigFixture(t, body))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.ProjectKeyFilter != "LEGACY_.+" {
+		t.Errorf("expected deprecated project_key to still resolve, got %q", cfg.ProjectKeyFilter)
+	}
+}
+
+func TestLoadMigrateConfigFileProjectKeyRegexp_BothSetNewWins(t *testing.T) {
+	body := `{
+  "objects": ["projects"],
+  "project_key": "LEGACY_.+",
+  "project_key_regexp": "NEW_.+"
+}`
+	cfg, err := LoadMigrateConfigFile(writeConfigFixture(t, body))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.ProjectKeyFilter != "NEW_.+" {
+		t.Errorf("expected project_key_regexp to win over project_key, got %q", cfg.ProjectKeyFilter)
+	}
+}
+
+func TestLoadMigrateConfigFileProjectKeyRegexp_UnifiedShape_TargetOverridesTopLevel(t *testing.T) {
+	body := `{
+  "objects": ["projects"],
+  "project_key_regexp": "top-level-.+",
+  "target": { "url": "u", "token": "t", "project_key_regexp": "target-.+" }
+}`
+	cfg, err := LoadMigrateConfigFile(writeConfigFixture(t, body))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.ProjectKeyFilter != "target-.+" {
+		t.Errorf("expected target.project_key_regexp to win, got %q", cfg.ProjectKeyFilter)
+	}
+}
+
+func TestLoadMigrateConfigFileProjectKeyRegexp_UnifiedShape_FallsBackToTopLevel(t *testing.T) {
+	body := `{
+  "objects": ["projects"],
+  "project_key_regexp": "top-level-.+",
+  "target": { "url": "u", "token": "t" }
+}`
+	cfg, err := LoadMigrateConfigFile(writeConfigFixture(t, body))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.ProjectKeyFilter != "top-level-.+" {
+		t.Errorf("expected fallback to top-level project_key_regexp, got %q", cfg.ProjectKeyFilter)
+	}
+}
+
 // #582 — command-sectioned shape: outer-level branch_regexp wins over the
 // same field nested inside "migrate", mirroring project_key's precedence
 // above.

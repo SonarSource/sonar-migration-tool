@@ -61,7 +61,12 @@
     },
     "project_key": {
       "type": ["string", "null"],
-      "description": "Regexp pattern of source project keys to extract / migrate — extract and migrate only; only applies when \"projects\" is selected via objects (or objects is unset). Implicitly anchored (^...$); a plain key with no regex metacharacters matches only itself. Issue #536."
+      "deprecated": true,
+      "description": "DEPRECATED — use project_key_regexp instead (issue #592); still honoured with a WARN, and project_key_regexp takes precedence if both are set. Regexp pattern of source project keys to extract / migrate — extract and migrate only; only applies when \"projects\" is selected via objects (or objects is unset). Implicitly anchored (^...$); a plain key with no regex metacharacters matches only itself. Issue #536."
+    },
+    "project_key_regexp": {
+      "type": ["string", "null"],
+      "description": "Regexp pattern of source project keys to extract / migrate — extract and migrate only; only applies when \"projects\" is selected via objects (or objects is unset). Implicitly anchored (^...$); a plain key with no regex metacharacters matches only itself. Applies to both source (extract) and target (migrate) unless overridden by source.project_key_regexp / target.project_key_regexp. Replaces the deprecated project_key. Issue #536, #592."
     },
     "branch_regexp": {
       "type": ["string", "null"],
@@ -178,6 +183,10 @@
           "type": ["string", "null"],
           "description": "Overrides the top-level branch_regexp for extract. Regexp pattern of branch names to extract, implicitly anchored (^...$). The project's main branch is always extracted regardless of match. Issue #582."
         },
+        "project_key_regexp": {
+          "type": ["string", "null"],
+          "description": "Overrides the top-level project_key_regexp for extract. Regexp pattern of project keys to extract, implicitly anchored (^...$); a plain key matches only itself. Only applies when \"projects\" is selected via objects (or objects is unset). Issue #592."
+        },
         "branch_analyzed_after": {
           "type": ["string", "null"],
           "pattern": "^(\\d{4}-\\d{2}-\\d{2})?$",
@@ -250,6 +259,10 @@
         "branch_regexp": {
           "type": ["string", "null"],
           "description": "Overrides the top-level branch_regexp for migrate. Regexp pattern of branch names to migrate, implicitly anchored (^...$). Only branches that were actually extracted can be migrated; when unset, migrate implicitly operates on whatever branches were actually extracted. The project's main branch is always migrated regardless of match. Issue #582."
+        },
+        "project_key_regexp": {
+          "type": ["string", "null"],
+          "description": "Overrides the top-level project_key_regexp for migrate. Regexp pattern of source project keys to migrate, implicitly anchored (^...$); a plain key matches only itself. Only applies when \"projects\" is selected via objects (or objects is unset). Not to be confused with project_key_pattern (the target-key rendering template). Issue #592."
         },
         "organization_key": {
           "type": ["string", "null"],

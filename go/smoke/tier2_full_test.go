@@ -154,7 +154,7 @@ func TestTier2_PathA_Transfer(t *testing.T) {
 		// CAUTION: transfer uses --export_dir, not --export_directory.
 		res := runCLI(t, "transfer",
 			"--config", cfg.path,
-			"--project_key", projectKey,
+			"--project_key_regexp", projectKey,
 			"--export_dir", exportDir,
 		)
 		requireExit(t, res, 0, "transfer")
@@ -183,7 +183,7 @@ func TestTier2_PathA_Transfer(t *testing.T) {
 		// the export dir it used — unscoped, regtest checks every project
 		// on the source against the default "./migration-files" and fails
 		// on projects this run never touched.
-		runRegtest(t, cfg, "--project_key", projectKey, "--config", regtestConfigPath(t, cfg, exportDir))
+		runRegtest(t, cfg, "--project_key_regexp", projectKey, "--config", regtestConfigPath(t, cfg, exportDir))
 	})
 
 	t.Run("report_accuracy", func(t *testing.T) {
@@ -208,7 +208,7 @@ func TestTier2_PathB_FullPipeline(t *testing.T) {
 		res := runCLI(t, "extract",
 			"--config", cfg.path,
 			"--export_directory", exportDir,
-			"--project_key", projectKey,
+			"--project_key_regexp", projectKey,
 			// #583 — a deliberately permissive cutoff: exercises the
 			// --branch_analyzed_after code path live without excluding this
 			// project's actual branches.
@@ -270,7 +270,7 @@ func TestTier2_PathB_FullPipeline(t *testing.T) {
 		res := runCLI(t, "migrate",
 			"--config", cfg.path,
 			"--export_directory", exportDir,
-			"--project_key", projectKey,
+			"--project_key_regexp", projectKey,
 			// #583 — same permissive cutoff as extract; exercises the
 			// migrate-side filter live.
 			"--branch_analyzed_after", "2000-01-01",
@@ -285,7 +285,7 @@ func TestTier2_PathB_FullPipeline(t *testing.T) {
 		// export dir it used — unscoped, regtest checks every project on
 		// the source against the default "./migration-files" and fails on
 		// projects this run never touched.
-		runRegtest(t, cfg, "--project_key", projectKey, "--config", regtestConfigPath(t, cfg, exportDir))
+		runRegtest(t, cfg, "--project_key_regexp", projectKey, "--config", regtestConfigPath(t, cfg, exportDir))
 	})
 
 	t.Run("migrate_idempotent", func(t *testing.T) {
@@ -298,11 +298,11 @@ func TestTier2_PathB_FullPipeline(t *testing.T) {
 		res := runCLI(t, "migrate",
 			"--config", cfg.path,
 			"--export_directory", exportDir,
-			"--project_key", projectKey,
+			"--project_key_regexp", projectKey,
 		)
 		requireExit(t, res, 0, "migrate (idempotent re-run)")
 		assertNoPanics(t, res.combined())
-		runRegtest(t, cfg, "--project_key", projectKey, "--config", regtestConfigPath(t, cfg, exportDir))
+		runRegtest(t, cfg, "--project_key_regexp", projectKey, "--config", regtestConfigPath(t, cfg, exportDir))
 	})
 
 	t.Run("sync_issues", func(t *testing.T) {

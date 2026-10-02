@@ -34,6 +34,7 @@ func newMigrateTestCmd() *cobra.Command {
 	f.String("project_key_pattern", "", "")
 	f.String("objects", "", "")
 	f.String(flagProjectKey, "", "")
+	f.String(flagProjectKeyRegexp, "", "")
 	// Deprecated aliases — registered so tests can exercise back-compat (#406).
 	f.String("token", "", "")
 	f.String("url", "", "")
@@ -357,6 +358,46 @@ func TestBuildMigrateConfigProjectKeyFlag(t *testing.T) {
 		}
 		if cfg.ProjectKeyFilter != "BANKING_.+" {
 			t.Errorf("expected ProjectKeyFilter to be set when projects is selected, got %q", cfg.ProjectKeyFilter)
+		}
+	})
+
+	// #592: --project_key_regexp is the replacement for --project_key.
+	t.Run("captured from --project_key_regexp", func(t *testing.T) {
+		cmd := newMigrateTestCmd()
+		if err := cmd.Flags().Set(flagProjectKeyRegexp, "BANKING_.+"); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := buildMigrateConfig(cmd, nil)
+		if err != nil {
+			t.Fatalf("buildMigrateConfig: %v", err)
+		}
+		if cfg.ProjectKeyFilter != "BANKING_.+" {
+			t.Errorf("expected ProjectKeyFilter %q, got %q", "BANKING_.+", cfg.ProjectKeyFilter)
+		}
+	})
+
+	t.Run("--project_key_regexp wins when both flags are set", func(t *testing.T) {
+		cmd := newMigrateTestCmd()
+		_ = cmd.Flags().Set(flagProjectKey, "LEGACY_.+")
+		_ = cmd.Flags().Set(flagProjectKeyRegexp, "NEW_.+")
+		cfg, err := buildMigrateConfig(cmd, nil)
+		if err != nil {
+			t.Fatalf("buildMigrateConfig: %v", err)
+		}
+		if cfg.ProjectKeyFilter != "NEW_.+" {
+			t.Errorf("expected --project_key_regexp to win, got %q", cfg.ProjectKeyFilter)
+		}
+	})
+
+	t.Run("deprecated --project_key still works", func(t *testing.T) {
+		cmd := newMigrateTestCmd()
+		_ = cmd.Flags().Set(flagProjectKey, "LEGACY_.+")
+		cfg, err := buildMigrateConfig(cmd, nil)
+		if err != nil {
+			t.Fatalf("buildMigrateConfig: %v", err)
+		}
+		if cfg.ProjectKeyFilter != "LEGACY_.+" {
+			t.Errorf("expected deprecated --project_key to still resolve, got %q", cfg.ProjectKeyFilter)
 		}
 	})
 }

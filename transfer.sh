@@ -40,4 +40,4 @@ fi
 
 CONFIG_FILE="config-${CONFIG}.json"
 
-sonar-migration-tool transfer --config "${CONFIG_FILE}" --project_key $PK --default_organization $ORG $DEBUG
+sonar-migration-tool transfer --config "${CONFIG_FILE}" --project_key_regexp $PK --default_organization $ORG $DEBUG

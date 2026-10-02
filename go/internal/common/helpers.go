@@ -7,6 +7,7 @@ package common
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"strings"
 )
 
@@ -89,6 +90,30 @@ func FirstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// ResolveDeprecatedProjectKey combines the deprecated "project_key" value
+// with its replacement "project_key_regexp" into one effective pattern
+// (#592): newVal wins when both are non-empty. Logs a deprecation WARN
+// when legacyVal is used at all, and a separate WARN when both are set,
+// naming which one takes precedence. Shared by every config-file loader
+// (extract, migrate, transfer) and by the CLI flag resolution in
+// go/cmd/project_key_flags.go, so the wording and precedence rule stay
+// identical everywhere this parameter can be set. Mirrors
+// warnIfConcurrencyDeprecated (go/cmd/transfer.go) in taking no logger
+// param and using slog.Default() directly.
+func ResolveDeprecatedProjectKey(legacyVal, newVal string) string {
+	if legacyVal != "" {
+		slog.Default().Warn("project_key is deprecated; use project_key_regexp instead", "value", legacyVal)
+	}
+	if legacyVal != "" && newVal != "" {
+		slog.Default().Warn("both project_key and project_key_regexp are set; project_key_regexp takes precedence",
+			"project_key", legacyVal, "project_key_regexp", newVal)
+	}
+	if newVal != "" {
+		return newVal
+	}
+	return legacyVal
 }
 
 // Expansion defines a set of values for cross-product iteration.
