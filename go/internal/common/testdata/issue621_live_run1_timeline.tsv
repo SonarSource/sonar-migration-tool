@@ -1,0 +1,1153 @@
+plan	1	generateGateMappings
+plan	1	generateGroupMappings
+plan	1	generateOrganizationMappings
+plan	1	generatePortfolioMappings
+plan	1	generateProfileMappings
+plan	1	generateProjectMappings
+plan	1	generateTemplateMappings
+plan	2	compareBuiltInProfiles
+plan	2	createGates
+plan	2	createGroups
+plan	2	createMigrationGroups
+plan	2	createPermissionTemplates
+plan	2	createProfiles
+plan	2	createProjects
+plan	2	getMigrationUser
+plan	2	getOrgBinding
+plan	2	getOrgRepos
+plan	2	setGlobalNewCodePeriod
+plan	2	setGlobalWebhooks
+plan	2	updateRuleDescriptions
+plan	2	updateRuleTags
+plan	3	addMigrationGroupToTemplates
+plan	3	addMigrationUserToMigrationGroups
+plan	3	analyzeProfileRules
+plan	3	getGateConditions
+plan	3	getProfileBackups
+plan	3	getProjectIds
+plan	3	grantMigrationUserProjectPermissions
+plan	3	setDefaultTemplates
+plan	3	setGlobalSettings
+plan	3	setOrgGroupPermissions
+plan	3	setProfileGroupPermissions
+plan	3	setProfileParent
+plan	3	setTemplateGroupPermissions
+plan	4	addGateConditions
+plan	4	matchProjectRepos
+plan	4	restoreProfiles
+plan	4	setNewCodePeriods
+plan	4	setProjectGates
+plan	4	setProjectGroupPermissions
+plan	4	setProjectLinks
+plan	4	setProjectProfiles
+plan	4	setProjectSettings
+plan	4	setProjectSourceLink
+plan	4	setProjectTags
+plan	4	setProjectWebhooks
+plan	5	importProjectData
+plan	5	setDefaultGates
+plan	5	setDefaultProfiles
+plan	5	setProjectBinding
+plan	6	syncHotspotMetadata
+plan	6	syncIssueMetadata
+pseudo	0	migrateProjectHistory	487
+start	0	generateGateMappings
+start	0	generateGroupMappings
+start	0	generateOrganizationMappings
+start	0	generatePortfolioMappings
+start	0	generateProfileMappings
+start	0	generateProjectMappings
+start	0	generateTemplateMappings
+end	2	generateGateMappings
+end	2	generateGroupMappings
+end	2	generateOrganizationMappings
+end	2	generatePortfolioMappings
+end	2	generateProfileMappings
+end	2	generateProjectMappings
+end	2	generateTemplateMappings
+start	3	compareBuiltInProfiles
+start	3	createGates
+start	3	createGroups
+start	3	createMigrationGroups
+start	3	createPermissionTemplates
+start	3	createProfiles
+frac	3	createGates	0/7
+frac	3	createMigrationGroups	0/8
+frac	3	createPermissionTemplates	0/17
+frac	3	createGroups	0/71
+frac	3	createProfiles	0/50
+frac	3	compareBuiltInProfiles	0/178
+start	1685	getMigrationUser
+end	1685	createMigrationGroups
+frac	1685	createMigrationGroups	8/8
+start	1686	createProjects
+frac	1686	createProjects	0/80
+start	2683	getOrgBinding
+end	2683	createGates
+frac	2683	createGates	7/7
+frac	2683	getOrgBinding	0/8
+end	2685	getMigrationUser
+frac	2699	compareBuiltInProfiles	20/178
+start	2832	getOrgRepos
+end	2832	createPermissionTemplates
+frac	2832	createPermissionTemplates	17/17
+frac	2832	getOrgRepos	0/8
+end	2897	createGroups
+frac	2897	createGroups	71/71
+start	3284	setGlobalNewCodePeriod
+end	3683	getOrgBinding
+frac	3683	getOrgBinding	8/8
+frac	3773	compareBuiltInProfiles	40/178
+end	3832	getOrgRepos
+frac	3832	getOrgRepos	8/8
+frac	4389	compareBuiltInProfiles	60/178
+frac	5003	createProfiles	8/50
+start	5295	setGlobalWebhooks
+frac	5312	compareBuiltInProfiles	80/178
+frac	6548	compareBuiltInProfiles	100/178
+frac	6686	createProjects	39/80
+frac	7349	compareBuiltInProfiles	120/178
+start	7702	updateRuleDescriptions
+frac	7702	updateRuleDescriptions	0/8867
+frac	8087	createProjects	50/80
+frac	8124	compareBuiltInProfiles	140/178
+start	8538	updateRuleTags
+end	8538	setGlobalWebhooks
+frac	8538	updateRuleTags	0/8867
+frac	8716	compareBuiltInProfiles	160/178
+end	8830	setGlobalNewCodePeriod
+frac	8901	updateRuleDescriptions	1000/8867
+frac	8906	updateRuleDescriptions	2000/8867
+frac	8910	updateRuleDescriptions	3000/8867
+frac	8915	updateRuleDescriptions	4000/8867
+frac	8921	updateRuleDescriptions	5000/8867
+frac	8927	updateRuleDescriptions	6000/8867
+frac	8933	updateRuleDescriptions	7000/8867
+frac	8936	updateRuleDescriptions	8000/8867
+frac	9080	updateRuleTags	1000/8867
+frac	9084	updateRuleTags	2000/8867
+frac	9087	updateRuleTags	3000/8867
+frac	9092	updateRuleTags	4000/8867
+frac	9099	updateRuleTags	5000/8867
+frac	9104	updateRuleTags	6000/8867
+frac	9107	updateRuleTags	7000/8867
+frac	9109	updateRuleTags	8000/8867
+end	9765	updateRuleTags
+frac	9765	updateRuleTags	8867/8867
+end	9900	updateRuleDescriptions
+frac	9900	updateRuleDescriptions	8867/8867
+logged	10001	7	408
+frac	10003	createProfiles	17/50
+end	10157	compareBuiltInProfiles
+frac	10157	compareBuiltInProfiles	178/178
+end	10265	createProjects
+frac	10265	createProjects	80/80
+frac	15003	createProfiles	26/50
+logged	20001	8	680
+frac	20003	createProfiles	35/50
+frac	25003	createProfiles	44/50
+start	28362	addMigrationGroupToTemplates
+start	28362	addMigrationUserToMigrationGroups
+start	28362	getGateConditions
+start	28362	getProfileBackups
+start	28362	getProjectIds
+end	28362	createProfiles
+frac	28362	createProfiles	50/50
+frac	28362	getGateConditions	0/7
+frac	28362	addMigrationUserToMigrationGroups	0/8
+frac	28362	addMigrationGroupToTemplates	0/17
+frac	28362	getProfileBackups	0/50
+frac	28362	getProjectIds	0/80
+start	28363	analyzeProfileRules
+frac	28363	analyzeProfileRules	0/50
+start	28381	grantMigrationUserProjectPermissions
+frac	28381	getGateConditions	7/7
+frac	28381	grantMigrationUserProjectPermissions	0/80
+start	28851	setDefaultTemplates
+frac	28851	getProfileBackups	50/50
+frac	28851	setDefaultTemplates	0/16
+end	29362	getGateConditions
+end	29362	getProfileBackups
+end	29362	getProjectIds
+frac	29362	getGateConditions	7/7
+frac	29362	getProfileBackups	50/50
+frac	29362	getProjectIds	80/80
+start	29370	setGlobalSettings
+end	29370	analyzeProfileRules
+frac	29370	analyzeProfileRules	50/50
+end	29511	setDefaultTemplates
+frac	29511	setDefaultTemplates	16/16
+start	29512	setOrgGroupPermissions
+frac	29512	setOrgGroupPermissions	0/13
+logged	30000	11	773
+start	30220	setProfileGroupPermissions
+frac	30220	setProfileGroupPermissions	0/1
+start	30389	setProfileParent
+end	30389	addMigrationUserToMigrationGroups
+frac	30389	addMigrationUserToMigrationGroups	8/8
+frac	30389	setProfileParent	0/42
+end	30515	setOrgGroupPermissions
+frac	30515	setOrgGroupPermissions	13/13
+start	30516	setTemplateGroupPermissions
+end	30903	addMigrationGroupToTemplates
+frac	30903	addMigrationGroupToTemplates	17/17
+end	30950	setProfileGroupPermissions
+frac	30950	setProfileGroupPermissions	1/1
+frac	33381	grantMigrationUserProjectPermissions	27/80
+end	34783	setTemplateGroupPermissions
+frac	35389	setProfileParent	20/42
+frac	37599	grantMigrationUserProjectPermissions	50/80
+logged	40001	14	773
+frac	40389	setProfileParent	40/42
+end	40862	setProfileParent
+frac	40862	setProfileParent	42/42
+frac	42599	grantMigrationUserProjectPermissions	56/80
+frac	47599	grantMigrationUserProjectPermissions	62/80
+logged	50001	14	933
+frac	52599	grantMigrationUserProjectPermissions	69/80
+frac	57599	grantMigrationUserProjectPermissions	75/80
+logged	60001	15	1101
+end	61084	grantMigrationUserProjectPermissions
+frac	61084	grantMigrationUserProjectPermissions	80/80
+logged	70001	15	1268
+logged	80002	15	1438
+logged	90001	15	1610
+logged	100001	15	1781
+logged	110002	15	1953
+end	117612	setGlobalSettings
+start	117614	addGateConditions
+start	117614	matchProjectRepos
+frac	117614	addGateConditions	0/7
+start	117615	restoreProfiles
+start	117615	setNewCodePeriods
+start	117615	setProjectGates
+start	117615	setProjectGroupPermissions
+frac	117615	setProjectGates	0/80
+frac	117615	setNewCodePeriods	0/102
+frac	117615	setProjectGroupPermissions	0/1266
+frac	117615	restoreProfiles	0/50
+start	117921	setProjectLinks
+frac	117921	setProjectLinks	0/15
+end	118614	matchProjectRepos
+start	119628	setProjectProfiles
+end	119628	setProjectGates
+frac	119628	setProjectGates	80/80
+frac	119628	setProjectProfiles	0/4
+logged	120000	17	1941
+end	120208	setProjectProfiles
+frac	120208	setProjectProfiles	4/4
+start	120209	setProjectSettings
+frac	120209	setProjectSettings	0/19
+frac	122614	addGateConditions	5/7
+frac	122615	setNewCodePeriods	67/102
+frac	122615	setProjectGroupPermissions	15/1266
+frac	122615	restoreProfiles	8/50
+frac	122709	setProjectLinks	15/15
+start	122710	setProjectSourceLink
+end	122710	setProjectLinks
+frac	122710	setProjectLinks	15/15
+frac	122710	setProjectSourceLink	0/80
+end	123542	addGateConditions
+frac	123542	addGateConditions	7/7
+start	123543	setProjectTags
+frac	123543	setProjectTags	0/10
+end	124547	setProjectTags
+frac	124547	setProjectTags	10/10
+start	124548	setProjectWebhooks
+frac	124548	setProjectWebhooks	0/1
+end	124992	setProjectWebhooks
+frac	124992	setProjectWebhooks	1/1
+end	125155	setNewCodePeriods
+frac	125155	setNewCodePeriods	102/102
+frac	125209	setProjectSettings	18/19
+frac	125230	setProjectSettings	19/19
+end	125233	setProjectSettings
+frac	125233	setProjectSettings	19/19
+frac	126101	setProjectSourceLink	50/80
+frac	127615	setProjectGroupPermissions	30/1266
+frac	127615	restoreProfiles	17/50
+end	127916	setProjectSourceLink
+frac	127916	setProjectSourceLink	80/80
+logged	130001	23	1762
+frac	132615	setProjectGroupPermissions	45/1266
+frac	132615	restoreProfiles	26/50
+frac	137615	setProjectGroupPermissions	61/1266
+frac	137615	restoreProfiles	35/50
+logged	140002	23	1888
+frac	142615	setProjectGroupPermissions	76/1266
+frac	142615	restoreProfiles	44/50
+frac	145866	restoreProfiles	50/50
+end	145867	restoreProfiles
+frac	145867	restoreProfiles	50/50
+frac	147615	setProjectGroupPermissions	91/1266
+logged	150001	23	2018
+frac	150282	setProjectGroupPermissions	100/1266
+frac	155282	setProjectGroupPermissions	141/1266
+logged	160001	23	2147
+frac	160282	setProjectGroupPermissions	182/1266
+frac	162458	setProjectGroupPermissions	200/1266
+frac	167458	setProjectGroupPermissions	249/1266
+logged	170001	23	2276
+frac	172458	setProjectGroupPermissions	299/1266
+frac	172535	setProjectGroupPermissions	300/1266
+frac	177535	setProjectGroupPermissions	344/1266
+logged	180001	23	2404
+frac	182535	setProjectGroupPermissions	389/1266
+frac	183696	setProjectGroupPermissions	400/1266
+frac	188696	setProjectGroupPermissions	453/1266
+logged	190001	23	2530
+frac	193026	setProjectGroupPermissions	500/1266
+frac	198026	setProjectGroupPermissions	531/1266
+logged	200001	23	2657
+frac	203026	setProjectGroupPermissions	562/1266
+frac	208026	setProjectGroupPermissions	594/1266
+frac	208933	setProjectGroupPermissions	600/1266
+logged	210001	24	2787
+frac	213933	setProjectGroupPermissions	636/1266
+frac	218933	setProjectGroupPermissions	673/1266
+logged	220002	24	2914
+frac	222469	setProjectGroupPermissions	700/1266
+frac	227469	setProjectGroupPermissions	747/1266
+logged	230002	24	3040
+frac	232469	setProjectGroupPermissions	795/1266
+frac	232980	setProjectGroupPermissions	800/1266
+frac	237980	setProjectGroupPermissions	842/1266
+logged	240001	24	3165
+frac	242980	setProjectGroupPermissions	885/1266
+frac	244718	setProjectGroupPermissions	900/1266
+frac	249718	setProjectGroupPermissions	941/1266
+logged	250001	24	3291
+frac	254718	setProjectGroupPermissions	983/1266
+frac	256637	setProjectGroupPermissions	1000/1266
+logged	260000	24	3416
+frac	261637	setProjectGroupPermissions	1039/1266
+frac	266637	setProjectGroupPermissions	1079/1266
+frac	269221	setProjectGroupPermissions	1100/1266
+logged	270001	24	3542
+frac	274221	setProjectGroupPermissions	1136/1266
+frac	279221	setProjectGroupPermissions	1172/1266
+logged	280001	24	3667
+frac	283012	setProjectGroupPermissions	1200/1266
+frac	288012	setProjectGroupPermissions	1242/1266
+logged	290009	24	3794
+start	290709	setDefaultGates
+start	290709	setProjectBinding
+end	290709	setProjectGroupPermissions
+frac	290709	setProjectGroupPermissions	1266/1266
+frac	290709	setDefaultGates	0/0
+frac	290709	setProjectBinding	0/15
+start	290710	setDefaultProfiles
+frac	290710	setDefaultProfiles	0/40
+frac	290719	setProjectBinding	15/15
+start	290781	importProjectData
+frac	290781	importProjectData	0/80
+frac	290781	migrateProjectHistory	0/487
+end	291709	setDefaultGates
+end	291709	setProjectBinding
+frac	291709	setDefaultGates	0/0
+frac	291709	setProjectBinding	15/15
+end	293550	setDefaultProfiles
+frac	293550	setDefaultProfiles	40/40
+frac	295781	importProjectData	0/80
+frac	295781	migrateProjectHistory	2/487
+logged	300001	26	3529
+frac	300781	importProjectData	0/80
+frac	300781	migrateProjectHistory	5/487
+frac	305781	importProjectData	0/80
+frac	305781	migrateProjectHistory	7/487
+logged	310001	26	3388
+frac	310781	importProjectData	1/80
+frac	310781	migrateProjectHistory	10/487
+frac	315781	importProjectData	1/80
+frac	315781	migrateProjectHistory	12/487
+logged	320002	26	3040
+frac	320781	importProjectData	1/80
+frac	320781	migrateProjectHistory	15/487
+frac	325781	importProjectData	2/80
+frac	325781	migrateProjectHistory	18/487
+frac	329645	migrateProjectHistory	20/487
+logged	330001	27	2694
+frac	330781	importProjectData	2/80
+frac	334645	migrateProjectHistory	21/487
+frac	335781	importProjectData	2/80
+frac	339645	migrateProjectHistory	23/487
+logged	340001	27	2732
+frac	340781	importProjectData	3/80
+frac	344645	migrateProjectHistory	24/487
+frac	345781	importProjectData	3/80
+frac	349645	migrateProjectHistory	26/487
+logged	350002	27	2556
+frac	350781	importProjectData	3/80
+frac	354645	migrateProjectHistory	28/487
+frac	355781	importProjectData	4/80
+frac	359645	migrateProjectHistory	29/487
+logged	360002	27	2406
+frac	360781	importProjectData	4/80
+frac	364645	migrateProjectHistory	31/487
+frac	365781	importProjectData	4/80
+frac	369645	migrateProjectHistory	33/487
+logged	370002	27	2301
+frac	370781	importProjectData	5/80
+frac	374645	migrateProjectHistory	34/487
+frac	375781	importProjectData	5/80
+frac	379645	migrateProjectHistory	36/487
+logged	380002	27	2308
+frac	380781	importProjectData	5/80
+frac	384645	migrateProjectHistory	38/487
+frac	385781	importProjectData	6/80
+frac	389645	migrateProjectHistory	39/487
+logged	390002	28	2315
+frac	390476	migrateProjectHistory	40/487
+frac	390781	importProjectData	6/80
+frac	395476	migrateProjectHistory	43/487
+frac	395781	importProjectData	6/80
+logged	400001	28	2155
+frac	400476	migrateProjectHistory	47/487
+frac	400781	importProjectData	7/80
+frac	405476	migrateProjectHistory	51/487
+frac	405781	importProjectData	7/80
+logged	410002	28	2057
+frac	410476	migrateProjectHistory	54/487
+frac	410781	importProjectData	7/80
+frac	415476	migrateProjectHistory	58/487
+frac	415781	importProjectData	8/80
+frac	417239	migrateProjectHistory	60/487
+logged	420002	29	1914
+frac	420781	importProjectData	8/80
+frac	422239	migrateProjectHistory	63/487
+frac	425781	importProjectData	8/80
+frac	427239	migrateProjectHistory	67/487
+logged	430004	29	1872
+frac	430781	importProjectData	9/80
+frac	432239	migrateProjectHistory	71/487
+frac	435781	importProjectData	9/80
+frac	437239	migrateProjectHistory	75/487
+logged	440002	29	1739
+frac	440781	importProjectData	9/80
+frac	442239	migrateProjectHistory	79/487
+frac	442413	migrateProjectHistory	80/487
+frac	445781	importProjectData	10/80
+frac	447413	migrateProjectHistory	83/487
+logged	450001	30	1651
+frac	450781	importProjectData	10/80
+frac	452413	migrateProjectHistory	86/487
+frac	455781	importProjectData	10/80
+frac	457413	migrateProjectHistory	90/487
+logged	460005	30	1583
+frac	460781	importProjectData	11/80
+frac	462413	migrateProjectHistory	93/487
+frac	465781	importProjectData	11/80
+frac	467413	migrateProjectHistory	97/487
+logged	470002	30	1509
+frac	470781	importProjectData	11/80
+frac	471675	migrateProjectHistory	100/487
+frac	475781	importProjectData	12/80
+frac	476675	migrateProjectHistory	104/487
+logged	480002	31	1463
+frac	480781	importProjectData	12/80
+frac	481675	migrateProjectHistory	108/487
+frac	485781	importProjectData	12/80
+frac	486675	migrateProjectHistory	112/487
+logged	490002	31	1361
+frac	490781	importProjectData	13/80
+frac	491675	migrateProjectHistory	116/487
+frac	495781	importProjectData	13/80
+frac	496673	migrateProjectHistory	120/487
+logged	500001	32	1287
+frac	500781	importProjectData	13/80
+frac	501673	migrateProjectHistory	123/487
+frac	505781	importProjectData	14/80
+frac	506673	migrateProjectHistory	127/487
+logged	510002	32	1245
+frac	510781	importProjectData	14/80
+frac	511673	migrateProjectHistory	131/487
+frac	515781	importProjectData	14/80
+frac	516673	migrateProjectHistory	135/487
+logged	520001	32	1237
+frac	520781	importProjectData	15/80
+frac	521673	migrateProjectHistory	139/487
+frac	522558	migrateProjectHistory	140/487
+frac	525781	importProjectData	15/80
+frac	527558	migrateProjectHistory	144/487
+logged	530002	33	1167
+frac	530781	importProjectData	15/80
+frac	532558	migrateProjectHistory	148/487
+frac	535781	importProjectData	16/80
+frac	537558	migrateProjectHistory	152/487
+logged	540002	33	1132
+frac	540781	importProjectData	16/80
+frac	542558	migrateProjectHistory	156/487
+frac	545781	importProjectData	16/80
+frac	546186	migrateProjectHistory	160/487
+logged	550002	33	1084
+frac	550781	importProjectData	17/80
+frac	551186	migrateProjectHistory	163/487
+frac	555781	importProjectData	17/80
+frac	556186	migrateProjectHistory	167/487
+logged	560002	34	1070
+frac	560781	importProjectData	17/80
+frac	561186	migrateProjectHistory	171/487
+frac	565781	importProjectData	18/80
+frac	566186	migrateProjectHistory	175/487
+logged	570002	34	1032
+frac	570781	importProjectData	18/80
+frac	571186	migrateProjectHistory	179/487
+frac	571961	migrateProjectHistory	180/487
+frac	575781	importProjectData	18/80
+frac	576961	migrateProjectHistory	185/487
+logged	580002	35	954
+frac	580781	importProjectData	19/80
+frac	581961	migrateProjectHistory	191/487
+frac	585781	importProjectData	19/80
+frac	586961	migrateProjectHistory	196/487
+frac	589788	migrateProjectHistory	200/487
+logged	590002	35	920
+frac	590781	importProjectData	19/80
+frac	594788	migrateProjectHistory	205/487
+frac	595300	importProjectData	20/80
+frac	599788	migrateProjectHistory	211/487
+logged	600002	36	840
+frac	600300	importProjectData	21/80
+frac	604788	migrateProjectHistory	216/487
+frac	605300	importProjectData	22/80
+frac	607439	migrateProjectHistory	220/487
+logged	610001	36	822
+frac	610300	importProjectData	24/80
+frac	612439	migrateProjectHistory	224/487
+frac	615300	importProjectData	25/80
+frac	617439	migrateProjectHistory	229/487
+logged	620001	36	786
+frac	620300	importProjectData	27/80
+frac	622439	migrateProjectHistory	234/487
+frac	625300	importProjectData	28/80
+frac	627439	migrateProjectHistory	239/487
+frac	627640	migrateProjectHistory	240/487
+logged	630002	37	757
+frac	630300	importProjectData	29/80
+frac	632640	migrateProjectHistory	244/487
+frac	635300	importProjectData	31/80
+frac	637640	migrateProjectHistory	249/487
+logged	640002	37	728
+frac	640300	importProjectData	32/80
+frac	642640	migrateProjectHistory	254/487
+frac	645300	importProjectData	34/80
+frac	647640	migrateProjectHistory	259/487
+frac	648622	migrateProjectHistory	260/487
+logged	650002	38	697
+frac	650300	importProjectData	35/80
+frac	653622	migrateProjectHistory	264/487
+frac	655300	importProjectData	37/80
+frac	658622	migrateProjectHistory	268/487
+logged	660002	38	674
+frac	660300	importProjectData	38/80
+frac	663622	migrateProjectHistory	272/487
+frac	665300	importProjectData	39/80
+frac	665746	importProjectData	40/80
+frac	668622	migrateProjectHistory	276/487
+logged	670003	38	656
+frac	670746	importProjectData	41/80
+frac	673216	migrateProjectHistory	280/487
+frac	675746	importProjectData	42/80
+frac	678216	migrateProjectHistory	283/487
+logged	680003	39	641
+frac	680746	importProjectData	43/80
+frac	683216	migrateProjectHistory	287/487
+frac	685746	importProjectData	45/80
+frac	688216	migrateProjectHistory	291/487
+logged	690002	39	613
+frac	690746	importProjectData	46/80
+frac	693216	migrateProjectHistory	295/487
+frac	695746	importProjectData	47/80
+frac	698216	migrateProjectHistory	299/487
+frac	698322	migrateProjectHistory	300/487
+logged	700003	40	586
+frac	700746	importProjectData	49/80
+frac	703322	migrateProjectHistory	304/487
+frac	705746	importProjectData	50/80
+frac	708322	migrateProjectHistory	308/487
+logged	710002	40	554
+frac	710746	importProjectData	51/80
+frac	713322	migrateProjectHistory	312/487
+frac	715746	importProjectData	52/80
+frac	718322	migrateProjectHistory	317/487
+logged	720002	40	550
+frac	720746	importProjectData	54/80
+frac	721728	migrateProjectHistory	320/487
+frac	725746	importProjectData	55/80
+frac	726728	migrateProjectHistory	322/487
+logged	730002	41	537
+frac	730746	importProjectData	56/80
+frac	731728	migrateProjectHistory	324/487
+frac	735746	importProjectData	58/80
+frac	736728	migrateProjectHistory	326/487
+logged	740003	41	522
+frac	740746	importProjectData	59/80
+frac	741728	migrateProjectHistory	329/487
+frac	742802	importProjectData	60/80
+frac	746728	migrateProjectHistory	331/487
+frac	747802	importProjectData	60/80
+logged	750003	41	521
+frac	751728	migrateProjectHistory	333/487
+frac	752802	importProjectData	60/80
+frac	756728	migrateProjectHistory	335/487
+frac	757802	importProjectData	60/80
+logged	760003	41	520
+frac	761728	migrateProjectHistory	338/487
+frac	762802	importProjectData	60/80
+frac	765566	migrateProjectHistory	340/487
+frac	767802	importProjectData	60/80
+logged	770004	41	504
+frac	770566	migrateProjectHistory	343/487
+frac	772802	importProjectData	60/80
+frac	775566	migrateProjectHistory	346/487
+frac	777802	importProjectData	60/80
+logged	780002	42	497
+frac	780566	migrateProjectHistory	350/487
+frac	782802	importProjectData	60/80
+frac	785566	migrateProjectHistory	353/487
+frac	787802	importProjectData	60/80
+logged	790003	42	481
+frac	790566	migrateProjectHistory	357/487
+frac	792802	importProjectData	61/80
+frac	794594	migrateProjectHistory	360/487
+frac	797802	importProjectData	61/80
+frac	799594	migrateProjectHistory	364/487
+logged	800002	42	452
+frac	802802	importProjectData	61/80
+frac	804594	migrateProjectHistory	369/487
+frac	807802	importProjectData	61/80
+frac	809594	migrateProjectHistory	374/487
+logged	810003	43	429
+frac	812802	importProjectData	61/80
+frac	814594	migrateProjectHistory	379/487
+frac	815385	migrateProjectHistory	380/487
+frac	817802	importProjectData	61/80
+logged	820003	43	410
+frac	820385	migrateProjectHistory	383/487
+frac	822802	importProjectData	61/80
+frac	825385	migrateProjectHistory	387/487
+frac	827802	importProjectData	61/80
+logged	830003	44	395
+frac	830385	migrateProjectHistory	391/487
+frac	832802	importProjectData	61/80
+frac	835385	migrateProjectHistory	395/487
+frac	837802	importProjectData	61/80
+logged	840003	44	381
+frac	840385	migrateProjectHistory	399/487
+frac	841601	migrateProjectHistory	400/487
+frac	842802	importProjectData	62/80
+frac	846601	migrateProjectHistory	400/487
+frac	847802	importProjectData	62/80
+logged	850003	44	374
+frac	851601	migrateProjectHistory	401/487
+frac	852802	importProjectData	62/80
+frac	856601	migrateProjectHistory	402/487
+frac	857802	importProjectData	62/80
+logged	860003	44	372
+frac	861601	migrateProjectHistory	403/487
+frac	862802	importProjectData	62/80
+frac	866601	migrateProjectHistory	404/487
+frac	867802	importProjectData	62/80
+logged	870003	44	368
+frac	871601	migrateProjectHistory	405/487
+frac	872802	importProjectData	62/80
+frac	876601	migrateProjectHistory	406/487
+frac	877802	importProjectData	62/80
+logged	880060	44	366
+frac	881601	migrateProjectHistory	407/487
+frac	882802	importProjectData	62/80
+frac	886601	migrateProjectHistory	408/487
+frac	887802	importProjectData	62/80
+logged	890061	45	364
+frac	891601	migrateProjectHistory	409/487
+frac	892802	importProjectData	63/80
+frac	896601	migrateProjectHistory	410/487
+frac	897802	importProjectData	63/80
+logged	900061	45	361
+frac	901601	migrateProjectHistory	411/487
+frac	902802	importProjectData	63/80
+frac	906601	migrateProjectHistory	412/487
+frac	907802	importProjectData	63/80
+logged	910062	45	361
+frac	911601	migrateProjectHistory	413/487
+frac	912802	importProjectData	63/80
+frac	916601	migrateProjectHistory	414/487
+frac	917802	importProjectData	63/80
+logged	920061	45	359
+frac	921601	migrateProjectHistory	415/487
+frac	922802	importProjectData	63/80
+frac	926601	migrateProjectHistory	415/487
+frac	927802	importProjectData	63/80
+logged	930061	45	357
+frac	931601	migrateProjectHistory	416/487
+frac	932802	importProjectData	63/80
+frac	936601	migrateProjectHistory	417/487
+frac	937802	importProjectData	63/80
+logged	940062	45	359
+frac	941601	migrateProjectHistory	418/487
+frac	942802	importProjectData	64/80
+frac	946601	migrateProjectHistory	419/487
+frac	947802	importProjectData	64/80
+frac	948147	migrateProjectHistory	420/487
+logged	950062	45	357
+frac	952802	importProjectData	64/80
+frac	953147	migrateProjectHistory	420/487
+frac	957802	importProjectData	64/80
+frac	958147	migrateProjectHistory	421/487
+logged	960062	45	359
+frac	962802	importProjectData	64/80
+frac	963147	migrateProjectHistory	422/487
+frac	967802	importProjectData	64/80
+frac	968147	migrateProjectHistory	423/487
+logged	970061	45	356
+frac	972802	importProjectData	64/80
+frac	973147	migrateProjectHistory	424/487
+frac	977802	importProjectData	64/80
+frac	978147	migrateProjectHistory	424/487
+logged	980063	45	356
+frac	982802	importProjectData	64/80
+frac	983147	migrateProjectHistory	425/487
+frac	987802	importProjectData	64/80
+frac	988147	migrateProjectHistory	426/487
+logged	990062	45	356
+frac	992802	importProjectData	65/80
+frac	993147	migrateProjectHistory	427/487
+frac	997802	importProjectData	65/80
+frac	998147	migrateProjectHistory	428/487
+logged	1000064	45	358
+frac	1002802	importProjectData	65/80
+frac	1003147	migrateProjectHistory	429/487
+frac	1007802	importProjectData	65/80
+frac	1008147	migrateProjectHistory	429/487
+logged	1010063	45	353
+frac	1012802	importProjectData	65/80
+frac	1013147	migrateProjectHistory	430/487
+frac	1017802	importProjectData	65/80
+frac	1018147	migrateProjectHistory	431/487
+logged	1020063	46	350
+frac	1022802	importProjectData	65/80
+frac	1023147	migrateProjectHistory	432/487
+frac	1027802	importProjectData	65/80
+frac	1028147	migrateProjectHistory	433/487
+logged	1030063	46	349
+frac	1032802	importProjectData	65/80
+frac	1033147	migrateProjectHistory	433/487
+frac	1037802	importProjectData	65/80
+frac	1038147	migrateProjectHistory	434/487
+logged	1040063	46	344
+frac	1042802	importProjectData	66/80
+frac	1043147	migrateProjectHistory	435/487
+frac	1047802	importProjectData	66/80
+frac	1048147	migrateProjectHistory	436/487
+logged	1050063	46	341
+frac	1052802	importProjectData	66/80
+frac	1053147	migrateProjectHistory	437/487
+frac	1057802	importProjectData	66/80
+frac	1058147	migrateProjectHistory	438/487
+logged	1060064	46	337
+frac	1062802	importProjectData	66/80
+frac	1063147	migrateProjectHistory	438/487
+frac	1067802	importProjectData	66/80
+frac	1068147	migrateProjectHistory	439/487
+logged	1070064	46	334
+frac	1070104	migrateProjectHistory	440/487
+frac	1072802	importProjectData	66/80
+frac	1075104	migrateProjectHistory	440/487
+frac	1077802	importProjectData	66/80
+logged	1080063	46	328
+frac	1080104	migrateProjectHistory	441/487
+frac	1082802	importProjectData	66/80
+frac	1085104	migrateProjectHistory	442/487
+frac	1087802	importProjectData	66/80
+logged	1090065	46	325
+frac	1090104	migrateProjectHistory	443/487
+frac	1092802	importProjectData	67/80
+frac	1095104	migrateProjectHistory	444/487
+frac	1097802	importProjectData	67/80
+logged	1100064	46	322
+frac	1100104	migrateProjectHistory	445/487
+frac	1102802	importProjectData	67/80
+frac	1105104	migrateProjectHistory	446/487
+frac	1107802	importProjectData	67/80
+logged	1110064	47	318
+frac	1110104	migrateProjectHistory	447/487
+frac	1112802	importProjectData	67/80
+frac	1115104	migrateProjectHistory	448/487
+frac	1117802	importProjectData	67/80
+logged	1120065	47	315
+frac	1120104	migrateProjectHistory	449/487
+frac	1122802	importProjectData	67/80
+frac	1125104	migrateProjectHistory	449/487
+frac	1127802	importProjectData	67/80
+logged	1130065	47	311
+frac	1130104	migrateProjectHistory	450/487
+frac	1132802	importProjectData	67/80
+frac	1135104	migrateProjectHistory	451/487
+frac	1137802	importProjectData	67/80
+logged	1140064	47	311
+frac	1140104	migrateProjectHistory	452/487
+frac	1142802	importProjectData	68/80
+frac	1145104	migrateProjectHistory	453/487
+frac	1147802	importProjectData	68/80
+logged	1150064	47	307
+frac	1150104	migrateProjectHistory	454/487
+frac	1152802	importProjectData	68/80
+frac	1155104	migrateProjectHistory	455/487
+frac	1157802	importProjectData	68/80
+logged	1160065	47	306
+frac	1160104	migrateProjectHistory	456/487
+frac	1162802	importProjectData	68/80
+frac	1165104	migrateProjectHistory	457/487
+frac	1167802	importProjectData	68/80
+logged	1170064	47	302
+frac	1170104	migrateProjectHistory	458/487
+frac	1172802	importProjectData	68/80
+frac	1175104	migrateProjectHistory	459/487
+frac	1177802	importProjectData	68/80
+logged	1180066	47	301
+frac	1180104	migrateProjectHistory	459/487
+frac	1180271	migrateProjectHistory	460/487
+frac	1182802	importProjectData	68/80
+frac	1185271	migrateProjectHistory	460/487
+frac	1187802	importProjectData	68/80
+logged	1190066	47	300
+frac	1190271	migrateProjectHistory	460/487
+frac	1192802	importProjectData	69/80
+frac	1195271	migrateProjectHistory	460/487
+frac	1197802	importProjectData	69/80
+logged	1200066	47	301
+frac	1200271	migrateProjectHistory	461/487
+frac	1202802	importProjectData	69/80
+frac	1205271	migrateProjectHistory	461/487
+frac	1207802	importProjectData	69/80
+logged	1210065	47	300
+frac	1210271	migrateProjectHistory	461/487
+frac	1212802	importProjectData	69/80
+frac	1215271	migrateProjectHistory	461/487
+frac	1217802	importProjectData	69/80
+logged	1220066	47	301
+frac	1220271	migrateProjectHistory	462/487
+frac	1222802	importProjectData	69/80
+frac	1225271	migrateProjectHistory	462/487
+frac	1227802	importProjectData	69/80
+logged	1230066	47	303
+frac	1230271	migrateProjectHistory	462/487
+frac	1232802	importProjectData	69/80
+frac	1235271	migrateProjectHistory	462/487
+frac	1237802	importProjectData	69/80
+logged	1240066	47	301
+frac	1240271	migrateProjectHistory	463/487
+frac	1242802	importProjectData	70/80
+frac	1245271	migrateProjectHistory	463/487
+frac	1247802	importProjectData	70/80
+logged	1250066	47	300
+frac	1250271	migrateProjectHistory	463/487
+frac	1252802	importProjectData	70/80
+frac	1255271	migrateProjectHistory	464/487
+frac	1257802	importProjectData	70/80
+logged	1260066	47	299
+frac	1260271	migrateProjectHistory	464/487
+frac	1262802	importProjectData	70/80
+frac	1265271	migrateProjectHistory	464/487
+frac	1267802	importProjectData	70/80
+logged	1270067	47	300
+frac	1270271	migrateProjectHistory	464/487
+frac	1272802	importProjectData	70/80
+frac	1275271	migrateProjectHistory	465/487
+frac	1277802	importProjectData	70/80
+logged	1280067	47	301
+frac	1280271	migrateProjectHistory	465/487
+frac	1282802	importProjectData	70/80
+frac	1285271	migrateProjectHistory	465/487
+frac	1287802	importProjectData	70/80
+logged	1290067	47	302
+frac	1290271	migrateProjectHistory	465/487
+frac	1292802	importProjectData	71/80
+frac	1295271	migrateProjectHistory	466/487
+frac	1297802	importProjectData	71/80
+logged	1300069	48	304
+frac	1300271	migrateProjectHistory	466/487
+frac	1302802	importProjectData	71/80
+frac	1305271	migrateProjectHistory	466/487
+frac	1307802	importProjectData	71/80
+logged	1310067	48	302
+frac	1310271	migrateProjectHistory	467/487
+frac	1312802	importProjectData	71/80
+frac	1315271	migrateProjectHistory	467/487
+frac	1317802	importProjectData	71/80
+logged	1320067	48	301
+frac	1320271	migrateProjectHistory	467/487
+frac	1322802	importProjectData	71/80
+frac	1325271	migrateProjectHistory	467/487
+frac	1327802	importProjectData	71/80
+logged	1330068	48	299
+frac	1330271	migrateProjectHistory	468/487
+frac	1332802	importProjectData	71/80
+frac	1335271	migrateProjectHistory	468/487
+frac	1337802	importProjectData	71/80
+logged	1340068	48	300
+frac	1340271	migrateProjectHistory	468/487
+frac	1342802	importProjectData	72/80
+frac	1345271	migrateProjectHistory	468/487
+frac	1347802	importProjectData	72/80
+logged	1350068	48	301
+frac	1350271	migrateProjectHistory	469/487
+frac	1352802	importProjectData	72/80
+frac	1355271	migrateProjectHistory	469/487
+frac	1357802	importProjectData	72/80
+logged	1360068	48	302
+frac	1360271	migrateProjectHistory	469/487
+frac	1362802	importProjectData	72/80
+frac	1365271	migrateProjectHistory	470/487
+frac	1367802	importProjectData	72/80
+logged	1370067	48	304
+frac	1370271	migrateProjectHistory	470/487
+frac	1372802	importProjectData	72/80
+frac	1375271	migrateProjectHistory	470/487
+frac	1377802	importProjectData	72/80
+logged	1380069	48	305
+frac	1380271	migrateProjectHistory	470/487
+frac	1382802	importProjectData	72/80
+frac	1385271	migrateProjectHistory	471/487
+frac	1387802	importProjectData	72/80
+logged	1390069	48	300
+frac	1390271	migrateProjectHistory	471/487
+frac	1392802	importProjectData	73/80
+frac	1395271	migrateProjectHistory	471/487
+frac	1397802	importProjectData	73/80
+logged	1400069	48	298
+frac	1400271	migrateProjectHistory	471/487
+frac	1402802	importProjectData	73/80
+frac	1405271	migrateProjectHistory	472/487
+frac	1407802	importProjectData	73/80
+logged	1410069	48	299
+frac	1410271	migrateProjectHistory	472/487
+frac	1412802	importProjectData	73/80
+frac	1415271	migrateProjectHistory	472/487
+frac	1417802	importProjectData	73/80
+logged	1420069	48	300
+frac	1420271	migrateProjectHistory	472/487
+frac	1422802	importProjectData	73/80
+frac	1425271	migrateProjectHistory	473/487
+frac	1427802	importProjectData	73/80
+logged	1430068	48	302
+frac	1430271	migrateProjectHistory	473/487
+frac	1432802	importProjectData	73/80
+frac	1435271	migrateProjectHistory	473/487
+frac	1437802	importProjectData	73/80
+logged	1440069	48	300
+frac	1440271	migrateProjectHistory	474/487
+frac	1442802	importProjectData	74/80
+frac	1445271	migrateProjectHistory	474/487
+frac	1447802	importProjectData	74/80
+logged	1450069	48	298
+frac	1450271	migrateProjectHistory	474/487
+frac	1452802	importProjectData	74/80
+frac	1455271	migrateProjectHistory	474/487
+frac	1457802	importProjectData	74/80
+logged	1460070	48	299
+frac	1460271	migrateProjectHistory	475/487
+frac	1462802	importProjectData	74/80
+frac	1465271	migrateProjectHistory	475/487
+frac	1467802	importProjectData	74/80
+logged	1470070	48	300
+frac	1470271	migrateProjectHistory	475/487
+frac	1472802	importProjectData	74/80
+frac	1475271	migrateProjectHistory	475/487
+frac	1477802	importProjectData	74/80
+logged	1480069	48	298
+frac	1480271	migrateProjectHistory	476/487
+frac	1482802	importProjectData	74/80
+frac	1485271	migrateProjectHistory	476/487
+frac	1487802	importProjectData	74/80
+logged	1490071	48	299
+frac	1490271	migrateProjectHistory	476/487
+frac	1492802	importProjectData	75/80
+frac	1495271	migrateProjectHistory	477/487
+frac	1497802	importProjectData	75/80
+logged	1500070	48	294
+frac	1500271	migrateProjectHistory	477/487
+frac	1502802	importProjectData	75/80
+frac	1505271	migrateProjectHistory	477/487
+frac	1507802	importProjectData	75/80
+logged	1510070	48	295
+frac	1510271	migrateProjectHistory	477/487
+frac	1512802	importProjectData	75/80
+frac	1515271	migrateProjectHistory	478/487
+frac	1517802	importProjectData	75/80
+logged	1520070	48	296
+frac	1520271	migrateProjectHistory	478/487
+frac	1522802	importProjectData	75/80
+frac	1525271	migrateProjectHistory	478/487
+frac	1527802	importProjectData	75/80
+logged	1530071	48	294
+frac	1530271	migrateProjectHistory	478/487
+frac	1532802	importProjectData	75/80
+frac	1535271	migrateProjectHistory	479/487
+frac	1537802	importProjectData	75/80
+logged	1540070	48	289
+frac	1540271	migrateProjectHistory	479/487
+frac	1542802	importProjectData	76/80
+frac	1545271	migrateProjectHistory	479/487
+frac	1547802	importProjectData	76/80
+frac	1549990	migrateProjectHistory	480/487
+logged	1550071	49	283
+frac	1552802	importProjectData	76/80
+frac	1554990	migrateProjectHistory	480/487
+frac	1557802	importProjectData	76/80
+frac	1559990	migrateProjectHistory	480/487
+logged	1560073	49	281
+frac	1562802	importProjectData	76/80
+frac	1564990	migrateProjectHistory	480/487
+frac	1567802	importProjectData	76/80
+frac	1569990	migrateProjectHistory	481/487
+logged	1570072	49	282
+frac	1572802	importProjectData	76/80
+frac	1574990	migrateProjectHistory	481/487
+frac	1577802	importProjectData	76/80
+frac	1579990	migrateProjectHistory	481/487
+logged	1580071	49	283
+frac	1582802	importProjectData	76/80
+frac	1584990	migrateProjectHistory	482/487
+frac	1587802	importProjectData	76/80
+frac	1589990	migrateProjectHistory	482/487
+logged	1590071	49	281
+frac	1592802	importProjectData	77/80
+frac	1594990	migrateProjectHistory	482/487
+frac	1597802	importProjectData	77/80
+frac	1599990	migrateProjectHistory	483/487
+logged	1600072	49	278
+frac	1602802	importProjectData	77/80
+frac	1604990	migrateProjectHistory	483/487
+frac	1607802	importProjectData	77/80
+frac	1609990	migrateProjectHistory	483/487
+logged	1610072	49	279
+frac	1612802	importProjectData	77/80
+frac	1614990	migrateProjectHistory	483/487
+frac	1617802	importProjectData	77/80
+frac	1619990	migrateProjectHistory	484/487
+logged	1620072	49	277
+frac	1622802	importProjectData	77/80
+frac	1624990	migrateProjectHistory	484/487
+frac	1627802	importProjectData	77/80
+frac	1629990	migrateProjectHistory	484/487
+logged	1630072	49	275
+frac	1632802	importProjectData	77/80
+frac	1634990	migrateProjectHistory	485/487
+frac	1637802	importProjectData	77/80
+frac	1639990	migrateProjectHistory	485/487
+logged	1640075	49	272
+frac	1642802	importProjectData	78/80
+frac	1644990	migrateProjectHistory	485/487
+frac	1647802	importProjectData	78/80
+frac	1649990	migrateProjectHistory	486/487
+logged	1650073	49	273
+frac	1652802	importProjectData	78/80
+frac	1654990	migrateProjectHistory	486/487
+frac	1657802	importProjectData	78/80
+frac	1659990	migrateProjectHistory	486/487
+logged	1660073	49	274
+frac	1662802	importProjectData	78/80
+frac	1664990	migrateProjectHistory	486/487
+frac	1665064	migrateProjectHistory	487/487
+frac	1667802	importProjectData	78/80
+frac	1670064	migrateProjectHistory	487/487
+logged	1670072	49	271
+frac	1672802	importProjectData	78/80
+frac	1675064	migrateProjectHistory	487/487
+frac	1677802	importProjectData	78/80
+frac	1680064	migrateProjectHistory	487/487
+logged	1680073	49	272
+frac	1682802	importProjectData	78/80
+frac	1685064	migrateProjectHistory	487/487
+frac	1687802	importProjectData	78/80
+frac	1690064	migrateProjectHistory	487/487
+logged	1690073	49	273
+frac	1692802	importProjectData	79/80
+frac	1695064	migrateProjectHistory	487/487
+frac	1697802	importProjectData	79/80
+frac	1700064	migrateProjectHistory	487/487
+logged	1700073	49	273
+frac	1702802	importProjectData	79/80
+frac	1705064	migrateProjectHistory	487/487
+frac	1707802	importProjectData	79/80
+frac	1710064	migrateProjectHistory	487/487
+logged	1710074	49	274
+frac	1712802	importProjectData	79/80
+frac	1715064	migrateProjectHistory	487/487
+frac	1717802	importProjectData	79/80
+frac	1720064	migrateProjectHistory	487/487
+logged	1720073	49	275
+frac	1722802	importProjectData	79/80
+frac	1725064	migrateProjectHistory	487/487
+frac	1727802	importProjectData	79/80
+frac	1730064	migrateProjectHistory	487/487
+logged	1730073	49	275
+frac	1732802	importProjectData	79/80
+frac	1735064	migrateProjectHistory	487/487
+frac	1737802	importProjectData	79/80
+end	1739717	importProjectData
+frac	1739717	importProjectData	80/80
+frac	1739717	migrateProjectHistory	487/487
+start	1739718	syncHotspotMetadata
+frac	1739718	syncHotspotMetadata	0/80
+start	1739759	syncIssueMetadata
+frac	1739759	syncIssueMetadata	0/80
+logged	1740075	53	40
+end	1740718	syncHotspotMetadata
+frac	1740718	syncHotspotMetadata	80/80
+frac	1744759	syncIssueMetadata	2/80
+frac	1749759	syncIssueMetadata	4/80
+logged	1750073	56	37
+frac	1754759	syncIssueMetadata	6/80
+frac	1759759	syncIssueMetadata	9/80
+logged	1760073	59	35
+frac	1764759	syncIssueMetadata	11/80
+frac	1769759	syncIssueMetadata	13/80
+logged	1770074	62	33
+frac	1774759	syncIssueMetadata	16/80
+frac	1779759	syncIssueMetadata	18/80
+logged	1780074	64	31
+frac	1784759	syncIssueMetadata	20/80
+frac	1789759	syncIssueMetadata	23/80
+logged	1790074	66	30
+frac	1794759	syncIssueMetadata	25/80
+frac	1799759	syncIssueMetadata	27/80
+logged	1800074	67	28
+frac	1804759	syncIssueMetadata	30/80
+frac	1809759	syncIssueMetadata	32/80
+logged	1810074	69	27
+frac	1814759	syncIssueMetadata	34/80
+frac	1819759	syncIssueMetadata	37/80
+logged	1820075	70	26
+frac	1824759	syncIssueMetadata	39/80
+frac	1829759	syncIssueMetadata	41/80
+logged	1830074	71	25
+frac	1834759	syncIssueMetadata	44/80
+frac	1839759	syncIssueMetadata	46/80
+logged	1840076	73	24
+frac	1844759	syncIssueMetadata	48/80
+frac	1849759	syncIssueMetadata	51/80
+logged	1850094	74	23
+frac	1854759	syncIssueMetadata	53/80
+frac	1859759	syncIssueMetadata	55/80
+logged	1860102	75	22
+frac	1864759	syncIssueMetadata	57/80
+frac	1869759	syncIssueMetadata	60/80
+logged	1870108	76	22
+frac	1874759	syncIssueMetadata	62/80
+frac	1879759	syncIssueMetadata	64/80
+logged	1880111	76	21
+frac	1884759	syncIssueMetadata	67/80
+frac	1889759	syncIssueMetadata	69/80
+logged	1890112	77	20
+frac	1894759	syncIssueMetadata	71/80
+frac	1899759	syncIssueMetadata	74/80
+logged	1900113	78	20
+frac	1904759	syncIssueMetadata	76/80
+frac	1909759	syncIssueMetadata	78/80
+logged	1910114	79	19
+end	1912257	syncIssueMetadata
+frac	1912257	syncIssueMetadata	80/80
+logged	1912257	100	0
+total	1912278
