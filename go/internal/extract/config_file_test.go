@@ -444,6 +444,102 @@ func TestLoadExtractConfigFileObjectsAndProjectKey_NoObjectsMeansEverything(t *t
 	}
 }
 
+// #592: "project_key_regexp" is the deprecated "project_key"'s
+// replacement. Both round-trip; project_key_regexp wins when both are set.
+func TestLoadExtractConfigFileProjectKeyRegexp_FlatShape(t *testing.T) {
+	body := `{
+  "url": "http://sq.example.com",
+  "token": "tok",
+  "project_key_regexp": "BANKING_.+"
+}`
+	path := filepath.Join(t.TempDir(), "flat-project-key-regexp.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.ProjectKey != "BANKING_.+" {
+		t.Errorf("ProjectKey: got %q", cfg.ProjectKey)
+	}
+}
+
+func TestLoadExtractConfigFileProjectKeyRegexp_DeprecatedProjectKeyStillWorks(t *testing.T) {
+	body := `{
+  "url": "http://sq.example.com",
+  "token": "tok",
+  "project_key": "LEGACY_.+"
+}`
+	path := filepath.Join(t.TempDir(), "flat-deprecated-project-key.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.ProjectKey != "LEGACY_.+" {
+		t.Errorf("expected deprecated project_key to still resolve, got %q", cfg.ProjectKey)
+	}
+}
+
+func TestLoadExtractConfigFileProjectKeyRegexp_BothSetNewWins(t *testing.T) {
+	body := `{
+  "url": "http://sq.example.com",
+  "token": "tok",
+  "project_key": "LEGACY_.+",
+  "project_key_regexp": "NEW_.+"
+}`
+	path := filepath.Join(t.TempDir(), "flat-both-project-key.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.ProjectKey != "NEW_.+" {
+		t.Errorf("expected project_key_regexp to win over project_key, got %q", cfg.ProjectKey)
+	}
+}
+
+func TestLoadExtractConfigFileProjectKeyRegexp_UnifiedShape_SourceOverridesTopLevel(t *testing.T) {
+	body := `{
+  "project_key_regexp": "top-level-.+",
+  "source": { "url": "u", "token": "t", "project_key_regexp": "source-.+" }
+}`
+	path := filepath.Join(t.TempDir(), "unified-project-key-regexp-source.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.ProjectKey != "source-.+" {
+		t.Errorf("expected source.project_key_regexp to win, got %q", cfg.ProjectKey)
+	}
+}
+
+func TestLoadExtractConfigFileProjectKeyRegexp_UnifiedShape_FallsBackToTopLevel(t *testing.T) {
+	body := `{
+  "project_key_regexp": "top-level-.+",
+  "source": { "url": "u", "token": "t" }
+}`
+	path := filepath.Join(t.TempDir(), "unified-project-key-regexp-fallback.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadExtractConfigFile(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.ProjectKey != "top-level-.+" {
+		t.Errorf("expected fallback to top-level project_key_regexp, got %q", cfg.ProjectKey)
+	}
+}
+
 // #582: "branch_regexp" round-trips for the flat shape, same as
 // "project_key" above.
 func TestLoadExtractConfigFileBranchRegexp_FlatShape(t *testing.T) {

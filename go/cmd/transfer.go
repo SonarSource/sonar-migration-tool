@@ -30,10 +30,11 @@ const (
 	sqServerName = "SonarQube Server"
 	scCloudName  = "SonarQube Cloud"
 
-	flagConfig                   = "config"
-	flagSourceURL                = "source_url"
-	flagSourceToken              = "source_token"
-	flagProjectKey               = "project_key"
+	flagConfig      = "config"
+	flagSourceURL   = "source_url"
+	flagSourceToken = "source_token"
+	// flagProjectKey / flagProjectKeyRegexp live in project_key_flags.go,
+	// shared by every command that accepts this parameter (#592).
 	flagTargetURL                = "target_url"
 	flagTargetToken              = "target_token"
 	flagEnterpriseKey            = "enterprise_key"
@@ -145,10 +146,11 @@ var transferCmd = &cobra.Command{
 It chains extract → structure → mappings → migrate automatically, eliminating
 the manual CSV-editing step. Credentials for both sides are required.
 
-Transfer is project-scoped. --project_key is always compiled as a full-match
-regex, implicitly anchored with ^ and $ (#529) — a plain key like "my-project"
-matches only itself, while a pattern like "BANKING_.+" transfers every source
-project whose key starts with "BANKING_" (not just one containing that
+Transfer is project-scoped. --project_key_regexp (the deprecated --project_key
+still works) is always compiled as a full-match regex, implicitly anchored
+with ^ and $ (#529) — a plain key like "my-project" matches only itself,
+while a pattern like "BANKING_.+" transfers every source project whose key
+starts with "BANKING_" (not just one containing that
 substring). Every matched project migrates together with the quality gate and
 quality profiles it uses, its permissions and project settings, and its full
 issue and Security Hotspot history — including externally imported issues —
@@ -163,7 +165,7 @@ Example (flags, single project):
   sonar-migration-tool transfer \
     --source_url https://sonarqube.example.com \
     --source_token sqp_xxx \
-    --project_key my-project \
+    --project_key_regexp my-project \
     --target_token squ_xxx \
     --default_organization my-org
 
@@ -171,7 +173,7 @@ Example (flags, every project matching a pattern):
   sonar-migration-tool transfer \
     --source_url https://sonarqube.example.com \
     --source_token sqp_xxx \
-    --project_key "BANKING_.+" \
+    --project_key_regexp "BANKING_.+" \
     --target_token squ_xxx \
     --default_organization my-org
 
@@ -186,7 +188,7 @@ and cert_password:
     "export_directory": "./migration-files",
     "concurrency": 10,
     "timeout": 60,
-    "project_key": "my-project",
+    "project_key_regexp": "my-project",
     "source": {
       "url": "https://sonarqube.example.com",
       "token": "sqp_xxx",
@@ -215,7 +217,7 @@ func init() {
 	f.StringP(flagConfig, "c", "", "Path to JSON configuration file (common shape with source / target sections)")
 	f.String(flagSourceURL, "", sqServerName+" URL (maps to source.url)")
 	f.String(flagSourceToken, "", sqServerName+" token (maps to source.token)")
-	f.String(flagProjectKey, "", "Project key (or regexp) to transfer (required; transfer is project-scoped — also accepts top-level project_key in the config file). Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"BANKING_.+\" matches every key starting with BANKING_, not just a key containing that substring. #529.")
+	registerProjectKeyFlags(f, "Regexp pattern of the project key to transfer (required; transfer is project-scoped — also accepts top-level project_key_regexp in the config file). Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"BANKING_.+\" matches every key starting with BANKING_, not just a key containing that substring. #529, #592.")
 	f.String(flagTargetURL, "", scCloudName+" URL (maps to target.url, default: https://sonarcloud.io/)")
 	f.String(flagTargetToken, "", scCloudName+" token (maps to target.token)")
 	f.String(flagDefaultOrg, "", scCloudName+" organization key (maps to target.default_organization)")
@@ -417,6 +419,11 @@ func warnIfConcurrencyDeprecated(concurrency int) {
 // in the config file and are not part of extract or migrate configs.
 type transferConfigOverlay struct {
 	ProjectKey string `json:"project_key"`
+	// ProjectKeyRegexp is the replacement for ProjectKey (#592) — kept
+	// as a separate JSON field, not a second name for the same one,
+	// so common.ResolveDeprecatedProjectKey can tell whether the
+	// (deprecated) old name or the new one was actually set in the file.
+	ProjectKeyRegexp string `json:"project_key_regexp"`
 }
 
 func loadTransferOverlay(path string) (transferConfigOverlay, error) {
@@ -453,7 +460,7 @@ func loadTransferFileDefaults(path string) (transferConfig, error) {
 
 	cfg.sourceURL = extractCfg.URL
 	cfg.sourceToken = extractCfg.Token
-	cfg.projectKey = overlay.ProjectKey
+	cfg.projectKey = common.ResolveDeprecatedProjectKey(overlay.ProjectKey, overlay.ProjectKeyRegexp)
 	cfg.targetURL = migrateCfg.URL
 	cfg.targetToken = migrateCfg.Token
 	cfg.enterpriseKey = migrateCfg.EnterpriseKey
@@ -525,7 +532,7 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 
 	applyFlagString(cmd, flagSourceURL, &cfg.sourceURL)
 	applyFlagString(cmd, flagSourceToken, &cfg.sourceToken)
-	applyFlagString(cmd, flagProjectKey, &cfg.projectKey)
+	resolveProjectKeyFlagsInto(cmd, &cfg.projectKey)
 	applyFlagString(cmd, flagTargetURL, &cfg.targetURL)
 	applyFlagString(cmd, flagTargetToken, &cfg.targetToken)
 	applyFlagString(cmd, flagDefaultOrg, &cfg.defaultOrganization)
@@ -605,13 +612,13 @@ func validateTransferConfig(cfg transferConfig) error {
 	// front so the failure mode is a clear validation error instead
 	// of a downstream cascade.
 	if cfg.projectKey == "" {
-		return fmt.Errorf("project key is required (--%s or project_key in config file) — transfer is project-scoped by design", flagProjectKey)
+		return fmt.Errorf("project key is required (--%s, or project_key_regexp in the config file — the deprecated --%s/project_key still work too) — transfer is project-scoped by design", flagProjectKeyRegexp, flagProjectKey)
 	}
 	// #529 — --project_key is always compiled as an anchored regex (a
 	// literal key with no metacharacters matches only itself). Reject an
 	// invalid pattern up front rather than failing deep in extract.
 	if _, err := anchoredProjectKeyPattern(cfg.projectKey); err != nil {
-		return fmt.Errorf("invalid --%s pattern %q: %w", flagProjectKey, cfg.projectKey, err)
+		return fmt.Errorf("invalid --%s/--%s pattern %q: %w", flagProjectKeyRegexp, flagProjectKey, cfg.projectKey, err)
 	}
 	// #582 — reject an invalid --branch_regexp pattern up front, same
 	// rationale as --project_key above.
@@ -731,7 +738,7 @@ func resolveTransferProjectKeys(ctx context.Context, cfg transferConfig) ([]stri
 	re, err := anchoredProjectKeyPattern(cfg.projectKey)
 	if err != nil {
 		// Already validated by validateTransferConfig; defensive only.
-		return nil, fmt.Errorf("invalid --%s pattern %q: %w", flagProjectKey, cfg.projectKey, err)
+		return nil, fmt.Errorf("invalid --%s/--%s pattern %q: %w", flagProjectKeyRegexp, flagProjectKey, cfg.projectKey, err)
 	}
 	allKeys, err := extract.ListAllProjectKeys(ctx, extract.ExtractConfig{
 		URL:          cfg.sourceURL,
@@ -756,10 +763,10 @@ func resolveTransferProjectKeys(ctx context.Context, cfg transferConfig) ([]stri
 		return nil, fmt.Errorf(
 			"no project on %s matches --%s %q "+
 				"(keys are case-sensitive; verify with GET /api/projects/search)",
-			cfg.sourceURL, flagProjectKey, cfg.projectKey)
+			cfg.sourceURL, flagProjectKeyRegexp, cfg.projectKey)
 	}
 	sort.Strings(matched)
-	fmt.Printf("Matched %d project(s) for --%s %q: %s\n", len(matched), flagProjectKey, cfg.projectKey, strings.Join(matched, ", "))
+	fmt.Printf("Matched %d project(s) for --%s %q: %s\n", len(matched), flagProjectKeyRegexp, cfg.projectKey, strings.Join(matched, ", "))
 	return matched, nil
 }
 
@@ -844,7 +851,7 @@ func ensureTransferProjectExtracted(cfg transferConfig, wantKeys []string) error
 	return fmt.Errorf(
 		"project(s) %s matched --%s %q but do not exist on source server %s "+
 			"(keys are case-sensitive; verify with GET /api/projects/search?projects=%s)",
-		strings.Join(missing, ", "), flagProjectKey, cfg.projectKey, cfg.sourceURL, strings.Join(missing, ","))
+		strings.Join(missing, ", "), flagProjectKeyRegexp, cfg.projectKey, cfg.sourceURL, strings.Join(missing, ","))
 }
 
 func runTransferStructure(cfg transferConfig) error {

@@ -231,10 +231,10 @@ curl -u "$SC_TOKEN:" \
 
 ```bash
 # Default: drop the unsupported-language files, migrate everything else
-sonar-migration-tool transfer -c config.json --project_key my-project
+sonar-migration-tool transfer -c config.json --project_key_regexp my-project
 
 # Or: do not migrate this project's issues/branches at all
-sonar-migration-tool transfer -c config.json --project_key my-project \
+sonar-migration-tool transfer -c config.json --project_key_regexp my-project \
   --unsupported_languages skip
 ```
 

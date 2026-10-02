@@ -233,29 +233,31 @@ the other actions, issue #295) and then applies CLI overrides via
 # Flags
 sonar-migration-tool transfer \
   --source_url https://sonarqube.example.com --source_token sqp_xxx \
-  --project_key my-project \
+  --project_key_regexp my-project \
   --target_token squ_xxx --default_organization my-org
 
 # Config file
-sonar-migration-tool transfer -c config.json --project_key my-project
+sonar-migration-tool transfer -c config.json --project_key_regexp my-project
 ```
 
 **config.json** (same unified shape as `extract` / `migrate`):
 ```json
 {
+  "project_key_regexp": "my-project",
   "source": { "url": "...", "token": "..." },
   "target": { "url": "...", "token": "...",
               "default_organization": "...", "enterprise_key": "..." }
 }
 ```
 
-`--project_key` is optional and lives on the CLI only. When provided, the
-`/api/projects/search` call is filtered server-side via the `projects=` param, so only
-the target project and its data are extracted. When omitted, all projects on the server
-are migrated.
+`--project_key_regexp` (CLI flag or top-level config field; the deprecated
+`--project_key`/`project_key` still work but log a warning) is **required**
+— transfer is project-scoped by design. The `/api/projects/search` call is
+filtered server-side via the `projects=` param, so only matching projects and
+their data are extracted.
 
 **Execution sequence:**
-1. `extract.RunExtract` — sets `ExtractConfig.ProjectKeys` when `--project_key` is given
+1. `extract.RunExtract` — sets `ExtractConfig.ProjectKeys` from `--project_key_regexp`
 2. `structure.RunStructure(dir, defaultOrg)` — pre-populates `sonarcloud_org_key` in organizations.csv
 3. `structure.RunMappings(dir)` — generates gates/profiles/groups/templates CSVs
 4. `migrate.RunMigrate` — pushes everything to SonarQube Cloud
