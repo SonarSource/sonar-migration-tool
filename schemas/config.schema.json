@@ -62,11 +62,11 @@
     "project_key": {
       "type": ["string", "null"],
       "deprecated": true,
-      "description": "DEPRECATED — use project_key_regexp instead (issue #592); still honoured with a WARN, and project_key_regexp takes precedence if both are set. Regexp pattern of source project keys to extract / migrate — extract and migrate only; only applies when \"projects\" is selected via objects (or objects is unset). Implicitly anchored (^...$); a plain key with no regex metacharacters matches only itself. Issue #536."
+      "description": "DEPRECATED — use project_key_regexp instead (issue #592); still honoured with a WARN, and project_key_regexp takes precedence if both are set. Regexp pattern of source project keys to extract / migrate / sync-issues; on extract/migrate only applies when \"projects\" is selected via objects (or objects is unset). Implicitly anchored (^...$); a plain key with no regex metacharacters matches only itself. Issue #536."
     },
     "project_key_regexp": {
       "type": ["string", "null"],
-      "description": "Regexp pattern of source project keys to extract / migrate — extract and migrate only; only applies when \"projects\" is selected via objects (or objects is unset). Implicitly anchored (^...$); a plain key with no regex metacharacters matches only itself. Applies to both source (extract) and target (migrate) unless overridden by source.project_key_regexp / target.project_key_regexp. Replaces the deprecated project_key. Issue #536, #592."
+      "description": "Regexp pattern of source project keys to extract / migrate / sync-issues; on extract/migrate only applies when \"projects\" is selected via objects (or objects is unset). Implicitly anchored (^...$); a plain key with no regex metacharacters matches only itself. Applies to both source (extract, also read by sync-issues) and target (migrate) unless overridden by source.project_key_regexp / target.project_key_regexp. Replaces the deprecated project_key. Issue #536, #592."
     },
     "branch_regexp": {
       "type": ["string", "null"],

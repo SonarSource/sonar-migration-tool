@@ -312,7 +312,7 @@ func TestTier2_PathB_FullPipeline(t *testing.T) {
 		// (go/cmd), so it takes --export_dir, not --export_directory.
 		res := runCLI(t, "sync-issues",
 			"--config", cfg.path,
-			"--project_key", projectKey,
+			"--project_key_regexp", projectKey,
 			"--export_dir", exportDir,
 		)
 		requireExit(t, res, 0, "sync-issues")

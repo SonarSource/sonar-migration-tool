@@ -95,7 +95,7 @@ var commandFlags = map[string][]string{
 		"--api_max_rate_per_min", "--cert_password", "--concurrency",
 		"--config", "--default_organization",
 		"--enterprise_key", "--export_dir", "--fast_sync", "--insecure",
-		"--key_file_path", "--pem_file_path", "--project_key",
+		"--key_file_path", "--pem_file_path", "--project_key_regexp",
 		"--project_key_pattern", "--source_token", "--source_url",
 		"--target_token", "--target_url", "--timeout",
 	},
@@ -259,6 +259,24 @@ func TestTier0_ProjectKeyDeprecatedFlagStillWorks(t *testing.T) {
 	}
 	if !strings.Contains(combined, "URL and TOKEN are required") {
 		t.Errorf("expected extract to still run its normal URL/token validation past the deprecated flag, got: %s", combined)
+	}
+}
+
+// TestTier0_SyncIssuesProjectKeyDeprecatedFlagStillWorks is the sync-issues
+// counterpart of TestTier0_ProjectKeyDeprecatedFlagStillWorks: sync-issues
+// registers --project_key as its own, differently-typed (repeatable
+// StringSlice) deprecated flag rather than through the shared
+// go/cmd/project_key_flags.go helper, so it gets its own live check (#592).
+func TestTier0_SyncIssuesProjectKeyDeprecatedFlagStillWorks(t *testing.T) {
+	defer track(t, "0", "sync-issues project_key deprecated flag")()
+
+	res := runCLI(t, "sync-issues", "--project_key", "BANKING_.+")
+	combined := res.combined()
+	if !strings.Contains(combined, "project_key") || !strings.Contains(combined, "deprecated") {
+		t.Errorf("expected a deprecation notice mentioning project_key, got: %s", combined)
+	}
+	if !strings.Contains(combined, "URL and token are required") {
+		t.Errorf("expected sync-issues to still run its normal URL/token validation past the deprecated flag, got: %s", combined)
 	}
 }
 
