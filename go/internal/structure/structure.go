@@ -29,7 +29,19 @@ func RunStructure(exportDirectory string, defaultOrgKey ...string) error {
 		return fmt.Errorf("exporting projects.csv: %w", err)
 	}
 
-	fmt.Printf("Structure complete: %d organizations, %d projects\n", len(organizations), len(projects))
+	shared := 0
+	for _, p := range projects {
+		if p.SharedRepoBinding {
+			shared++
+		}
+	}
+
+	if shared > 0 {
+		fmt.Printf("Structure complete: %d organizations, %d projects (%d share a repo binding without monorepo enabled — see shared_repo_binding column in projects.csv)\n",
+			len(organizations), len(projects), shared)
+	} else {
+		fmt.Printf("Structure complete: %d organizations, %d projects\n", len(organizations), len(projects))
+	}
 	return nil
 }
 
