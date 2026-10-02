@@ -26,10 +26,12 @@ import (
 // cheap tasks, then importProjectData alone for 77 of the 98 seconds, then
 // a short burst of issue/hotspot sync at the end. An estimator can look
 // fine on an evenly-spread plan and still be badly wrong here.
-var recordedMigrateRun = []struct {
+type recordedTask struct {
 	name           string
 	startMs, durMs int
-}{
+}
+
+var recordedMigrateRun = []recordedTask{
 	{"generateGateMappings", 2266, 1},
 	{"generateGroupMappings", 2266, 4},
 	{"generateOrganizationMappings", 2266, 3},
@@ -104,45 +106,62 @@ type replayTick struct {
 	trueRemaining float64
 }
 
-func replayRecordedRun(t *testing.T, interval time.Duration) (ticks []replayTick) {
-	t.Helper()
+// replayMoment is one task start or completion on the replay's virtual
+// clock, in the order the tracker must observe it.
+type replayMoment struct {
+	at   time.Time
+	done bool
+	name string
+}
 
-	origin := time.Date(2026, 9, 22, 16, 18, 29, 0, time.UTC)
-	vnow := origin
-
-	plan := make([][]string, len(recordedMigratePhaseStartsMs))
-	for _, task := range recordedMigrateRun {
+// replayPlan buckets each recorded task into the phase that was active at
+// its startMs, per phaseStartsMs.
+func replayPlan(tasks []recordedTask, phaseStartsMs []int) [][]string {
+	plan := make([][]string, len(phaseStartsMs))
+	for _, task := range tasks {
 		phase := 0
-		for i, startMs := range recordedMigratePhaseStartsMs {
+		for i, startMs := range phaseStartsMs {
 			if task.startMs >= startMs {
 				phase = i
 			}
 		}
 		plan[phase] = append(plan[phase], task.name)
 	}
-	tr := NewTracker(testLogger(), plan, ExpectedTaskDuration)
-	tr.start = origin
-	tr.now = func() time.Time { return vnow }
+	return plan
+}
 
-	type moment struct {
-		at   time.Time
-		done bool
-		name string
-	}
-	var moments []moment
-	for _, task := range recordedMigrateRun {
+// replayMoments turns each recorded task into a start and a completion
+// moment, in stable timestamp order. A start and its own completion can
+// share a timestamp for a 0ms task, and start must win, so the sort below
+// is a stable insertion sort rather than sort.Slice.
+func replayMoments(tasks []recordedTask, origin time.Time) []replayMoment {
+	var moments []replayMoment
+	for _, task := range tasks {
 		start := origin.Add(time.Duration(task.startMs) * time.Millisecond)
 		moments = append(moments,
-			moment{at: start, name: task.name},
-			moment{at: start.Add(time.Duration(task.durMs) * time.Millisecond), done: true, name: task.name})
+			replayMoment{at: start, name: task.name},
+			replayMoment{at: start.Add(time.Duration(task.durMs) * time.Millisecond), done: true, name: task.name})
 	}
-	// Stable insertion order per timestamp is enough; a start and its own
-	// completion can share a timestamp for a 0ms task, and start must win.
 	for i := 1; i < len(moments); i++ {
 		for j := i; j > 0 && moments[j].at.Before(moments[j-1].at); j-- {
 			moments[j], moments[j-1] = moments[j-1], moments[j]
 		}
 	}
+	return moments
+}
+
+func replayRecordedRun(t *testing.T, interval time.Duration) (ticks []replayTick) {
+	t.Helper()
+
+	origin := time.Date(2026, 9, 22, 16, 18, 29, 0, time.UTC)
+	vnow := origin
+
+	plan := replayPlan(recordedMigrateRun, recordedMigratePhaseStartsMs)
+	tr := NewTracker(testLogger(), plan, ExpectedTaskDuration)
+	tr.start = origin
+	tr.now = func() time.Time { return vnow }
+
+	moments := replayMoments(recordedMigrateRun, origin)
 
 	nextTick := origin.Add(interval)
 	record := func() {
