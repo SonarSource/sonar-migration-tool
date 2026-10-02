@@ -313,7 +313,7 @@ sonar-migration-tool reset <TOKEN> <ENTERPRISE_KEY> --export_directory ./files/
 | `requests.log` | Log of all API requests made during extraction |
 | `results.*.jsonl` | Raw extracted data in JSON Lines format (one file per entity) |
 | `organizations.csv` | Server-to-organization mapping (you edit this) |
-| `projects.csv` | List of all extracted projects. Its `sonarcloud_org_key` column is an optional per-project organization override you may edit — see [Mapping unbound SonarQube Server projects](MAPPING-UNBOUND-PROJECTS.md) |
+| `projects.csv` | List of all extracted projects. Its `sonarcloud_org_key` column is an optional per-project organization override you may edit — see [Mapping unbound SonarQube Server projects](MAPPING-UNBOUND-PROJECTS.md). Its `shared_repo_binding` column flags projects whose DevOps platform repository binding is shared with another project without `monorepo` enabled on SonarQube Server — SonarQube Cloud allows only one non-monorepo project per repository, so flagged projects will collide at migrate time unless you enable `monorepo` for them on SonarQube Server and re-run `extract`. (Issue #622.) |
 | `gates.csv` | Quality Gate mappings |
 | `profiles.csv` | Quality Profile mappings |
 | `groups.csv` | Group mappings |
