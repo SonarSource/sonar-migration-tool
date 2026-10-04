@@ -7,14 +7,12 @@ package extract
 import "github.com/sonar-solutions/sonar-migration-tool/internal/common"
 
 // extractProjectDataTasks and extractIssueSyncTasks split
-// projectDataTaskNames (planner.go) for progress-weighting purposes only
-// (#520) — gating still treats them as one group via IncludeProjectData.
-// --skip_issue_sync does not remove tasks from the extract plan (it only
-// drops additionalFields=_all / hotspot enrichment inside these two tasks'
-// API calls), so on extract the IssueSync weight only ever falls to 0
-// together with ProjectData, never independently. That's an honest
-// reflection of the flag's real effect, and still satisfies "project data
-// migration ... turned off" from the issue.
+// projectDataTaskNames (planner.go) into stages (#520) — gating still
+// treats them as one group via IncludeProjectData. --skip_issue_sync does
+// not remove tasks from the extract plan (it only drops
+// additionalFields=_all / hotspot enrichment inside these two tasks' API
+// calls), so on extract the IssueSync stage only ever empties together
+// with ProjectData, never independently.
 var extractProjectDataTasks = map[string]bool{
 	"getProjectComponentTree":   true,
 	"getProjectSourceCode":      true,
@@ -59,8 +57,10 @@ var extractProjectConfigTasks = map[string]bool{
 	"getProjectTemplateIssues":    true,
 }
 
-// CategorizeTask buckets an extract task name for run-wide progress
-// weighting (#520). Anything not explicitly listed is CategoryGeneral —
+// CategorizeTask buckets an extract task name into the same four stages
+// migrate.CategorizeTask uses (#520). The overall progress tracker no
+// longer weights by it (#621); it is kept so the task groups above stay
+// checked for full coverage. Anything not explicitly listed is CategoryGeneral —
 // server, user, rule, profile, gate, template, portfolio/app, and
 // server-level webhook/misc tasks, none of which loop over projects as
 // their primary axis.
