@@ -27,13 +27,28 @@ const (
 	impactSoftwareQualitiesParam = "impactSoftwareQualities"
 	impactSeveritiesParam        = "impactSeverities"
 
+	// directoriesParam / filesParam are the cascade's third and fourth
+	// fallback facets (#630's own "ruleId in particular but others may
+	// be used (directory, file, ...)"), tried when a single rule key is
+	// itself still over the ceiling — the shape of a systematic rule
+	// (e.g. a duplication or convention check) firing on every file of
+	// a first analysis. "files" rather than "fileUuids": the latter is
+	// sonar-tools' SonarQube-Cloud-only facet name, and this package
+	// only ever talks to the source SonarQube Server.
+	directoriesParam = "directories"
+	filesParam       = "files"
+
 	// maxFacetValues bounds how many distinct facet values the cascade
-	// will fan out into follow-up requests for. Mirrors the reference
-	// implementation's own safeguard (sonar-tools' _MAX_FACETS = 100,
-	// see #630): a facet with this many distinct values is evidence the
-	// dimension will not usefully partition one second's issues, so the
-	// cascade gives up on that cell rather than firing 100+ follow-up
-	// requests for diminishing returns.
+	// will fan out into follow-up requests for at any single level.
+	// Mirrors the reference implementation's own safeguard (sonar-tools'
+	// _MAX_FACETS = 100, see #630): a facet with more than this many
+	// distinct values is evidence the dimension will not usefully
+	// partition one second's issues (or would cost more requests than
+	// it recovers), so the cascade gives up on that cell instead of
+	// fanning out 100+ follow-up requests. Exactly maxFacetValues
+	// distinct values is still tried — the cutoff is "more than", not
+	// "at least" — so a project with precisely that many files, say, is
+	// not punished for landing exactly on the line.
 	maxFacetValues = 100
 
 	settingsAPI       = "api/settings/values"
@@ -76,6 +91,14 @@ var (
 	// multi-quality issue, not of a broken seam.
 	mqrTaxonomy = issueTaxonomy{typeParam: impactSoftwareQualitiesParam, severityParam: impactSeveritiesParam}
 )
+
+// facetCascadeOrder is the fallback order tried once a (type, severity)
+// cell is itself still over the ceiling: rule key, then directory, then
+// file path (#630) — mirroring sonar-tools' own facet search order for
+// the dimensions that apply uniformly regardless of taxonomy (rules,
+// directories and files mean the same thing under Standard Experience
+// and MQR mode alike, unlike type/severity).
+var facetCascadeOrder = []string{rulesParam, directoriesParam, filesParam}
 
 // IsMQRMode reports whether the source SonarQube Server is configured
 // in MQR mode rather than Standard Experience mode, mirroring
@@ -253,9 +276,11 @@ func (s *issueSlicer) fetchAndAbsorbCell(ctx context.Context, w issueWindow, fil
 // tries a second partition axis instead of giving up immediately: types
 // x severities first (validated on real production data — see
 // fetchAtomicWindow's doc comment — to recover a one-second window up
-// to roughly 24,500 issues with zero loss), falling back to rules
-// within any (type, severity) cell that is itself still over the
-// ceiling. Only a cell that survives every level of this cascade still
+// to roughly 24,500 issues with zero loss), falling back through rule
+// key, then directory, then file path (facetCascadeOrder) within any
+// (type, severity) cell that is itself still over the ceiling — the
+// shape of a systematic rule firing on every file of a first analysis.
+// Only a cell that survives every level of this cascade still
 // over the ceiling falls through to the same capped-fetch give-up
 // fetchAtomicWindow always performed on its own.
 func (s *issueSlicer) fetchByFacets(ctx context.Context, w issueWindow, total int) error {
@@ -299,32 +324,38 @@ func (s *issueSlicer) fetchTypeCell(ctx context.Context, w issueWindow, tax issu
 			}
 			continue
 		}
-		if err := s.fetchByRules(ctx, w, sev.Count, typeFilter, severityFilter); err != nil {
+		if err := s.fetchByRemainingFacets(ctx, w, sev.Count, facetCascadeOrder, typeFilter, severityFilter); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// fetchByRules is the cascade's second and final fallback level: a
-// (type, severity) cell that is itself still over the ceiling, split
-// further by rule key — the facet #630 explicitly asked for.
-func (s *issueSlicer) fetchByRules(ctx context.Context, w issueWindow, cellTotal int, parentFilters ...[2]string) error {
-	rules, err := s.probeFacet(ctx, w, rulesParam, parentFilters...)
-	if err != nil || len(rules) == 0 || len(rules) >= maxFacetValues {
-		return s.giveUpOnWindow(ctx, w, cellTotal, cellLabel(parentFilters...), parentFilters...)
+// fetchByRemainingFacets is the cascade's fallback engine for every
+// level after (type, severity): pop the next facet off order, probe it
+// scoped by every filter accumulated so far, and for each value either
+// fetch it (it fits) or recurse into whatever's left of order (#630).
+// Exhausting order with a cell still over the ceiling — the facet
+// cascade's true terminal case — gives up exactly as fetchAtomicWindow
+// always did on its own, now naming the exact cell via Scope.Detail.
+func (s *issueSlicer) fetchByRemainingFacets(ctx context.Context, w issueWindow, cellTotal int, order []string, filters ...[2]string) error {
+	if len(order) == 0 {
+		return s.giveUpOnWindow(ctx, w, cellTotal, cellLabel(filters...), filters...)
 	}
-	for _, r := range rules {
-		filters := append(append([][2]string(nil), parentFilters...), [2]string{rulesParam, r.Val})
-		if r.Count <= s.ceiling {
-			if err := s.fetchCellOrError(ctx, w, filters...); err != nil {
+	facet, rest := order[0], order[1:]
+	values, err := s.probeFacet(ctx, w, facet, filters...)
+	if err != nil || len(values) == 0 || len(values) > maxFacetValues {
+		return s.giveUpOnWindow(ctx, w, cellTotal, cellLabel(filters...), filters...)
+	}
+	for _, v := range values {
+		cellFilters := append(append([][2]string(nil), filters...), [2]string{facet, v.Val})
+		if v.Count <= s.ceiling {
+			if err := s.fetchCellOrError(ctx, w, cellFilters...); err != nil {
 				return err
 			}
 			continue
 		}
-		// A single rule, within one type and severity, still over the
-		// ceiling in one second — the cascade's true terminal case.
-		if err := s.giveUpOnWindow(ctx, w, r.Count, cellLabel(filters...), filters...); err != nil {
+		if err := s.fetchByRemainingFacets(ctx, w, v.Count, rest, cellFilters...); err != nil {
 			return err
 		}
 	}

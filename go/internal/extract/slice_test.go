@@ -33,14 +33,14 @@ var corpusStart = time.Date(2026, time.January, 15, 12, 0, 0, 0, time.UTC)
 
 // corpusIssue is one issue in the fake instance: the key the dedup set
 // keys on, the creation date the windows select on, and the
-// type/severity/rule tags the facet-slicing cascade (#630) partitions
-// by. The tags default to empty, which addBurst/addSpread leave them as
-// — only tests exercising the facet cascade need to set them, via
-// addBurstTagged.
+// type/severity/rule/directory/file tags the facet-slicing cascade
+// (#630) partitions by. The tags default to empty, which
+// addBurst/addSpread leave them as — only tests exercising the facet
+// cascade need to set them, via addBurstTagged / addBurstFull.
 type corpusIssue struct {
-	key               string
-	created           time.Time
-	typ, sev, ruleKey string
+	key                              string
+	created                          time.Time
+	typ, sev, ruleKey, dir, filePath string
 }
 
 // issueCorpus is a stand-in for /api/issues/search that honours the
@@ -148,13 +148,24 @@ func (c *issueCorpus) addBurst(at time.Time, n int, prefix string) {
 // Combine several calls at the same `at` to build a one-second burst
 // split across multiple (type, severity[, rule]) cells.
 func (c *issueCorpus) addBurstTagged(at time.Time, n int, prefix, typ, sev, rule string) {
+	c.addBurstFull(at, n, prefix, typ, sev, rule, "", "")
+}
+
+// addBurstFull is addBurstTagged plus the directory/file tags the
+// facet cascade's third and fourth fallback levels partition by
+// (#630) — the shape of a systematic rule (e.g. a duplication check)
+// firing on every file of a first analysis, spread across one or more
+// directories/files rather than concentrated in a single rule bucket.
+func (c *issueCorpus) addBurstFull(at time.Time, n int, prefix, typ, sev, rule, dir, file string) {
 	for i := 0; i < n; i++ {
 		c.issues = append(c.issues, corpusIssue{
-			key:     fmt.Sprintf("%s-%d", prefix, i),
-			created: at,
-			typ:     typ,
-			sev:     sev,
-			ruleKey: rule,
+			key:      fmt.Sprintf("%s-%d", prefix, i),
+			created:  at,
+			typ:      typ,
+			sev:      sev,
+			ruleKey:  rule,
+			dir:      dir,
+			filePath: file,
 		})
 	}
 }
@@ -267,11 +278,11 @@ type corpusQuery struct {
 	page, pageSize      int
 	newestFirst         bool
 
-	// types/severities/rules are the facet-cascade filters (#630) — each
-	// comma-separated like the real API, nil when the param is absent
-	// (meaning "no filter on this dimension", same as an absent date
-	// bound).
-	types, severities, rules []string
+	// types/severities/rules/directories/files are the facet-cascade
+	// filters (#630) — each comma-separated like the real API, nil when
+	// the param is absent (meaning "no filter on this dimension", same
+	// as an absent date bound).
+	types, severities, rules, directories, files []string
 	// facet, when non-empty, is the requested "facets=" property; the
 	// response carries a facets block computed over the filtered
 	// selection, same as the real endpoint's faceting-after-filtering
@@ -336,10 +347,12 @@ func (c *issueCorpus) parseQuery(q url.Values) (corpusQuery, string) {
 		// MQR's impactSoftwareQualities/impactSeverities are treated as
 		// aliases for the same underlying fields rather than modelled
 		// as genuinely different data.
-		types:      commaList(firstNonEmptyQuery(q, typesParam, impactSoftwareQualitiesParam)),
-		severities: commaList(firstNonEmptyQuery(q, severitiesParam, impactSeveritiesParam)),
-		rules:      commaList(q.Get(rulesParam)),
-		facet:      q.Get(facetsParam),
+		types:       commaList(firstNonEmptyQuery(q, typesParam, impactSoftwareQualitiesParam)),
+		severities:  commaList(firstNonEmptyQuery(q, severitiesParam, impactSeveritiesParam)),
+		rules:       commaList(q.Get(rulesParam)),
+		directories: commaList(q.Get(directoriesParam)),
+		files:       commaList(q.Get(filesParam)),
+		facet:       q.Get(facetsParam),
 	}
 	if parsed.pageSize > issuePageSize {
 		c.violate("ps=%d exceeds the server's maximum of %d", parsed.pageSize, issuePageSize)
@@ -412,6 +425,10 @@ func (c *issueCorpus) facetBlock(facet string, selected []corpusIssue) map[strin
 			v = issue.sev
 		case rulesParam:
 			v = issue.ruleKey
+		case directoriesParam:
+			v = issue.dir
+		case filesParam:
+			v = issue.filePath
 		}
 		if v != "" {
 			counts[v]++
@@ -454,7 +471,13 @@ func (c *issueCorpus) excluded(issue corpusIssue, q corpusQuery) bool {
 	if len(q.severities) > 0 && !containsStr(q.severities, issue.sev) {
 		return true
 	}
-	return len(q.rules) > 0 && !containsStr(q.rules, issue.ruleKey)
+	if len(q.rules) > 0 && !containsStr(q.rules, issue.ruleKey) {
+		return true
+	}
+	if len(q.directories) > 0 && !containsStr(q.directories, issue.dir) {
+		return true
+	}
+	return len(q.files) > 0 && !containsStr(q.files, issue.filePath)
 }
 
 // atoiOrDefault parses a query parameter the lenient way a server does.

@@ -535,8 +535,9 @@ func (s *issueSlicer) fetchWindowItems(ctx context.Context, w issueWindow, probe
 //
 // The contract is "return everything the API will give for this window,
 // and record exactly what it will not". A secondary partition axis
-// (types x severities, falling back to rules — see slice_facets.go's
-// fetchByFacets) now tries to make good on that contract before
+// (types x severities, falling back through rule, directory and file —
+// see slice_facets.go's fetchByFacets) now tries to make good on that
+// contract before
 // admitting defeat: types x severities was measured to partition
 // exactly inside a single second on SonarQube 2026.4.1 (a 15-cell cross
 // product summing to 8,916 with zero delta, dominant cell 40.9%, so

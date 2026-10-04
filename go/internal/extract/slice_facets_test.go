@@ -5,6 +5,7 @@
 package extract
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -131,6 +132,128 @@ func TestFacetCascadeTerminalGiveUpWhenRuleCellStillOverCeiling(t *testing.T) {
 	if rec.Fetched != common.ResultWindowLimit || rec.Lost != total-common.ResultWindowLimit {
 		t.Errorf("fetched/lost: got %d/%d, want %d/%d",
 			rec.Fetched, rec.Lost, common.ResultWindowLimit, total-common.ResultWindowLimit)
+	}
+}
+
+// TestFacetCascadeRecoversViaDirectoriesWhenRuleCellStillOverCeiling
+// reproduces a real customer repro (a single systematic rule firing on
+// every file of a first analysis, split across 2 directories — see
+// issue #630's follow-up): a (type, severity, rule) cell that is itself
+// still over the ceiling, but splits cleanly into 2 directories each
+// under it.
+func TestFacetCascadeRecoversViaDirectoriesWhenRuleCellStillOverCeiling(t *testing.T) {
+	const (
+		perDir = 6000
+		total  = perDir * 2
+	)
+	corpus := newIssueCorpus(t)
+	corpus.addBurstFull(corpusStart, perDir, "d1", "CODE_SMELL", "MINOR", "python:S1481", "pkg/a", "")
+	corpus.addBurstFull(corpusStart, perDir, "d2", "CODE_SMELL", "MINOR", "python:S1481", "pkg/b", "")
+	e, tracker := corpus.start()
+
+	var sink issueCollector
+	if err := fetchProjectIssues(ctx(t), e, "p1", "main", taskIssueParams(), sink.sink); err != nil {
+		t.Fatalf("fetchProjectIssues must not fail: %v", err)
+	}
+
+	if got := sink.delivered(); got != total {
+		t.Errorf("delivered: got %d, want %d (full recovery via the directories fallback)", got, total)
+	}
+	if recs := tracker.State().Records; len(recs) != 0 {
+		t.Errorf("nothing was lost, so nothing may be recorded: got %+v", recs)
+	}
+
+	sawDirectoriesFacetProbe := false
+	for _, q := range corpus.allQueries() {
+		if q.Get(facetsParam) == directoriesParam && q.Get(rulesParam) == "python:S1481" {
+			sawDirectoriesFacetProbe = true
+			break
+		}
+	}
+	if !sawDirectoriesFacetProbe {
+		t.Errorf("expected a facets=directories probe scoped to rules=python:S1481, queries: %v", corpus.allQueries())
+	}
+}
+
+// TestFacetCascadeRecoversViaFilesWhenDirectoriesDoNotHelp reproduces
+// the second real customer repro: a project with no subdirectories (so
+// the directories facet returns exactly one value covering everything,
+// still over the ceiling), split across 100 files each under it. The
+// cascade must fall through directories to files rather than giving up
+// as soon as directories alone does not resolve the cell.
+func TestFacetCascadeRecoversViaFilesWhenDirectoriesDoNotHelp(t *testing.T) {
+	const (
+		fileCount = 100
+		perFile   = 119
+		total     = fileCount * perFile
+	)
+	corpus := newIssueCorpus(t)
+	for i := 0; i < fileCount; i++ {
+		file := fmt.Sprintf("module_%d.py", i)
+		corpus.addBurstFull(corpusStart, perFile, file, "CODE_SMELL", "MINOR", "python:S1481", "src", file)
+	}
+	e, tracker := corpus.start()
+
+	var sink issueCollector
+	if err := fetchProjectIssues(ctx(t), e, "p1", "main", taskIssueParams(), sink.sink); err != nil {
+		t.Fatalf("fetchProjectIssues must not fail: %v", err)
+	}
+
+	if got := sink.delivered(); got != total {
+		t.Errorf("delivered: got %d, want %d (full recovery via the files fallback)", got, total)
+	}
+	if recs := tracker.State().Records; len(recs) != 0 {
+		t.Errorf("nothing was lost, so nothing may be recorded: got %+v", recs)
+	}
+
+	sawFilesFacetProbe := false
+	for _, q := range corpus.allQueries() {
+		if q.Get(facetsParam) == filesParam && q.Get(directoriesParam) == "src" {
+			sawFilesFacetProbe = true
+			break
+		}
+	}
+	if !sawFilesFacetProbe {
+		t.Errorf("expected a facets=files probe scoped to directories=src, queries: %v", corpus.allQueries())
+	}
+}
+
+// TestFacetCascadeGivesUpCleanlyWhenFilesExceedCap is the third real
+// customer repro: the same shape as the 100-files case, but 120 files —
+// one more than maxFacetValues allows — so the cascade must still give
+// up cleanly (capped delivery, one record) rather than fanning out 120
+// follow-up requests.
+func TestFacetCascadeGivesUpCleanlyWhenFilesExceedCap(t *testing.T) {
+	const (
+		fileCount = 120
+		perFile   = 100
+		total     = fileCount * perFile
+	)
+	corpus := newIssueCorpus(t)
+	for i := 0; i < fileCount; i++ {
+		file := fmt.Sprintf("module_%d.py", i)
+		corpus.addBurstFull(corpusStart, perFile, file, "CODE_SMELL", "MINOR", "python:S1481", "src", file)
+	}
+	e, tracker := corpus.start()
+
+	var sink issueCollector
+	if err := fetchProjectIssues(ctx(t), e, "p1", "main", taskIssueParams(), sink.sink); err != nil {
+		t.Fatalf("fetchProjectIssues must not fail: %v", err)
+	}
+
+	if got := sink.delivered(); got != common.ResultWindowLimit {
+		t.Errorf("delivered: got %d, want %d (capped, 120 files exceeds the fan-out cap)", got, common.ResultWindowLimit)
+	}
+	rec := onlyRecord(t, tracker.State())
+	if rec.Total != total || rec.Fetched != common.ResultWindowLimit || rec.Lost != total-common.ResultWindowLimit {
+		t.Errorf("total/fetched/lost: got %d/%d/%d, want %d/%d/%d",
+			rec.Total, rec.Fetched, rec.Lost, total, common.ResultWindowLimit, total-common.ResultWindowLimit)
+	}
+	// Gave up at the files level (120 > maxFacetValues), so no single
+	// file was ever chosen — the detail reaches "directories=src" but
+	// not a files= filter.
+	if !strings.Contains(rec.Scope.Detail, "directories=src") || strings.Contains(rec.Scope.Detail, filesParam+"=") {
+		t.Errorf("scope.Detail: got %q, want it to reach directories=src but name no single file", rec.Scope.Detail)
 	}
 }
 
