@@ -414,6 +414,15 @@ func (c *issueCorpus) writePage(w http.ResponseWriter, q corpusQuery) {
 // behavior (#630): counts, over the already-filtered selection, of the
 // requested facet property's distinct values. Matches the
 // property/values[].val/.count shape probeFacet parses.
+//
+// It also reproduces the real server's own silent truncation: a facet
+// response never carries more than maxFacetValues buckets, with no
+// flag saying there would have been more — it just keeps the highest-
+// count buckets and drops the rest. A corpus with more distinct values
+// than that cap (e.g. the 120-flat-files repro) must come back short
+// of its own cellTotal here, the same way the real API does, or a test
+// built on this corpus cannot catch facetCoversCell regressing back to
+// trusting len(values) alone (#630's actual under-fetch bug).
 func (c *issueCorpus) facetBlock(facet string, selected []corpusIssue) map[string]any {
 	counts := make(map[string]int)
 	for _, issue := range selected {
@@ -434,9 +443,26 @@ func (c *issueCorpus) facetBlock(facet string, selected []corpusIssue) map[strin
 			counts[v]++
 		}
 	}
-	values := make([]map[string]any, 0, len(counts))
+	type bucket struct {
+		val   string
+		count int
+	}
+	buckets := make([]bucket, 0, len(counts))
 	for val, count := range counts {
-		values = append(values, map[string]any{"val": val, "count": count})
+		buckets = append(buckets, bucket{val, count})
+	}
+	sort.SliceStable(buckets, func(i, j int) bool {
+		if buckets[i].count != buckets[j].count {
+			return buckets[i].count > buckets[j].count
+		}
+		return buckets[i].val < buckets[j].val
+	})
+	if len(buckets) > maxFacetValues {
+		buckets = buckets[:maxFacetValues]
+	}
+	values := make([]map[string]any, 0, len(buckets))
+	for _, b := range buckets {
+		values = append(values, map[string]any{"val": b.val, "count": b.count})
 	}
 	return map[string]any{"property": facet, "values": values}
 }

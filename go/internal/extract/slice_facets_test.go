@@ -257,6 +257,53 @@ func TestFacetCascadeGivesUpCleanlyWhenFilesExceedCap(t *testing.T) {
 	}
 }
 
+// TestFacetCascadeGivesUpWhenFacetMissesValuelessIssues is the
+// regression for the real under-fetch this cascade shipped with
+// (#630): a facet response can fall short of its cell's own total
+// well below maxFacetValues — not just at the server's 100-bucket
+// cap — whenever some issues carry no value for that facet at all
+// (here, project-scoped issues with no file path). The old check only
+// asked "how many buckets came back"; it never asked "do their counts
+// add up", so a cell like this one looked fully recovered after
+// fetching its two file buckets, and the 150 issues with no file
+// silently vanished with no WARN and no TruncationRecord — exactly
+// the drift the customer's own run surfaced as an unexplained
+// count_drift at the very end of the walk, nowhere near this cell.
+func TestFacetCascadeGivesUpWhenFacetMissesValuelessIssues(t *testing.T) {
+	const (
+		perFile   = 5200
+		valueless = 150
+		total     = 2*perFile + valueless
+	)
+	corpus := newIssueCorpus(t)
+	corpus.addBurstFull(corpusStart, perFile, "a", "CODE_SMELL", "MINOR", "python:S1481", "src", "a.py")
+	corpus.addBurstFull(corpusStart, perFile, "b", "CODE_SMELL", "MINOR", "python:S1481", "src", "b.py")
+	// No file path: a project-scoped finding for the same rule, in the
+	// same directory bucket, but outside every "files" facet value.
+	corpus.addBurstFull(corpusStart, valueless, "v", "CODE_SMELL", "MINOR", "python:S1481", "src", "")
+	e, tracker := corpus.start()
+
+	var sink issueCollector
+	if err := fetchProjectIssues(ctx(t), e, "p1", "main", taskIssueParams(), sink.sink); err != nil {
+		t.Fatalf("fetchProjectIssues must not fail: %v", err)
+	}
+
+	if got := sink.delivered(); got != common.ResultWindowLimit {
+		t.Errorf("delivered: got %d, want %d (capped: the files facet cannot see the valueless issues)", got, common.ResultWindowLimit)
+	}
+	rec := onlyRecord(t, tracker.State())
+	if rec.Reason != common.ReasonAtomicWindow {
+		t.Errorf("reason: got %q, want %q", rec.Reason, common.ReasonAtomicWindow)
+	}
+	if rec.Total != total || rec.Fetched != common.ResultWindowLimit || rec.Lost != total-common.ResultWindowLimit {
+		t.Errorf("total/fetched/lost: got %d/%d/%d, want %d/%d/%d",
+			rec.Total, rec.Fetched, rec.Lost, total, common.ResultWindowLimit, total-common.ResultWindowLimit)
+	}
+	if !strings.Contains(rec.Scope.Detail, "directories=src") || strings.Contains(rec.Scope.Detail, filesParam+"=") {
+		t.Errorf("scope.Detail: got %q, want it to reach directories=src but name no single file", rec.Scope.Detail)
+	}
+}
+
 // TestFacetCascadeGivesUpCleanlyWhenRulesFacetTooLarge covers the
 // defensive cap mirroring sonar-tools' own _MAX_FACETS=100 safeguard
 // (#630): a (type, severity) cell spread evenly across >= maxFacetValues

@@ -41,14 +41,15 @@ const (
 	// maxFacetValues bounds how many distinct facet values the cascade
 	// will fan out into follow-up requests for at any single level.
 	// Mirrors the reference implementation's own safeguard (sonar-tools'
-	// _MAX_FACETS = 100, see #630): a facet with more than this many
-	// distinct values is evidence the dimension will not usefully
-	// partition one second's issues (or would cost more requests than
-	// it recovers), so the cascade gives up on that cell instead of
-	// fanning out 100+ follow-up requests. Exactly maxFacetValues
-	// distinct values is still tried — the cutoff is "more than", not
-	// "at least" — so a project with precisely that many files, say, is
-	// not punished for landing exactly on the line.
+	// _MAX_FACETS = 100, see #630). It is also, not coincidentally, the
+	// server's own cap on how many buckets a single facet response ever
+	// returns: the server does not report "there were more than 100
+	// distinct values," it just silently stops at the 100 it picked
+	// (highest count first) and returns exactly 100, indistinguishable
+	// on its face from a project that has exactly 100 real distinct
+	// values. So len(values) alone can never prove truncation — see
+	// facetCoversCell, which is what actually decides whether a facet's
+	// response can be trusted for this cell.
 	maxFacetValues = 100
 
 	settingsAPI       = "api/settings/values"
@@ -289,11 +290,13 @@ func (s *issueSlicer) fetchByFacets(ctx context.Context, w issueWindow, total in
 		tax = mqrTaxonomy
 	}
 	types, err := s.probeFacet(ctx, w, tax.typeParam)
-	if err != nil || len(types) == 0 {
-		// No usable type facet — a probe failure, or (unreachable in
-		// practice, since total > 0) a response carrying none. Give up
-		// exactly as fetchAtomicWindow always did, before this change.
-		return s.giveUpOnWindow(ctx, w, total, "")
+	if err != nil {
+		return s.giveUpOnWindow(ctx, w, total, "", fmt.Sprintf("the %s facet probe failed: %v", tax.typeParam, err))
+	}
+	if len(types) == 0 {
+		// Unreachable in practice, since total > 0, but a response
+		// carrying none is still a reason to say, not just a number.
+		return s.giveUpOnWindow(ctx, w, total, "", fmt.Sprintf("the %s facet returned no values", tax.typeParam))
 	}
 
 	for _, t := range types {
@@ -313,8 +316,13 @@ func (s *issueSlicer) fetchByFacets(ctx context.Context, w issueWindow, total in
 func (s *issueSlicer) fetchTypeCell(ctx context.Context, w issueWindow, tax issueTaxonomy, t facetValue) error {
 	typeFilter := [2]string{tax.typeParam, t.Val}
 	severities, err := s.probeFacet(ctx, w, tax.severityParam, typeFilter)
-	if err != nil || len(severities) == 0 {
-		return s.giveUpOnWindow(ctx, w, t.Count, cellLabel(typeFilter), typeFilter)
+	if err != nil {
+		return s.giveUpOnWindow(ctx, w, t.Count, cellLabel(typeFilter),
+			fmt.Sprintf("the %s facet probe failed: %v", tax.severityParam, err), typeFilter)
+	}
+	if len(severities) == 0 {
+		return s.giveUpOnWindow(ctx, w, t.Count, cellLabel(typeFilter),
+			fmt.Sprintf("the %s facet returned no values", tax.severityParam), typeFilter)
 	}
 	for _, sev := range severities {
 		severityFilter := [2]string{tax.severityParam, sev.Val}
@@ -331,6 +339,27 @@ func (s *issueSlicer) fetchTypeCell(ctx context.Context, w issueWindow, tax issu
 	return nil
 }
 
+// facetCoversCell reports whether a facet's returned values can be
+// trusted to account for the whole cell. The server's own cap on facet
+// bucket count (maxFacetValues, see its doc comment) is silent about
+// truncation: it just stops at the buckets it kept and returns however
+// many that is, with no "there were more" flag. The honest signal is
+// arithmetic instead of cardinality — the returned buckets are a
+// partition of the filtered selection, so their counts must sum to
+// cellTotal exactly when the facet saw everything, and fall short when
+// the server silently dropped the long tail. A short sum (e.g. 20
+// files' worth of issues missing from a "files" facet capped at its
+// top 100) is exactly the shape that caused #630's facet cascade to
+// under-fetch without ever logging a give-up: the cell total and the
+// walk's own count drifted apart with no record naming why.
+func facetCoversCell(values []facetValue, cellTotal int) bool {
+	sum := 0
+	for _, v := range values {
+		sum += v.Count
+	}
+	return sum >= cellTotal
+}
+
 // fetchByRemainingFacets is the cascade's fallback engine for every
 // level after (type, severity): pop the next facet off order, probe it
 // scoped by every filter accumulated so far, and for each value either
@@ -340,12 +369,24 @@ func (s *issueSlicer) fetchTypeCell(ctx context.Context, w issueWindow, tax issu
 // always did on its own, now naming the exact cell via Scope.Detail.
 func (s *issueSlicer) fetchByRemainingFacets(ctx context.Context, w issueWindow, cellTotal int, order []string, filters ...[2]string) error {
 	if len(order) == 0 {
-		return s.giveUpOnWindow(ctx, w, cellTotal, cellLabel(filters...), filters...)
+		return s.giveUpOnWindow(ctx, w, cellTotal, cellLabel(filters...),
+			"the facet cascade (rules, directories, files) is exhausted and this cell is still over the ceiling", filters...)
 	}
 	facet, rest := order[0], order[1:]
 	values, err := s.probeFacet(ctx, w, facet, filters...)
-	if err != nil || len(values) == 0 || len(values) > maxFacetValues {
-		return s.giveUpOnWindow(ctx, w, cellTotal, cellLabel(filters...), filters...)
+	switch {
+	case err != nil:
+		return s.giveUpOnWindow(ctx, w, cellTotal, cellLabel(filters...),
+			fmt.Sprintf("the %s facet probe failed: %v", facet, err), filters...)
+	case len(values) == 0:
+		return s.giveUpOnWindow(ctx, w, cellTotal, cellLabel(filters...),
+			fmt.Sprintf("the %s facet returned no values", facet), filters...)
+	case len(values) > maxFacetValues:
+		return s.giveUpOnWindow(ctx, w, cellTotal, cellLabel(filters...),
+			fmt.Sprintf("the %s facet has more than %d distinct values", facet, maxFacetValues), filters...)
+	case !facetCoversCell(values, cellTotal):
+		return s.giveUpOnWindow(ctx, w, cellTotal, cellLabel(filters...),
+			fmt.Sprintf("the %s facet does not account for every issue in this cell (some issues carry no %s value)", facet, facet), filters...)
 	}
 	for _, v := range values {
 		cellFilters := append(append([][2]string(nil), filters...), [2]string{facet, v.Val})
@@ -378,7 +419,13 @@ func (s *issueSlicer) fetchCellOrError(ctx context.Context, w issueWindow, filte
 // a second with two independently-pathological cells (vanishingly
 // unlikely, but the reason to get this right) records both instead of
 // one merging into the other.
-func (s *issueSlicer) giveUpOnWindow(ctx context.Context, w issueWindow, total int, detail string, filters ...[2]string) error {
+//
+// cause is the one piece every earlier version of this WARN left for
+// the reader to reconstruct by hand: not just "how many were lost" but
+// "why the cascade stopped here" — a facet pegged at the server's
+// bucket cap, one that could not account for every issue in the cell,
+// a probe failure, or the cascade's own ordered facet list running out.
+func (s *issueSlicer) giveUpOnWindow(ctx context.Context, w issueWindow, total int, detail, cause string, filters ...[2]string) error {
 	res, err := s.fetchAndAbsorbCell(ctx, w, filters...)
 	if err != nil {
 		return err
@@ -387,9 +434,9 @@ func (s *issueSlicer) giveUpOnWindow(ctx context.Context, w issueWindow, total i
 	if lost < 0 {
 		lost = 0
 	}
-	s.e.Logger.Warn("more issues share one creation second than the API will return - date and facet slicing cannot subdivide further",
+	s.e.Logger.Warn("more than 10,000 issues could not be split below the search ceiling by date or facets",
 		"project", s.scope.ProjectKey, "branch", s.scope.Branch, "window", w.label(),
-		"facets", detail, "total", total, "fetched", res.Fetched, "lost", lost)
+		"facets", detail, "cause", cause, "total", total, "fetched", res.Fetched, "lost", lost)
 	start, end := w.bounds()
 	scope := s.scope
 	scope.Detail = detail
