@@ -270,7 +270,7 @@ curl -u "$SC_TOKEN:" \
 level=WARN msg="more issues share one creation second than the API will return - date and facet slicing cannot subdivide further" project=my-project branch=main window="[2025-09-05T17:29:07+0000, 2025-09-05T17:29:08+0000)" facets="types=BUG severities=MAJOR rules=java:S1234" total=17919 fetched=10000 lost=7919
 ```
 
-`facets` names the exact cell the cascade gave up on (empty when it could not even start, e.g. the facet probe itself failed) — `rules` is only present when a single (type, severity) cell was itself still over the ceiling, which the facet cascade tried to split further.
+`facets` names the exact cell the cascade gave up on (empty when it could not even start, e.g. the facet probe itself failed) — `rules` is only present when a single (type, severity) cell was itself still over the ceiling, which the facet cascade tried to split further. On a server configured in MQR (Multi-Quality Rule) mode the same line reads `impactSoftwareQualities=...  impactSeverities=...` instead — the cascade detects the instance's mode automatically (SonarQube Server only; see [#630](https://github.com/SonarSource/sonar-migration-tool/issues/630)) and needs no configuration on your side.
 
 Every other truncation is logged by the HTTP client, which names the endpoint and the reason instead of a window. This is what a component-tree ceiling looks like:
 

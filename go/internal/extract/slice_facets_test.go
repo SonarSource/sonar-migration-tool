@@ -184,3 +184,108 @@ func TestFacetCascadeGivesUpCleanlyWhenRulesFacetTooLarge(t *testing.T) {
 		t.Errorf("expected exactly 1 rules-facet probe, got %d: %v", rulesProbes, corpus.allQueries())
 	}
 }
+
+// TestFacetCascadeUsesMQRTaxonomyBetweenIntroAndToggleVersions covers
+// #630's MQR-mode gap: a server at 10.2.0-10.7.x has MQR with no way to
+// turn it off, so the cascade must use impactSoftwareQualities /
+// impactSeverities without even asking the setting.
+func TestFacetCascadeUsesMQRTaxonomyBetweenIntroAndToggleVersions(t *testing.T) {
+	const (
+		maintainabilityHigh = 9000
+		reliabilityLow      = 6000
+		total               = maintainabilityHigh + reliabilityLow
+	)
+	corpus := newIssueCorpus(t)
+	corpus.addBurstTagged(corpusStart, maintainabilityHigh, "m", "MAINTAINABILITY", "HIGH", "")
+	corpus.addBurstTagged(corpusStart, reliabilityLow, "r", "RELIABILITY", "LOW", "")
+	e, tracker := corpus.start()
+	e.Version = common.MustParseVersion("10.5.0")
+
+	var sink issueCollector
+	if err := fetchProjectIssues(ctx(t), e, "p1", "main", taskIssueParams(), sink.sink); err != nil {
+		t.Fatalf("fetchProjectIssues must not fail: %v", err)
+	}
+
+	if got := sink.delivered(); got != total {
+		t.Errorf("delivered: got %d, want %d", got, total)
+	}
+	if len(tracker.State().Records) != 0 {
+		t.Errorf("nothing was lost, so nothing may be recorded: got %+v", tracker.State().Records)
+	}
+	assertUsedMQRParams(t, corpus)
+}
+
+// TestFacetCascadeUsesMQRTaxonomyWhenSettingSaysSo covers the >= 10.8.0
+// case: MQR is an instance toggle, queried live via api/settings/values
+// (#630).
+func TestFacetCascadeUsesMQRTaxonomyWhenSettingSaysSo(t *testing.T) {
+	const total = 15000
+	corpus := newIssueCorpus(t)
+	corpus.mqrSetting = "true"
+	corpus.addBurstTagged(corpusStart, total, "burst", "SECURITY", "BLOCKER", "")
+	e, tracker := corpus.start()
+	e.Version = common.MustParseVersion("2026.4.0")
+
+	var sink issueCollector
+	if err := fetchProjectIssues(ctx(t), e, "p1", "main", taskIssueParams(), sink.sink); err != nil {
+		t.Fatalf("fetchProjectIssues must not fail: %v", err)
+	}
+
+	// A single (quality, severity) cell at 15000 is itself still over
+	// the ceiling — the point here is only that the probe used the MQR
+	// param names, not that this particular shape recovers fully.
+	rec := onlyRecord(t, tracker.State())
+	wantDetail := "impactSoftwareQualities=SECURITY impactSeverities=BLOCKER"
+	if rec.Scope.Detail != wantDetail {
+		t.Errorf("scope.Detail: got %q, want %q", rec.Scope.Detail, wantDetail)
+	}
+	assertUsedMQRParams(t, corpus)
+}
+
+// TestFacetCascadeDefaultsToStandardWhenSettingIsAbsent covers a server
+// new enough to have the toggle (>= 10.8.0) that nonetheless answers
+// with no matching setting (e.g. never explicitly configured) — the
+// cascade must default to Standard Experience's types/severities
+// rather than guessing MQR (#630).
+func TestFacetCascadeDefaultsToStandardWhenSettingIsAbsent(t *testing.T) {
+	const (
+		bugMajor   = 9000
+		smellMinor = 6000
+		total      = bugMajor + smellMinor
+	)
+	corpus := newIssueCorpus(t) // mqrSetting left "" — the setting does not exist in the response
+	corpus.addBurstTagged(corpusStart, bugMajor, "bug", "BUG", "MAJOR", "")
+	corpus.addBurstTagged(corpusStart, smellMinor, "smell", "CODE_SMELL", "MINOR", "")
+	e, tracker := corpus.start()
+	e.Version = common.MustParseVersion("2026.4.0")
+
+	var sink issueCollector
+	if err := fetchProjectIssues(ctx(t), e, "p1", "main", taskIssueParams(), sink.sink); err != nil {
+		t.Fatalf("fetchProjectIssues must not fail: %v", err)
+	}
+
+	if got := sink.delivered(); got != total {
+		t.Errorf("delivered: got %d, want %d", got, total)
+	}
+	if len(tracker.State().Records) != 0 {
+		t.Errorf("nothing was lost, so nothing may be recorded: got %+v", tracker.State().Records)
+	}
+	for _, q := range corpus.allQueries() {
+		if q.Get(impactSoftwareQualitiesParam) != "" || q.Get(impactSeveritiesParam) != "" {
+			t.Errorf("expected Standard taxonomy only, got an MQR-tagged query: %v", q)
+		}
+	}
+}
+
+// assertUsedMQRParams fails unless at least one query carried the MQR
+// taxonomy's type param, proving the cascade actually chose it rather
+// than happening to recover via some other path.
+func assertUsedMQRParams(t *testing.T, corpus *issueCorpus) {
+	t.Helper()
+	for _, q := range corpus.allQueries() {
+		if q.Get(impactSoftwareQualitiesParam) != "" {
+			return
+		}
+	}
+	t.Errorf("expected at least one impactSoftwareQualities-scoped query, got: %v", corpus.allQueries())
+}

@@ -105,6 +105,24 @@ type issueCorpus struct {
 	// onRequest is called with the running request count, for tests that
 	// need to interfere mid-walk.
 	onRequest func(count int)
+
+	// mqrSetting controls how the fake api/settings/values endpoint
+	// answers a sonar.multi-quality-mode.enabled probe (#630):
+	// "true"/"false" answers with that value, "" (the default) answers
+	// as if the setting does not exist (empty settings array) — the
+	// shape a pre-MQR server gives.
+	mqrSetting string
+}
+
+// serveSettings answers api/settings/values for the one key the
+// facet-slicing cascade ever asks for (#630). Any other key is not
+// modelled; none of this package's tests need one.
+func (c *issueCorpus) serveSettings(w http.ResponseWriter, r *http.Request) {
+	settings := []map[string]any{}
+	if r.URL.Query().Get("keys") == mqrEnabledSetting && c.mqrSetting != "" {
+		settings = append(settings, map[string]any{"key": mqrEnabledSetting, "value": c.mqrSetting})
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"settings": settings})
 }
 
 func newIssueCorpus(t *testing.T) *issueCorpus {
@@ -182,6 +200,10 @@ func (c *issueCorpus) sortIssues() {
 }
 
 func (c *issueCorpus) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/"+settingsAPI {
+		c.serveSettings(w, r)
+		return
+	}
 	if r.URL.Path != "/"+issuesSearchAPI {
 		http.NotFound(w, r)
 		return
@@ -267,6 +289,18 @@ func commaList(raw string) []string {
 	return strings.Split(raw, ",")
 }
 
+// firstNonEmptyQuery returns the first non-empty value among several
+// query parameter names — used to treat Standard Experience's and MQR's
+// differently-named type/severity params as aliases (#630).
+func firstNonEmptyQuery(q url.Values, keys ...string) string {
+	for _, k := range keys {
+		if v := q.Get(k); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 func containsStr(list []string, v string) bool {
 	for _, s := range list {
 		if s == v {
@@ -296,10 +330,16 @@ func (c *issueCorpus) parseQuery(q url.Values) (corpusQuery, string) {
 		page:        atoiOrDefault(q.Get("p"), 1),
 		pageSize:    atoiOrDefault(q.Get("ps"), 100),
 		newestFirst: q.Get("s") == "CREATION_DATE" && q.Get("asc") == "false",
-		types:       commaList(q.Get(typesParam)),
-		severities:  commaList(q.Get(severitiesParam)),
-		rules:       commaList(q.Get(rulesParam)),
-		facet:       q.Get(facetsParam),
+		// types/severities accept EITHER taxonomy's param name (#630):
+		// the corpus's corpusIssue only ever carries one pair of
+		// typ/sev tags, so Standard Experience's types/severities and
+		// MQR's impactSoftwareQualities/impactSeverities are treated as
+		// aliases for the same underlying fields rather than modelled
+		// as genuinely different data.
+		types:      commaList(firstNonEmptyQuery(q, typesParam, impactSoftwareQualitiesParam)),
+		severities: commaList(firstNonEmptyQuery(q, severitiesParam, impactSeveritiesParam)),
+		rules:      commaList(q.Get(rulesParam)),
+		facet:      q.Get(facetsParam),
 	}
 	if parsed.pageSize > issuePageSize {
 		c.violate("ps=%d exceeds the server's maximum of %d", parsed.pageSize, issuePageSize)
@@ -366,9 +406,9 @@ func (c *issueCorpus) facetBlock(facet string, selected []corpusIssue) map[strin
 	for _, issue := range selected {
 		var v string
 		switch facet {
-		case typesParam:
+		case typesParam, impactSoftwareQualitiesParam:
 			v = issue.typ
-		case severitiesParam:
+		case severitiesParam, impactSeveritiesParam:
 			v = issue.sev
 		case rulesParam:
 			v = issue.ruleKey

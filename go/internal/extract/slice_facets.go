@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strings"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
@@ -19,6 +20,13 @@ const (
 	rulesParam      = "rules"
 	facetsParam     = "facets"
 
+	// impactSoftwareQualitiesParam / impactSeveritiesParam are the MQR
+	// (Multi-Quality Rule) mode equivalents of types/severities (#630).
+	// rules needs no MQR equivalent: a rule key means the same thing in
+	// both models.
+	impactSoftwareQualitiesParam = "impactSoftwareQualities"
+	impactSeveritiesParam        = "impactSeverities"
+
 	// maxFacetValues bounds how many distinct facet values the cascade
 	// will fan out into follow-up requests for. Mirrors the reference
 	// implementation's own safeguard (sonar-tools' _MAX_FACETS = 100,
@@ -27,7 +35,95 @@ const (
 	// cascade gives up on that cell rather than firing 100+ follow-up
 	// requests for diminishing returns.
 	maxFacetValues = 100
+
+	settingsAPI       = "api/settings/values"
+	mqrEnabledSetting = "sonar.multi-quality-mode.enabled"
 )
+
+// mqrIntroVersion / mqr5SeveritiesVersion mirror sonar-tools'
+// MQR_INTRO_VERSION / MQR_5_SEVERITIES_VERSION (the reference
+// implementation #630 cited, sonar/util/constants.py): MQR mode existed
+// from 10.2.0 with no way to turn it off; the sonar.multi-quality-mode.enabled
+// setting that lets an instance choose its mode was not added until
+// 10.8.0.
+var (
+	mqrIntroVersion       = common.MustParseVersion("10.2.0")
+	mqr5SeveritiesVersion = common.MustParseVersion("10.8.0")
+)
+
+// issueTaxonomy names one of SonarQube's two issue classification
+// models' type/severity filter and facet parameters (#630).
+type issueTaxonomy struct {
+	typeParam     string
+	severityParam string
+}
+
+var (
+	// standardTaxonomy is "Standard Experience" mode: one type and one
+	// severity per issue — the model fetchAtomicWindow's own doc comment
+	// was measured against (SonarQube 2026.4.1, types x severities,
+	// zero-delta 15-cell partition).
+	standardTaxonomy = issueTaxonomy{typeParam: typesParam, severityParam: severitiesParam}
+
+	// mqrTaxonomy is MQR (Multi-Quality Rule) mode. Unlike Standard
+	// Experience, one issue can carry impacts on more than one software
+	// quality at different severities simultaneously, so these facet
+	// counts are not the clean, non-overlapping partition types x
+	// severities is — a cell fetched under this taxonomy can return an
+	// issue a sibling cell also returns. That is not a correctness bug:
+	// absorb's existing dedup (s.seen) is exactly the verifier for this
+	// kind of overlap, and a duplicate here is evidence of a real
+	// multi-quality issue, not of a broken seam.
+	mqrTaxonomy = issueTaxonomy{typeParam: impactSoftwareQualitiesParam, severityParam: impactSeveritiesParam}
+)
+
+// IsMQRMode reports whether the source SonarQube Server is configured
+// in MQR mode rather than Standard Experience mode, mirroring
+// sonar-tools' Platform.is_mqr_mode (#630) — SonarQube Server only:
+// SonarQube Cloud is unconditionally MQR (sonar-tools short-circuits
+// is_sonarcloud() to true), but nothing in this package ever talks to
+// Cloud (extract's issue-search slicing is source-only), so that branch
+// is intentionally not implemented here. Probed at most once per
+// Executor and cached: the setting is instance-wide, and this is only
+// ever asked from inside the facet-slicing cascade, itself a rare path.
+func (e *Executor) IsMQRMode(ctx context.Context) bool {
+	e.mqrModeMu.Lock()
+	defer e.mqrModeMu.Unlock()
+	if e.mqrMode != nil {
+		return *e.mqrMode
+	}
+	mqr := e.probeMQRMode(ctx)
+	e.mqrMode = &mqr
+	return mqr
+}
+
+func (e *Executor) probeMQRMode(ctx context.Context) bool {
+	if e.Version.Less(mqrIntroVersion) {
+		// MQR did not exist yet; every such version only understands
+		// Standard Experience's types/severities.
+		return false
+	}
+	if e.Version.Less(mqr5SeveritiesVersion) {
+		// MQR existed with no toggle to turn it off yet.
+		return true
+	}
+	items, err := e.Raw.GetArray(ctx, settingsAPI, "settings", url.Values{"keys": {mqrEnabledSetting}})
+	if err != nil || len(items) == 0 {
+		// A server new enough to have the toggle but that did not
+		// answer it defaults to Standard taxonomy — the one every
+		// version understands — rather than guessing MQR.
+		e.Logger.Debug("could not read "+mqrEnabledSetting+", assuming Standard Experience mode",
+			"err", err)
+		return false
+	}
+	var setting struct {
+		Value string `json:"value"`
+	}
+	if json.Unmarshal(items[0], &setting) != nil {
+		return false
+	}
+	return strings.EqualFold(setting.Value, "true")
+}
 
 // facetValue is one (value, count) pair read from a SonarQube facets
 // response. Values with a zero count are dropped before this type is
@@ -163,34 +259,40 @@ func (s *issueSlicer) fetchAndAbsorbCell(ctx context.Context, w issueWindow, fil
 // over the ceiling falls through to the same capped-fetch give-up
 // fetchAtomicWindow always performed on its own.
 func (s *issueSlicer) fetchByFacets(ctx context.Context, w issueWindow, total int) error {
-	types, err := s.probeFacet(ctx, w, typesParam)
+	tax := standardTaxonomy
+	if s.e.IsMQRMode(ctx) {
+		tax = mqrTaxonomy
+	}
+	types, err := s.probeFacet(ctx, w, tax.typeParam)
 	if err != nil || len(types) == 0 {
-		// No usable types facet — a probe failure, or (unreachable in
+		// No usable type facet — a probe failure, or (unreachable in
 		// practice, since total > 0) a response carrying none. Give up
 		// exactly as fetchAtomicWindow always did, before this change.
 		return s.giveUpOnWindow(ctx, w, total, "")
 	}
 
 	for _, t := range types {
-		if err := s.fetchTypeCell(ctx, w, t); err != nil {
+		if err := s.fetchTypeCell(ctx, w, tax, t); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// fetchTypeCell handles one types facet value: probe severities scoped
+// fetchTypeCell handles one type facet value: probe severities scoped
 // to this type (the response's facet counts are the exact (type,
-// severity) cross-product cells, since the type filter conditions the
-// facet), then fetch or further split each one.
-func (s *issueSlicer) fetchTypeCell(ctx context.Context, w issueWindow, t facetValue) error {
-	typeFilter := [2]string{typesParam, t.Val}
-	severities, err := s.probeFacet(ctx, w, severitiesParam, typeFilter)
+// severity) cross-product cells under Standard Experience, since the
+// type filter conditions the facet — see mqrTaxonomy's doc comment for
+// why that guarantee weakens, not breaks, under MQR mode), then fetch
+// or further split each one.
+func (s *issueSlicer) fetchTypeCell(ctx context.Context, w issueWindow, tax issueTaxonomy, t facetValue) error {
+	typeFilter := [2]string{tax.typeParam, t.Val}
+	severities, err := s.probeFacet(ctx, w, tax.severityParam, typeFilter)
 	if err != nil || len(severities) == 0 {
 		return s.giveUpOnWindow(ctx, w, t.Count, cellLabel(typeFilter), typeFilter)
 	}
 	for _, sev := range severities {
-		severityFilter := [2]string{severitiesParam, sev.Val}
+		severityFilter := [2]string{tax.severityParam, sev.Val}
 		if sev.Count <= s.ceiling {
 			if err := s.fetchCellOrError(ctx, w, typeFilter, severityFilter); err != nil {
 				return err
