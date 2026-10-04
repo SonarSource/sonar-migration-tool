@@ -32,10 +32,15 @@ import (
 var corpusStart = time.Date(2026, time.January, 15, 12, 0, 0, 0, time.UTC)
 
 // corpusIssue is one issue in the fake instance: the key the dedup set
-// keys on, and the creation date the windows select on.
+// keys on, the creation date the windows select on, and the
+// type/severity/rule tags the facet-slicing cascade (#630) partitions
+// by. The tags default to empty, which addBurst/addSpread leave them as
+// — only tests exercising the facet cascade need to set them, via
+// addBurstTagged.
 type corpusIssue struct {
-	key     string
-	created time.Time
+	key               string
+	created           time.Time
+	typ, sev, ruleKey string
 }
 
 // issueCorpus is a stand-in for /api/issues/search that honours the
@@ -115,6 +120,23 @@ func (c *issueCorpus) addBurst(at time.Time, n int, prefix string) {
 		c.issues = append(c.issues, corpusIssue{
 			key:     fmt.Sprintf("%s-%d", prefix, i),
 			created: at,
+		})
+	}
+}
+
+// addBurstTagged appends n issues created at the same instant, all
+// tagged with the given type/severity/rule — a controlled, individually
+// countable cell for tests exercising the facet-slicing cascade (#630).
+// Combine several calls at the same `at` to build a one-second burst
+// split across multiple (type, severity[, rule]) cells.
+func (c *issueCorpus) addBurstTagged(at time.Time, n int, prefix, typ, sev, rule string) {
+	for i := 0; i < n; i++ {
+		c.issues = append(c.issues, corpusIssue{
+			key:     fmt.Sprintf("%s-%d", prefix, i),
+			created: at,
+			typ:     typ,
+			sev:     sev,
+			ruleKey: rule,
 		})
 	}
 }
@@ -222,6 +244,36 @@ type corpusQuery struct {
 	afterSet, beforeSet bool
 	page, pageSize      int
 	newestFirst         bool
+
+	// types/severities/rules are the facet-cascade filters (#630) — each
+	// comma-separated like the real API, nil when the param is absent
+	// (meaning "no filter on this dimension", same as an absent date
+	// bound).
+	types, severities, rules []string
+	// facet, when non-empty, is the requested "facets=" property; the
+	// response carries a facets block computed over the filtered
+	// selection, same as the real endpoint's faceting-after-filtering
+	// behavior.
+	facet string
+}
+
+// commaList splits a comma-separated query value, returning nil for an
+// empty value so an absent filter and an empty filter are the same
+// "no constraint on this dimension" rather than "matches nothing."
+func commaList(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	return strings.Split(raw, ",")
+}
+
+func containsStr(list []string, v string) bool {
+	for _, s := range list {
+		if s == v {
+			return true
+		}
+	}
+	return false
 }
 
 // parseQuery validates a request the way the server does and returns
@@ -244,6 +296,10 @@ func (c *issueCorpus) parseQuery(q url.Values) (corpusQuery, string) {
 		page:        atoiOrDefault(q.Get("p"), 1),
 		pageSize:    atoiOrDefault(q.Get("ps"), 100),
 		newestFirst: q.Get("s") == "CREATION_DATE" && q.Get("asc") == "false",
+		types:       commaList(q.Get(typesParam)),
+		severities:  commaList(q.Get(severitiesParam)),
+		rules:       commaList(q.Get(rulesParam)),
+		facet:       q.Get(facetsParam),
 	}
 	if parsed.pageSize > issuePageSize {
 		c.violate("ps=%d exceeds the server's maximum of %d", parsed.pageSize, issuePageSize)
@@ -273,9 +329,15 @@ func (c *issueCorpus) writePage(w http.ResponseWriter, q corpusQuery) {
 	to := min(from+q.pageSize, len(selected))
 	items := make([]map[string]any, 0, to-from)
 	for _, issue := range selected[from:to] {
+		rule := issue.ruleKey
+		if rule == "" {
+			rule = "java:S100"
+		}
 		items = append(items, map[string]any{
 			"key":          issue.key,
-			"rule":         "java:S100",
+			"rule":         rule,
+			"type":         issue.typ,
+			"severity":     issue.sev,
 			"creationDate": common.FormatSQDate(issue.created),
 		})
 	}
@@ -289,7 +351,37 @@ func (c *issueCorpus) writePage(w http.ResponseWriter, q corpusQuery) {
 		}
 		body["paging"] = map[string]any{"pageIndex": q.page, "pageSize": q.pageSize, "total": total}
 	}
+	if q.facet != "" {
+		body["facets"] = []map[string]any{c.facetBlock(q.facet, selected)}
+	}
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// facetBlock computes the real server's faceting-after-filtering
+// behavior (#630): counts, over the already-filtered selection, of the
+// requested facet property's distinct values. Matches the
+// property/values[].val/.count shape probeFacet parses.
+func (c *issueCorpus) facetBlock(facet string, selected []corpusIssue) map[string]any {
+	counts := make(map[string]int)
+	for _, issue := range selected {
+		var v string
+		switch facet {
+		case typesParam:
+			v = issue.typ
+		case severitiesParam:
+			v = issue.sev
+		case rulesParam:
+			v = issue.ruleKey
+		}
+		if v != "" {
+			counts[v]++
+		}
+	}
+	values := make([]map[string]any, 0, len(counts))
+	for val, count := range counts {
+		values = append(values, map[string]any{"val": val, "count": count})
+	}
+	return map[string]any{"property": facet, "values": values}
 }
 
 // selected applies the window, half-open: createdAfter inclusive,
@@ -306,12 +398,23 @@ func (c *issueCorpus) selected(q corpusQuery) []corpusIssue {
 	return out
 }
 
-// excluded is the half-open window test on one issue.
+// excluded is the half-open window test on one issue, plus the
+// types/severities/rules facet filters (#630) — same "absent means no
+// constraint" semantics as the date bounds.
 func (c *issueCorpus) excluded(issue corpusIssue, q corpusQuery) bool {
 	if q.afterSet && issue.created.Before(q.after) {
 		return true
 	}
-	return q.beforeSet && !issue.created.Before(q.before)
+	if q.beforeSet && !issue.created.Before(q.before) {
+		return true
+	}
+	if len(q.types) > 0 && !containsStr(q.types, issue.typ) {
+		return true
+	}
+	if len(q.severities) > 0 && !containsStr(q.severities, issue.sev) {
+		return true
+	}
+	return len(q.rules) > 0 && !containsStr(q.rules, issue.ruleKey)
 }
 
 // atoiOrDefault parses a query parameter the lenient way a server does.

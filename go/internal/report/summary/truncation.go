@@ -299,7 +299,7 @@ func truncationLead(key truncationGroupKey, group *truncationGroup) string {
 			name, truncationLostPhrase(group.lost, "result"))
 	case common.ReasonAtomicWindow:
 		return fmt.Sprintf(
-			"The %s extract hit SonarQube's 10,000-result search ceiling inside a single second: more than 10,000 issues share one creation timestamp, and date slicing cannot subdivide a one-second window any further. %s are missing from the extract and cannot be migrated.",
+			"The %s extract hit SonarQube's 10,000-result search ceiling inside a single second: more than 10,000 issues share one creation timestamp, and date slicing cannot subdivide a one-second window any further. Slicing by issue type, severity and rule (#630) also could not narrow the remainder below the ceiling. %s are missing from the extract and cannot be migrated.",
 			name, truncationLostPhrase(group.lost, "issue"))
 	case common.ReasonDatesIgnored:
 		return fmt.Sprintf(
