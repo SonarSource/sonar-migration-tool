@@ -17,9 +17,10 @@ import (
 // TestProjectHistoryPointTotal covers #564's history-migration ETA
 // integration: the upfront point count RunMigrate uses to give
 // migrateProjectHistory its own tracked unit of work must sum every
-// extracted project's main-branch history points, purely from
-// already-extracted data (getProjects/getBranches/getProjectAnalysisHistory)
-// — no API calls, safe to call before a single migrate task has run.
+// extracted project's eligible branches' history points (every branch,
+// not just main — #625), purely from already-extracted data
+// (getProjects/getBranches/getProjectAnalysisHistory) — no API calls,
+// safe to call before a single migrate task has run.
 func TestProjectHistoryPointTotal(t *testing.T) {
 	dir := t.TempDir()
 	writeExtractMetaJSON(t, dir, extractRun, testServerURL)
@@ -30,8 +31,8 @@ func TestProjectHistoryPointTotal(t *testing.T) {
 	writeJSONL(filepath.Join(dir, extractRun, "getBranches"), []map[string]any{
 		{"projectKey": projMain, "name": "main", "isMain": true, "type": "BRANCH"},
 		{"projectKey": "proj2", "name": "main", "isMain": true, "type": "BRANCH"},
-		// A non-main branch's history must not be counted — migrateBranchHistory
-		// only ever replays the main branch (see its own doc comment).
+		// A non-main branch's history must be counted too (#625) — it
+		// gets replayed exactly like main's.
 		{"projectKey": "proj2", "name": "feature", "isMain": false, "type": "BRANCH"},
 	})
 	writeJSONL(filepath.Join(dir, extractRun, "getProjectAnalysisHistory"), []map[string]any{
@@ -53,8 +54,8 @@ func TestProjectHistoryPointTotal(t *testing.T) {
 	}
 
 	e.MigrateHistory = true
-	if got := projectHistoryPointTotal(e); got != 3 {
-		t.Errorf("total = %d, want 3 (2 for %s/main + 1 for proj2/main; proj2/feature excluded, not main)", got, projMain)
+	if got := projectHistoryPointTotal(e); got != 4 {
+		t.Errorf("total = %d, want 4 (2 for %s/main + 1 for proj2/main + 1 for proj2/feature)", got, projMain)
 	}
 }
 

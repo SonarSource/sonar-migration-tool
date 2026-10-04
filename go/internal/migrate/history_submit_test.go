@@ -15,12 +15,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/scanreport"
 	pb "github.com/sonar-solutions/sonar-migration-tool/internal/scanreport/proto"
 	"google.golang.org/protobuf/proto"
@@ -68,6 +70,36 @@ func histBranchContext() branchImportContext {
 		OrgKey:    testCloudOrg,
 		ServerURL: testServerURL,
 		ServerKey: projMain,
+		// Only consulted for a non-main branch (see submitHistoricalSnapshot's
+		// referenceBranch), so this is inert for every main-branch test below.
+		MainTargetName: branchMain,
+	}
+}
+
+// newHistCloudTestWithHandshake is newCustomCloudTest plus pointing the
+// "Create analysis" handshake (preCreateBranchAnalysis, POST
+// /analysis/analyses) at the SAME mux as the regular CE submit/poll
+// endpoints, rather than the default separate mock API server — so a
+// test can serve all three from one place and one *histRecorder (#625).
+func newHistCloudTestWithHandshake(t *testing.T, mux *http.ServeMux) *Executor {
+	t.Helper()
+	e := newCustomCloudTest(t, mux)
+	e.APIURL = e.CloudURL
+	e.RawAPI = common.NewRawClient(e.Raw.HTTPClient(), e.CloudURL)
+	return e
+}
+
+// histHandshakeHandler answers POST /analysis/analyses with a fixed
+// analysis id, mirroring newCEMockServer's handler in
+// tasks_projectdata_test.go for the regular (non-history) import path.
+func histHandshakeHandler(rec *histRecorder) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rec.note(r.URL.Path)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "hist-analysis-uuid", "branchId": "hist-branch-id",
+			"branchType": "long", "referenceBranchName": branchMain,
+		})
 	}
 }
 
@@ -510,9 +542,11 @@ func TestResolveHistoryPlaceholderProfileDegradesToSkip(t *testing.T) {
 // --- migrateBranchHistory ------------------------------------------------
 
 // TestMigrateBranchHistoryNoOps pins the guards that keep #554 invisible to
-// everyone who didn't opt in: with the feature off, on a non-main branch, or
-// with no extracted history, migrateBranchHistory must not touch the network
-// at all — not even to look up quality profiles.
+// everyone who didn't opt in: with the feature off, or with no extracted
+// history, migrateBranchHistory must not touch the network at all — not
+// even to look up quality profiles. (Being on a non-main branch is no
+// longer one of these guards — see #625 — so it has its own dedicated
+// tests below instead of a case here.)
 func TestMigrateBranchHistoryNoOps(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -524,12 +558,6 @@ func TestMigrateBranchHistoryNoOps(t *testing.T) {
 			name:           "feature not enabled",
 			migrateHistory: false,
 			branch:         branchInfo{Name: branchMain, IsMain: true},
-			seed:           true,
-		},
-		{
-			name:           "non-main branch is out of scope for the PoC",
-			migrateHistory: true,
-			branch:         branchInfo{Name: branchDev, IsMain: false},
 			seed:           true,
 		},
 		{
@@ -677,6 +705,49 @@ func TestMigrateBranchHistoryStopsAtFirstFailure(t *testing.T) {
 	}
 }
 
+// TestMigrateBranchHistoryReplaysNonMainBranch is the full-loop counterpart
+// to TestSubmitHistoricalSnapshotNonMainBranch: migrateBranchHistory on a
+// non-main branch must perform the create-analysis handshake once PER
+// historical point (mirroring what a real scanner does once per analysis,
+// not once per branch — see migrateBranchHistory's doc comment), and every
+// point must land tagged as the right branch, not main.
+func TestMigrateBranchHistoryReplaysNonMainBranch(t *testing.T) {
+	rec := newHistRecorder()
+	mux := histProfileMux(rec)
+	mux.HandleFunc("POST /analysis/analyses", histHandshakeHandler(rec))
+	mux.HandleFunc("POST /api/ce/submit", func(w http.ResponseWriter, r *http.Request) {
+		rec.note(r.URL.Path)
+		rec.captureSubmit(t, r)
+		_ = json.NewEncoder(w).Encode(map[string]any{"taskId": "AX-hist-dev"})
+	})
+	mux.HandleFunc("GET /api/ce/task", func(w http.ResponseWriter, r *http.Request) {
+		rec.note(r.URL.Path)
+		_ = json.NewEncoder(w).Encode(map[string]any{"task": map[string]any{"status": "SUCCESS"}})
+	})
+	addDefaultCloudHandler(mux)
+
+	e := newHistCloudTestWithHandshake(t, mux)
+	e.MigrateHistory = true
+	histSeed(e, []map[string]any{
+		histRecord(projMain, branchDev, "2022-01-15T00:00:00Z", "1.0", "100"),
+		histRecord(projMain, branchDev, "2023-06-01T00:00:00Z", "2.0", "200"),
+	})
+
+	migrateBranchHistory(context.Background(), e, histBranchContext(),
+		branchInfo{Name: branchDev, IsMain: false}, branchDev)
+
+	if n := rec.count("/analysis/analyses"); n != 2 {
+		t.Errorf("expected 1 create-analysis handshake PER historical point, got %d", n)
+	}
+	if n := rec.count("/api/ce/submit"); n != 2 {
+		t.Errorf("expected both historical points submitted, got %d", n)
+	}
+	histWantNonMainBranchSubmitForm(t, rec, branchDev)
+	if md := histMetadata(t, rec.reportBytes()); md.GetBranchName() != branchDev {
+		t.Errorf("last submitted point branchName = %q, want %q", md.GetBranchName(), branchDev)
+	}
+}
+
 // --- submitHistoricalSnapshot --------------------------------------------
 //
 // The successful-submission test below inspects a whole report, so its
@@ -703,6 +774,26 @@ func histWantMainBranchSubmitForm(t *testing.T, rec *histRecorder) {
 	// makes the CE reject the report.
 	if chars := rec.formValues("characteristic"); len(chars) != 0 {
 		t.Errorf("expected no branch characteristic on a main-branch history point, got %v", chars)
+	}
+	if got := rec.formValue("projectKey"); got != histCloudKey {
+		t.Errorf("submitted projectKey = %q, want %q", got, histCloudKey)
+	}
+	if got := rec.formValue("organization"); got != testCloudOrg {
+		t.Errorf("submitted organization = %q, want %q", got, testCloudOrg)
+	}
+}
+
+// histWantNonMainBranchSubmitForm is histWantMainBranchSubmitForm's
+// counterpart for a non-main branch (#625): the submit form MUST declare
+// the branch characteristic, or the CE lands the report on the project's
+// main branch regardless of what the report's own metadata says (see
+// buildMultipartForm).
+func histWantNonMainBranchSubmitForm(t *testing.T, rec *histRecorder, branch string) {
+	t.Helper()
+	chars := rec.formValues("characteristic")
+	wantBranch := "branch=" + branch
+	if !slices.Contains(chars, wantBranch) || !slices.Contains(chars, "branchType=LONG") {
+		t.Errorf("characteristic = %v, want it to contain %q and %q", chars, wantBranch, "branchType=LONG")
 	}
 	if got := rec.formValue("projectKey"); got != histCloudKey {
 		t.Errorf("submitted projectKey = %q, want %q", got, histCloudKey)
@@ -837,8 +928,6 @@ func histWantSuccessLog(t *testing.T, logged, wantTaskID string) {
 // the whole point of #554: the report that reaches the CE must be stamped
 // with the SOURCE analysis date, not "now", and must declare the target
 // organization's own quality profile key.
-//
-// It is deliberately the only successful submission in this file.
 func TestSubmitHistoricalSnapshotBackdatedReport(t *testing.T) {
 	rec := newHistRecorder()
 	mux := http.NewServeMux()
@@ -868,7 +957,7 @@ func TestSubmitHistoricalSnapshotBackdatedReport(t *testing.T) {
 		},
 	}
 
-	err := submitHistoricalSnapshot(context.Background(), e, histBranchContext(), branchMain, snap, histPlaceholder())
+	err := submitHistoricalSnapshot(context.Background(), e, histBranchContext(), branchInfo{Name: branchMain, IsMain: true}, branchMain, snap, histPlaceholder())
 	if err != nil {
 		t.Fatalf("submitHistoricalSnapshot: %v", err)
 	}
@@ -888,6 +977,66 @@ func TestSubmitHistoricalSnapshotBackdatedReport(t *testing.T) {
 	histWantNoActiveRules(t, zipBytes)
 
 	histWantSuccessLog(t, buf.String(), "AX-hist-1")
+}
+
+// TestSubmitHistoricalSnapshotNonMainBranch is
+// TestSubmitHistoricalSnapshotBackdatedReport's counterpart for a non-main
+// branch (#625): the create-analysis handshake must run once, its returned
+// id must reach the report's metadata (analysis_uuid), the metadata must
+// name the main branch as its reference, and the submit form must declare
+// the branch characteristic — the three things the original PoC either
+// skipped or got backwards (see migrateBranchHistory's doc comment).
+func TestSubmitHistoricalSnapshotNonMainBranch(t *testing.T) {
+	rec := newHistRecorder()
+	mux := histProfileMux(rec)
+	mux.HandleFunc("POST /analysis/analyses", histHandshakeHandler(rec))
+	mux.HandleFunc("POST /api/ce/submit", func(w http.ResponseWriter, r *http.Request) {
+		rec.note(r.URL.Path)
+		rec.captureSubmit(t, r)
+		_ = json.NewEncoder(w).Encode(map[string]any{"taskId": "AX-hist-dev"})
+	})
+	mux.HandleFunc("GET /api/ce/task", func(w http.ResponseWriter, r *http.Request) {
+		rec.note(r.URL.Path)
+		_ = json.NewEncoder(w).Encode(map[string]any{"task": map[string]any{"status": "SUCCESS"}})
+	})
+	addDefaultCloudHandler(mux)
+
+	e := newHistCloudTestWithHandshake(t, mux)
+	buf := histLogBuf(e, slog.LevelInfo)
+
+	snap := historySnapshot{
+		Date:           time.Date(2022, 3, 1, 9, 30, 0, 0, time.UTC),
+		ProjectVersion: "2.5",
+		Measures: []scanreport.MeasureInput{
+			{Component: projMain, MetricKey: "ncloc", Value: "500"},
+		},
+	}
+
+	err := submitHistoricalSnapshot(context.Background(), e, histBranchContext(),
+		branchInfo{Name: branchDev, IsMain: false}, branchDev, snap, histPlaceholder())
+	if err != nil {
+		t.Fatalf("submitHistoricalSnapshot: %v", err)
+	}
+
+	if n := rec.count("/analysis/analyses"); n != 1 {
+		t.Errorf("expected exactly 1 create-analysis handshake, got %d", n)
+	}
+	histWantSubmitOnce(t, rec)
+	histWantNonMainBranchSubmitForm(t, rec, branchDev)
+
+	zipBytes := rec.reportBytes()
+	md := histMetadata(t, zipBytes)
+	if md.GetBranchName() != branchDev {
+		t.Errorf("branchName = %q, want %q", md.GetBranchName(), branchDev)
+	}
+	if md.GetReferenceBranchName() != branchMain {
+		t.Errorf("referenceBranchName = %q, want %q (the project's main branch)", md.GetReferenceBranchName(), branchMain)
+	}
+	if md.GetAnalysisUuid() != "hist-analysis-uuid" {
+		t.Errorf("analysisUuid = %q, want the handshake's own id %q", md.GetAnalysisUuid(), "hist-analysis-uuid")
+	}
+
+	histWantSuccessLog(t, buf.String(), "AX-hist-dev")
 }
 
 // TestSubmitHistoricalSnapshotSubmitFailure pins that a rejected upload
@@ -929,7 +1078,7 @@ func TestSubmitHistoricalSnapshotSubmitFailure(t *testing.T) {
 			e := newCustomCloudTest(t, mux)
 			snap := historySnapshot{Date: time.Date(2022, 3, 1, 0, 0, 0, 0, time.UTC), ProjectVersion: "2.5"}
 
-			err := submitHistoricalSnapshot(context.Background(), e, histBranchContext(), branchMain, snap, histPlaceholder())
+			err := submitHistoricalSnapshot(context.Background(), e, histBranchContext(), branchInfo{Name: branchMain, IsMain: true}, branchMain, snap, histPlaceholder())
 			if err == nil {
 				t.Fatal("expected an error when the CE refuses the report")
 			}
@@ -966,7 +1115,7 @@ func TestSubmitHistoricalSnapshotCETaskFailure(t *testing.T) {
 	histLogBuf(e, slog.LevelWarn)
 	snap := historySnapshot{Date: time.Date(2022, 3, 1, 0, 0, 0, 0, time.UTC), ProjectVersion: "2.5"}
 
-	err := submitHistoricalSnapshot(context.Background(), e, histBranchContext(), branchMain, snap, histPlaceholder())
+	err := submitHistoricalSnapshot(context.Background(), e, histBranchContext(), branchInfo{Name: branchMain, IsMain: true}, branchMain, snap, histPlaceholder())
 	if err == nil {
 		t.Fatal("expected an error when the CE task fails")
 	}

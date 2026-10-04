@@ -297,7 +297,7 @@ points described below. Only the analysis's own stamped date changes; other
 fallback dates used elsewhere in the import are untouched.
 
 ### Project history migration (`--migrate_history`) — PoC
-<!-- updated: 2026-09-08_17:42:31.120 -->
+<!-- updated: 2026-10-04_00:00:00 -->
 
 **This is a proof-of-concept.** By default, `transfer` (and `migrate`) submit a
 single scanner report per branch. Since #557, that report is backdated to the
@@ -307,11 +307,17 @@ without `--migrate_history`, it is still only one point: the target's analysis
 history starts there, even if the source project has years of prior analyses.
 Issue #554 asks for a way to carry some of that history over.
 
-`--migrate_history` opts into replaying a bounded set of the source project's
-**main branch** historical analyses as separate, backdated entries on the
-target, submitted before the regular current-snapshot import so each lands as
-its own point in SonarQube Cloud's analysis history (`/api/project_analyses/search`),
-not just a re-dated copy of the latest one.
+`--migrate_history` opts into replaying a bounded set of a project's
+historical analyses — on **every migrated branch, not just main** (#625) —
+as separate, backdated entries on the target, submitted before each branch's
+regular current-snapshot import so each lands as its own point in SonarQube
+Cloud's analysis history (`/api/project_analyses/search`), not just a
+re-dated copy of the latest one. A non-main branch's historical points
+perform the same "Create analysis" handshake (see
+[TRANSFER-INTERNALS.md](TRANSFER-INTERNALS.md)) the regular current-snapshot
+import already performs once per report — once per historical point here,
+not once per branch, mirroring what a real scanner does before every
+analysis upload.
 
 Each historical entry carries the project's own measures as recorded by the
 source server at that analysis: lines of code, complexity, comment density,
@@ -408,8 +414,8 @@ default to `0` — no cap, no spacing — so every analysis becomes a candidate:
 
 ```bash
 # Migrate the current snapshot as usual, plus every historical analysis on
-# the main branch — unbounded, unspaced (the default when the flags are
-# left unset)
+# every migrated branch — unbounded, unspaced (the default when the flags
+# are left unset)
 sonar-migration-tool transfer -c config.json --project_key my-project \
   --migrate_history
 
@@ -420,10 +426,6 @@ sonar-migration-tool transfer -c config.json --project_key my-project \
 
 **Known limitations (PoC):**
 
-- **Main branch only.** Non-main branches keep today's single-snapshot
-  behavior. Backdating a non-main branch would need the create-analysis
-  handshake (see [TRANSFER-INTERNALS.md](TRANSFER-INTERNALS.md)) repeated per
-  historical point, which this PoC does not implement.
 - **Best-effort, not transactional.** If a historical submission is rejected
   by the Compute Engine (for example, on a re-run against a project that
   already has newer analyses on the target), history migration for that
