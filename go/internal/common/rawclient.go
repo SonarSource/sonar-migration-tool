@@ -357,6 +357,23 @@ func (r *RawClient) recordTruncation(rec TruncationRecord) {
 	}
 }
 
+// bodyReadRetryBackoff mirrors sq-api-go/retry.go's unexported
+// defaultBackoff (100/200/400ms, 3 retries) for consistency. It is
+// duplicated here, rather than imported, because retryTransport's
+// RoundTrip-level retry never sees a body-read failure: an error from
+// io.ReadAll(resp.Body) happens in the caller, after RoundTrip has
+// already returned a success (resp, nil) — e.g. an HTTP/2 GOAWAY
+// arriving mid-stream when a proxy/edge recycles the connection after
+// hitting its own request quota (issue #616). doGet is GET-only (the
+// only HTTP method RawClient exposes), so blindly re-issuing the whole
+// request on a body-read failure is always safe: there is no request
+// body to rewind, and GET is idempotent by definition.
+var bodyReadRetryBackoff = []time.Duration{
+	100 * time.Millisecond,
+	200 * time.Millisecond,
+	400 * time.Millisecond,
+}
+
 func (r *RawClient) doGet(ctx context.Context, path string, params url.Values) ([]byte, error) {
 	u := r.baseURL + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
@@ -366,24 +383,38 @@ func (r *RawClient) doGet(ctx context.Context, path string, params url.Values) (
 	if len(params) > 0 {
 		req.URL.RawQuery = params.Encode()
 	}
-	resp, err := r.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode >= 400 {
-		return nil, &HTTPError{
-			StatusCode: resp.StatusCode,
-			Method:     http.MethodGet,
-			URL:        req.URL.String(),
-			Body:       Truncate(body, 500),
+
+	var lastReadErr error
+	for attempt := 0; ; attempt++ {
+		resp, err := r.httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr == nil {
+			if resp.StatusCode >= 400 {
+				return nil, &HTTPError{
+					StatusCode: resp.StatusCode,
+					Method:     http.MethodGet,
+					URL:        req.URL.String(),
+					Body:       Truncate(body, 500),
+				}
+			}
+			return body, nil
+		}
+
+		lastReadErr = readErr
+		if attempt >= len(bodyReadRetryBackoff) {
+			return nil, fmt.Errorf("reading response body from %s (after %d attempts): %w",
+				req.URL.String(), attempt+1, lastReadErr)
+		}
+		select {
+		case <-time.After(bodyReadRetryBackoff[attempt]):
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
 	}
-	return body, nil
 }
 
 // ExtractArray extracts a JSON array at the given key from a raw JSON body.
