@@ -89,6 +89,13 @@ type configFileShape struct {
 	// concrete key list; createProjects filters locally).
 	Objects    []string `json:"objects"`
 	ProjectKey string   `json:"project_key"`
+	// ProjectKeyRegexp is the top-level "project_key_regexp" value, the
+	// replacement for the deprecated ProjectKey/"project_key" (#592) — it
+	// was always a regexp, never a literal single key. In the unified
+	// shape, target.project_key_regexp wins when both are set — see
+	// unifiedTargetBlock. common.ResolveDeprecatedProjectKey combines
+	// this with ProjectKey wherever both are read.
+	ProjectKeyRegexp string `json:"project_key_regexp"`
 	// BranchRegexp is the top-level regexp pattern restricting which
 	// branches extract/migrate/transfer process (#582). Mirrors
 	// ProjectKey's top-level/shape semantics.
@@ -132,19 +139,23 @@ type unifiedSourceBlock struct {
 // the unified config shape (#266). organization_key is provisional
 // for future SQC-org-to-SQC-org migration and is ignored for now.
 type unifiedTargetBlock struct {
-	URL                 string   `json:"url"`
-	Token               string   `json:"token"`
-	EnterpriseKey       string   `json:"enterprise_key"`
-	Edition             string   `json:"edition"`
-	Concurrency         int      `json:"concurrency"`
-	Timeout             int      `json:"timeout"`
-	RunID               string   `json:"run_id"`
-	TargetTask          string   `json:"target_task"`
-	BuildConcurrency    int      `json:"project_data_build_concurrency"`
-	OrganizationKey     string   `json:"organization_key"`     // provisional, ignored
-	DefaultOrganization string   `json:"default_organization"` // #281
-	ProjectKeyPattern   string   `json:"project_key_pattern"`  // #138
-	ExcludeBranches     []string `json:"exclude_branches"`
+	URL                 string `json:"url"`
+	Token               string `json:"token"`
+	EnterpriseKey       string `json:"enterprise_key"`
+	Edition             string `json:"edition"`
+	Concurrency         int    `json:"concurrency"`
+	Timeout             int    `json:"timeout"`
+	RunID               string `json:"run_id"`
+	TargetTask          string `json:"target_task"`
+	BuildConcurrency    int    `json:"project_data_build_concurrency"`
+	OrganizationKey     string `json:"organization_key"`     // provisional, ignored
+	DefaultOrganization string `json:"default_organization"` // #281
+	ProjectKeyPattern   string `json:"project_key_pattern"`  // #138
+	// ProjectKeyRegexp, when set, overrides the top-level
+	// "project_key_regexp" for this target. #592. Not to be confused
+	// with ProjectKeyPattern above, the target-key rendering template.
+	ProjectKeyRegexp string   `json:"project_key_regexp"`
+	ExcludeBranches  []string `json:"exclude_branches"`
 	// UnsupportedLanguages — see configFileShape.UnsupportedLanguages (#474).
 	UnsupportedLanguages string `json:"unsupported_languages"`
 	// FastSync — see configFileShape.FastSync (#527).
@@ -273,7 +284,14 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			cfg.SkipProjectDataMigration = s.SkipProjectDataMigration.Value
 		}
 		cfg.objectsRaw = s.Objects
-		cfg.ProjectKeyFilter = s.ProjectKey
+		// #592: target.project_key_regexp wins over the top-level
+		// project_key_regexp, which in turn wins over the deprecated
+		// project_key (top-level only — it never had a target override).
+		var targetProjectKeyRegexp string
+		if s.Target != nil {
+			targetProjectKeyRegexp = s.Target.ProjectKeyRegexp
+		}
+		cfg.ProjectKeyFilter = common.ResolveDeprecatedProjectKey(s.ProjectKey, common.FirstNonEmpty(targetProjectKeyRegexp, s.ProjectKeyRegexp))
 		return cfg
 	case s.SonarCloud != nil:
 		cfg := s.SonarCloud.toMigrateConfig(s.Settings)
@@ -296,7 +314,7 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			cfg.MigrateHistory = s.MigrateHistory.Value
 		}
 		cfg.objectsRaw = s.Objects
-		cfg.ProjectKeyFilter = s.ProjectKey
+		cfg.ProjectKeyFilter = common.ResolveDeprecatedProjectKey(s.ProjectKey, s.ProjectKeyRegexp)
 		cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
 		return cfg
 	case s.Migrate != nil:
@@ -326,8 +344,8 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		if len(s.Objects) > 0 {
 			cfg.objectsRaw = s.Objects
 		}
-		if s.ProjectKey != "" {
-			cfg.ProjectKeyFilter = s.ProjectKey
+		if outer := common.ResolveDeprecatedProjectKey(s.ProjectKey, s.ProjectKeyRegexp); outer != "" {
+			cfg.ProjectKeyFilter = outer
 		}
 		// #582: same outer-wins-else-nested semantics for branch_regexp.
 		if s.BranchRegexp != "" {
@@ -374,7 +392,7 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			cfg.MigrateHistory = s.MigrateHistory.Value
 		}
 		cfg.objectsRaw = s.Objects
-		cfg.ProjectKeyFilter = s.ProjectKey
+		cfg.ProjectKeyFilter = common.ResolveDeprecatedProjectKey(s.ProjectKey, s.ProjectKeyRegexp)
 		return cfg
 	}
 }

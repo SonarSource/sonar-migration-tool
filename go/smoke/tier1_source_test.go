@@ -61,7 +61,7 @@ func TestTier1_SourcePipeline(t *testing.T) {
 		res := runCLI(t, "extract",
 			"--config", cfg.path,
 			"--export_directory", exportDir,
-			"--project_key", projectKey)
+			"--project_key_regexp", projectKey)
 		requireExit(t, res, 0, "extract")
 		assertNoPanics(t, res.combined())
 
@@ -109,7 +109,7 @@ func TestTier1_SourcePipeline(t *testing.T) {
 		res := runCLI(t, "extract",
 			"--config", cfg.path,
 			"--export_directory", exportDir,
-			"--project_key", projectKey,
+			"--project_key_regexp", projectKey,
 			"--extract_id", extractRunID)
 		requireExit(t, res, 0, "extract_resume")
 		logf(t, "extract_resume output:\n%s\n", res.combined())

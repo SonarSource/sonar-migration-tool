@@ -5,6 +5,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"time"
@@ -16,6 +17,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// flagProjectKeys is sync-issues's own, deprecated selection mechanism: a
+// repeatable literal key list (#592 superseded it with the anchored-regex
+// --project_key_regexp shared by every other command — see
+// go/cmd/project_key_flags.go). Kept under its own name/type (StringSlice,
+// not a String) rather than folded into registerProjectKeyFlags, since
+// pflag cannot register two different types under the same flag name.
 const flagProjectKeys = "project_key"
 
 var syncIssuesCmd = &cobra.Command{
@@ -33,10 +40,14 @@ It runs its own lightweight extract from the source (issues and hotspots
 carrying any manual triage signal: non-default status, custom tags, manual
 severity, or comments) — no prior extract is required.
 
-By default every project visible on the source is synced; pass one or more
---project_key flags to narrow the scope. Target project keys are resolved
-via the same project_key_pattern + organizations.csv convention migrate/
-transfer use.
+By default every project visible on the source is synced; pass
+--project_key_regexp to narrow the scope to every source project whose key
+fully matches the pattern (implicitly anchored with ^ and $, same mechanism
+as extract/migrate/transfer/regtest — a plain key matches only itself).
+The deprecated, repeatable --project_key (explicit literal keys) still
+works but logs a warning; --project_key_regexp takes precedence if both
+are set (#592). Target project keys are resolved via the same
+project_key_pattern + organizations.csv convention migrate/transfer use.
 
 Example (flags):
   sonar-migration-tool sync-issues \
@@ -74,7 +85,13 @@ func init() {
 	f.StringP(flagConfig, "c", "", "Path to JSON configuration file (common shape with source / target sections)")
 	f.String(flagSourceURL, "", sqServerName+" URL (maps to source.url)")
 	f.String(flagSourceToken, "", sqServerName+" token (maps to source.token)")
-	f.StringSlice(flagProjectKeys, nil, "Project key to sync (repeatable; omit to sync every project on the source)")
+	// Deprecated (#592): use --project_key_regexp instead. Usage text left
+	// empty since MarkDeprecated hides this from --help and carries its
+	// own message instead — same convention as the other deprecated
+	// aliases (e.g. --url/--token, go/cmd/extract.go's init()).
+	f.StringSlice(flagProjectKeys, nil, "")
+	_ = f.MarkDeprecated(flagProjectKeys, "use --"+flagProjectKeyRegexp+" instead")
+	f.String(flagProjectKeyRegexp, "", "Regexp pattern of project keys to sync, implicitly anchored (^...$) — a plain key matches only itself. Omit to sync every project visible to the source token. #592.")
 	f.String(flagTargetURL, "", scCloudName+" URL (maps to target.url, default: https://sonarcloud.io/)")
 	f.String(flagTargetToken, "", scCloudName+" token (maps to target.token)")
 	f.String(flagDefaultOrg, "", scCloudName+" organization key (maps to target.default_organization)")
@@ -103,9 +120,14 @@ func init() {
 // flag values. Mirrors transferConfig, minus the skip-flags (this command's
 // entire job is the sync) and the mandatory single-project requirement.
 type syncIssuesConfig struct {
-	sourceURL           string
-	sourceToken         string
-	projectKeys         []string
+	sourceURL   string
+	sourceToken string
+	projectKeys []string
+	// projectKeyRegexp is the replacement for the deprecated, repeatable
+	// projectKeys above (#592): a single anchored-regex pattern, resolved
+	// against the source project list by resolveSyncIssuesProjectKeyRegexp
+	// into projectKeys before the extract phase runs.
+	projectKeyRegexp    string
 	targetURL           string
 	targetToken         string
 	defaultOrganization string
@@ -143,6 +165,11 @@ func loadSyncIssuesFileDefaults(path string) (syncIssuesConfig, error) {
 
 	cfg.sourceURL = extractCfg.URL
 	cfg.sourceToken = extractCfg.Token
+	// extractCfg.ProjectKey already resolved the config file's top-level /
+	// source.project_key_regexp (and the deprecated project_key) via
+	// extract.LoadExtractConfigFile — inherit it directly rather than
+	// re-implementing that resolution here (#592).
+	cfg.projectKeyRegexp = extractCfg.ProjectKey
 	cfg.targetURL = migrateCfg.URL
 	cfg.targetToken = migrateCfg.Token
 	cfg.enterpriseKey = migrateCfg.EnterpriseKey
@@ -185,6 +212,7 @@ func resolveSyncIssuesConfig(cmd *cobra.Command) (syncIssuesConfig, error) {
 	if cmd.Flags().Changed(flagProjectKeys) {
 		cfg.projectKeys, _ = cmd.Flags().GetStringSlice(flagProjectKeys)
 	}
+	applyFlagString(cmd, flagProjectKeyRegexp, &cfg.projectKeyRegexp)
 	applyFlagString(cmd, flagTargetURL, &cfg.targetURL)
 	applyFlagString(cmd, flagTargetToken, &cfg.targetToken)
 	applyFlagString(cmd, flagDefaultOrg, &cfg.defaultOrganization)
@@ -230,6 +258,40 @@ func validateSyncIssuesConfig(cfg syncIssuesConfig) error {
 	return nil
 }
 
+// resolveSyncIssuesProjectKeyRegexp resolves cfg.projectKeyRegexp (if set)
+// against the source project list into a concrete key list — the same
+// anchored-regex mechanism extract/migrate/transfer/regtest already use
+// (extract.ResolveProjectKeys), applied here since sync-issues builds its
+// own extract.ExtractConfig with ProjectKeys already resolved rather than
+// a pattern RunExtract would resolve itself. Takes precedence over the
+// deprecated, repeatable --project_key when both are set, with a WARN
+// (#592) — mirroring common.ResolveDeprecatedProjectKey's rule, adapted
+// here since the deprecated side is a []string, not a string.
+func resolveSyncIssuesProjectKeyRegexp(ctx context.Context, cfg *syncIssuesConfig) error {
+	if cfg.projectKeyRegexp == "" {
+		return nil
+	}
+	if len(cfg.projectKeys) > 0 {
+		slog.Default().Warn("both the deprecated --project_key and --project_key_regexp are set; --project_key_regexp takes precedence",
+			"project_key", cfg.projectKeys, "project_key_regexp", cfg.projectKeyRegexp)
+	}
+	matched, err := extract.ResolveProjectKeys(ctx, extract.ExtractConfig{
+		URL:          cfg.sourceURL,
+		Token:        cfg.sourceToken,
+		Timeout:      cfg.sourceTimeout,
+		PEMFilePath:  cfg.pemFilePath,
+		KeyFilePath:  cfg.keyFilePath,
+		CertPassword: cfg.certPassword,
+		Insecure:     cfg.insecure,
+		Debug:        cfg.debug,
+	}, cfg.projectKeyRegexp)
+	if err != nil {
+		return err
+	}
+	cfg.projectKeys = matched
+	return nil
+}
+
 func runSyncIssuesCmd(cmd *cobra.Command, _ []string) error {
 	defer common.LogCommandDuration(slog.Default(), "sync-issues", time.Now())
 
@@ -238,6 +300,12 @@ func runSyncIssuesCmd(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	if err := validateSyncIssuesConfig(cfg); err != nil {
+		return err
+	}
+	// #592: resolve --project_key_regexp now that source URL/token are
+	// known to be valid, same ordering cmd/extract.go uses for its own
+	// --project_key_regexp.
+	if err := resolveSyncIssuesProjectKeyRegexp(cmd.Context(), &cfg); err != nil {
 		return err
 	}
 	warnIfInsecure(cfg.insecure)
