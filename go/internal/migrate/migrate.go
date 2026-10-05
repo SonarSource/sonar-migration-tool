@@ -243,7 +243,8 @@ type MigrateConfig struct {
 	// MigrateHistory opts into the project-history migration PoC (#554):
 	// replay each project's extracted historical (date, measures) snapshots
 	// (see internal/extract's getProjectAnalysisHistory) as separate,
-	// backdated analyses on the target's main branch, before the regular
+	// backdated analyses on the target, per migrated branch (every branch,
+	// not just main — #625), before that branch's regular
 	// current-snapshot import. Defaults to false — when unset, migrate
 	// ignores any extracted history records and behaves exactly as before
 	// this feature existed, even if extract happened to capture history

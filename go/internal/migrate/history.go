@@ -125,6 +125,12 @@ func projectHistoryPointTotal(e *Executor) int {
 		if serverKey == "" {
 			continue
 		}
+		// Extract bounds the history points per BRANCH, not per project
+		// (extractProjectAnalysisHistory applies history_max_points and
+		// history_min_interval_days to each branch's own analysis list), so
+		// every eligible branch contributes its own capped set to the total:
+		// a project with N such branches can replay up to
+		// N x history_max_points points.
 		for _, b := range historyEligibleBranches(e, p.ServerURL, serverKey) {
 			total += len(loadExtractedAnalysisHistory(e, p.ServerURL, serverKey, b.Name))
 		}
@@ -149,9 +155,11 @@ func historyEligibleBranches(e *Executor, serverURL, serverKey string) []branchI
 	return branches
 }
 
-// migrateBranchHistory replays a project's extracted historical analysis
+// migrateBranchHistory replays one branch's extracted historical analysis
 // snapshots as separate, backdated analyses on the target, oldest to
-// newest (#554, PoC; generalized to non-main branches by #625).
+// newest (#554, PoC; generalized to non-main branches by #625). Called once
+// per migrated branch, each with its own extracted (and per-branch bounded)
+// list.
 //
 // The original PoC ran main only, on the assumption that generalizing the
 // create-analysis handshake (see preCreateBranchAnalysis) per historical
