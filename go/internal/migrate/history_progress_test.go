@@ -321,24 +321,7 @@ func TestProjectHistoryPointTotalMatchesPerBranchLoader(t *testing.T) {
 
 	totals := make([]int, 1<<len(filters))
 	for mask := range totals {
-		e.ExcludeBranches, e.BranchRe, e.BranchAnalyzedAfter = nil, nil, nil
-		var on []string
-		if mask&1 != 0 {
-			e.ExcludeBranches = []string{"feature/*"}
-			on = append(on, filters[0])
-		}
-		if mask&2 != 0 {
-			e.BranchRe = regexp.MustCompile(`^(release|develop|stale)`)
-			on = append(on, filters[1])
-		}
-		if mask&4 != 0 {
-			e.BranchAnalyzedAfter = &cutoff
-			on = append(on, filters[2])
-		}
-		name := strings.Join(on, "+")
-		if name == "" {
-			name = "no branch filters"
-		}
+		name := applyHistoryFilterMask(e, mask, cutoff, filters)
 		t.Run(name, func(t *testing.T) {
 			want := histTotalPerBranch(e)
 			if got := projectHistoryPointTotal(e); got != want {
@@ -361,6 +344,29 @@ func TestProjectHistoryPointTotalMatchesPerBranchLoader(t *testing.T) {
 		t.Errorf("all filters on: total = %d, want %d (hand-counted from newHistoryCountExecutor's table)",
 			got, histCountFixtureTotal)
 	}
+}
+
+// applyHistoryFilterMask turns on the branch filters whose bit is set in mask
+// (bit i is filters[i]) and returns the subtest name that says which are on.
+func applyHistoryFilterMask(e *Executor, mask int, cutoff time.Time, filters []string) string {
+	e.ExcludeBranches, e.BranchRe, e.BranchAnalyzedAfter = nil, nil, nil
+	var on []string
+	if mask&1 != 0 {
+		e.ExcludeBranches = []string{"feature/*"}
+		on = append(on, filters[0])
+	}
+	if mask&2 != 0 {
+		e.BranchRe = regexp.MustCompile(`^(release|develop|stale)`)
+		on = append(on, filters[1])
+	}
+	if mask&4 != 0 {
+		e.BranchAnalyzedAfter = &cutoff
+		on = append(on, filters[2])
+	}
+	if len(on) == 0 {
+		return "no branch filters"
+	}
+	return strings.Join(on, "+")
 }
 
 // TestHistoryCountPointDateRule pins the one rule loadExtractedAnalysisHistory
@@ -596,73 +602,91 @@ func TestProjectHistoryPointTotalReadsExtractsOnlyAsNeeded(t *testing.T) {
 	branchRow := func(project, name string, isMain bool) map[string]any {
 		return map[string]any{"projectKey": project, "name": name, "isMain": isMain, "type": "BRANCH"}
 	}
-	projects := []map[string]any{{"key": projMain}, {"key": "proj2"}}
-	branches := []map[string]any{
-		branchRow(projMain, "main", true), branchRow(projMain, "develop", false), branchRow(projMain, "release/1.0", false),
-		branchRow("proj2", "main", true), branchRow("proj2", "develop", false),
+	fx := histTotalFixture{
+		projects: []map[string]any{{"key": projMain}, {"key": "proj2"}},
+		branches: []map[string]any{
+			branchRow(projMain, "main", true), branchRow(projMain, "develop", false), branchRow(projMain, "release/1.0", false),
+			branchRow("proj2", "main", true), branchRow("proj2", "develop", false),
+		},
+		history: slices.Concat(
+			histCountDated(projMain, "main", 2), histCountDated(projMain, "develop", 2), histCountDated(projMain, "release/1.0", 2),
+			histCountDated("proj2", "main", 2), histCountDated("proj2", "develop", 2),
+		),
 	}
-	history := slices.Concat(
-		histCountDated(projMain, "main", 2), histCountDated(projMain, "develop", 2), histCountDated(projMain, "release/1.0", 2),
-		histCountDated("proj2", "main", 2), histCountDated("proj2", "develop", 2),
-	)
 
-	t.Run("history extract is read once for any number of branches", func(t *testing.T) {
-		e, passes := newHistoryPassProbe(t, projects, branches, history)
-		if got := projectHistoryPointTotal(e); got != 10 {
-			t.Errorf("total = %d, want 10", got)
-		}
-		if n := passes(histTaskName); n != 1 {
-			t.Errorf("history extract read %d times for 5 (project, branch) pairs, want exactly 1: a pass per pair is the O(pairs x corpus) cost of #625", n)
-		}
-		if n := passes("getProjects"); n != 1 {
-			t.Errorf("getProjects read %d times, want 1", n)
-		}
-		if passes("getBranches") == 0 {
-			t.Error("getBranches was never read: the probe observes nothing, so the checks below prove nothing")
-		}
-	})
+	tests := []struct {
+		name string
+		run  func(t *testing.T, fx histTotalFixture)
+	}{
+		{"history extract is read once for any number of branches", histTotalReadsHistoryOnce},
+		{"migrate_history off reads nothing", histTotalReadsNothingWhenOff},
+		{"no projects: the history extract is not read", histTotalSkipsHistoryWithoutProjects},
+		{"nothing replayable: branches are not resolved", histTotalSkipsBranchesWhenNothingReplayable},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) { tc.run(t, fx) })
+	}
+}
 
-	t.Run("migrate_history off reads nothing", func(t *testing.T) {
-		e, passes := newHistoryPassProbe(t, projects, branches, history)
-		e.MigrateHistory = false
-		if got := projectHistoryPointTotal(e); got != 0 {
-			t.Errorf("total = %d, want 0", got)
-		}
-		for _, task := range []string{"getProjects", "getBranches", histTaskName} {
-			if n := passes(task); n != 0 {
-				t.Errorf("%s read %d times with history migration off, want 0", task, n)
-			}
-		}
-	})
+// histTotalFixture is the extract corpus the pre-count subtests read.
+type histTotalFixture struct{ projects, branches, history []map[string]any }
 
-	t.Run("no projects: the history extract is not read", func(t *testing.T) {
-		e, passes := newHistoryPassProbe(t, nil, branches, history)
-		if got := projectHistoryPointTotal(e); got != 0 {
-			t.Errorf("total = %d, want 0", got)
-		}
-		if n := passes("getProjects"); n != 1 {
-			t.Errorf("getProjects read %d times, want 1: the probe does not observe reads", n)
-		}
-		for _, task := range []string{"getBranches", histTaskName} {
-			if n := passes(task); n != 0 {
-				t.Errorf("%s read %d times with no projects to sum over, want 0", task, n)
-			}
-		}
-	})
+func histTotalReadsHistoryOnce(t *testing.T, fx histTotalFixture) {
+	e, passes := newHistoryPassProbe(t, fx.projects, fx.branches, fx.history)
+	if got := projectHistoryPointTotal(e); got != 10 {
+		t.Errorf("total = %d, want 10", got)
+	}
+	if n := passes(histTaskName); n != 1 {
+		t.Errorf("history extract read %d times for 5 (project, branch) pairs, want exactly 1: a pass per pair is the O(pairs x corpus) cost of #625", n)
+	}
+	if n := passes("getProjects"); n != 1 {
+		t.Errorf("getProjects read %d times, want 1", n)
+	}
+	if passes("getBranches") == 0 {
+		t.Error("getBranches was never read: the probe observes nothing, so the checks below prove nothing")
+	}
+}
 
-	t.Run("nothing replayable: branches are not resolved", func(t *testing.T) {
-		undated := slices.Concat(histCountUndated(projMain, "main"), histCountUndated("proj2", "main"))
-		e, passes := newHistoryPassProbe(t, projects, branches, undated)
-		if got := projectHistoryPointTotal(e); got != 0 {
-			t.Errorf("total = %d, want 0", got)
+func histTotalReadsNothingWhenOff(t *testing.T, fx histTotalFixture) {
+	e, passes := newHistoryPassProbe(t, fx.projects, fx.branches, fx.history)
+	e.MigrateHistory = false
+	if got := projectHistoryPointTotal(e); got != 0 {
+		t.Errorf("total = %d, want 0", got)
+	}
+	for _, task := range []string{"getProjects", "getBranches", histTaskName} {
+		if n := passes(task); n != 0 {
+			t.Errorf("%s read %d times with history migration off, want 0", task, n)
 		}
-		if n := passes(histTaskName); n != 1 {
-			t.Errorf("history extract read %d times, want 1", n)
+	}
+}
+
+func histTotalSkipsHistoryWithoutProjects(t *testing.T, fx histTotalFixture) {
+	e, passes := newHistoryPassProbe(t, nil, fx.branches, fx.history)
+	if got := projectHistoryPointTotal(e); got != 0 {
+		t.Errorf("total = %d, want 0", got)
+	}
+	if n := passes("getProjects"); n != 1 {
+		t.Errorf("getProjects read %d times, want 1: the probe does not observe reads", n)
+	}
+	for _, task := range []string{"getBranches", histTaskName} {
+		if n := passes(task); n != 0 {
+			t.Errorf("%s read %d times with no projects to sum over, want 0", task, n)
 		}
-		if n := passes("getBranches"); n != 0 {
-			t.Errorf("getBranches read %d times though no point is replayable, want 0: the total is 0 whatever the branches are", n)
-		}
-	})
+	}
+}
+
+func histTotalSkipsBranchesWhenNothingReplayable(t *testing.T, fx histTotalFixture) {
+	undated := slices.Concat(histCountUndated(projMain, "main"), histCountUndated("proj2", "main"))
+	e, passes := newHistoryPassProbe(t, fx.projects, fx.branches, undated)
+	if got := projectHistoryPointTotal(e); got != 0 {
+		t.Errorf("total = %d, want 0", got)
+	}
+	if n := passes(histTaskName); n != 1 {
+		t.Errorf("history extract read %d times, want 1", n)
+	}
+	if n := passes("getBranches"); n != 0 {
+		t.Errorf("getBranches read %d times though no point is replayable, want 0: the total is 0 whatever the branches are", n)
+	}
 }
 
 // BenchmarkProjectHistoryPointTotal runs the ETA pre-count over a corpus laid
@@ -675,74 +699,81 @@ func TestProjectHistoryPointTotalReadsExtractsOnlyAsNeeded(t *testing.T) {
 //
 //	go test ./internal/migrate/ -run '^$' -bench ProjectHistoryPointTotal -benchmem
 func BenchmarkProjectHistoryPointTotal(b *testing.B) {
-	const branches, points = 3, 30
+	for _, projects := range []int{10, 20, 40} {
+		e, want := newHistoryBenchCorpus(b, projects, 3, 30)
+		b.Run(fmt.Sprintf("projects=%d", projects), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if got := projectHistoryPointTotal(e); got != want {
+					b.Fatalf("total = %d, want %d", got, want)
+				}
+			}
+		})
+	}
+}
+
+// writeHistChunk writes rows as results.n.jsonl in taskDir, one row per line,
+// the way ChunkWriter.WriteChunk does.
+func writeHistChunk(tb testing.TB, taskDir string, n int, rows ...map[string]any) {
+	tb.Helper()
+	var chunk []byte
+	for _, row := range rows {
+		line, err := json.Marshal(row)
+		if err != nil {
+			tb.Fatal(err)
+		}
+		chunk = append(append(chunk, line...), '\n')
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, fmt.Sprintf("results.%d.jsonl", n)), chunk, 0o644); err != nil {
+		tb.Fatal(err)
+	}
+}
+
+// newHistoryBenchCorpus lays out projects x branches x points history points
+// on disk and returns the executor over them with the total the pre-count must
+// report.
+func newHistoryBenchCorpus(b *testing.B, projects, branches, points int) (*Executor, int) {
+	b.Helper()
 	measures := make([]map[string]any, 22)
 	for i := range measures {
 		measures[i] = map[string]any{"metric": "metric_" + strconv.Itoa(i), "value": strconv.Itoa(1000 + i)}
 	}
 	first := time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
 
-	// writeChunk writes rows as results.n.jsonl in taskDir, one row per line,
-	// the way ChunkWriter.WriteChunk does.
-	writeChunk := func(taskDir string, n int, rows ...map[string]any) {
-		var chunk []byte
-		for _, row := range rows {
-			line, err := json.Marshal(row)
-			if err != nil {
-				b.Fatal(err)
-			}
-			chunk = append(append(chunk, line...), '\n')
-		}
-		if err := os.WriteFile(filepath.Join(taskDir, fmt.Sprintf("results.%d.jsonl", n)), chunk, 0o644); err != nil {
+	dir := b.TempDir()
+	branchDir := filepath.Join(dir, extractRun, "getBranches")
+	histDir := filepath.Join(dir, extractRun, histTaskName)
+	for _, d := range []string{branchDir, histDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
 			b.Fatal(err)
 		}
 	}
-
-	for _, projects := range []int{10, 20, 40} {
-		dir := b.TempDir()
-		branchDir := filepath.Join(dir, extractRun, "getBranches")
-		histDir := filepath.Join(dir, extractRun, histTaskName)
-		for _, d := range []string{branchDir, histDir} {
-			if err := os.MkdirAll(d, 0o755); err != nil {
-				b.Fatal(err)
+	var projectRows []map[string]any
+	file := 0
+	for p := range projects {
+		project := fmt.Sprintf("proj-%03d", p)
+		projectRows = append(projectRows, map[string]any{"key": project})
+		var branchRows []map[string]any
+		for br := range branches {
+			name := "main"
+			if br > 0 {
+				name = "br-" + strconv.Itoa(br)
+			}
+			branchRows = append(branchRows, map[string]any{
+				"projectKey": project, "name": name, "isMain": br == 0, "type": "BRANCH",
+			})
+			for pt := range points {
+				rec := histRecord(project, name, first.AddDate(0, 0, pt).Format(time.RFC3339), "1.0", "")
+				rec["measures"] = measures
+				file++
+				writeHistChunk(b, histDir, file, rec)
 			}
 		}
-		var projectRows []map[string]any
-		file := 0
-		for p := range projects {
-			project := fmt.Sprintf("proj-%03d", p)
-			projectRows = append(projectRows, map[string]any{"key": project})
-			var branchRows []map[string]any
-			for br := range branches {
-				name := "main"
-				if br > 0 {
-					name = "br-" + strconv.Itoa(br)
-				}
-				branchRows = append(branchRows, map[string]any{
-					"projectKey": project, "name": name, "isMain": br == 0, "type": "BRANCH",
-				})
-				for pt := range points {
-					rec := histRecord(project, name, first.AddDate(0, 0, pt).Format(time.RFC3339), "1.0", "")
-					rec["measures"] = measures
-					file++
-					writeChunk(histDir, file, rec)
-				}
-			}
-			writeChunk(branchDir, p+1, branchRows...)
-		}
-		writeJSONL(filepath.Join(dir, extractRun, "getProjects"), projectRows)
-		e := &Executor{ExportDir: dir, Mapping: structure.ExtractMapping{testServerURL: extractRun}, MigrateHistory: true}
-
-		b.Run(fmt.Sprintf("projects=%d", projects), func(b *testing.B) {
-			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				if got := projectHistoryPointTotal(e); got != file {
-					b.Fatalf("total = %d, want %d", got, file)
-				}
-			}
-		})
+		writeHistChunk(b, branchDir, p+1, branchRows...)
 	}
+	writeJSONL(filepath.Join(dir, extractRun, "getProjects"), projectRows)
+	return &Executor{ExportDir: dir, Mapping: structure.ExtractMapping{testServerURL: extractRun}, MigrateHistory: true}, file
 }
 
 // TestMigrateBranchHistoryIncrementsHistoryProgress covers #564's other

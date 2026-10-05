@@ -493,40 +493,84 @@ func TestMigrateBranchHistoryDropsPointsTheRegularImportCovers(t *testing.T) {
 
 			migrateBranchHistory(context.Background(), tgt.e, histBranchContext(), branch, branchDev)
 
-			if got := tgt.rec.count("/analysis/analyses"); got != replayed {
-				t.Errorf("create-analysis handshakes = %d, want %d", got, replayed)
-			}
-			if got := tgt.rec.count("/api/ce/submit"); got != replayed {
-				t.Errorf("submissions = %d, want %d", got, replayed)
-			}
+			histWantReplayCounts(t, tgt.rec, replayed)
 			dates := histUploadDates(t, tgt.rec)
 			histWantDates(t, "submitted analysis dates", dates, tc.wantReplayed...)
 			// Implied by the exact dates above; spelled out because it is the
 			// property the Compute Engine enforces and this test exists for.
-			for _, d := range dates {
-				if !branch.LastAnalysisDate.IsZero() && !d.Before(branch.LastAnalysisDate) {
-					t.Errorf("submitted a point dated %s, at or after the regular import's %s",
-						d.Format(time.RFC3339), branch.LastAnalysisDate.Format(time.RFC3339))
-				}
-			}
+			histWantAllBefore(t, dates, branch.LastAnalysisDate)
 
 			logged := tgt.logs.String()
 			histWantDropLog(t, logged, 3-replayed, 3)
-			if want := "points=" + strconv.Itoa(replayed); !strings.Contains(logged, want) {
-				t.Errorf("expected the replay line to report %s (the points left after dropping), got: %s", want, logged)
-			}
-			if dropped := 3 - replayed; dropped > 0 {
+			histWantReplayLine(t, logged, replayed)
+			if 3-replayed > 0 {
 				// The date that decided it is in the line, and the target's
 				// is not: this is a new project.
-				line := histLogLine(logged, "history points not replayed")
-				if want := "source_last_analysis_date=" + tc.lastAnalysis; !strings.Contains(line, want) {
-					t.Errorf("drop line %q does not name the regular import's date (%s)", line, want)
-				}
-				if strings.Contains(line, "target_analysis_date") {
-					t.Errorf("drop line %q names a target date, but the target holds nothing yet", line)
-				}
+				histWantDropLineNames(t, logged, "source_last_analysis_date="+tc.lastAnalysis, "target_analysis_date")
 			}
 		})
+	}
+}
+
+// histWantReplayCounts pins how many create-analysis handshakes and CE
+// submissions the target saw: one of each per replayed point.
+func histWantReplayCounts(t *testing.T, rec *histRecorder, replayed int) {
+	t.Helper()
+	if got := rec.count("/analysis/analyses"); got != replayed {
+		t.Errorf("create-analysis handshakes = %d, want %d", got, replayed)
+	}
+	if got := rec.count("/api/ce/submit"); got != replayed {
+		t.Errorf("submissions = %d, want %d", got, replayed)
+	}
+}
+
+// histWantAllBefore fails for every date at or after limit; a zero limit means
+// there is no upper bound.
+func histWantAllBefore(t *testing.T, dates []time.Time, limit time.Time) {
+	t.Helper()
+	if limit.IsZero() {
+		return
+	}
+	for _, d := range dates {
+		if !d.Before(limit) {
+			t.Errorf("submitted a point dated %s, at or after the regular import's %s",
+				d.Format(time.RFC3339), limit.Format(time.RFC3339))
+		}
+	}
+}
+
+// histWantAllAfter fails for every date at or before floor.
+func histWantAllAfter(t *testing.T, dates []time.Time, floor time.Time) {
+	t.Helper()
+	for _, d := range dates {
+		if !d.After(floor) {
+			t.Errorf("submitted a point dated %s, at or before the target's %s",
+				d.Format(time.RFC3339), floor.Format(time.RFC3339))
+		}
+	}
+}
+
+// histWantReplayLine pins the points= field of the replay line: the points
+// left after dropping.
+func histWantReplayLine(t *testing.T, logged string, replayed int) {
+	t.Helper()
+	if want := "points=" + strconv.Itoa(replayed); !strings.Contains(logged, want) {
+		t.Errorf("expected the replay line to report %s (the points left after dropping), got: %s", want, logged)
+	}
+}
+
+// histWantDropLineNames pins that the drop line contains want and none of the
+// unwanted fragments.
+func histWantDropLineNames(t *testing.T, logged, want string, unwanted ...string) {
+	t.Helper()
+	line := histLogLine(logged, "history points not replayed")
+	if !strings.Contains(line, want) {
+		t.Errorf("drop line %q does not name %s", line, want)
+	}
+	for _, u := range unwanted {
+		if strings.Contains(line, u) {
+			t.Errorf("drop line %q contains %q, but the target holds nothing yet", line, u)
+		}
 	}
 }
 
@@ -571,32 +615,20 @@ func TestMigrateBranchHistoryReplaysOnlyPointsNewerThanTheTarget(t *testing.T) {
 			migrateBranchHistory(context.Background(), tgt.e, bctx, branchInfo{Name: branchDev}, branchDev)
 
 			replayed := len(tc.wantReplayed)
-			if got := tgt.rec.count("/analysis/analyses"); got != replayed {
-				t.Errorf("create-analysis handshakes = %d, want %d", got, replayed)
-			}
-			if got := tgt.rec.count("/api/ce/submit"); got != replayed {
-				t.Errorf("submissions = %d, want %d", got, replayed)
-			}
+			histWantReplayCounts(t, tgt.rec, replayed)
 			dates := histUploadDates(t, tgt.rec)
 			histWantDates(t, "submitted analysis dates", dates, tc.wantReplayed...)
 			// Implied by the exact dates above; spelled out because it is the
 			// property the Compute Engine enforces and this test exists for.
-			for _, d := range dates {
-				if !d.After(mustTime(t, tc.target)) {
-					t.Errorf("submitted a point dated %s, at or before the target's %s", d.Format(time.RFC3339), tc.target)
-				}
-			}
+			histWantAllAfter(t, dates, mustTime(t, tc.target))
 
 			logged := tgt.logs.String()
 			histWantDropLog(t, logged, 4-replayed, 4)
 			if strings.Contains(logged, "stopped early") {
 				t.Errorf("a resumed branch must not report stopping early, got: %s", logged)
 			}
-			if dropped := 4 - replayed; dropped > 0 {
-				line := histLogLine(logged, "history points not replayed")
-				if want := "target_analysis_date=" + tc.target; !strings.Contains(line, want) {
-					t.Errorf("drop line %q does not name the target's date (%s)", line, want)
-				}
+			if 4-replayed > 0 {
+				histWantDropLineNames(t, logged, "target_analysis_date="+tc.target)
 			}
 		})
 	}
@@ -860,34 +892,41 @@ func TestMigrateBranchHistoryHandshakeFailureStopsTheBranch(t *testing.T) {
 
 			migrateBranchHistory(context.Background(), tgt.e, histBranchContext(), branchInfo{Name: branchDev}, branchDev)
 
-			if got := tgt.rec.count("/analysis/analyses"); got != k {
-				t.Errorf("create-analysis handshakes = %d, want %d (none after the failing one)", got, k)
-			}
-			if got := tgt.rec.count("/api/ce/submit"); got != k-1 {
-				t.Errorf("submissions = %d, want %d (none for the failed point or later ones)", got, k-1)
-			}
-			if got := tgt.rec.count("/api/ce/task"); got != k-1 {
-				t.Errorf("CE polls = %d, want %d", got, k-1)
-			}
-			histWantDates(t, "submitted analysis dates", histUploadDates(t, tgt.rec), dates[:k-1]...)
-
-			line := histLogLine(tgt.logs.String(), "stopped early")
-			if line == "" {
-				t.Fatalf("expected a 'stopped early' warning, got: %s", tgt.logs.String())
-			}
-			for _, want := range []string{
-				"level=WARN",
-				"point=" + strconv.Itoa(k),
-				"of=3",
-				dates[k-1],
-				"create-analysis handshake",
-				"HTTP 500",
-			} {
-				if !strings.Contains(line, want) {
-					t.Errorf("warning %q does not contain %q", line, want)
-				}
-			}
+			histWantStoppedAt(t, tgt, dates, k)
 		})
+	}
+}
+
+// histWantStoppedAt pins what the target saw and logged when the handshake of
+// the k-th (1-based) point was rejected.
+func histWantStoppedAt(t *testing.T, tgt *histTarget, dates []string, k int) {
+	t.Helper()
+	if got := tgt.rec.count("/analysis/analyses"); got != k {
+		t.Errorf("create-analysis handshakes = %d, want %d (none after the failing one)", got, k)
+	}
+	if got := tgt.rec.count("/api/ce/submit"); got != k-1 {
+		t.Errorf("submissions = %d, want %d (none for the failed point or later ones)", got, k-1)
+	}
+	if got := tgt.rec.count("/api/ce/task"); got != k-1 {
+		t.Errorf("CE polls = %d, want %d", got, k-1)
+	}
+	histWantDates(t, "submitted analysis dates", histUploadDates(t, tgt.rec), dates[:k-1]...)
+
+	line := histLogLine(tgt.logs.String(), "stopped early")
+	if line == "" {
+		t.Fatalf("expected a 'stopped early' warning, got: %s", tgt.logs.String())
+	}
+	for _, want := range []string{
+		"level=WARN",
+		"point=" + strconv.Itoa(k),
+		"of=3",
+		dates[k-1],
+		"create-analysis handshake",
+		"HTTP 500",
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("warning %q does not contain %q", line, want)
+		}
 	}
 }
 
@@ -909,13 +948,7 @@ func TestImportProjectBranchesHistoryKeepsUploadsStrictlyAscending(t *testing.T)
 		d3 = "2023-06-01T00:00:00Z"
 		d4 = "2023-09-01T00:00:00Z"
 	)
-	tests := []struct {
-		name         string
-		heldByTarget string   // the target's newest analysis of the branch ("" = new branch)
-		points       []string // the extracted history list
-		lastAnalysis string   // the source's last analysis, which the regular import is dated
-		want         []string // every upload, in order: replayed points, then the regular import
-	}{
+	tests := []histStrictlyAscendingCase{
 		{
 			name:         "extract-time race: the newest history point is the regular import's own date",
 			points:       []string{d1, d2, d3},
@@ -932,69 +965,88 @@ func TestImportProjectBranchesHistoryKeepsUploadsStrictlyAscending(t *testing.T)
 	}
 
 	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			tgt := newHistTarget(t, 0)
-			e := tgt.e
-			histSeedBranch(e, branchDev, tc.points...)
-			// What the regular import is built from.
-			writeJSONL(filepath.Join(e.ExportDir, extractRun, "getProjectComponentTree"), []map[string]any{{
-				"key": projMain + ":src/app.js", "name": "app.js", "path": "src/app.js",
-				"language": "js", "lines": 10,
-				"projectKey": projMain, "branch": branchDev, "serverUrl": testServerURL,
-			}})
-			writeJSONL(filepath.Join(e.ExportDir, extractRun, "getProjectSourceCode"), []map[string]any{{
-				"key": projMain + ":src/app.js", "source": "console.log(1)\n",
-				"projectKey": projMain, "branch": branchDev, "serverUrl": testServerURL,
-			}})
+		t.Run(tc.name, func(t *testing.T) { runStrictlyAscendingCase(t, tc) })
+	}
+}
 
-			scBranches := []types.Branch{{Name: branchMain, IsMain: true}, {Name: branchDev}}
-			if tc.heldByTarget != "" {
-				scBranches[1].AnalysisDate = mustTime(t, tc.heldByTarget).Format("2006-01-02T15:04:05-0700")
-			}
-			w, err := e.Store.Writer("importProjectData")
-			if err != nil {
-				t.Fatalf("opening the importProjectData writer: %v", err)
-			}
-			branches := []branchInfo{{Name: branchDev, LastAnalysisDate: mustTime(t, tc.lastAnalysis)}}
+type histStrictlyAscendingCase struct {
+	name         string
+	heldByTarget string   // the target's newest analysis of the branch ("" = new branch)
+	points       []string // the extracted history list
+	lastAnalysis string   // the source's last analysis, which the regular import is dated
+	want         []string // every upload, in order: replayed points, then the regular import
+}
 
-			if err := importProjectBranches(context.Background(), e, upToDateTestProject(t), branches, scBranches, nil, w); err != nil {
-				t.Fatalf("importProjectBranches: %v", err)
-			}
+func runStrictlyAscendingCase(t *testing.T, tc histStrictlyAscendingCase) {
+	tgt := newHistTarget(t, 0)
+	e := tgt.e
+	histSeedBranch(e, branchDev, tc.points...)
+	// What the regular import is built from.
+	writeJSONL(filepath.Join(e.ExportDir, extractRun, "getProjectComponentTree"), []map[string]any{{
+		"key": projMain + ":src/app.js", "name": "app.js", "path": "src/app.js",
+		"language": "js", "lines": 10,
+		"projectKey": projMain, "branch": branchDev, "serverUrl": testServerURL,
+	}})
+	writeJSONL(filepath.Join(e.ExportDir, extractRun, "getProjectSourceCode"), []map[string]any{{
+		"key": projMain + ":src/app.js", "source": "console.log(1)\n",
+		"projectKey": projMain, "branch": branchDev, "serverUrl": testServerURL,
+	}})
 
-			dates := histUploadDates(t, tgt.rec)
-			histWantDates(t, "uploaded analysis dates", dates, tc.want...)
-			for i := 1; i < len(dates); i++ {
-				if !dates[i].After(dates[i-1]) {
-					t.Errorf("upload %d is dated %s, not after upload %d (%s)",
-						i+1, dates[i].Format(time.RFC3339), i, dates[i-1].Format(time.RFC3339))
-				}
-			}
-			if tc.heldByTarget != "" && !dates[0].After(mustTime(t, tc.heldByTarget)) {
-				t.Errorf("first upload is dated %s, at or before what the target already holds (%s)",
-					dates[0].Format(time.RFC3339), tc.heldByTarget)
-			}
+	scBranches := []types.Branch{{Name: branchMain, IsMain: true}, {Name: branchDev}}
+	if tc.heldByTarget != "" {
+		scBranches[1].AnalysisDate = mustTime(t, tc.heldByTarget).Format("2006-01-02T15:04:05-0700")
+	}
+	w, err := e.Store.Writer("importProjectData")
+	if err != nil {
+		t.Fatalf("opening the importProjectData writer: %v", err)
+	}
+	branches := []branchInfo{{Name: branchDev, LastAnalysisDate: mustTime(t, tc.lastAnalysis)}}
 
-			// The regular import is the last upload, and a real report: the
-			// replayed points hang off the placeholder file, it hangs off the
-			// branch's own.
-			uploads := tgt.rec.allUploads()
-			for i, u := range uploads {
-				want := histFileName
-				if i == len(uploads)-1 {
-					want = "src/app.js"
-				}
-				if got := histFileComponent(t, u.report).GetProjectRelativePath(); got != want {
-					t.Errorf("upload %d carries file %q, want %q", i+1, got, want)
-				}
-			}
+	if err := importProjectBranches(context.Background(), e, upToDateTestProject(t), branches, scBranches, nil, w); err != nil {
+		t.Fatalf("importProjectBranches: %v", err)
+	}
 
-			items, _ := e.Store.ReadAll("importProjectData")
-			if len(items) != 1 {
-				t.Fatalf("expected exactly 1 branch record, got %d", len(items))
-			}
-			if got := extractField(items[0], "status"); got != "success" {
-				t.Errorf("branch status = %q, want %q", got, "success")
-			}
-		})
+	dates := histUploadDates(t, tgt.rec)
+	histWantDates(t, "uploaded analysis dates", dates, tc.want...)
+	histWantStrictlyAscending(t, dates)
+	if tc.heldByTarget != "" && !dates[0].After(mustTime(t, tc.heldByTarget)) {
+		t.Errorf("first upload is dated %s, at or before what the target already holds (%s)",
+			dates[0].Format(time.RFC3339), tc.heldByTarget)
+	}
+	histWantFileComponents(t, tgt.rec)
+
+	items, _ := e.Store.ReadAll("importProjectData")
+	if len(items) != 1 {
+		t.Fatalf("expected exactly 1 branch record, got %d", len(items))
+	}
+	if got := extractField(items[0], "status"); got != "success" {
+		t.Errorf("branch status = %q, want %q", got, "success")
+	}
+}
+
+func histWantStrictlyAscending(t *testing.T, dates []time.Time) {
+	t.Helper()
+	for i := 1; i < len(dates); i++ {
+		if !dates[i].After(dates[i-1]) {
+			t.Errorf("upload %d is dated %s, not after upload %d (%s)",
+				i+1, dates[i].Format(time.RFC3339), i, dates[i-1].Format(time.RFC3339))
+		}
+	}
+}
+
+// histWantFileComponents pins that the regular import is the last upload, and
+// a real report: the replayed points hang off the placeholder file, it hangs
+// off the branch's own.
+func histWantFileComponents(t *testing.T, rec *histRecorder) {
+	t.Helper()
+	uploads := rec.allUploads()
+	for i, u := range uploads {
+		want := histFileName
+		if i == len(uploads)-1 {
+			want = "src/app.js"
+		}
+		if got := histFileComponent(t, u.report).GetProjectRelativePath(); got != want {
+			t.Errorf("upload %d carries file %q, want %q", i+1, got, want)
+		}
 	}
 }
