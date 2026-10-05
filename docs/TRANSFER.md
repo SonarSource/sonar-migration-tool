@@ -430,14 +430,15 @@ sonar-migration-tool transfer -c config.json --project_key_regexp <projectKeyReg
 **Known limitations (PoC):**
 
 - **Best-effort, not transactional.** If a historical submission is rejected
-  by the Compute Engine (for example, on a re-run against a project that
-  already has newer analyses on the target), history migration for that
-  branch stops and logs a warning — it never fails or blocks the regular
-  current-snapshot import that follows it.
-- **Not resume-safe.** Re-running a transfer that already replayed history
-  for a project resubmits the same historical points again (duplicate history
-  entries on the target), since completed history points aren't tracked the
-  way branch completion is. Safe to run once per target project.
+  by the Compute Engine, history migration for that branch stops and logs a
+  warning — it never fails or blocks the regular current-snapshot import that
+  follows it.
+- **Resume-safe.** A point dated at or before the branch's newest analysis on
+  the target, or at or after the date the regular import is stamped with, is
+  dropped before submission and logged at Info: the Compute Engine refuses
+  both, and the second would make the regular import itself fail. A re-run
+  therefore only sends what the target is missing, and a branch that is
+  already up to date is skipped entirely.
 - **Not every migrated point stays on the target.** The Compute Engine accepts
   and writes every point the migration submits, but SonarQube Cloud then
   removes some of them. Expect the Activity page to hold fewer analyses than
