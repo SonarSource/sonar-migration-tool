@@ -8,7 +8,7 @@
     "settings", "permission_templates", "quality_profiles", "quality_gates",
     "projects", "portfolios", "groups"
   ],
-  "project_key": null,
+  "project_key_regexp": null,
   "migrate_history": false,
   "history_max_points": 10,
   "history_min_interval_days": 30,

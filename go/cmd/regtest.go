@@ -38,7 +38,7 @@ data from SonarQube Server exists and is correct in SonarCloud."`,
 		if err != nil {
 			return err
 		}
-		if pattern, _ := cmd.Flags().GetString(flagProjectKey); pattern != "" {
+		if pattern := resolveProjectKeyFlags(cmd); pattern != "" {
 			keys, err := resolveRegtestProjectKeys(cmd.Context(), cfg, pattern)
 			if err != nil {
 				return err
@@ -90,7 +90,7 @@ func init() {
 	f.String("format", "table", "Output format: table, json, markdown")
 	f.Int("concurrency", 20, "Maximum number of parallel checks")
 	f.Bool("verbose", false, "Enable verbose output")
-	f.String(flagProjectKey, "", "Project key (or regexp) to scope verification to, matching transfer's --project_key semantics (#529): always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"BANKING_.+\" matches every key starting with BANKING_. Use this to verify a project-scoped transfer instead of every project on the source.")
+	registerProjectKeyFlags(f, "Project key (or regexp) to scope verification to, matching transfer's --project_key_regexp semantics (#529): always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"BANKING_.+\" matches every key starting with BANKING_. Use this to verify a project-scoped transfer instead of every project on the source. #592")
 }
 
 // resolveRegtestProjectKeys lists every project on the source and returns
@@ -102,7 +102,7 @@ func init() {
 func resolveRegtestProjectKeys(ctx context.Context, cfg regtest.Config, pattern string) ([]string, error) {
 	re, err := anchoredProjectKeyPattern(pattern)
 	if err != nil {
-		return nil, fmt.Errorf("invalid --%s pattern %q: %w", flagProjectKey, pattern, err)
+		return nil, fmt.Errorf("invalid --%s/--%s pattern %q: %w", flagProjectKeyRegexp, flagProjectKey, pattern, err)
 	}
 	allKeys, err := extract.ListAllProjectKeys(ctx, extract.ExtractConfig{
 		URL:   cfg.SQSURL,
@@ -120,11 +120,11 @@ func resolveRegtestProjectKeys(ctx context.Context, cfg regtest.Config, pattern 
 	if len(matched) == 0 {
 		return nil, fmt.Errorf(
 			"no project on %s matches --%s %q (keys are case-sensitive; verify with GET /api/projects/search)",
-			cfg.SQSURL, flagProjectKey, pattern)
+			cfg.SQSURL, flagProjectKeyRegexp, pattern)
 	}
 	sort.Strings(matched)
 	fmt.Fprintf(os.Stderr, "Matched %d project(s) for --%s %q: %s\n",
-		len(matched), flagProjectKey, pattern, strings.Join(matched, ", "))
+		len(matched), flagProjectKeyRegexp, pattern, strings.Join(matched, ", "))
 	return matched, nil
 }
 

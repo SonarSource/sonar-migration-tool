@@ -5,6 +5,7 @@
 package cmd
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -22,6 +23,7 @@ func newSyncIssuesTestCmd() *cobra.Command {
 	f.String(flagSourceURL, "", "")
 	f.String(flagSourceToken, "", "")
 	f.StringSlice(flagProjectKeys, nil, "")
+	f.String(flagProjectKeyRegexp, "", "")
 	f.String(flagTargetURL, "", "")
 	f.String(flagTargetToken, "", "")
 	f.String(flagDefaultOrg, "", "")
@@ -101,6 +103,28 @@ func TestResolveSyncIssuesConfig_UnifiedConfigShape(t *testing.T) {
 	}
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("got %+v\nwant %+v", cfg, want)
+	}
+}
+
+// #592: project_key_regexp is settable via the config file (top-level or
+// source.project_key_regexp), inherited from extract.LoadExtractConfigFile
+// exactly like every other extract-side field above.
+func TestResolveSyncIssuesConfig_ProjectKeyRegexpFromConfigFile(t *testing.T) {
+	path := writeSyncIssuesConfig(t, `{
+		"project_key_regexp": "BANKING_.+",
+		"source": { "url": "https://sq.example.com", "token": "sq-token" },
+		"target": { "url": "https://sonarcloud.io/", "token": "sc-token", "default_organization": "my-org" }
+	}`)
+	cmd := newSyncIssuesTestCmd()
+	if err := cmd.ParseFlags([]string{"-c", path}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := resolveSyncIssuesConfig(cmd)
+	if err != nil {
+		t.Fatalf("resolveSyncIssuesConfig: %v", err)
+	}
+	if cfg.projectKeyRegexp != "BANKING_.+" {
+		t.Errorf("projectKeyRegexp: got %q, want %q", cfg.projectKeyRegexp, "BANKING_.+")
 	}
 }
 
@@ -293,6 +317,71 @@ func TestResolveSyncIssuesConfig_ProjectKeyOptional(t *testing.T) {
 	}
 	if len(cfg.projectKeys) != 0 {
 		t.Errorf("projectKeys: got %v, want empty", cfg.projectKeys)
+	}
+}
+
+// #592: --project_key_regexp is captured as a raw pattern by
+// resolveSyncIssuesConfig; resolveSyncIssuesProjectKeyRegexp (tested
+// separately, needs a live source) turns it into cfg.projectKeys.
+func TestResolveSyncIssuesConfig_ProjectKeyRegexpCaptured(t *testing.T) {
+	cmd := newSyncIssuesTestCmd()
+	if err := cmd.ParseFlags([]string{"--project_key_regexp", "BANKING_.+"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := resolveSyncIssuesConfig(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.projectKeyRegexp != "BANKING_.+" {
+		t.Errorf("projectKeyRegexp: got %q, want %q", cfg.projectKeyRegexp, "BANKING_.+")
+	}
+}
+
+// #592: resolveSyncIssuesProjectKeyRegexp must leave cfg.projectKeys
+// untouched (the deprecated --project_key path) when no pattern is set.
+func TestResolveSyncIssuesProjectKeyRegexp_EmptyIsNoOp(t *testing.T) {
+	cfg := syncIssuesConfig{projectKeys: []string{"a", "b"}}
+	if err := resolveSyncIssuesProjectKeyRegexp(context.Background(), &cfg); err != nil {
+		t.Fatalf("resolveSyncIssuesProjectKeyRegexp: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.projectKeys, []string{"a", "b"}) {
+		t.Errorf("expected projectKeys unchanged, got %v", cfg.projectKeys)
+	}
+}
+
+// #592: when --project_key_regexp is set, it resolves against the source
+// project list and overrides whatever the deprecated --project_key list
+// held, regardless of order.
+func TestResolveSyncIssuesProjectKeyRegexp_ResolvesAndOverridesDeprecatedList(t *testing.T) {
+	srv := newProjectListingMockServer(t, []string{
+		"BANKING_core", "BANKING_payments", "other-project",
+	})
+	cfg := syncIssuesConfig{
+		sourceURL:        srv.URL,
+		sourceToken:      "tok",
+		projectKeys:      []string{"other-project"},
+		projectKeyRegexp: "BANKING_.+",
+	}
+	if err := resolveSyncIssuesProjectKeyRegexp(context.Background(), &cfg); err != nil {
+		t.Fatalf("resolveSyncIssuesProjectKeyRegexp: %v", err)
+	}
+	want := []string{"BANKING_core", "BANKING_payments"}
+	if !reflect.DeepEqual(cfg.projectKeys, want) {
+		t.Errorf("got %v, want %v", cfg.projectKeys, want)
+	}
+}
+
+// #592: a pattern matching nothing on the source is an error, same as
+// extract/migrate/transfer/regtest's --project_key_regexp.
+func TestResolveSyncIssuesProjectKeyRegexp_NoMatchIsAnError(t *testing.T) {
+	srv := newProjectListingMockServer(t, []string{"other-project"})
+	cfg := syncIssuesConfig{
+		sourceURL:        srv.URL,
+		sourceToken:      "tok",
+		projectKeyRegexp: "BANKING_.+",
+	}
+	if err := resolveSyncIssuesProjectKeyRegexp(context.Background(), &cfg); err == nil {
+		t.Fatal("expected an error when --project_key_regexp matches zero source projects")
 	}
 }
 
