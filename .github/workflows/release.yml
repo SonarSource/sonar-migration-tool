@@ -37,7 +37,7 @@ jobs:
       - name: Compute project version
         id: project_version
         run: |
-          RAW_VERSION="$(grep -oE 'const Version = "[^"]+"' go/internal/version/version.go | cut -d'"' -f2)"
+          RAW_VERSION="$(grep -oE 'var Version = "[^"]+"' go/internal/version/version.go | cut -d'"' -f2)"
           VERSION="${RAW_VERSION#v}"
           VERSION="${VERSION%%-*}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
@@ -84,13 +84,27 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: '1.25'
+      - name: Compute release version
+        id: release_version
+        run: |
+          RAW_VERSION="$(grep -oE 'var Version = "[^"]+"' go/internal/version/version.go | cut -d'"' -f2)"
+          VERSION="${RAW_VERSION#v}"
+          VERSION="${VERSION%%-*}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version '${RAW_VERSION}' in go/internal/version/version.go is not major.minor.patch"
+            exit 1
+          fi
+          echo "version=v${VERSION}" >> "$GITHUB_OUTPUT"
       - name: Build binary
         working-directory: go
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: '0'
-        run: go build -o ../sonar-migration-tool-${{ matrix.suffix }} .
+        # -ldflags -X strips the "-SNAPSHOT" source carries between releases
+        # (#615): the built binary reports steps.release_version.outputs.version
+        # instead of the literal in go/internal/version/version.go.
+        run: go build -ldflags "-X github.com/sonar-solutions/sonar-migration-tool/internal/version.Version=${{ steps.release_version.outputs.version }}" -o ../sonar-migration-tool-${{ matrix.suffix }} .
 
       - name: Vault Secrets
         id: secrets
@@ -302,7 +316,7 @@ jobs:
       - name: Set release version and tag
         id: release
         run: |
-          RAW_VERSION="$(grep -oE 'const Version = "[^"]+"' go/internal/version/version.go | cut -d'"' -f2)"
+          RAW_VERSION="$(grep -oE 'var Version = "[^"]+"' go/internal/version/version.go | cut -d'"' -f2)"
           VERSION="${RAW_VERSION#v}"
           VERSION="${VERSION%%-*}"
           if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -369,7 +383,7 @@ jobs:
           NEXT_VERSION="${MAJOR}.$((MINOR + 1)).0-SNAPSHOT"
           BRANCH="chore/bump-version-${MAJOR}.$((MINOR + 1)).0"
 
-          sed -i.bak -E "s/const Version = \"[^\"]+\"/const Version = \"v${NEXT_VERSION}\"/" go/internal/version/version.go
+          sed -i.bak -E "s/var Version = \"[^\"]+\"/var Version = \"v${NEXT_VERSION}\"/" go/internal/version/version.go
           rm -f go/internal/version/version.go.bak
 
           if git diff --quiet -- go/internal/version/version.go; then

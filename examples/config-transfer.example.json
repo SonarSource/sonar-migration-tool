@@ -4,7 +4,7 @@
   "export_directory": "./migration-files",
   "skip_issue_sync": false,
   "skip_project_data_migration": false,
-  "project_key": "my-project-key",
+  "project_key_regexp": "my-project-key",
   "source": {
     "url": "https://sonarqube.example.com",
     "token": "sqp_YOUR_SONARQUBE_SERVER_TOKEN",

@@ -112,6 +112,21 @@ func TestFirstNonEmpty(t *testing.T) {
 	}
 }
 
+func TestResolveDeprecatedProjectKey(t *testing.T) {
+	if got := ResolveDeprecatedProjectKey("", ""); got != "" {
+		t.Errorf("neither set: expected empty, got %q", got)
+	}
+	if got := ResolveDeprecatedProjectKey("LEGACY_.+", ""); got != "LEGACY_.+" {
+		t.Errorf("legacy only: expected %q, got %q", "LEGACY_.+", got)
+	}
+	if got := ResolveDeprecatedProjectKey("", "NEW_.+"); got != "NEW_.+" {
+		t.Errorf("new only: expected %q, got %q", "NEW_.+", got)
+	}
+	if got := ResolveDeprecatedProjectKey("LEGACY_.+", "NEW_.+"); got != "NEW_.+" {
+		t.Errorf("both set: expected project_key_regexp to win with %q, got %q", "NEW_.+", got)
+	}
+}
+
 func TestExpandCombinations(t *testing.T) {
 	expansions := []Expansion{
 		{Key: "type", Values: []string{"A", "B"}},

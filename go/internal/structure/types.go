@@ -38,6 +38,13 @@ type Project struct {
 	Slug                   string `csv:"slug" json:"slug"`
 	Monorepo               bool   `csv:"monorepo" json:"monorepo"`
 	SummaryCommentEnabled  bool   `csv:"summary_comment_enabled" json:"summary_comment_enabled"`
+	// SharedRepoBinding is true when this project's non-monorepo DevOps
+	// platform repo binding (alm+repository) is also claimed by at
+	// least one other extracted project. SonarQube Cloud allows only
+	// one non-monorepo project per repository, so these projects will
+	// collide at migrate time unless `monorepo` is enabled for them on
+	// SonarQube Server and the extract is re-run (#622).
+	SharedRepoBinding bool `csv:"shared_repo_binding" json:"shared_repo_binding"`
 }
 
 // Profile represents a mapped quality profile with org assignment.

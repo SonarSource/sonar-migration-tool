@@ -66,7 +66,7 @@ var commandFlags = map[string][]string{
 		"--concurrency", "--config", "--export_directory", "--extract_id",
 		"--extract_type", "--history_max_points", "--history_min_interval_days",
 		"--insecure", "--key_file_path", "--migrate_history", "--objects",
-		"--pem_file_path", "--project_key", "--skip_issue_sync",
+		"--pem_file_path", "--project_key_regexp", "--skip_issue_sync",
 		"--skip_project_data_migration", "--source_token", "--source_url",
 		"--target_task", "--timeout",
 	},
@@ -77,13 +77,13 @@ var commandFlags = map[string][]string{
 		"--concurrency", "--config", "--default_organization", "--edition",
 		"--enterprise_key", "--exclude_branches", "--export_directory",
 		"--fast_sync", "--migrate_history", "--objects",
-		"--project_data_build_concurrency", "--project_key",
+		"--project_data_build_concurrency", "--project_key_regexp",
 		"--project_key_pattern", "--run_id", "--skip_issue_sync",
 		"--skip_profiles", "--skip_project_data_migration", "--target_task",
 		"--target_token", "--target_url", "--timeout",
 	},
 	"predictive-report": {"--config", "--default_organization", "--export_directory"},
-	"regtest":           {"--concurrency", "--config", "--format", "--project_key", "--verbose"},
+	"regtest":           {"--concurrency", "--config", "--format", "--project_key_regexp", "--verbose"},
 	"report":            {"--export_directory", "--filename", "--report_type"},
 	"reset": {
 		"--api_max_rate_per_min", "--concurrency", "--config", "--dry-run",
@@ -95,7 +95,7 @@ var commandFlags = map[string][]string{
 		"--api_max_rate_per_min", "--cert_password", "--concurrency",
 		"--config", "--default_organization",
 		"--enterprise_key", "--export_dir", "--fast_sync", "--insecure",
-		"--key_file_path", "--pem_file_path", "--project_key",
+		"--key_file_path", "--pem_file_path", "--project_key_regexp",
 		"--project_key_pattern", "--source_token", "--source_url",
 		"--target_token", "--target_url", "--timeout",
 	},
@@ -105,7 +105,7 @@ var commandFlags = map[string][]string{
 		"--edition", "--enterprise_key", "--exclude_branches", "--export_dir",
 		"--fast_sync", "--history_max_points", "--history_min_interval_days",
 		"--insecure", "--key_file_path", "--migrate_history", "--pem_file_path",
-		"--project_key", "--project_key_pattern", "--skip_issue_sync",
+		"--project_key_regexp", "--project_key_pattern", "--skip_issue_sync",
 		"--skip_project_data_migration", "--source_token", "--source_url",
 		"--target_token", "--target_url", "--timeout", "--unsupported_languages",
 	},
@@ -240,6 +240,43 @@ func TestTier0_FlagRegistration(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestTier0_ProjectKeyDeprecatedFlagStillWorks asserts the deprecated
+// --project_key flag (renamed to --project_key_regexp, #592) still works
+// and prints cobra's own deprecation notice, rather than being rejected
+// outright or silently ignored. extract validates --source_url/
+// --source_token before doing anything with --project_key, so this needs
+// no network access and belongs in Tier 0.
+func TestTier0_ProjectKeyDeprecatedFlagStillWorks(t *testing.T) {
+	defer track(t, "0", "project_key deprecated flag")()
+
+	res := runCLI(t, "extract", "--project_key", "BANKING_.+")
+	combined := res.combined()
+	if !strings.Contains(combined, "project_key") || !strings.Contains(combined, "deprecated") {
+		t.Errorf("expected a deprecation notice mentioning project_key, got: %s", combined)
+	}
+	if !strings.Contains(combined, "URL and TOKEN are required") {
+		t.Errorf("expected extract to still run its normal URL/token validation past the deprecated flag, got: %s", combined)
+	}
+}
+
+// TestTier0_SyncIssuesProjectKeyDeprecatedFlagStillWorks is the sync-issues
+// counterpart of TestTier0_ProjectKeyDeprecatedFlagStillWorks: sync-issues
+// registers --project_key as its own, differently-typed (repeatable
+// StringSlice) deprecated flag rather than through the shared
+// go/cmd/project_key_flags.go helper, so it gets its own live check (#592).
+func TestTier0_SyncIssuesProjectKeyDeprecatedFlagStillWorks(t *testing.T) {
+	defer track(t, "0", "sync-issues project_key deprecated flag")()
+
+	res := runCLI(t, "sync-issues", "--project_key", "BANKING_.+")
+	combined := res.combined()
+	if !strings.Contains(combined, "project_key") || !strings.Contains(combined, "deprecated") {
+		t.Errorf("expected a deprecation notice mentioning project_key, got: %s", combined)
+	}
+	if !strings.Contains(combined, "URL and token are required") {
+		t.Errorf("expected sync-issues to still run its normal URL/token validation past the deprecated flag, got: %s", combined)
 	}
 }
 

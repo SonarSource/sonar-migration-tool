@@ -159,7 +159,7 @@ Full form:
   "concurrency": 25,
   "timeout": 60,
   "export_directory": "./migration-files",
-  "project_key": "my-project",
+  "project_key_regexp": "my-project",
   "source": {
     "url": "https://sonarqube.example.com",
     "token": "sqp_xxx",
@@ -182,14 +182,14 @@ Full form:
 sonar-migration-tool transfer \
   --source_url https://sonarqube.example.com \
   --source_token sqp_xxx \
-  --project_key my-project \
+  --project_key_regexp my-project \
   --target_token squ_xxx \
   --default_organization my-org
 ```
 
-`--project_key` is always compiled as a full-match regex, implicitly anchored
-with `^` and `$` (issue #529). A plain key like `my-project` matches only
-itself, so single-project usage is unaffected. A pattern transfers every
+`--project_key_regexp` is always compiled as a full-match regex, implicitly
+anchored with `^` and `$` (issue #529). A plain key like `my-project` matches
+only itself, so single-project usage is unaffected. A pattern transfers every
 source project whose key **fully** matches it in one run:
 
 ```bash
@@ -198,12 +198,15 @@ source project whose key **fully** matches it in one run:
 sonar-migration-tool transfer \
   --source_url https://sonarqube.example.com \
   --source_token sqp_xxx \
-  --project_key "BANKING_.+" \
+  --project_key_regexp "BANKING_.+" \
   --target_token squ_xxx \
   --default_organization my-org
 ```
 
-Omit `--project_key` to transfer **every** project visible to the token (in which case the rest of the manual workflow applies — see [MIGRATE.md](MIGRATE.md) for the per-project `organizations.csv` mapping step).
+`--project_key_regexp` (or its deprecated alias `--project_key`, or
+`project_key_regexp`/`project_key` in the config file) is **required** —
+transfer is project-scoped by design. Use the step-by-step `migrate` workflow
+(see [MIGRATE.md](MIGRATE.md)) to transfer every project in one run.
 
 > **Note:** `transfer` runs `structure` itself, which rewrites `projects.csv`, so the per-project organization override described in [Mapping unbound SonarQube Server projects](MAPPING-UNBOUND-PROJECTS.md) cannot be used with `transfer`. Use the step-by-step `migrate` workflow when you need it. (Issue #612.)
 
@@ -217,7 +220,7 @@ Omit `--project_key` to transfer **every** project visible to the token (in whic
 | `-c, --config` | — | Path to a JSON configuration file (see [ADVANCED-CONFIG.md](ADVANCED-CONFIG.md)) |
 | `--source_url` | `source.url` | SonarQube Server URL |
 | `--source_token` | `source.token` | SonarQube Server token |
-| `--project_key` | `project_key` | Project key (or regexp) to transfer. Always compiled as a full-match regex, implicitly anchored with `^` and `$` — a plain key matches only itself; a pattern like `BANKING_.+` transfers every project whose key starts with `BANKING_`. Omit to transfer every project visible to the token. |
+| `--project_key_regexp` | `project_key_regexp` | Project key (or regexp) to transfer (required; transfer is project-scoped by design). Always compiled as a full-match regex, implicitly anchored with `^` and `$` — a plain key matches only itself; a pattern like `BANKING_.+` transfers every project whose key starts with `BANKING_`. The deprecated `--project_key` / `project_key` still work but log a warning; `--project_key_regexp` takes precedence if both are set. |
 | `--target_url` | `target.url` | SonarQube Cloud URL (default: `https://sonarcloud.io/`) |
 | `--target_token` | `target.token` | SonarQube Cloud token |
 | `--default_organization` | `target.default_organization` | SonarQube Cloud organization key |
@@ -274,10 +277,10 @@ file count and an example path. Choose the handling with
 
 ```bash
 # Migrate everything except the unsupported-language files (default)
-sonar-migration-tool transfer -c config.json --project_key my-project
+sonar-migration-tool transfer -c config.json --project_key_regexp my-project
 
 # Do not transfer this project's issues/branches at all
-sonar-migration-tool transfer -c config.json --project_key my-project \
+sonar-migration-tool transfer -c config.json --project_key_regexp my-project \
   --unsupported_languages skip
 ```
 
@@ -414,13 +417,12 @@ default to `0` — no cap, no spacing — so every analysis becomes a candidate:
 
 ```bash
 # Migrate the current snapshot as usual, plus every historical analysis on
-# every migrated branch — unbounded, unspaced (the default when the flags
-# are left unset)
-sonar-migration-tool transfer -c config.json --project_key my-project \
+# every migrated branch — unbounded, unspaced (the default when the flags are left unset)
+sonar-migration-tool transfer -c config.json --project_key_regexp <projectKeyRegexp> \
   --migrate_history
 
 # Bounded history instead: at most 10 points, at least 30 days apart
-sonar-migration-tool transfer -c config.json --project_key my-project \
+sonar-migration-tool transfer -c config.json --project_key_regexp <projectKeyRegexp> \
   --migrate_history --history_max_points 10 --history_min_interval_days 30
 ```
 

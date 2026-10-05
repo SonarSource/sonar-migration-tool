@@ -31,14 +31,16 @@ For each extracted finding, the command:
 
 ## Project scope
 
-By default, `sync-issues` targets **every project visible on the source SonarQube Server token** — the sync fans out across the whole instance. Pass one or more `--project_key` flags to narrow it to specific projects:
+By default, `sync-issues` targets **every project visible on the source SonarQube Server token** — the sync fans out across the whole instance. Pass `--project_key_regexp` to narrow it to every source project whose key fully matches the pattern — implicitly anchored with `^` and `$`, the same mechanism `extract`/`migrate`/`transfer`/`regtest` use (a plain key matches only itself):
 
 ```bash
-sonar-migration-tool sync-issues \
-  --project_key my-project \
-  --project_key another-project \
-  ...
+sonar-migration-tool sync-issues --project_key_regexp "my-project|another-project"
+
+# Or a real pattern, to sync every project whose key starts with "BANKING_":
+sonar-migration-tool sync-issues --project_key_regexp "BANKING_.+"
 ```
+
+The deprecated, repeatable `--project_key` (pass it multiple times to name explicit keys) still works but logs a warning; `--project_key_regexp` takes precedence if both are set. (Issue #592.)
 
 Projects whose organization has no SonarQube Cloud mapping (see [Target project resolution](#target-project-resolution)) are silently excluded; they are not created.
 
@@ -68,7 +70,7 @@ sonar-migration-tool sync-issues \
   --default_organization my-org
 ```
 
-Omitting `--project_key` syncs every project visible to the source token.
+Omitting `--project_key_regexp` (and the deprecated `--project_key`) syncs every project visible to the source token.
 
 ### With a config file
 
@@ -108,7 +110,7 @@ sonar-migration-tool sync-issues -c config.json
 | `-c, --config` | — | Path to a JSON configuration file (see [ADVANCED-CONFIG.md](ADVANCED-CONFIG.md)) |
 | `--source_url` | `source.url` | SonarQube Server URL |
 | `--source_token` | `source.token` | SonarQube Server token |
-| `--project_key` | `project_key` | Project key to sync. Repeatable. Omit to sync every project visible to the source token. |
+| `--project_key_regexp` | `project_key_regexp` | Regexp pattern of project keys to sync, implicitly anchored (`^...$`) — a plain key matches only itself. Omit to sync every project visible to the source token. Also settable via `source.project_key_regexp`. The deprecated, repeatable `--project_key` / `project_key` (explicit literal keys) still works but logs a warning; `--project_key_regexp` takes precedence if both are set. (#592) |
 | `--target_url` | `target.url` | SonarQube Cloud URL (default: `https://sonarcloud.io/`) |
 | `--target_token` | `target.token` | SonarQube Cloud token |
 | `--default_organization` | `target.default_organization` | SonarQube Cloud organization key, used as a fallback when `organizations.csv` has no mapping for a source project |
