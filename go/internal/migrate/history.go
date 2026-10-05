@@ -195,19 +195,50 @@ func historyEligibleBranches(e *Executor, serverURL, serverKey string) []branchI
 //
 // Must run BEFORE the regular current-snapshot import for this branch: the
 // Compute Engine requires each new analysis to be dated after the branch's
-// most recent one. The regular import now backdates its own submission to
-// the source's true last-analysis date (#557 review feedback) rather than
-// "now" — still guaranteed later than every historical point here, because
-// selectBoundedHistoryPoints drops that same most-recent analysis before
-// building this candidate list. Best-effort: a failure here is logged and
-// does NOT fail or block the regular import that follows it, so
-// --migrate_history can never turn a transfer that used to succeed into one
-// that fails.
+// most recent one, and refuses one dated at or before it ("a newer report has
+// already been processed, and processing older reports is not supported").
+// The regular import backdates its own submission to the source's true
+// last-analysis date, branch.LastAnalysisDate (#557 review feedback), rather
+// than "now", so every point replayed here must be strictly older than that
+// date — and strictly newer than anything the target already holds for the
+// branch, which a resumed or re-run migration can leave behind.
+//
+// Neither bound used to be enforced here. The upper one was taken on trust
+// from extract: selectBoundedHistoryPoints drops the single most recent
+// analysis of the history list because the regular import covers it. But
+// extract reads each branch's analysisDate (getBranches) first and lists that
+// branch's analyses (getProjectAnalysisHistory, which depends on it) only
+// later — on a large instance, hours later — so a branch re-analysed in
+// between has an analysis NEWER than the one getBranches recorded. That newer
+// one is what gets dropped, and the previous newest, dated exactly
+// branch.LastAnalysisDate, stays in the list:
+// replayed as the last point, it leaves the regular import carrying an
+// identical date, the CE refuses that, and the branch's import fails (for the
+// main branch the whole project does, and its non-main branches are skipped).
+// A later re-run then reads target date == source date and records the branch
+// up_to_date, quietly blessing a branch whose latest analysis is a synthetic
+// __history_snapshot__ placeholder instead of the real report. Replaying every
+// branch (#625) leaves every non-main branch exposed to that too, not just
+// main. The lower bound was not checked at all, so a re-run against a branch
+// the target already holds started from the oldest point, which the CE
+// refused: a wasted handshake, upload and CE task, a misleading "stopped
+// early" warning, and no replay of the points between the target's date and
+// the source's. Both bounds are now enforced here, at migrate time, by
+// replayableHistory against the dates this run will actually use, rather than
+// inferred from how extract happened to trim its list.
+//
+// Best-effort: a failure here is logged and does NOT fail or block the regular
+// import that follows it, so --migrate_history can never turn a transfer that
+// used to succeed into one that fails.
 func migrateBranchHistory(ctx context.Context, e *Executor, bctx branchImportContext, branch branchInfo, targetBranch string) {
 	if !e.MigrateHistory {
 		return
 	}
-	snapshots := loadExtractedAnalysisHistory(e, bctx.ServerURL, bctx.ServerKey, branch.Name)
+	snapshots := dropUnreplayableHistory(e, bctx, branch, targetBranch,
+		loadExtractedAnalysisHistory(e, bctx.ServerURL, bctx.ServerKey, branch.Name))
+	// Nothing left to replay: no history was extracted for this branch, or
+	// every point was dropped above. Either way return before the placeholder
+	// lookup below, so this costs no network call at all.
 	if len(snapshots) == 0 {
 		return
 	}
@@ -255,6 +286,89 @@ func migrateBranchHistory(ctx context.Context, e *Executor, bctx branchImportCon
 			return
 		}
 	}
+}
+
+// replayableHistory returns the points of snaps that migrateBranchHistory can
+// still submit, in a NEW slice: snaps is never modified, and the survivors
+// keep its order (loadExtractedAnalysisHistory sorts oldest to newest, which
+// is the order the Compute Engine needs them in). A point is dropped when the
+// CE would refuse it, or the regular import already covers its instant:
+//
+//   - Dated at or after regularImportDate, the date the branch's regular
+//     current-snapshot import is stamped with (branchInfo.LastAnalysisDate).
+//     That import submits a report dated exactly then, and the CE refuses a
+//     report dated at or before the branch's newest analysis, so a point on
+//     that instant, or past it, makes the regular import itself fail. Zero
+//     means the source branch was never analyzed, so buildBranchReport stamps
+//     the regular import with "now": no upper bound.
+//   - Dated at or before targetLastAnalysis, the newest analysis the target
+//     already holds for the branch (branchImportContext.TargetAnalysisDates,
+//     e.g. left behind by a resumed or re-run migration). The CE refuses these for
+//     the same reason, so submitting one only burns a handshake, an upload and
+//     a CE task before the branch stops early — while the points between the
+//     target's date and the source's would never be replayed at all. Zero
+//     means the target has never analyzed the branch (or the project is new):
+//     no lower bound.
+//
+// A point equal to either bound is dropped, not kept: the CE rejects an equal
+// date as firmly as an older one (see targetBranchUpToDate). Dates compare as
+// instants, so the zone each was parsed in does not matter.
+func replayableHistory(snaps []historySnapshot, regularImportDate, targetLastAnalysis time.Time) []historySnapshot {
+	out := make([]historySnapshot, 0, len(snaps))
+	for _, snap := range snaps {
+		if !regularImportDate.IsZero() && !snap.Date.Before(regularImportDate) {
+			continue
+		}
+		if !targetLastAnalysis.IsZero() && !snap.Date.After(targetLastAnalysis) {
+			continue
+		}
+		out = append(out, snap)
+	}
+	return out
+}
+
+// dropUnreplayableHistory narrows one branch's extracted snapshots to the ones
+// replayableHistory allows, using the dates this run will actually submit
+// with: the branch's last-analysis date for the regular import, and whatever
+// the target held for targetBranch when the project's branch list was read.
+// It also accounts for what it dropped: one Info line saying how many and
+// against which dates (silent when nothing was dropped), and one
+// HistoryProgress increment per dropped point.
+//
+// The increments keep the live ETA honest. projectHistoryPointTotal counts
+// every extracted point up front, before any of these dates are compared; a
+// point dropped here is never attempted, so without them it would leave the
+// percentage stuck short of 100% for the rest of the run — the same plateau a
+// branch that stops early causes.
+func dropUnreplayableHistory(e *Executor, bctx branchImportContext, branch branchInfo, targetBranch string, snapshots []historySnapshot) []historySnapshot {
+	// A nil map (new target project, unreadable branch list) and an absent
+	// branch both yield the zero time, which replayableHistory reads as "no
+	// lower bound".
+	existing := bctx.TargetAnalysisDates[targetBranch]
+	replayable := replayableHistory(snapshots, branch.LastAnalysisDate, existing)
+	dropped := len(snapshots) - len(replayable)
+	if dropped == 0 {
+		return replayable
+	}
+
+	attrs := []any{"project", bctx.CloudKey, "branch", targetBranch, "dropped", dropped, "of", len(snapshots)}
+	if !branch.LastAnalysisDate.IsZero() {
+		attrs = append(attrs, "source_last_analysis_date", branch.LastAnalysisDate.Format(time.RFC3339))
+	}
+	if !existing.IsZero() {
+		attrs = append(attrs, "target_analysis_date", existing.Format(time.RFC3339))
+	}
+	e.Logger.Info("history points not replayed: dated at or after the regular import, or at or before the target's newest analysis", attrs...)
+
+	// ProgressLogger has no bulk add, and one Increment per point is what keeps
+	// its every-N-points log lines intact: a single jump past a multiple of N
+	// would skip that line.
+	if e.HistoryProgress != nil {
+		for range dropped {
+			e.HistoryProgress.Increment()
+		}
+	}
+	return replayable
 }
 
 // historyPlaceholderLangs are the languages the placeholder file may be

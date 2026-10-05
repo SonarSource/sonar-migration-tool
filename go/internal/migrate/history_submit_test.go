@@ -140,6 +140,19 @@ type histRecorder struct {
 	hits   map[string]int
 	report []byte // last multipart "report" upload
 	form   map[string][]string
+	// order is every noted request path in arrival order, and uploads every
+	// ce/submit upload (report and form above hold only the latest one), for
+	// tests that have to say what happened to each history point rather than
+	// just how many requests there were (see history_guard_test.go).
+	order   []string
+	uploads []histUpload
+}
+
+// histUpload is one captured POST /api/ce/submit: the report ZIP and the
+// multipart form values that travelled with it.
+type histUpload struct {
+	report []byte
+	form   map[string][]string
 }
 
 func newHistRecorder() *histRecorder {
@@ -150,6 +163,7 @@ func (r *histRecorder) note(path string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.hits[path]++
+	r.order = append(r.order, path)
 }
 
 func (r *histRecorder) count(path string) int {
@@ -209,12 +223,27 @@ func (r *histRecorder) captureSubmit(t *testing.T, req *http.Request) {
 	for k, v := range req.MultipartForm.Value {
 		r.form[k] = append([]string(nil), v...)
 	}
+	r.uploads = append(r.uploads, histUpload{report: b, form: r.form})
 }
 
 func (r *histRecorder) reportBytes() []byte {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.report
+}
+
+// allUploads returns every ce/submit upload captured so far, in arrival order.
+func (r *histRecorder) allUploads() []histUpload {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.uploads)
+}
+
+// sequence returns every request path noted so far, in arrival order.
+func (r *histRecorder) sequence() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.order)
 }
 
 func (r *histRecorder) formValues(key string) []string {
