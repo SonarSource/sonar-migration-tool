@@ -522,8 +522,7 @@ func (s *issueSlicer) fetchWindowItems(ctx context.Context, w issueWindow, probe
 	return nil
 }
 
-// fetchAtomicWindow is the seam, and the one place this change admits
-// defeat in writing.
+// fetchAtomicWindow is the seam.
 //
 // It is called for exactly one shape: a window one second wide that
 // still holds more issues than the result window will return. Date
@@ -535,18 +534,19 @@ func (s *issueSlicer) fetchWindowItems(ctx context.Context, w issueWindow, probe
 // would lose twelve thousand of them here.
 //
 // The contract is "return everything the API will give for this window,
-// and record exactly what it will not". Today that is the capped fetch
-// plus a record naming the second and the missing count. A secondary
-// partition axis replaces this body and nothing else: types x
-// severities was measured to partition exactly inside a single second
-// on SonarQube 2026.4.1 (a 15-cell cross product summing to 8,916 with
-// zero delta, dominant cell 40.9%, so headroom to about 24,500 issues
-// per second), and the clone-and-set parameter discipline, the dedup
-// verifier, the reconciliation and the artefact all work unchanged
-// around it — UnexplainedDrift becomes its free correctness test. It is
-// deferred because that engaged path cannot be proven against any real
-// server available to us, and because every atomic_window record this
-// version writes measures the distribution the follow-up needs (#574).
+// and record exactly what it will not". A secondary partition axis
+// (types x severities, falling back through rule, directory and file —
+// see slice_facets.go's fetchByFacets) now tries to make good on that
+// contract before
+// admitting defeat: types x severities was measured to partition
+// exactly inside a single second on SonarQube 2026.4.1 (a 15-cell cross
+// product summing to 8,916 with zero delta, dominant cell 40.9%, so
+// headroom to about 24,500 issues per second), and the clone-and-set
+// parameter discipline, the dedup verifier, the reconciliation and the
+// artefact all work unchanged around it — UnexplainedDrift is its free
+// correctness test. Only a cell that survives every level of that
+// cascade still over the ceiling reaches the capped-fetch give-up this
+// function used to perform unconditionally (#574, #630).
 func (s *issueSlicer) fetchAtomicWindow(ctx context.Context, w issueWindow, total, depth int) error {
 	// An atomic_window record is a claim about ONE creation second, and
 	// the report states it in those words. A window with an open edge
@@ -558,38 +558,7 @@ func (s *issueSlicer) fetchAtomicWindow(ctx context.Context, w issueWindow, tota
 	if w.openStart || w.openEnd {
 		return s.closeAtomicWindow(ctx, w, total, depth)
 	}
-
-	res, err := s.fetchWindow(ctx, w, false)
-	if err != nil {
-		return err
-	}
-	s.windows++
-	if err := s.absorb(res.Items); err != nil {
-		return err
-	}
-
-	lost := total - res.Fetched
-	if lost < 0 {
-		lost = 0
-	}
-	s.e.Logger.Warn("more issues share one creation second than the API will return - date slicing cannot subdivide further",
-		"project", s.scope.ProjectKey, "branch", s.scope.Branch, "window", w.label(),
-		"total", total, "fetched", res.Fetched, "lost", lost)
-	start, end := w.bounds()
-	s.record(common.TruncationRecord{
-		Endpoint:    issuesSearchAPI,
-		Reason:      common.ReasonAtomicWindow,
-		Scope:       s.scope,
-		Total:       total,
-		TotalKnown:  true,
-		Fetched:     res.Fetched,
-		Lost:        lost,
-		PageSize:    res.PageSize,
-		PageLimit:   res.PageLimit,
-		WindowStart: start,
-		WindowEnd:   end,
-	})
-	return nil
+	return s.fetchByFacets(ctx, w, total)
 }
 
 // closeAtomicWindow turns an atomic candidate that still has an open

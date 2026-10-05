@@ -151,6 +151,15 @@ type Executor struct {
 
 	mu              sync.Mutex
 	skippedProjects map[string]bool
+
+	// mqrMode caches whether the source server is configured in MQR
+	// (Multi-Quality Rule) mode, probed lazily the first time the
+	// issue-search facet-slicing cascade needs it (#630, see
+	// IsMQRMode in slice_facets.go) — nil means "not yet probed". The
+	// setting is instance-wide, so every project's slicer shares one
+	// probe instead of asking again per atomic second.
+	mqrMode   *bool
+	mqrModeMu sync.Mutex
 }
 
 // RecordSkipped marks a project as skipped due to insufficient privileges.
