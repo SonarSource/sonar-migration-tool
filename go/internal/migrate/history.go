@@ -48,9 +48,9 @@ type historySnapshot struct {
 func loadExtractedAnalysisHistory(e *Executor, serverURL, serverKey, branch string) []historySnapshot {
 	scope := extractScope{ServerURL: serverURL, ProjectKey: serverKey, Branch: branch}
 	var out []historySnapshot
-	for item := range scopedExtractItems(e, "getProjectAnalysisHistory", scope) {
-		date := parseISODate(extractField(item.Data, "date"))
-		if date.IsZero() {
+	for item := range scopedExtractItems(e, historyExtractTask, scope) {
+		date, ok := historyPointDate(extractField(item.Data, "date"))
+		if !ok {
 			continue
 		}
 		out = append(out, historySnapshot{
@@ -97,12 +97,19 @@ func extractHistoryMeasures(data json.RawMessage, cloudProjectKey string) []scan
 // will attempt to replay across every branch of every extracted project
 // that will actually be imported (#564, generalized to non-main branches
 // by #625) — a pure read of already-extracted data (readExtractItems,
-// collectBranchInfo, loadExtractedAnalysisHistory), no API calls, safe to
+// collectBranchInfo, countReplayableHistoryPoints), no API calls, safe to
 // call before a single migrate task has run. Lets RunMigrate give history
 // replay its own tracked unit of work in the overall ETA up front. Returns
 // 0 when history migration is off, or when extract never ran with
-// --migrate_history (loadExtractedAnalysisHistory then returns nil for
-// every project) — both keep the feature a true no-op.
+// --migrate_history (there are then no history points to count for any
+// project) — both keep the feature a true no-op.
+//
+// The history extract is read in a SINGLE pass (countReplayableHistoryPoints)
+// rather than once per branch through loadExtractedAnalysisHistory. Each of
+// those reads streams the whole corpus, and since #625 every eligible branch is
+// both one more lookup and more records to scan, so a per-branch pre-count
+// cost O(branches x corpus) — quadratic in the instance, all of it spent
+// before RunMigrate's first progress line.
 //
 // historyEligibleBranches mirrors resolveProjectBranches' own filter
 // pipeline (exclude glob, --branch_regexp, --branch_analyzed_after, the
@@ -119,6 +126,16 @@ func projectHistoryPointTotal(e *Executor) int {
 	if err != nil {
 		return 0
 	}
+	if len(projects) == 0 {
+		// Nothing to sum the counts over, so don't read the history extract.
+		return 0
+	}
+	counts := countReplayableHistoryPoints(e)
+	if len(counts) == 0 {
+		// No project has a single replayable point, so the total is 0 whatever
+		// the branches are — skip resolving them project by project.
+		return 0
+	}
 	total := 0
 	for _, p := range projects {
 		serverKey := extractField(p.Data, "key")
@@ -132,7 +149,7 @@ func projectHistoryPointTotal(e *Executor) int {
 		// a project with N such branches can replay up to
 		// N x history_max_points points.
 		for _, b := range historyEligibleBranches(e, p.ServerURL, serverKey) {
-			total += len(loadExtractedAnalysisHistory(e, p.ServerURL, serverKey, b.Name))
+			total += counts[extractScope{ServerURL: p.ServerURL, ProjectKey: serverKey, Branch: b.Name}]
 		}
 	}
 	return total
