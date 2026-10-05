@@ -32,10 +32,15 @@ import (
 var corpusStart = time.Date(2026, time.January, 15, 12, 0, 0, 0, time.UTC)
 
 // corpusIssue is one issue in the fake instance: the key the dedup set
-// keys on, and the creation date the windows select on.
+// keys on, the creation date the windows select on, and the
+// type/severity/rule/directory/file tags the facet-slicing cascade
+// (#630) partitions by. The tags default to empty, which
+// addBurst/addSpread leave them as — only tests exercising the facet
+// cascade need to set them, via addBurstTagged / addBurstFull.
 type corpusIssue struct {
-	key     string
-	created time.Time
+	key                              string
+	created                          time.Time
+	typ, sev, ruleKey, dir, filePath string
 }
 
 // issueCorpus is a stand-in for /api/issues/search that honours the
@@ -100,6 +105,24 @@ type issueCorpus struct {
 	// onRequest is called with the running request count, for tests that
 	// need to interfere mid-walk.
 	onRequest func(count int)
+
+	// mqrSetting controls how the fake api/settings/values endpoint
+	// answers a sonar.multi-quality-mode.enabled probe (#630):
+	// "true"/"false" answers with that value, "" (the default) answers
+	// as if the setting does not exist (empty settings array) — the
+	// shape a pre-MQR server gives.
+	mqrSetting string
+}
+
+// serveSettings answers api/settings/values for the one key the
+// facet-slicing cascade ever asks for (#630). Any other key is not
+// modelled; none of this package's tests need one.
+func (c *issueCorpus) serveSettings(w http.ResponseWriter, r *http.Request) {
+	settings := []map[string]any{}
+	if r.URL.Query().Get("keys") == mqrEnabledSetting && c.mqrSetting != "" {
+		settings = append(settings, map[string]any{"key": mqrEnabledSetting, "value": c.mqrSetting})
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"settings": settings})
 }
 
 func newIssueCorpus(t *testing.T) *issueCorpus {
@@ -115,6 +138,34 @@ func (c *issueCorpus) addBurst(at time.Time, n int, prefix string) {
 		c.issues = append(c.issues, corpusIssue{
 			key:     fmt.Sprintf("%s-%d", prefix, i),
 			created: at,
+		})
+	}
+}
+
+// addBurstTagged appends n issues created at the same instant, all
+// tagged with the given type/severity/rule — a controlled, individually
+// countable cell for tests exercising the facet-slicing cascade (#630).
+// Combine several calls at the same `at` to build a one-second burst
+// split across multiple (type, severity[, rule]) cells.
+func (c *issueCorpus) addBurstTagged(at time.Time, n int, prefix, typ, sev, rule string) {
+	c.addBurstFull(at, n, prefix, typ, sev, rule, "", "")
+}
+
+// addBurstFull is addBurstTagged plus the directory/file tags the
+// facet cascade's third and fourth fallback levels partition by
+// (#630) — the shape of a systematic rule (e.g. a duplication check)
+// firing on every file of a first analysis, spread across one or more
+// directories/files rather than concentrated in a single rule bucket.
+func (c *issueCorpus) addBurstFull(at time.Time, n int, prefix, typ, sev, rule, dir, file string) {
+	for i := 0; i < n; i++ {
+		c.issues = append(c.issues, corpusIssue{
+			key:      fmt.Sprintf("%s-%d", prefix, i),
+			created:  at,
+			typ:      typ,
+			sev:      sev,
+			ruleKey:  rule,
+			dir:      dir,
+			filePath: file,
 		})
 	}
 }
@@ -160,6 +211,10 @@ func (c *issueCorpus) sortIssues() {
 }
 
 func (c *issueCorpus) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/"+settingsAPI {
+		c.serveSettings(w, r)
+		return
+	}
 	if r.URL.Path != "/"+issuesSearchAPI {
 		http.NotFound(w, r)
 		return
@@ -222,6 +277,48 @@ type corpusQuery struct {
 	afterSet, beforeSet bool
 	page, pageSize      int
 	newestFirst         bool
+
+	// types/severities/rules/directories/files are the facet-cascade
+	// filters (#630) — each comma-separated like the real API, nil when
+	// the param is absent (meaning "no filter on this dimension", same
+	// as an absent date bound).
+	types, severities, rules, directories, files []string
+	// facet, when non-empty, is the requested "facets=" property; the
+	// response carries a facets block computed over the filtered
+	// selection, same as the real endpoint's faceting-after-filtering
+	// behavior.
+	facet string
+}
+
+// commaList splits a comma-separated query value, returning nil for an
+// empty value so an absent filter and an empty filter are the same
+// "no constraint on this dimension" rather than "matches nothing."
+func commaList(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	return strings.Split(raw, ",")
+}
+
+// firstNonEmptyQuery returns the first non-empty value among several
+// query parameter names — used to treat Standard Experience's and MQR's
+// differently-named type/severity params as aliases (#630).
+func firstNonEmptyQuery(q url.Values, keys ...string) string {
+	for _, k := range keys {
+		if v := q.Get(k); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func containsStr(list []string, v string) bool {
+	for _, s := range list {
+		if s == v {
+			return true
+		}
+	}
+	return false
 }
 
 // parseQuery validates a request the way the server does and returns
@@ -244,6 +341,18 @@ func (c *issueCorpus) parseQuery(q url.Values) (corpusQuery, string) {
 		page:        atoiOrDefault(q.Get("p"), 1),
 		pageSize:    atoiOrDefault(q.Get("ps"), 100),
 		newestFirst: q.Get("s") == "CREATION_DATE" && q.Get("asc") == "false",
+		// types/severities accept EITHER taxonomy's param name (#630):
+		// the corpus's corpusIssue only ever carries one pair of
+		// typ/sev tags, so Standard Experience's types/severities and
+		// MQR's impactSoftwareQualities/impactSeverities are treated as
+		// aliases for the same underlying fields rather than modelled
+		// as genuinely different data.
+		types:       commaList(firstNonEmptyQuery(q, typesParam, impactSoftwareQualitiesParam)),
+		severities:  commaList(firstNonEmptyQuery(q, severitiesParam, impactSeveritiesParam)),
+		rules:       commaList(q.Get(rulesParam)),
+		directories: commaList(q.Get(directoriesParam)),
+		files:       commaList(q.Get(filesParam)),
+		facet:       q.Get(facetsParam),
 	}
 	if parsed.pageSize > issuePageSize {
 		c.violate("ps=%d exceeds the server's maximum of %d", parsed.pageSize, issuePageSize)
@@ -273,9 +382,15 @@ func (c *issueCorpus) writePage(w http.ResponseWriter, q corpusQuery) {
 	to := min(from+q.pageSize, len(selected))
 	items := make([]map[string]any, 0, to-from)
 	for _, issue := range selected[from:to] {
+		rule := issue.ruleKey
+		if rule == "" {
+			rule = "java:S100"
+		}
 		items = append(items, map[string]any{
 			"key":          issue.key,
-			"rule":         "java:S100",
+			"rule":         rule,
+			"type":         issue.typ,
+			"severity":     issue.sev,
 			"creationDate": common.FormatSQDate(issue.created),
 		})
 	}
@@ -289,7 +404,67 @@ func (c *issueCorpus) writePage(w http.ResponseWriter, q corpusQuery) {
 		}
 		body["paging"] = map[string]any{"pageIndex": q.page, "pageSize": q.pageSize, "total": total}
 	}
+	if q.facet != "" {
+		body["facets"] = []map[string]any{c.facetBlock(q.facet, selected)}
+	}
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// facetBlock computes the real server's faceting-after-filtering
+// behavior (#630): counts, over the already-filtered selection, of the
+// requested facet property's distinct values. Matches the
+// property/values[].val/.count shape probeFacet parses.
+//
+// It also reproduces the real server's own silent truncation: a facet
+// response never carries more than maxFacetValues buckets, with no
+// flag saying there would have been more — it just keeps the highest-
+// count buckets and drops the rest. A corpus with more distinct values
+// than that cap (e.g. the 120-flat-files repro) must come back short
+// of its own cellTotal here, the same way the real API does, or a test
+// built on this corpus cannot catch facetCoversCell regressing back to
+// trusting len(values) alone (#630's actual under-fetch bug).
+func (c *issueCorpus) facetBlock(facet string, selected []corpusIssue) map[string]any {
+	counts := make(map[string]int)
+	for _, issue := range selected {
+		var v string
+		switch facet {
+		case typesParam, impactSoftwareQualitiesParam:
+			v = issue.typ
+		case severitiesParam, impactSeveritiesParam:
+			v = issue.sev
+		case rulesParam:
+			v = issue.ruleKey
+		case directoriesParam:
+			v = issue.dir
+		case filesParam:
+			v = issue.filePath
+		}
+		if v != "" {
+			counts[v]++
+		}
+	}
+	type bucket struct {
+		val   string
+		count int
+	}
+	buckets := make([]bucket, 0, len(counts))
+	for val, count := range counts {
+		buckets = append(buckets, bucket{val, count})
+	}
+	sort.SliceStable(buckets, func(i, j int) bool {
+		if buckets[i].count != buckets[j].count {
+			return buckets[i].count > buckets[j].count
+		}
+		return buckets[i].val < buckets[j].val
+	})
+	if len(buckets) > maxFacetValues {
+		buckets = buckets[:maxFacetValues]
+	}
+	values := make([]map[string]any, 0, len(buckets))
+	for _, b := range buckets {
+		values = append(values, map[string]any{"val": b.val, "count": b.count})
+	}
+	return map[string]any{"property": facet, "values": values}
 }
 
 // selected applies the window, half-open: createdAfter inclusive,
@@ -306,12 +481,29 @@ func (c *issueCorpus) selected(q corpusQuery) []corpusIssue {
 	return out
 }
 
-// excluded is the half-open window test on one issue.
+// excluded is the half-open window test on one issue, plus the
+// types/severities/rules facet filters (#630) — same "absent means no
+// constraint" semantics as the date bounds.
 func (c *issueCorpus) excluded(issue corpusIssue, q corpusQuery) bool {
 	if q.afterSet && issue.created.Before(q.after) {
 		return true
 	}
-	return q.beforeSet && !issue.created.Before(q.before)
+	if q.beforeSet && !issue.created.Before(q.before) {
+		return true
+	}
+	if len(q.types) > 0 && !containsStr(q.types, issue.typ) {
+		return true
+	}
+	if len(q.severities) > 0 && !containsStr(q.severities, issue.sev) {
+		return true
+	}
+	if len(q.rules) > 0 && !containsStr(q.rules, issue.ruleKey) {
+		return true
+	}
+	if len(q.directories) > 0 && !containsStr(q.directories, issue.dir) {
+		return true
+	}
+	return len(q.files) > 0 && !containsStr(q.files, issue.filePath)
 }
 
 // atoiOrDefault parses a query parameter the lenient way a server does.
