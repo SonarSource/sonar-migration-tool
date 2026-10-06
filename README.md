@@ -41,16 +41,17 @@ See [what's new](WHATSNEW.md) in the latest release.
 * Portfolios (Enterprise)<br>
 * Project data (Branches with Measures, Issues, Source files, Syntax highlighting, ...) (Optional)<br>
 * Issues & Hotspots status, comments, and tags (optional)
+* Analysis history (v1.2) - opt-in option
 * SCM blame authorship
-* Project DevOps platform binding (GitHub / GitLab / Azure DevOps / Bitbucket Cloud) — requires the target organization to be bound to the same platform
+* Project DevOps platform binding (v1.2) (GitHub / GitLab / Azure DevOps / Bitbucket Cloud) — requires the target organization to be bound to the same platform
 
 ### ❌ NOT migrated
 * User accounts & auth
 * User Permissions on users
-* Analysis history
 * Coverage and Duplication data
 * Applications
 * Portfolio hierarchies
+* Portfolio measures history
 * Issue assignments
 * CI/CD pipelines
 * Organization-level DevOps platform binding (needs platform secrets — bind the target organization by hand first)
