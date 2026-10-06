@@ -189,7 +189,7 @@ Use `transfer`. It runs the whole migration in a single command — extracting f
 ./sonar-migration-tool transfer \
   --source_url <YOUR_SQS_URL> \
   --source_token <YOUR_SQS_TOKEN> \
-  --project_key <YOUR_PROJECT_KEY> \
+  --project_key_regexp <YOUR_PROJECT_KEY> \
   --target_url https://sonarcloud.io \
   --target_token <YOUR_SQC_TOKEN> \
   --enterprise_key <YOUR_SQC_ENTERPRISE_KEY> \

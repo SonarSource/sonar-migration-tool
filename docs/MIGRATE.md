@@ -115,9 +115,10 @@ sonar-migration-tool extract --source_url <URL> --source_token <TOKEN> --export_
 | `--export_directory` | Output directory (default: `./migration-files`) |
 | `--skip_project_data_migration` | Skip the issue / source / SCM-blame extract (project data is extracted by default) |
 | `--branch_regexp` | Regexp pattern of branch names to extract, implicitly anchored (`^...$`) — a plain name matches only itself. Omit to extract every branch. The main branch is always extracted regardless of match. |
-| `--migrate_history` | **PoC, opt-in (v1.2).** Also extract a bounded set of historical analysis snapshots (date + project-level measures) per project's main branch, so `migrate --migrate_history` can replay them. Off by default — no extra API calls unless set. See [Project history migration](TRANSFER.md#project-history-migration---migrate_history--poc) |
+| `--migrate_history` | **opt-in (v1.2).** Also extract a bounded set of historical analysis snapshots (date + project-level measures) per project's main branch, so `migrate --migrate_history` can replay them. Off by default — no extra API calls unless set. See [Project history migration](TRANSFER.md#project-history-migration---migrate_history--poc) |
 | `--history_max_points` | Max historical snapshots selected per project when `--migrate_history` is set (default: `0`, no cap) |
 | `--history_min_interval_days` | Minimum spacing, in days, between two selected snapshots when `--migrate_history` is set (default: `0`, no spacing rule) |
+| `--project_key_regexp` | Regexp pattern of project keys to extract, implicitly anchored (`^...$`) — a plain key matches only itself. Omit to extract every project. Also settable via the config file's top-level `project_key_regexp`, or `source.project_key_regexp` to scope extract independently of migrate (#536, #592). The deprecated `--project_key`/`project_key` still work but log a warning; `--project_key_regexp` takes precedence if both are set. |
 | `--pem_file_path` | Client certificate PEM file (mTLS) |
 | `--key_file_path` | Client certificate key file (mTLS) |
 | `--cert_password` | Client certificate password (mTLS) |
@@ -200,7 +201,8 @@ sonar-migration-tool migrate --target_token <TOKEN> --enterprise_key <ENTERPRISE
 | `--default_organization` | SonarQube Cloud organization key applied to every project when `organizations.csv` has no mapping. Ignored (with a WARN) if any row already carries a `sonarcloud_org_key`. Useful for small instances where every SQS project migrates into one SQC org. |
 | `--edition` | SonarQube Cloud license edition |
 | `--branch_regexp` | Regexp pattern of branch names to migrate, implicitly anchored (`^...$`) — a plain name matches only itself. If not set, implicitly operates on whatever branches were actually extracted. The main branch is always migrated regardless of match. |
-| `--migrate_history` | **PoC, opt-in (v1.2).** Replay each project's extracted historical analysis snapshots as separate, backdated analyses on the target's main branch, before the regular current-snapshot import. Requires `extract` to have run with `--migrate_history` too. Off by default. See [Project history migration](TRANSFER.md#project-history-migration---migrate_history--poc) |
+| `--migrate_history` | **opt-in (v1.2).** Replay each project's extracted historical analysis snapshots as separate, backdated analyses on the target's main branch, before the regular current-snapshot import. Requires `extract` to have run with `--migrate_history` too. Off by default. See [Project history migration](TRANSFER.md#project-history-migration---migrate_history--poc) |
+| `--project_key_regexp` | Regexp pattern of source project keys to migrate (only applies when the `projects` category is selected via `--objects`), implicitly anchored (`^...$`) — a plain key matches only itself. If `extract` was already narrowed via its own `--project_key_regexp`, this can only narrow further, never widen past what was extracted. Also settable via the config file's top-level `project_key_regexp`, or `target.project_key_regexp` to scope migrate independently of extract (#536, #592). The deprecated `--project_key`/`project_key` still work but log a warning; `--project_key_regexp` takes precedence if both are set. Not to be confused with `--project_key_pattern` (the target-key rendering template). |
 | `--target_url` | SonarQube Cloud URL (default: `https://sonarcloud.io/`) |
 | `--concurrency` | Max concurrent requests |
 | `--export_directory` | Directory containing SonarQube exports (default: `./migration-files`) |
@@ -317,7 +319,7 @@ sonar-migration-tool reset <TOKEN> <ENTERPRISE_KEY> --export_directory ./files/
 | `requests.log` | Log of all API requests made during extraction |
 | `results.*.jsonl` | Raw extracted data in JSON Lines format (one file per entity) |
 | `organizations.csv` | Server-to-organization mapping (you edit this) |
-| `projects.csv` | List of all extracted projects. Its `sonarcloud_org_key` column is an optional per-project organization override you may edit — see [Mapping unbound SonarQube Server projects](MAPPING-UNBOUND-PROJECTS.md) |
+| `projects.csv` | List of all extracted projects. Its `sonarcloud_org_key` column is an optional per-project organization override you may edit — see [Mapping unbound SonarQube Server projects](MAPPING-UNBOUND-PROJECTS.md). Its `shared_repo_binding` column flags projects whose DevOps platform repository binding is shared with another project without `monorepo` enabled on SonarQube Server — SonarQube Cloud allows only one non-monorepo project per repository, so flagged projects will collide at migrate time unless you enable `monorepo` for them on SonarQube Server and re-run `extract`. (Issue #622.) |
 | `gates.csv` | Quality Gate mappings |
 | `profiles.csv` | Quality Profile mappings |
 | `groups.csv` | Group mappings |

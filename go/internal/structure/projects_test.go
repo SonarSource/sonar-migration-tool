@@ -53,23 +53,23 @@ func TestIsCloudBinding(t *testing.T) {
 	}
 }
 
-func TestGenerateUniqueProjectKey(t *testing.T) {
-	// ALM-bound non-monorepo
-	got := GenerateUniqueProjectKey(testSQURL, "proj1", "github", "org/repo", false)
+func TestRepoBindingIdentity(t *testing.T) {
+	// ALM-bound non-monorepo — collision risk, identity is alm_repository.
+	got := repoBindingIdentity("github", "org/repo", false)
 	if got != "github_org/repo" {
 		t.Errorf("expected 'github_org/repo', got %q", got)
 	}
 
-	// No ALM
-	got = GenerateUniqueProjectKey(testSQURL, "proj1", "", "", false)
-	if got != testProjOrgKey {
-		t.Errorf("expected 'https://sq.example.com/proj1', got %q", got)
+	// No ALM — no collision risk.
+	got = repoBindingIdentity("", "", false)
+	if got != "" {
+		t.Errorf("expected empty identity, got %q", got)
 	}
 
-	// Monorepo (falls back to server_url+key)
-	got = GenerateUniqueProjectKey(testSQURL, "proj1", "github", "org/repo", true)
-	if got != testProjOrgKey {
-		t.Errorf("expected 'https://sq.example.com/proj1', got %q", got)
+	// Monorepo — no collision risk, even with a repo binding.
+	got = repoBindingIdentity("github", "org/repo", true)
+	if got != "" {
+		t.Errorf("expected empty identity for monorepo, got %q", got)
 	}
 }
 
@@ -144,6 +144,109 @@ func TestMapProjectStructure(t *testing.T) {
 	}
 	if !found {
 		t.Error("proj1 not found in projects")
+	}
+}
+
+// TestMapProjectStructure_SharedRepoBinding is the regression test for #622:
+// two source projects bound to the same repository without monorepo enabled
+// used to collide on the same internal map key and silently overwrite one
+// another, so only one of them ever reached projects.csv. Every source
+// project must now survive as its own row, with the colliding ones flagged.
+func TestMapProjectStructure_SharedRepoBinding(t *testing.T) {
+	dir := t.TempDir()
+	extractDir := filepath.Join(dir, testExtractID)
+
+	writeTestJSON(t, filepath.Join(extractDir, "extract.json"),
+		map[string]any{"url": testSQURL, "edition": "enterprise"})
+
+	writeTestJSONL(t, filepath.Join(extractDir, "getProjectDetails"), []map[string]any{
+		{"key": "proj1", "name": "Project 1", "branch": "main", "serverUrl": testSQURL},
+		{"key": "proj2", "name": "Project 2", "branch": "main", "serverUrl": testSQURL},
+		{"key": "proj3", "name": "Project 3", "branch": "main", "serverUrl": testSQURL},
+	})
+
+	// One GitHub binding shared by all three projects' bindingKey.
+	writeTestJSONL(t, filepath.Join(extractDir, "getBindings"), []map[string]any{
+		{"key": "b1", "alm": "github", "url": "https://api.github.com/orgs/org", "serverUrl": testSQURL},
+	})
+
+	// proj1 and proj2 point at the SAME repository without monorepo —
+	// they must collide (SharedRepoBinding=true) but both must still
+	// appear as distinct rows. proj3 points at a different repository
+	// under the same GitHub org, so it must not be flagged.
+	writeTestJSONL(t, filepath.Join(extractDir, "getProjectBindings"), []map[string]any{
+		{"projectKey": "proj1", "key": "b1", "repository": "org/repo", "monorepo": false, "serverUrl": testSQURL},
+		{"projectKey": "proj2", "key": "b1", "repository": "org/repo", "monorepo": false, "serverUrl": testSQURL},
+		{"projectKey": "proj3", "key": "b1", "repository": "org/other-repo", "monorepo": false, "serverUrl": testSQURL},
+	})
+
+	writeTestJSONL(t, filepath.Join(extractDir, "getNewCodePeriods"), nil)
+
+	mapping := ExtractMapping{testSQURL: testExtractID}
+	_, projects := MapProjectStructure(dir, mapping)
+
+	if len(projects) != 3 {
+		t.Fatalf("expected 3 projects (no silent overwrite), got %d", len(projects))
+	}
+
+	byKey := make(map[string]Project, len(projects))
+	for _, p := range projects {
+		byKey[p.Key] = p
+	}
+
+	for _, key := range []string{"proj1", "proj2", "proj3"} {
+		if _, ok := byKey[key]; !ok {
+			t.Errorf("expected %s to survive in projects.csv, it did not", key)
+		}
+	}
+
+	if !byKey["proj1"].SharedRepoBinding {
+		t.Error("expected proj1.SharedRepoBinding=true (shares repo with proj2)")
+	}
+	if !byKey["proj2"].SharedRepoBinding {
+		t.Error("expected proj2.SharedRepoBinding=true (shares repo with proj1)")
+	}
+	if byKey["proj3"].SharedRepoBinding {
+		t.Error("expected proj3.SharedRepoBinding=false (distinct repository)")
+	}
+}
+
+// TestMapProjectStructure_MonorepoNotFlagged confirms that setting monorepo
+// on the shared repo binding keeps both projects, without flagging them —
+// that is the legitimate, intentional way to share a repository.
+func TestMapProjectStructure_MonorepoNotFlagged(t *testing.T) {
+	dir := t.TempDir()
+	extractDir := filepath.Join(dir, testExtractID)
+
+	writeTestJSON(t, filepath.Join(extractDir, "extract.json"),
+		map[string]any{"url": testSQURL, "edition": "enterprise"})
+
+	writeTestJSONL(t, filepath.Join(extractDir, "getProjectDetails"), []map[string]any{
+		{"key": "proj1", "name": "Project 1", "branch": "main", "serverUrl": testSQURL},
+		{"key": "proj2", "name": "Project 2", "branch": "main", "serverUrl": testSQURL},
+	})
+
+	writeTestJSONL(t, filepath.Join(extractDir, "getBindings"), []map[string]any{
+		{"key": "b1", "alm": "github", "url": "https://api.github.com/orgs/org", "serverUrl": testSQURL},
+	})
+
+	writeTestJSONL(t, filepath.Join(extractDir, "getProjectBindings"), []map[string]any{
+		{"projectKey": "proj1", "key": "b1", "repository": "org/repo", "monorepo": true, "serverUrl": testSQURL},
+		{"projectKey": "proj2", "key": "b1", "repository": "org/repo", "monorepo": true, "serverUrl": testSQURL},
+	})
+
+	writeTestJSONL(t, filepath.Join(extractDir, "getNewCodePeriods"), nil)
+
+	mapping := ExtractMapping{testSQURL: testExtractID}
+	_, projects := MapProjectStructure(dir, mapping)
+
+	if len(projects) != 2 {
+		t.Fatalf("expected 2 projects, got %d", len(projects))
+	}
+	for _, p := range projects {
+		if p.SharedRepoBinding {
+			t.Errorf("expected %s.SharedRepoBinding=false under monorepo, got true", p.Key)
+		}
 	}
 }
 

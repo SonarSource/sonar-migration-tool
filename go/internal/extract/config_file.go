@@ -52,6 +52,13 @@ type configFileShape struct {
 	// global value win but still falling back to the command-scoped one.
 	Objects    []string `json:"objects"`
 	ProjectKey string   `json:"project_key"`
+	// ProjectKeyRegexp is the top-level "project_key_regexp" value, the
+	// replacement for the deprecated ProjectKey/"project_key" (#592) — it
+	// was always a regexp, never a literal single key. In the unified
+	// shape (4), source.project_key_regexp wins when both are set — see
+	// unifiedSourceBlock. common.ResolveDeprecatedProjectKey combines
+	// this with ProjectKey wherever both are read.
+	ProjectKeyRegexp string `json:"project_key_regexp"`
 	// BranchRegexp is the top-level "branch_regexp" value. In the unified
 	// shape (4), source.branch_regexp wins when both are set — see
 	// unifiedSourceBlock. #582.
@@ -110,6 +117,9 @@ type unifiedSourceBlock struct {
 	// BranchRegexp, when set, overrides the top-level "branch_regexp" for
 	// this source. #582.
 	BranchRegexp string `json:"branch_regexp"`
+	// ProjectKeyRegexp, when set, overrides the top-level
+	// "project_key_regexp" for this source. #592.
+	ProjectKeyRegexp string `json:"project_key_regexp"`
 	// BranchAnalyzedAfter, when present (even as an explicit empty string),
 	// overrides the top-level branch_analyzed_after for extract only
 	// (#583). nil means "not set here" — fall through to the top-level
@@ -225,7 +235,14 @@ func (s configFileShape) applyUnifiedShapeTo(cfg *ExtractConfig) {
 	cfg.SkipProjectDataMigration = s.SkipProjectDataMigration
 	cfg.SkipIssueSync = s.SkipIssueSync
 	cfg.objectsRaw = s.Objects
-	cfg.ProjectKey = s.ProjectKey
+	// #592: source.project_key_regexp wins over the top-level
+	// project_key_regexp, which in turn wins over the deprecated
+	// project_key (top-level only — it never had a source override).
+	var sourceProjectKeyRegexp string
+	if s.Source != nil {
+		sourceProjectKeyRegexp = s.Source.ProjectKeyRegexp
+	}
+	cfg.ProjectKey = common.ResolveDeprecatedProjectKey(s.ProjectKey, common.FirstNonEmpty(sourceProjectKeyRegexp, s.ProjectKeyRegexp))
 	// #582: source.branch_regexp wins, else the top-level field.
 	var sourceBranchRegexp string
 	if s.Source != nil {
@@ -253,7 +270,7 @@ func (s configFileShape) applyLegacySonarQubeShapeTo(cfg *ExtractConfig) {
 	cfg.SkipProjectDataMigration = s.SkipProjectDataMigration
 	cfg.SkipIssueSync = s.SkipIssueSync
 	cfg.objectsRaw = s.Objects
-	cfg.ProjectKey = s.ProjectKey
+	cfg.ProjectKey = common.ResolveDeprecatedProjectKey(s.ProjectKey, s.ProjectKeyRegexp)
 	cfg.BranchRegexp = s.BranchRegexp
 	cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
 	s.applyHistoryTo(cfg)
@@ -269,8 +286,8 @@ func (s configFileShape) applySectionedShapeTo(cfg *ExtractConfig) {
 	if len(s.Objects) > 0 {
 		cfg.objectsRaw = s.Objects
 	}
-	if s.ProjectKey != "" {
-		cfg.ProjectKey = s.ProjectKey
+	if outer := common.ResolveDeprecatedProjectKey(s.ProjectKey, s.ProjectKeyRegexp); outer != "" {
+		cfg.ProjectKey = outer
 	}
 	if s.BranchRegexp != "" {
 		cfg.BranchRegexp = s.BranchRegexp
@@ -297,7 +314,7 @@ func (s configFileShape) applyFlatShapeTo(cfg *ExtractConfig) {
 	cfg.SkipProjectDataMigration = s.SkipProjectDataMigration
 	cfg.SkipIssueSync = s.SkipIssueSync
 	cfg.objectsRaw = s.Objects
-	cfg.ProjectKey = s.ProjectKey
+	cfg.ProjectKey = common.ResolveDeprecatedProjectKey(s.ProjectKey, s.ProjectKeyRegexp)
 	cfg.BranchRegexp = s.BranchRegexp
 	cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
 	s.applyHistoryTo(cfg)

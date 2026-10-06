@@ -38,12 +38,13 @@ var extractCmd = &cobra.Command{
 				return fmt.Errorf("invalid branch regexp pattern %q: %w", cfg.BranchRegexp, err)
 			}
 		}
-		// #536: resolve --project_key (or the config file's top-level
-		// "project_key") into concrete ProjectKeys now that URL/Token are
-		// known to be set. Skipped entirely when an active --objects
-		// filter excludes the "projects" category — the pattern is
-		// harmless but unused in that combination, matching the issue's
-		// checklist (no error, just a no-op).
+		// #536, #592: resolve --project_key_regexp (or the deprecated
+		// --project_key, or either one's config-file equivalent) into
+		// concrete ProjectKeys now that URL/Token are known to be set.
+		// Skipped entirely when an active --objects filter excludes the
+		// "projects" category — the pattern is harmless but unused in
+		// that combination, matching the issue's checklist (no error,
+		// just a no-op).
 		if cfg.ProjectKey != "" && (cfg.Objects == nil || cfg.Objects[common.ObjectProjects]) {
 			keys, err := extract.ResolveProjectKeys(cmd.Context(), cfg, cfg.ProjectKey)
 			if err != nil {
@@ -93,7 +94,7 @@ func init() {
 	f.Int(flagHistoryMaxPoints, 0, "Max historical snapshots selected per project+branch when --migrate_history is set (default: no cap, every analysis is a candidate). Pass a positive number to bound it.")
 	f.Int(flagHistoryMinIntervalDays, extract.HistoryUnset, "Minimum spacing, in days, enforced between two selected historical snapshots when --migrate_history is set (default 0 — no spacing rule, every analysis in the source history becomes a candidate).")
 	f.String("objects", "", "Comma-separated list of object categories to extract: "+strings.Join(common.AllObjects, ", ")+" (aliases: qp, qg, pt, lp). Omit to extract everything (default).")
-	f.String("project_key", "", "Regexp pattern of project keys to extract (only applies when the projects category is selected). A plain key matches only itself.")
+	registerProjectKeyFlags(f, "Regexp pattern of project keys to extract (only applies when the projects category is selected). A plain key matches only itself. #592.")
 	f.String(flagBranchRegexp, "", "Regexp pattern of branch names to extract, applied to each project's own branches (also filters the getBranches task's own written records, so downstream migrate runs only see what matched here). Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"(main|master)\" matches only branches literally named main or master. The project's main branch is always extracted regardless of match. Empty means every branch is extracted (default). #582.")
 	f.String(flagBranchAnalyzedAfter, "", "Only select branches analyzed on or after this date (YYYY-MM-DD) during extract. The project's main branch is always selected, even when it doesn't meet this date. Omit to select all branches (default). #583")
 }
@@ -160,11 +161,11 @@ func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfi
 		return cfg, err
 	}
 	warnIfLicenseProfilesSelected(cfg.Objects)
-	// --project_key is resolved into cfg.ProjectKeys by the caller (RunE),
-	// once URL/Token are known to be valid — see extractCmd.RunE. Just
-	// capture the pattern here, same precedence as every other flag
-	// (CLI overrides config file).
-	overrideString(cmd, "project_key", &cfg.ProjectKey)
+	// --project_key_regexp (or the deprecated --project_key) is resolved
+	// into cfg.ProjectKeys by the caller (RunE), once URL/Token are known
+	// to be valid — see extractCmd.RunE. Just capture the pattern here,
+	// same precedence as every other flag (CLI overrides config file).
+	resolveProjectKeyFlagsInto(cmd, &cfg.ProjectKey)
 	overrideString(cmd, flagBranchRegexp, &cfg.BranchRegexp)
 	overrideString(cmd, flagBranchAnalyzedAfter, &cfg.BranchAnalyzedAfter)
 	if err := validateBranchAnalyzedAfter(cfg.BranchAnalyzedAfter); err != nil {
