@@ -115,6 +115,9 @@ sonar-migration-tool extract --source_url <URL> --source_token <TOKEN> --export_
 | `--export_directory` | Output directory (default: `./migration-files`) |
 | `--skip_project_data_migration` | Skip the issue / source / SCM-blame extract (project data is extracted by default) |
 | `--branch_regexp` | Regexp pattern of branch names to extract, implicitly anchored (`^...$`) — a plain name matches only itself. Omit to extract every branch. The main branch is always extracted regardless of match. |
+| `--migrate_history` | **PoC, opt-in (v1.2).** Also extract a bounded set of historical analysis snapshots (date + project-level measures) per project's main branch, so `migrate --migrate_history` can replay them. Off by default — no extra API calls unless set. See [Project history migration](TRANSFER.md#project-history-migration---migrate_history--poc) |
+| `--history_max_points` | Max historical snapshots selected per project when `--migrate_history` is set (default: `0`, no cap) |
+| `--history_min_interval_days` | Minimum spacing, in days, between two selected snapshots when `--migrate_history` is set (default: `0`, no spacing rule) |
 | `--pem_file_path` | Client certificate PEM file (mTLS) |
 | `--key_file_path` | Client certificate key file (mTLS) |
 | `--cert_password` | Client certificate password (mTLS) |
@@ -197,6 +200,7 @@ sonar-migration-tool migrate --target_token <TOKEN> --enterprise_key <ENTERPRISE
 | `--default_organization` | SonarQube Cloud organization key applied to every project when `organizations.csv` has no mapping. Ignored (with a WARN) if any row already carries a `sonarcloud_org_key`. Useful for small instances where every SQS project migrates into one SQC org. |
 | `--edition` | SonarQube Cloud license edition |
 | `--branch_regexp` | Regexp pattern of branch names to migrate, implicitly anchored (`^...$`) — a plain name matches only itself. If not set, implicitly operates on whatever branches were actually extracted. The main branch is always migrated regardless of match. |
+| `--migrate_history` | **PoC, opt-in (v1.2).** Replay each project's extracted historical analysis snapshots as separate, backdated analyses on the target's main branch, before the regular current-snapshot import. Requires `extract` to have run with `--migrate_history` too. Off by default. See [Project history migration](TRANSFER.md#project-history-migration---migrate_history--poc) |
 | `--target_url` | SonarQube Cloud URL (default: `https://sonarcloud.io/`) |
 | `--concurrency` | Max concurrent requests |
 | `--export_directory` | Directory containing SonarQube exports (default: `./migration-files`) |
