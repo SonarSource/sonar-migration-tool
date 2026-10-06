@@ -52,7 +52,11 @@ func (t *debugTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		_ = resp.Body.Close()
 		if readErr != nil {
 			t.fn(req.Method, req.URL.String(), redactHeaders(req.Header), reqBody, resp.StatusCode, nil, time.Since(start), readErr)
-			resp.Body = io.NopCloser(bytes.NewReader(nil))
+			// Keep whatever arrived and surface the read error to the caller
+			// on the next Read, so callers that retry a failed body read
+			// (e.g. common.RawClient.doGet, #616) still see the failure
+			// instead of an empty, apparently successful body.
+			resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(buf), errReader{err: readErr}))
 			return resp, nil
 		}
 		respBody = buf
@@ -62,6 +66,11 @@ func (t *debugTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	t.fn(req.Method, req.URL.String(), redactHeaders(req.Header), reqBody, resp.StatusCode, respBody, time.Since(start), nil)
 	return resp, nil
 }
+
+// errReader is an io.Reader that always fails with err.
+type errReader struct{ err error }
+
+func (e errReader) Read([]byte) (int, error) { return 0, e.err }
 
 // redactHeaders returns a copy of h with the Authorization header replaced
 // by "<redacted>" so credentials never leak into a log.
