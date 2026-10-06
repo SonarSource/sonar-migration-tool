@@ -48,9 +48,9 @@ type historySnapshot struct {
 func loadExtractedAnalysisHistory(e *Executor, serverURL, serverKey, branch string) []historySnapshot {
 	scope := extractScope{ServerURL: serverURL, ProjectKey: serverKey, Branch: branch}
 	var out []historySnapshot
-	for item := range scopedExtractItems(e, "getProjectAnalysisHistory", scope) {
-		date := parseISODate(extractField(item.Data, "date"))
-		if date.IsZero() {
+	for item := range scopedExtractItems(e, historyExtractTask, scope) {
+		date, ok := historyPointDate(extractField(item.Data, "date"))
+		if !ok {
 			continue
 		}
 		out = append(out, historySnapshot{
@@ -94,14 +94,30 @@ func extractHistoryMeasures(data json.RawMessage, cloudProjectKey string) []scan
 }
 
 // projectHistoryPointTotal sums the history points migrateBranchHistory
-// will attempt to replay across every extracted project's main branch
-// (#564) — a pure read of already-extracted data (readExtractItems,
-// collectBranchInfo, loadExtractedAnalysisHistory), no API calls, safe to
+// will attempt to replay across every branch of every extracted project
+// that will actually be imported (#564, generalized to non-main branches
+// by #625) — a pure read of already-extracted data (readExtractItems,
+// collectBranchInfo, countReplayableHistoryPoints), no API calls, safe to
 // call before a single migrate task has run. Lets RunMigrate give history
 // replay its own tracked unit of work in the overall ETA up front. Returns
 // 0 when history migration is off, or when extract never ran with
-// --migrate_history (loadExtractedAnalysisHistory then returns nil for
-// every project) — both keep the feature a true no-op.
+// --migrate_history (there are then no history points to count for any
+// project) — both keep the feature a true no-op.
+//
+// The history extract is read in a SINGLE pass (countReplayableHistoryPoints)
+// rather than once per branch through loadExtractedAnalysisHistory. Each of
+// those reads streams the whole corpus, and since #625 every eligible branch is
+// both one more lookup and more records to scan, so a per-branch pre-count
+// cost O(branches x corpus) — quadratic in the instance, all of it spent
+// before RunMigrate's first progress line.
+//
+// historyEligibleBranches mirrors resolveProjectBranches' own filter
+// pipeline (exclude glob, --branch_regexp, --branch_analyzed_after, the
+// per-project branch cap) so this pre-count matches what the run will
+// actually attempt — a branch the real run drops at the cap, say, must
+// not inflate the ETA with history points that will never be replayed.
+// It only omits resolveProjectBranches' side effect of recording dropped
+// branches for the report, which would be premature and duplicated here.
 func projectHistoryPointTotal(e *Executor) int {
 	if !e.MigrateHistory {
 		return 0
@@ -110,50 +126,119 @@ func projectHistoryPointTotal(e *Executor) int {
 	if err != nil {
 		return 0
 	}
+	if len(projects) == 0 {
+		// Nothing to sum the counts over, so don't read the history extract.
+		return 0
+	}
+	counts := countReplayableHistoryPoints(e)
+	if len(counts) == 0 {
+		// No project has a single replayable point, so the total is 0 whatever
+		// the branches are — skip resolving them project by project.
+		return 0
+	}
 	total := 0
 	for _, p := range projects {
 		serverKey := extractField(p.Data, "key")
 		if serverKey == "" {
 			continue
 		}
-		for _, b := range collectBranchInfo(e, p.ServerURL, serverKey) {
-			if !b.IsMain {
-				continue
-			}
-			total += len(loadExtractedAnalysisHistory(e, p.ServerURL, serverKey, b.Name))
+		// Extract bounds the history points per BRANCH, not per project
+		// (extractProjectAnalysisHistory applies history_max_points and
+		// history_min_interval_days to each branch's own analysis list), so
+		// every eligible branch contributes its own capped set to the total:
+		// a project with N such branches can replay up to
+		// N x history_max_points points.
+		for _, b := range historyEligibleBranches(e, p.ServerURL, serverKey) {
+			total += counts[extractScope{ServerURL: p.ServerURL, ProjectKey: serverKey, Branch: b.Name}]
 		}
 	}
 	return total
 }
 
-// migrateBranchHistory replays a project's extracted historical analysis
+// historyEligibleBranches applies resolveProjectBranches' own filter
+// pipeline without its report-writing side effect (recordBranchLimitSkip),
+// so projectHistoryPointTotal's dry pre-count agrees with the branch list
+// the real import will use.
+func historyEligibleBranches(e *Executor, serverURL, serverKey string) []branchInfo {
+	branches := collectBranchInfo(e, serverURL, serverKey)
+	if len(branches) == 0 {
+		branches = []branchInfo{{Name: "main", IsMain: true}}
+	}
+	sortBranchesMainFirst(branches)
+	branches = filterBranches(branches, e.ExcludeBranches)
+	branches = filterBranchesByRegexp(branches, e.BranchRe)
+	branches, _, _ = filterBranchesByAnalyzedAfter(branches, e.BranchAnalyzedAfter)
+	branches, _ = capBranches(branches, MaxBranchesPerProject)
+	return branches
+}
+
+// migrateBranchHistory replays one branch's extracted historical analysis
 // snapshots as separate, backdated analyses on the target, oldest to
-// newest (#554, PoC).
+// newest (#554, PoC; generalized to non-main branches by #625). Called once
+// per migrated branch, each with its own extracted (and per-branch bounded)
+// list.
 //
-// Main branch only, by design: the create-analysis handshake (see
-// preCreateBranchAnalysis) exists specifically to anchor a NON-main branch
-// on the target before its first report is accepted, and generalizing that
-// per historical point for non-main branches is real additional complexity
-// this PoC deliberately doesn't take on (see the PR description's "known
-// limitations"). The main branch needs no handshake — same reasoning the
-// regular current-snapshot import already relies on — so replaying its
-// history is just N extra plain submissions before the regular one.
+// The original PoC ran main only, on the assumption that generalizing the
+// create-analysis handshake (see preCreateBranchAnalysis) per historical
+// point was real additional complexity. It isn't: PreCreateAnalysis's own
+// doc comment says it is "the handshake a real scanner runs before
+// uploading THE report" — singular, once per analysis, not once per
+// branch — so calling it once per historical point (exactly as the
+// regular current-snapshot import already calls it once per branch) is
+// the correct generalization, not a shortcut. What the PoC actually got
+// wrong for non-main branches, fixed here in submitHistoricalSnapshot:
+// SubmitConfig.IsMain was hardcoded true (so the submit form never
+// declared branch=<name>/branchType=LONG, meaning every historical
+// report would have landed on the project's MAIN branch regardless of
+// which branch it was meant for), and the report metadata carried no
+// ReferenceBranchName or AnalysisUUID.
 //
 // Must run BEFORE the regular current-snapshot import for this branch: the
 // Compute Engine requires each new analysis to be dated after the branch's
-// most recent one. The regular import now backdates its own submission to
-// the source's true last-analysis date (#557 review feedback) rather than
-// "now" — still guaranteed later than every historical point here, because
-// selectBoundedHistoryPoints drops that same most-recent analysis before
-// building this candidate list. Best-effort: a failure here is logged and
-// does NOT fail or block the regular import that follows it, so
-// --migrate_history can never turn a transfer that used to succeed into one
-// that fails.
+// most recent one, and refuses one dated at or before it ("a newer report has
+// already been processed, and processing older reports is not supported").
+// The regular import backdates its own submission to the source's true
+// last-analysis date, branch.LastAnalysisDate (#557 review feedback), rather
+// than "now", so every point replayed here must be strictly older than that
+// date — and strictly newer than anything the target already holds for the
+// branch, which a resumed or re-run migration can leave behind.
+//
+// Neither bound used to be enforced here. The upper one was taken on trust
+// from extract: selectBoundedHistoryPoints drops the single most recent
+// analysis of the history list because the regular import covers it. But
+// extract reads each branch's analysisDate (getBranches) first and lists that
+// branch's analyses (getProjectAnalysisHistory, which depends on it) only
+// later — on a large instance, hours later — so a branch re-analysed in
+// between has an analysis NEWER than the one getBranches recorded. That newer
+// one is what gets dropped, and the previous newest, dated exactly
+// branch.LastAnalysisDate, stays in the list:
+// replayed as the last point, it leaves the regular import carrying an
+// identical date, the CE refuses that, and the branch's import fails (for the
+// main branch the whole project does, and its non-main branches are skipped).
+// A later re-run then reads target date == source date and records the branch
+// up_to_date, quietly blessing a branch whose latest analysis is a synthetic
+// __history_snapshot__ placeholder instead of the real report. Replaying every
+// branch (#625) leaves every non-main branch exposed to that too, not just
+// main. The lower bound was not checked at all, so a re-run against a branch
+// the target already holds started from the oldest point, which the CE
+// refused: a wasted handshake, upload and CE task, a misleading "stopped
+// early" warning, and no replay of the points between the target's date and
+// the source's. Both bounds are now enforced here, at migrate time, by
+// replayableHistory against the dates this run will actually use, rather than
+// inferred from how extract happened to trim its list.
+//
+// Best-effort: a failure here is logged and does NOT fail or block the regular
+// import that follows it, so --migrate_history can never turn a transfer that
+// used to succeed into one that fails.
 func migrateBranchHistory(ctx context.Context, e *Executor, bctx branchImportContext, branch branchInfo, targetBranch string) {
-	if !e.MigrateHistory || !branch.IsMain {
+	if !e.MigrateHistory {
 		return
 	}
-	snapshots := loadExtractedAnalysisHistory(e, bctx.ServerURL, bctx.ServerKey, branch.Name)
+	snapshots := dropUnreplayableHistory(e, bctx, branch, targetBranch,
+		loadExtractedAnalysisHistory(e, bctx.ServerURL, bctx.ServerKey, branch.Name))
+	// Nothing left to replay: no history was extracted for this branch, or
+	// every point was dropped above. Either way return before the placeholder
+	// lookup below, so this costs no network call at all.
 	if len(snapshots) == 0 {
 		return
 	}
@@ -176,7 +261,7 @@ func migrateBranchHistory(ctx context.Context, e *Executor, bctx branchImportCon
 		"placeholder_language", placeholder.Language)
 
 	for i, snap := range snapshots {
-		err := submitHistoricalSnapshot(ctx, e, bctx, targetBranch, snap, placeholder)
+		err := submitHistoricalSnapshot(ctx, e, bctx, branch, targetBranch, snap, placeholder)
 		// Count this point toward the run-wide ETA (#564) whether it
 		// succeeded or not — either way the wall-clock time was spent.
 		// A branch that stops early below leaves its remaining points
@@ -201,6 +286,89 @@ func migrateBranchHistory(ctx context.Context, e *Executor, bctx branchImportCon
 			return
 		}
 	}
+}
+
+// replayableHistory returns the points of snaps that migrateBranchHistory can
+// still submit, in a NEW slice: snaps is never modified, and the survivors
+// keep its order (loadExtractedAnalysisHistory sorts oldest to newest, which
+// is the order the Compute Engine needs them in). A point is dropped when the
+// CE would refuse it, or the regular import already covers its instant:
+//
+//   - Dated at or after regularImportDate, the date the branch's regular
+//     current-snapshot import is stamped with (branchInfo.LastAnalysisDate).
+//     That import submits a report dated exactly then, and the CE refuses a
+//     report dated at or before the branch's newest analysis, so a point on
+//     that instant, or past it, makes the regular import itself fail. Zero
+//     means the source branch was never analyzed, so buildBranchReport stamps
+//     the regular import with "now": no upper bound.
+//   - Dated at or before targetLastAnalysis, the newest analysis the target
+//     already holds for the branch (branchImportContext.TargetAnalysisDates,
+//     e.g. left behind by a resumed or re-run migration). The CE refuses these for
+//     the same reason, so submitting one only burns a handshake, an upload and
+//     a CE task before the branch stops early — while the points between the
+//     target's date and the source's would never be replayed at all. Zero
+//     means the target has never analyzed the branch (or the project is new):
+//     no lower bound.
+//
+// A point equal to either bound is dropped, not kept: the CE rejects an equal
+// date as firmly as an older one (see targetBranchUpToDate). Dates compare as
+// instants, so the zone each was parsed in does not matter.
+func replayableHistory(snaps []historySnapshot, regularImportDate, targetLastAnalysis time.Time) []historySnapshot {
+	out := make([]historySnapshot, 0, len(snaps))
+	for _, snap := range snaps {
+		if !regularImportDate.IsZero() && !snap.Date.Before(regularImportDate) {
+			continue
+		}
+		if !targetLastAnalysis.IsZero() && !snap.Date.After(targetLastAnalysis) {
+			continue
+		}
+		out = append(out, snap)
+	}
+	return out
+}
+
+// dropUnreplayableHistory narrows one branch's extracted snapshots to the ones
+// replayableHistory allows, using the dates this run will actually submit
+// with: the branch's last-analysis date for the regular import, and whatever
+// the target held for targetBranch when the project's branch list was read.
+// It also accounts for what it dropped: one Info line saying how many and
+// against which dates (silent when nothing was dropped), and one
+// HistoryProgress increment per dropped point.
+//
+// The increments keep the live ETA honest. projectHistoryPointTotal counts
+// every extracted point up front, before any of these dates are compared; a
+// point dropped here is never attempted, so without them it would leave the
+// percentage stuck short of 100% for the rest of the run — the same plateau a
+// branch that stops early causes.
+func dropUnreplayableHistory(e *Executor, bctx branchImportContext, branch branchInfo, targetBranch string, snapshots []historySnapshot) []historySnapshot {
+	// A nil map (new target project, unreadable branch list) and an absent
+	// branch both yield the zero time, which replayableHistory reads as "no
+	// lower bound".
+	existing := bctx.TargetAnalysisDates[targetBranch]
+	replayable := replayableHistory(snapshots, branch.LastAnalysisDate, existing)
+	dropped := len(snapshots) - len(replayable)
+	if dropped == 0 {
+		return replayable
+	}
+
+	attrs := []any{"project", bctx.CloudKey, "branch", targetBranch, "dropped", dropped, "of", len(snapshots)}
+	if !branch.LastAnalysisDate.IsZero() {
+		attrs = append(attrs, "source_last_analysis_date", branch.LastAnalysisDate.Format(time.RFC3339))
+	}
+	if !existing.IsZero() {
+		attrs = append(attrs, "target_analysis_date", existing.Format(time.RFC3339))
+	}
+	e.Logger.Info("history points not replayed: dated at or after the regular import, or at or before the target's newest analysis", attrs...)
+
+	// ProgressLogger has no bulk add, and one Increment per point is what keeps
+	// its every-N-points log lines intact: a single jump past a multiple of N
+	// would skip that line.
+	if e.HistoryProgress != nil {
+		for range dropped {
+			e.HistoryProgress.Increment()
+		}
+	}
+	return replayable
 }
 
 // historyPlaceholderLangs are the languages the placeholder file may be
@@ -603,7 +771,15 @@ func buildSyntheticDuplication(measures []scanreport.MeasureInput) []*pb.Duplica
 // placeholder's own profile is resolved separately in resolveHistoryPlaceholderProfile,
 // and the synthetic issues use ad-hoc rules specifically to avoid needing
 // another one).
-func submitHistoricalSnapshot(ctx context.Context, e *Executor, bctx branchImportContext, targetBranch string, snap historySnapshot, placeholder historyPlaceholder) error {
+//
+// For a non-main branch (#625) this performs the same create-analysis
+// handshake the regular current-snapshot import performs once per report
+// (see preCreateBranchAnalysis) — PreCreateAnalysis's own doc comment
+// describes it as what a real scanner does before every analysis upload,
+// not a one-time branch-creation step, so calling it once per historical
+// point is the correct mirror of that behavior, not an approximation of
+// it.
+func submitHistoricalSnapshot(ctx context.Context, e *Executor, bctx branchImportContext, branch branchInfo, targetBranch string, snap historySnapshot, placeholder historyPlaceholder) error {
 	// A lone PROJECT component with a raw measure attached directly to it is
 	// not a shape the real scanner ever produces — measures normally live on
 	// FILE components and the CE aggregates the project total from them — and
@@ -632,18 +808,39 @@ func submitHistoricalSnapshot(ctx context.Context, e *Executor, bctx branchImpor
 	fileRef := fileComps[0].Ref
 	extIssues, adHocRules := buildSyntheticIssues(snap.Measures, placeholderKey)
 
+	// Non-main branches reference the main branch, exactly as
+	// importAndRecordBranch computes it for the regular import; the main
+	// branch references nothing (BuildMetadata falls back to its own
+	// name).
+	referenceBranch := ""
+	if !branch.IsMain {
+		referenceBranch = bctx.MainTargetName
+	}
+	analysisUUID, err := preCreateBranchAnalysis(ctx, e, importBranchInput{
+		IsMain:          branch.IsMain,
+		OrgKey:          bctx.OrgKey,
+		CloudKey:        bctx.CloudKey,
+		Branch:          branch.Name,
+		ReferenceBranch: referenceBranch,
+	}, targetBranch, snap.ProjectVersion)
+	if err != nil {
+		return fmt.Errorf("historical snapshot: %w", err)
+	}
+
 	reportData := &scanreport.ReportData{
 		Metadata: scanreport.BuildMetadata(scanreport.MetadataInput{
-			AnalysisDate: snap.Date,
-			OrgKey:       bctx.OrgKey,
-			ProjectKey:   bctx.CloudKey,
-			BranchName:   targetBranch,
-			BranchType:   pb.Metadata_BRANCH,
-			QProfiles:    []scanreport.QProfileInfo{placeholder.QProfile},
+			AnalysisDate:        snap.Date,
+			OrgKey:              bctx.OrgKey,
+			ProjectKey:          bctx.CloudKey,
+			BranchName:          targetBranch,
+			BranchType:          pb.Metadata_BRANCH,
+			ReferenceBranchName: referenceBranch,
+			QProfiles:           []scanreport.QProfileInfo{placeholder.QProfile},
 			// Keyed by LANGUAGE despite the name — countFilesByExt, which the
 			// regular import feeds this field from, counts c.Language.
 			FileCountByExt: map[string]int32{placeholder.Language: 1},
 			ProjectVersion: snap.ProjectVersion,
+			AnalysisUUID:   analysisUUID,
 		}, root.Ref),
 		RootComponent:  root,
 		FileComponents: fileComps,
@@ -673,7 +870,12 @@ func submitHistoricalSnapshot(ctx context.Context, e *Executor, bctx branchImpor
 		OrgKey:         bctx.OrgKey,
 		BranchName:     targetBranch,
 		ProjectVersion: snap.ProjectVersion,
-		IsMain:         true,
+		// Was hardcoded true: every historical report, including those
+		// meant for a non-main branch, would submit with no branch
+		// characteristics at all and land on the project's MAIN branch
+		// instead (see buildMultipartForm) — the actual #625 bug, not
+		// just the deliberate PoC scope note this replaces.
+		IsMain: branch.IsMain,
 	}
 	result, err := scanreport.SubmitReport(ctx, e.Raw.HTTPClient(), cfg, zipBytes)
 	if err != nil {

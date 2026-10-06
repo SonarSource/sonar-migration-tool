@@ -243,7 +243,8 @@ type MigrateConfig struct {
 	// MigrateHistory opts into the project-history migration PoC (#554):
 	// replay each project's extracted historical (date, measures) snapshots
 	// (see internal/extract's getProjectAnalysisHistory) as separate,
-	// backdated analyses on the target's main branch, before the regular
+	// backdated analyses on the target, per migrated branch (every branch,
+	// not just main — #625), before that branch's regular
 	// current-snapshot import. Defaults to false — when unset, migrate
 	// ignores any extracted history records and behaves exactly as before
 	// this feature existed, even if extract happened to capture history
@@ -388,10 +389,13 @@ type Executor struct {
 	MigrateHistory bool
 	// HistoryProgress tracks project-history replay (#554) as its own
 	// unit of work for the overall ETA (#564): migrateBranchHistory
-	// increments it once per historical point submitted. Nil when
-	// MigrateHistory is off or there's no history to replay — callers
-	// must go through it via ProgressLogger's own nil-safety, or check
-	// for nil directly (see migrateBranchHistory).
+	// increments it once per historical point it submits, fails on, or
+	// drops as unreplayable (see dropUnreplayableHistory — the up-front
+	// total counts every extracted point, including the ones dropped
+	// later). Nil when MigrateHistory is off or there's no history to
+	// replay — ProgressLogger's methods are not nil-safe, so callers must
+	// check for nil first (see migrateBranchHistory and
+	// dropUnreplayableHistory).
 	HistoryProgress *common.ProgressLogger
 
 	// MaxIssueComments — see MigrateConfig.MaxIssueComments (#571).
