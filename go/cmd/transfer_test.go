@@ -59,6 +59,7 @@ func newTransferTestCmd() *cobra.Command {
 	f.String(flagSourceURL, "", "")
 	f.String(flagSourceToken, "", "")
 	f.String(flagProjectKey, "", "")
+	f.String(flagProjectKeyRegexp, "", "")
 	f.String(flagTargetURL, "", "")
 	f.String(flagTargetToken, "", "")
 	f.String(flagDefaultOrg, "", "")
@@ -850,6 +851,41 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// #592: --project_key_regexp is the replacement for --project_key; the
+// deprecated flag still works, and the new one wins when both are set.
+func TestResolveTransferConfig_ProjectKeyRegexpFlag(t *testing.T) {
+	t.Run("deprecated --project_key still works", func(t *testing.T) {
+		cmd := newTransferTestCmd()
+		if err := cmd.ParseFlags([]string{"--" + flagProjectKey, "LEGACY_.+"}); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := resolveTransferConfig(cmd)
+		if err != nil {
+			t.Fatalf("resolveTransferConfig: %v", err)
+		}
+		if cfg.projectKey != "LEGACY_.+" {
+			t.Errorf("expected deprecated --project_key to still resolve, got %q", cfg.projectKey)
+		}
+	})
+
+	t.Run("--project_key_regexp wins when both are set", func(t *testing.T) {
+		cmd := newTransferTestCmd()
+		if err := cmd.ParseFlags([]string{
+			"--" + flagProjectKey, "LEGACY_.+",
+			"--" + flagProjectKeyRegexp, "NEW_.+",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := resolveTransferConfig(cmd)
+		if err != nil {
+			t.Fatalf("resolveTransferConfig: %v", err)
+		}
+		if cfg.projectKey != "NEW_.+" {
+			t.Errorf("expected --project_key_regexp to win, got %q", cfg.projectKey)
+		}
+	})
 }
 
 // #529: resolveTransferProjectKeys must return every source project key

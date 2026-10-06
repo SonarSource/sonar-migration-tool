@@ -433,7 +433,7 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 	if cfg.ProjectKeyFilter != "" {
 		re, err := extract.CompileProjectKeyPattern(cfg.ProjectKeyFilter)
 		if err != nil {
-			return "", fmt.Errorf("invalid project_key pattern %q: %w", cfg.ProjectKeyFilter, err)
+			return "", fmt.Errorf("invalid project_key_regexp pattern %q: %w", cfg.ProjectKeyFilter, err)
 		}
 		projectKeyRe = re
 	}

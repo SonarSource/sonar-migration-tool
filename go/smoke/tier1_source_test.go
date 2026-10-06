@@ -61,7 +61,7 @@ func TestTier1_SourcePipeline(t *testing.T) {
 		res := runCLI(t, "extract",
 			"--config", cfg.path,
 			"--export_directory", exportDir,
-			"--project_key", projectKey)
+			"--project_key_regexp", projectKey)
 		requireExit(t, res, 0, "extract")
 		assertNoPanics(t, res.combined())
 
@@ -109,7 +109,7 @@ func TestTier1_SourcePipeline(t *testing.T) {
 		res := runCLI(t, "extract",
 			"--config", cfg.path,
 			"--export_directory", exportDir,
-			"--project_key", projectKey,
+			"--project_key_regexp", projectKey,
 			"--extract_id", extractRunID)
 		requireExit(t, res, 0, "extract_resume")
 		logf(t, "extract_resume output:\n%s\n", res.combined())
@@ -151,6 +151,15 @@ func TestTier1_SourcePipeline(t *testing.T) {
 		// pinned to one organization regardless of organizations.csv.
 		assertCSVColumns(t, exportDir, "projects.csv", "sonarcloud_org_key")
 		assertCSVColumnEmpty(t, exportDir, "projects.csv", "sonarcloud_org_key")
+
+		// #622: projects.csv must declare shared_repo_binding — the flag
+		// marking projects whose non-monorepo repo binding collides with
+		// another project's, which used to silently overwrite one
+		// another instead of both surviving as rows. This run only
+		// extracts a single project, so the column can't be exercised
+		// for a real collision here (go/internal/structure's unit tests
+		// cover that); this just guards the column itself never regresses.
+		assertCSVColumns(t, exportDir, "projects.csv", "shared_repo_binding")
 
 		// #566: the one case where the column IS pre-populated — the config
 		// carries target.default_organization, so structure --config stamps

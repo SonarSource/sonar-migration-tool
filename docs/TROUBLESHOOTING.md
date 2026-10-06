@@ -231,10 +231,10 @@ curl -u "$SC_TOKEN:" \
 
 ```bash
 # Default: drop the unsupported-language files, migrate everything else
-sonar-migration-tool transfer -c config.json --project_key my-project
+sonar-migration-tool transfer -c config.json --project_key_regexp my-project
 
 # Or: do not migrate this project's issues/branches at all
-sonar-migration-tool transfer -c config.json --project_key my-project \
+sonar-migration-tool transfer -c config.json --project_key_regexp my-project \
   --unsupported_languages skip
 ```
 
@@ -262,13 +262,15 @@ curl -u "$SC_TOKEN:" \
 
 **Symptom.** A source project you know has far more than 10,000 issues arrives on SonarQube Cloud with exactly 10,000, or with some other suspiciously round shortfall. The migration report's Limitations section carries a bullet naming the project, and the `extract` run printed a warning block just before its "Extract Complete" line.
 
-**Cause.** SonarQube Server returns at most 10,000 results for any single search query — an Elasticsearch `index.max_result_window` limit, not a tool setting. Requesting a row past the 10,000th is an outright HTTP 400, so a query whose total is larger can only ever yield the first 10,000. Since [#574](https://github.com/SonarSource/sonar-migration-tool/issues/574) the tool works around this for issues by slicing the query into issue-creation-date ranges until each one fits, and it reports whatever it still could not retrieve rather than truncating in silence.
+**Cause.** SonarQube Server returns at most 10,000 results for any single search query — an Elasticsearch `index.max_result_window` limit, not a tool setting. Requesting a row past the 10,000th is an outright HTTP 400, so a query whose total is larger can only ever yield the first 10,000. Since [#574](https://github.com/SonarSource/sonar-migration-tool/issues/574) the tool works around this for issues by slicing the query into issue-creation-date ranges until each one fits, falling back since [#630](https://github.com/SonarSource/sonar-migration-tool/issues/630) to slicing by issue type, severity, rule, directory and file when a single creation second is still over the ceiling — and it reports whatever it still could not retrieve rather than truncating in silence.
 
-**Confirm it.** The atomic-window case, the one slicing cannot fix, logs its own line from the slicer:
+**Confirm it.** The atomic-window case — the rare one neither date nor facet slicing can fix — logs its own line from the slicer, with a `cause` field spelling out specifically why the cascade stopped where it did:
 
 ```
-level=WARN msg="more issues share one creation second than the API will return - date slicing cannot subdivide further" project=my-project branch=main window="[2025-09-05T17:29:07+0000, 2025-09-05T17:29:08+0000)" total=17919 fetched=10000 lost=7919
+level=WARN msg="more than 10,000 issues could not be split below the search ceiling by date or facets" project=my-project branch=main window="[2025-09-05T17:29:07+0000, 2025-09-05T17:29:08+0000)" facets="types=BUG severities=MAJOR rules=java:S1234" cause="the facet cascade (rules, directories, files) is exhausted and this cell is still over the ceiling" total=17919 fetched=10000 lost=7919
 ```
+
+`facets` names the exact cell the cascade gave up on (empty when it could not even start, e.g. the facet probe itself failed). `cause` is one of: the cascade running out of facets to fall back to (shown above), a facet spread across more than 100 distinct values, a facet that cannot account for every issue in the cell (some issues carry no value for it at all — e.g. project-scoped findings have no file path), a facet probe that failed outright, or one that came back with no values. On a server configured in MQR (Multi-Quality Rule) mode the same line reads `impactSoftwareQualities=...  impactSeverities=...` instead — the cascade detects the instance's mode automatically (SonarQube Server only; see [#630](https://github.com/SonarSource/sonar-migration-tool/issues/630)) and needs no configuration on your side.
 
 Every other truncation is logged by the HTTP client, which names the endpoint and the reason instead of a window. This is what a component-tree ceiling looks like:
 
@@ -289,9 +291,9 @@ Each record names the endpoint, the reason, the project and branch, and the `tot
 - `page_limit_clamp` **with** `windowStart` / `windowEnd` on the record — a date window that fitted when the slicer probed it grew past the ceiling before the fetch, because issues were created on the source while the extract was running. Re-running the extract recovers them.
 - `page_limit_clamp` **without** a window, or `unknown_total` — the query could not be narrowed. On `getProjectIssuesFull` this is the slicer's own fallback record: it refused to slice (the source ignored the date filters, or the bisection hit its depth backstop) or the total came back unparseable. On any other task it simply means that task is not sliced at all. Either way the bullet tells you exactly how many rows were not fetched, so you can judge whether it matters.
 - `count_drift` — the source project's issue count changed while the extract was running. This is an accounting statement, not a claim that data is missing; re-run the extract against a quiet server to get a clean reconciliation. The residual has a sign, and the bullet says which way it went: a *surplus* means the extract holds more issues than the source's own count predicted, and nothing is missing on that account.
-- `atomic_window` — see below. This is the one case slicing cannot fix.
+- `atomic_window` — see below. This is the rare case even facet slicing cannot fix.
 
-**The one case slicing cannot fix: more than 10,000 issues sharing a single creation second.** A date range cannot be narrowed below one second (a zero-width range is rejected by the server), so if a single second holds more issues than the ceiling, the extra ones are unreachable through this API. This is not exotic: a project's **first** analysis stamps its entire pre-existing backlog with one timestamp, so any project whose first analysis found more than 10,000 issues has exactly this shape. On one measured project, 8,916 of 14,903 issues carried the identical creation timestamp. The bullet and the `atomic_window` record name the exact second and the exact number of issues left behind. If you need those issues, the practical options are to re-analyse the project on the source server so that later analyses spread the creation dates, or to accept the documented shortfall — the tool will not pretend it retrieved them.
+**The rare case even facet slicing cannot fix: more than 10,000 issues sharing a single creation second, type, severity, rule, directory and file.** A date range cannot be narrowed below one second (a zero-width range is rejected by the server), so a single second holding more issues than the ceiling needs a different axis to split on. This is not exotic: a project's **first** analysis stamps its entire pre-existing backlog with one timestamp, so any project whose first analysis found more than 10,000 issues has exactly this shape — on one measured project, 8,916 of 14,903 issues carried the identical creation timestamp. Since [#630](https://github.com/SonarSource/sonar-migration-tool/issues/630), `extract` tries types x severities first (validated to recover a one-second window up to roughly 24,500 issues with zero loss), then — for a (type, severity) cell that is itself still over the ceiling — cascades through rule key, directory and file path, in that order, stopping as soon as a level brings every cell under the ceiling. The directory/file levels exist specifically for the shape one systematic rule produces on a first analysis (a duplication or convention check firing on nearly every file): rule key alone doesn't split that case, but the file tree does. The `atomic_window` record and bullet only appear once that whole cascade is exhausted — either a single (type, severity, rule, directory, file) cell is itself still over the ceiling (more than 10,000 issues sharing not just a second but also a type, a severity, a rule, a directory, and a file), or one of those dimensions spread across more than 100 distinct values, where fanning out a request per value would cost more than it recovers. The record's `facets` field (or the bullet's wording) names exactly which cell was left behind, and the practical options are the same as before: re-analyse the project on the source server so later analyses spread the creation dates, or accept the documented shortfall — the tool will not pretend it retrieved them.
 
 ---
 

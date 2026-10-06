@@ -61,14 +61,19 @@ func IsCloudBinding(bindingURL string) bool {
 	return false
 }
 
-// GenerateUniqueProjectKey generates a unique project key.
-// For ALM-bound non-monorepo projects: "{alm}_{repository}"
-// Otherwise: "{server_url}{key}"
-func GenerateUniqueProjectKey(serverURL, key, alm, repository string, monorepo bool) string {
+// repoBindingIdentity returns the identity SonarQube Cloud would bind this
+// project's repository to when monorepo is false: "{alm}_{repository}".
+// Two distinct source projects that resolve to the same identity will
+// collide on SonarQube Cloud's "one non-monorepo project per repository"
+// rule — see the SharedRepoBinding flag set in MapProjectStructure (#622).
+//
+// An empty return means "no collision risk": no ALM binding, or monorepo
+// already enabled for this project.
+func repoBindingIdentity(alm, repository string, monorepo bool) string {
 	if repository != "" && alm != "" && !monorepo {
 		return alm + "_" + repository
 	}
-	return serverURL + key
+	return ""
 }
 
 // GenerateUniqueBindingKey generates a unique binding/organization key.
@@ -187,6 +192,17 @@ func MapProjectStructure(directory string, mapping ExtractMapping) ([]Binding, [
 	uniqueBindings := make(map[string]*Binding)
 	projects := make(map[string]Project)
 
+	// repoIdentityCounts / identityByProjectKey back the SharedRepoBinding
+	// flag (#622): projects used to be keyed by repoBindingIdentity
+	// itself, so two source projects sharing a repo binding without
+	// monorepo enabled silently overwrote one another here. Every source
+	// project now always gets its own row (keyed by serverURL+projectKey,
+	// same as projectBindings above); these two maps instead let a second
+	// pass flag which rows share a non-monorepo repo binding with another
+	// row, without dropping any of them.
+	repoIdentityCounts := make(map[string]int)
+	identityByProjectKey := make(map[string]string)
+
 	detailItems, _ := ReadExtractData(directory, mapping, "getProjectDetails")
 	for _, item := range detailItems {
 		var detail map[string]any
@@ -220,9 +236,12 @@ func MapProjectStructure(directory string, mapping ExtractMapping) ([]Binding, [
 		uniqueBindings[uniqueBindingKey].ProjectCount++
 
 		pbMonorepo := getNestedBool(pb.ProjectBinding, "monorepo")
-		uniqueProjectKey := GenerateUniqueProjectKey(
-			item.ServerURL, projectKey, bindingALM, pbRepo, pbMonorepo,
-		)
+		uniqueProjectKey := item.ServerURL + projectKey
+
+		if identity := repoBindingIdentity(bindingALM, pbRepo, pbMonorepo); identity != "" {
+			repoIdentityCounts[identity]++
+			identityByProjectKey[uniqueProjectKey] = identity
+		}
 
 		branchName := getString(detail, "branch")
 		if branchName == "" {
@@ -247,6 +266,18 @@ func MapProjectStructure(directory string, mapping ExtractMapping) ([]Binding, [
 			Slug:                   getNestedString(pb.ProjectBinding, "slug"),
 			Monorepo:               pbMonorepo,
 			SummaryCommentEnabled:  getNestedBool(pb.ProjectBinding, "summaryCommentEnabled"),
+		}
+	}
+
+	// Flag every project whose repo-binding identity is shared with at
+	// least one other project (#622) — set once all rows are known so
+	// each colliding row can see the other(s), regardless of processing
+	// order.
+	for key, identity := range identityByProjectKey {
+		if repoIdentityCounts[identity] > 1 {
+			p := projects[key]
+			p.SharedRepoBinding = true
+			projects[key] = p
 		}
 	}
 

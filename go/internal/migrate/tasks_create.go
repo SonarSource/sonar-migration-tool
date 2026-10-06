@@ -104,7 +104,7 @@ func runCreateProjects(ctx context.Context, e *Executor) error {
 	// instead, matching extract.ResolveProjectKeys' behavior for the
 	// same flag.
 	if err == nil && e.ProjectKeyRe != nil && matched.Load() == 0 {
-		return fmt.Errorf("createProjects: no source project matches --project_key pattern %q", e.ProjectKeyRe)
+		return fmt.Errorf("createProjects: no source project matches the project_key_regexp pattern %q", e.ProjectKeyRe)
 	}
 	return err
 }

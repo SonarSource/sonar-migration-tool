@@ -89,7 +89,7 @@ func init() {
 	f.StringSlice("exclude_branches", nil, "Glob patterns for non-main branches to skip during project data import (e.g. feature/*,bugfix/*)")
 	f.String(flagBranchRegexp, "", "Regexp pattern of branch names to migrate, applied on top of whatever the extract phase already limited getBranches to. Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"(main|master)\" matches only branches literally named main or master. The project's main branch is always migrated regardless of match. Empty means every extracted branch is migrated (default). #582.")
 	f.String("objects", "", "Comma-separated list of object categories to migrate: "+strings.Join(common.AllObjects, ", ")+" (aliases: qp, qg, pt, lp). Omit to migrate everything (default). #536")
-	f.String(flagProjectKey, "", "Regexp pattern of source project keys to migrate (only applies when the projects category is selected via --objects). Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"BANKING_.+\" matches every key starting with BANKING_, not just a key containing that substring. A plain key like \"my-project\" matches only itself. #536")
+	registerProjectKeyFlags(f, "Regexp pattern of source project keys to migrate (only applies when the projects category is selected via --objects). Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"BANKING_.+\" matches every key starting with BANKING_, not just a key containing that substring. A plain key like \"my-project\" matches only itself. #536, #592")
 	f.Int(flagMaxIssueComments, 0, fmt.Sprintf("Max most-recent source comments replayed onto each migrated issue/hotspot (default %d, max %d) — reduces SonarQube Cloud API pressure on long comment threads (#571).", migrate.DefaultMaxIssueComments, migrate.MaxAllowedIssueComments))
 	f.String(flagBranchAnalyzedAfter, "", "Only select branches analyzed on or after this date (YYYY-MM-DD) during migrate. The project's main branch is always selected, even when it doesn't meet this date. Omit to select all branches (default). #583")
 }
@@ -194,24 +194,25 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	return cfg, nil
 }
 
-// applyMigrateProjectKeyFlag validates and applies --project_key for
-// migrate: unlike extract, migrate never calls the source API to
-// resolve it — createProjects filters the records it already read
-// locally from generateProjectMappings — so this only validates the
-// pattern compiles (aborting before any API call) and passes it
-// straight through as cfg.ProjectKeyFilter. Only takes effect when the
-// "projects" category is selected (or objects is unset); otherwise the
-// pattern is harmless but unused, matching the issue's checklist for
-// --objects+--project_key (#536, mirrors #529's transfer-side flag —
-// not to be confused with --project_key_pattern, the target-key
-// rendering template).
+// applyMigrateProjectKeyFlag validates and applies --project_key_regexp
+// (or the deprecated --project_key) for migrate: unlike extract, migrate
+// never calls the source API to resolve it — createProjects filters the
+// records it already read locally from generateProjectMappings — so
+// this only validates the pattern compiles (aborting before any API
+// call) and passes it straight through as cfg.ProjectKeyFilter. Only
+// takes effect when the "projects" category is selected (or objects is
+// unset); otherwise the pattern is harmless but unused, matching the
+// issue's checklist for --objects+--project_key (#536, mirrors #529's
+// transfer-side flag — not to be confused with --project_key_pattern,
+// the target-key rendering template). #592 added the project_key_regexp
+// rename/precedence.
 func applyMigrateProjectKeyFlag(cmd *cobra.Command, cfg *migrate.MigrateConfig) error {
-	if !cmd.Flags().Changed(flagProjectKey) {
+	raw := resolveProjectKeyFlags(cmd)
+	if raw == "" {
 		return nil
 	}
-	raw, _ := cmd.Flags().GetString(flagProjectKey)
 	if _, err := extract.CompileProjectKeyPattern(raw); err != nil {
-		return fmt.Errorf("invalid --%s pattern %q: %w", flagProjectKey, raw, err)
+		return fmt.Errorf("invalid --%s/--%s pattern %q: %w", flagProjectKeyRegexp, flagProjectKey, raw, err)
 	}
 	if cfg.Objects == nil || cfg.Objects[common.ObjectProjects] {
 		cfg.ProjectKeyFilter = raw
