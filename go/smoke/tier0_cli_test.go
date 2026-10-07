@@ -243,6 +243,22 @@ func TestTier0_FlagRegistration(t *testing.T) {
 	}
 }
 
+// TestTier0_MigrateConfigShorthand asserts migrate registers -c as the
+// shorthand of --config, and that the shorthand is actually parsed.
+func TestTier0_MigrateConfigShorthand(t *testing.T) {
+	res := runCLI(t, "migrate", "--help")
+	requireExit(t, res, 0, "migrate --help")
+	if !strings.Contains(res.combined(), "-c, --config") {
+		t.Errorf("migrate --help is missing the -c, --config shorthand:\n%s", res.combined())
+	}
+
+	cfg := scratchConfig(t)
+	res = runCLI(t, "migrate", "-c", cfg, "--bogus_flag")
+	if strings.Contains(res.combined(), "unknown shorthand flag") {
+		t.Errorf("migrate rejected -c as an unknown shorthand:\n%s", res.combined())
+	}
+}
+
 // TestTier0_ProjectKeyDeprecatedFlagStillWorks asserts the deprecated
 // --project_key flag (renamed to --project_key_regexp, #592) still works
 // and prints cobra's own deprecation notice, rather than being rejected
