@@ -97,10 +97,77 @@ func TestBuildExtractConfig_MigrateHistoryFlagIsOneWay(t *testing.T) {
 	}
 }
 
+// Issue #607: migrate must apply --migrate_history one-way too, like
+// extract and transfer. Before the fix, migrate used a two-way override, so
+// --migrate_history=false silently skipped the replay of history that the
+// extract had already written. Covers both config spellings: top-level
+// migrate_history and target.migrate_history.
+func TestBuildMigrateConfig_MigrateHistoryFlagIsOneWay(t *testing.T) {
+	cases := []struct {
+		name       string
+		configJSON string
+		args       []string
+		want       bool
+	}{
+		{
+			name:       "unset everywhere stays off",
+			configJSON: `{"target": {"url": "https://sc.invalid"}}`,
+			want:       false,
+		},
+		{
+			name:       "cli flag opts in",
+			configJSON: `{"target": {"url": "https://sc.invalid"}}`,
+			args:       []string{"--" + flagMigrateHistory},
+			want:       true,
+		},
+		{
+			name:       "explicit cli false does not undo top-level config",
+			configJSON: `{"migrate_history": true, "target": {"url": "https://sc.invalid"}}`,
+			args:       []string{"--" + flagMigrateHistory + "=false"},
+			want:       true,
+		},
+		{
+			name:       "explicit cli false does not undo target config",
+			configJSON: `{"target": {"url": "https://sc.invalid", "migrate_history": true}}`,
+			args:       []string{"--" + flagMigrateHistory + "=false"},
+			want:       true,
+		},
+		{
+			name:       "explicit cli false with config false stays off",
+			configJSON: `{"migrate_history": false, "target": {"url": "https://sc.invalid"}}`,
+			args:       []string{"--" + flagMigrateHistory + "=false"},
+			want:       false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := writeMigrateConfig(t, c.configJSON)
+			cmd := newMigrateTestCmd()
+			cmd.Flags().Bool(flagMigrateHistory, false, "")
+			args := append([]string{"--config", path}, c.args...)
+			if err := cmd.ParseFlags(args); err != nil {
+				t.Fatal(err)
+			}
+
+			cfg, err := buildMigrateConfig(cmd, nil)
+			if err != nil {
+				t.Fatalf("buildMigrateConfig: %v", err)
+			}
+			if cfg.MigrateHistory != c.want {
+				t.Errorf("MigrateHistory: got %v, want %v", cfg.MigrateHistory, c.want)
+			}
+			// Guard against a config file that silently failed to load.
+			if cfg.URL != "https://sc.invalid" {
+				t.Errorf("URL: got %q, want the config file's value", cfg.URL)
+			}
+		})
+	}
+}
+
 // Issue #554: the two bounds are plain last-one-wins overrides (unlike
 // the one-way boolean), and buildExtractConfig must not substitute the
-// 10/30 defaults itself — that happens later, in extract.applyDefaults,
-// which is what lets a 0 here still mean "not set".
+// defaults itself — that happens later, in extract.applyDefaults, which
+// is what lets HistoryUnset mean "not set" while an explicit 0 survives.
 func TestBuildExtractConfig_HistoryBoundsCLIOverridesConfig(t *testing.T) {
 	const withBounds = `{
 		"url": "https://sq.invalid",
