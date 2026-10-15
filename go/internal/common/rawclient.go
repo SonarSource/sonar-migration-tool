@@ -101,6 +101,7 @@ func NewRawClient(httpClient *http.Client, baseURL string) *RawClient {
 		pageSizes:  make(map[string]int),
 	}
 }
+
 // BaseURL returns the client's base URL.
 func (r *RawClient) BaseURL() string {
 	return r.baseURL
