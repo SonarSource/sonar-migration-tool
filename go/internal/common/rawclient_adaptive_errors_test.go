@@ -196,7 +196,7 @@ func TestAdaptivePaginationConcurrentEndpointMemory(t *testing.T) {
 
 	var wg sync.WaitGroup
 	start := make(chan struct{})
-	errs := make(chan error, workers*2)
+	errs := make(chan error, workers*4)
 
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
