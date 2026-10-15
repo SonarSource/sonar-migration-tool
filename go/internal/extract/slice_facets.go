@@ -250,6 +250,7 @@ func (s *issueSlicer) fetchAndAbsorbCell(ctx context.Context, w issueWindow, fil
 	if !w.safeToRequest() {
 		return common.PageResult{}, fmt.Errorf("refusing a zero-width issue window %s", w.label())
 	}
+
 	res, err := s.e.Raw.GetPaginatedResult(ctx, PaginatedOpts{
 		Path:                     issuesSearchAPI,
 		Params:                   facetParams(s.base, w, filters...),
@@ -260,13 +261,27 @@ func (s *issueSlicer) fetchAndAbsorbCell(ctx context.Context, w issueWindow, fil
 		Scope:                    s.scope,
 	})
 	s.requests += max(1, res.PagesRead)
+
 	if err != nil {
 		return res, asDateBoundRejection(w, err)
 	}
+
+	// Update the effective issue ceiling after adaptive pagination.
+	s.pageSize = res.PageSize
+	s.pageLimit = res.PageLimit
+	s.ceiling = windowCeiling(res.PageLimit, res.PageSize)
+
+	// Do not absorb a partial cell here. The caller must either
+	// partition it further or explicitly record the missing issues.
+	if res.Truncated {
+		return res, nil
+	}
+
 	s.windows++
 	if err := s.absorb(res.Items); err != nil {
 		return res, err
 	}
+
 	return res, nil
 }
 
@@ -327,7 +342,7 @@ func (s *issueSlicer) fetchTypeCell(ctx context.Context, w issueWindow, tax issu
 	for _, sev := range severities {
 		severityFilter := [2]string{tax.severityParam, sev.Val}
 		if sev.Count <= s.ceiling {
-			if err := s.fetchCellOrError(ctx, w, typeFilter, severityFilter); err != nil {
+			if err := s.fetchCellOrError(ctx, w, facetCascadeOrder, typeFilter, severityFilter); err != nil {
 				return err
 			}
 			continue
@@ -391,7 +406,7 @@ func (s *issueSlicer) fetchByRemainingFacets(ctx context.Context, w issueWindow,
 	for _, v := range values {
 		cellFilters := append(append([][2]string(nil), filters...), [2]string{facet, v.Val})
 		if v.Count <= s.ceiling {
-			if err := s.fetchCellOrError(ctx, w, cellFilters...); err != nil {
+			if err := s.fetchCellOrError(ctx, w, rest, cellFilters...); err != nil {
 				return err
 			}
 			continue
@@ -405,9 +420,41 @@ func (s *issueSlicer) fetchByRemainingFacets(ctx context.Context, w issueWindow,
 
 // fetchCellOrError is the non-give-up leaf: the caller has already
 // confirmed this cell fits, so only the fetch itself can still fail.
-func (s *issueSlicer) fetchCellOrError(ctx context.Context, w issueWindow, filters ...[2]string) error {
-	_, err := s.fetchAndAbsorbCell(ctx, w, filters...)
-	return err
+// fetchCellOrError fetches a facet cell that was expected to fit.
+// If pagination reduces the effective ceiling, retry by partitioning
+// the cell through the remaining facets rather than losing issues.
+func (s *issueSlicer) fetchCellOrError(ctx context.Context, w issueWindow, remainingFacets []string, filters ...[2]string) error {
+	res, err := s.fetchAndAbsorbCell(ctx, w, filters...)
+	if err != nil {
+		return err
+	}
+
+	if !res.Truncated {
+		return nil
+	}
+
+	if !res.TotalKnown {
+		return fmt.Errorf(
+			"issue facet cell %q was truncated without a readable total",
+			cellLabel(filters...),
+		)
+	}
+
+	s.e.Logger.Warn(
+		"issue facet cell exceeds effective pagination ceiling; trying finer facets",
+		"project", s.scope.ProjectKey,
+		"branch", s.scope.Branch,
+		"window", w.label(),
+		"facets", cellLabel(filters...),
+		"total", res.Total,
+		"fetched", res.Fetched,
+		"page_size", res.PageSize,
+		"ceiling", s.ceiling,
+	)
+
+	return s.fetchByRemainingFacets(
+		ctx, w, res.Total, remainingFacets, filters...,
+	)
 }
 
 // giveUpOnWindow is the cascade's terminal case at any level: fetch
@@ -430,11 +477,21 @@ func (s *issueSlicer) giveUpOnWindow(ctx context.Context, w issueWindow, total i
 	if err != nil {
 		return err
 	}
+
+	// This is an intentional give-up path. Keep the issues the
+	// API returned and record the remainder as missing.
+	if res.Truncated {
+		s.windows++
+		if err := s.absorb(res.Items); err != nil {
+			return err
+		}
+	}
+
 	lost := total - res.Fetched
 	if lost < 0 {
 		lost = 0
 	}
-	s.e.Logger.Warn("more than 10,000 issues could not be split below the search ceiling by date or facets",
+	s.e.Logger.Warn("issues could not be split below the effective search ceiling by date or facets",
 		"project", s.scope.ProjectKey, "branch", s.scope.Branch, "window", w.label(),
 		"facets", detail, "cause", cause, "total", total, "fetched", res.Fetched, "lost", lost)
 	start, end := w.bounds()
