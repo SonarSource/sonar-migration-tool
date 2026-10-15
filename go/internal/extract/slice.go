@@ -803,7 +803,7 @@ func (s *issueSlicer) fetchWindow(ctx context.Context, w issueWindow, stopOnTrun
 		// a request the server answers with HTTP 400.
 		return common.PageResult{}, fmt.Errorf("refusing a zero-width issue window %s", w.label())
 	}
-	res, err := s.e.Raw.GetPaginatedResult(ctx, PaginatedOpts{
+		res, err := s.e.Raw.GetPaginatedResult(ctx, PaginatedOpts{
 		Path:                     issuesSearchAPI,
 		Params:                   windowParams(s.base, w),
 		ResultKey:                issueResultKey,
@@ -812,7 +812,7 @@ func (s *issueSlicer) fetchWindow(ctx context.Context, w issueWindow, stopOnTrun
 		StopOnTruncation:         stopOnTruncation,
 		SuppressTruncationRecord: true,
 		Scope:                    s.scope,
-		})
+	})
 
 	// Keep the slicer's ceiling aligned with the effective page size.
 	// A successful 5xx fallback may reduce 500 to 200, 100 or 50.
