@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"sync"
 )
 
 // HTTPError represents an HTTP error response with a status code.
@@ -78,7 +79,11 @@ func IsHTTPError(err error, codes ...int) bool {
 type RawClient struct {
 	httpClient *http.Client
 	baseURL    string // normalised with trailing slash
-
+	
+	// Remember successful page sizes separately for each API endpoint.
+    // The mutex protects concurrent extraction requests.
+    pageSizeMu sync.Mutex
+    pageSizes map[string]int
 	// onTruncation receives one record per truncated paginated fetch.
 	// It lives on the client rather than in PaginatedOpts so a single
 	// installation covers every call site, including the ones nobody
@@ -89,7 +94,11 @@ type RawClient struct {
 
 // NewRawClient wraps an sqapi.Client's HTTP infrastructure.
 func NewRawClient(httpClient *http.Client, baseURL string) *RawClient {
-	return &RawClient{httpClient: httpClient, baseURL: baseURL}
+    return &RawClient{
+        httpClient: httpClient,
+        baseURL:    baseURL,
+        pageSizes:  make(map[string]int),
+    }
 }
 
 // BaseURL returns the client's base URL.
