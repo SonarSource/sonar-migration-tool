@@ -159,7 +159,10 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 		}
 	}
 	applyFlagBool(cmd, flagFastSync, &cfg.FastSync)
-	applyFlagBool(cmd, flagMigrateHistory, &cfg.MigrateHistory)
+	// --migrate_history is one-way, same as extract and transfer:
+	// --migrate_history=false does NOT undo a config file that opted in.
+	// #554, #607.
+	applyOneWayBoolFlag(cmd, flagMigrateHistory, &cfg.MigrateHistory)
 	applyFlagInt(cmd, flagMaxIssueComments, &cfg.MaxIssueComments)
 
 	if err := applyObjectsFlag(cmd, &cfg.Objects); err != nil {

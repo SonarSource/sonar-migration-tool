@@ -83,15 +83,15 @@
     },
     "history_max_points": {
       "type": "integer",
-      "minimum": 1,
-      "default": 10,
-      "description": "PoC (issue #554): max historical snapshots migrated per branch (not per project — each migrated branch gets its own cap) when migrate_history is set."
+      "minimum": 0,
+      "default": 0,
+      "description": "PoC (issue #554): max historical snapshots migrated per branch (not per project — each migrated branch gets its own cap) when migrate_history is set. 0 (the default) means no cap: every historical analysis is a candidate. Pass a positive number to bound it."
     },
     "history_min_interval_days": {
       "type": "integer",
-      "minimum": 1,
-      "default": 30,
-      "description": "PoC (issue #554): minimum spacing, in days, enforced between two migrated historical snapshots of the same branch when migrate_history is set. The smallest effective value is 1 (one point per day at most); 0 is indistinguishable from 'not set' in a config file and falls back to the default of 30."
+      "minimum": 0,
+      "default": 0,
+      "description": "PoC (issue #554): minimum spacing, in days, enforced between two migrated historical snapshots of the same branch when migrate_history is set. 0 (the default) means no spacing rule: every analysis in the source history is a candidate. 0 is a real value, not a 'not set' marker: an explicit 0 is kept as is, and an absent key also resolves to 0. A positive number keeps at most one point per that many days."
     },
     "branch_analyzed_after": {
       "type": ["string", "null"],
