@@ -41,7 +41,11 @@ func projectTasks() []TaskDef {
 			Name:     "getProjects",
 			Editions: AllEditions,
 			Run: func(ctx context.Context, e *Executor) error {
-				opts := PaginatedOpts{Path: "api/projects/search", ResultKey: "components"}
+				opts := PaginatedOpts{
+					Path:        "api/projects/search",
+					ResultKey:   "components",
+					MaxPageSize: 50,
+				}
 				if len(e.ProjectKeys) > 0 {
 					opts.Params = url.Values{"projects": {strings.Join(e.ProjectKeys, ",")}}
 				}
