@@ -364,11 +364,13 @@ var slowGatewayTimeout = 5 * time.Second
 
 // paginatedTimeoutFactor is how many times the client's timeout a
 // paginated request may wait while a smaller page size remains. Common
-// gateways (AWS load balancers, nginx, Apache, Azure Front Door) give up
-// on a slow upstream after 60s, the client's own default, so the two
+// gateways (AWS load balancers, nginx, Azure Front Door) answer a slow
+// upstream with 504 after 60s, the client's own default, so the two
 // race and the client usually loses: it times out just before the 504
 // that would trigger the fallback. Twice the timeout waits that 504 out
-// with room to spare.
+// with room to spare. Gateways that send a slow 502 or 503 instead
+// (Apache httpd) still get the SDK's same-size retries, which this
+// budget does not cover.
 const paginatedTimeoutFactor = 2
 
 // paginatedAttempt returns the context and client for one pagination
