@@ -270,12 +270,16 @@ func TestAdaptiveTruncatedFacetCellStopsAfterFirstPage(t *testing.T) {
 	}
 
 	e, tracker := corpus.start()
-	installLateSlice504(e, "facet")
+	tr := installLateSlice504(e, "facet")
 
 	var sink issueCollector
 	if err := fetchProjectIssues(context.Background(), e, "p1", "main", taskIssueParams(), sink.sink); err != nil {
 		t.Fatalf("facet extraction failed: %v", err)
 	}
+
+	// The 504 fired inside a type/severity cell, and that cell was then
+	// fetched at ps=200, so the check below is not vacuous.
+	assertLateSliceFallback(t, corpus, tr)
 
 	// The 6,000-issue BUG/MAJOR cell is refetched at ps=200 after the
 	// 504 and found over the new 4,000 ceiling: page 1 says so, and the
@@ -319,6 +323,46 @@ func TestAdaptiveTruncatedLeafCellIsReadOnce(t *testing.T) {
 	state := tracker.State()
 	if lost := recordedLoss(state); len(state.Records) != 2 || lost != 4000 {
 		t.Errorf("records = %+v, want two recording 4,000 lost in total", state.Records)
+	}
+	if drift := onlyReconciliation(t, state).UnexplainedDrift(); drift != 0 {
+		t.Errorf("unexplained drift: got %d, want 0", drift)
+	}
+}
+
+// TestAdaptiveTruncatedCellWithoutTotalIsPartitioned proves that a facet
+// cell whose fetch comes back truncated with no readable total is
+// partitioned and given up on using its probed count, rather than
+// aborting the whole extraction. Without a total, a fetch can read only
+// its first page, so each 3,000-issue leaf cell keeps 500 issues and
+// records the other 2,500 as lost.
+func TestAdaptiveTruncatedCellWithoutTotalIsPartitioned(t *testing.T) {
+	const perCell = 3000
+	const total = perCell * 4
+
+	corpus := newIssueCorpus(t)
+	corpus.omitTotalOnFilteredFetches = true
+	for i, cell := range []struct{ typ, sev, rule string }{
+		{"BUG", "MAJOR", "java:S1"},
+		{"BUG", "MAJOR", "java:S2"},
+		{"CODE_SMELL", "MINOR", "java:S3"},
+		{"CODE_SMELL", "MINOR", "java:S4"},
+	} {
+		corpus.addBurstFull(corpusStart, perCell, fmt.Sprintf("nototal-%d", i), cell.typ, cell.sev, cell.rule,
+			"src", fmt.Sprintf("src/F%d.java", i))
+	}
+
+	e, tracker := corpus.start()
+
+	var sink issueCollector
+	if err := fetchProjectIssues(context.Background(), e, "p1", "main", taskIssueParams(), sink.sink); err != nil {
+		t.Fatalf("a cell without a readable total aborted the extraction: %v", err)
+	}
+
+	assertDeliveredOnce(t, &sink, 4*issuePageSize, total)
+	state := tracker.State()
+	if lost := recordedLoss(state); sink.delivered()+lost != total {
+		t.Errorf("delivered %d + recorded lost %d = %d, want every one of %d issues accounted for",
+			sink.delivered(), lost, sink.delivered()+lost, total)
 	}
 	if drift := onlyReconciliation(t, state).UnexplainedDrift(); drift != 0 {
 		t.Errorf("unexplained drift: got %d, want 0", drift)
