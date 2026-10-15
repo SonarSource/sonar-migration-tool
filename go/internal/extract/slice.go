@@ -271,9 +271,12 @@ func windowParams(base url.Values, w issueWindow) url.Values {
 // One derivation, no second constant: PageLimit x MaxPageSize is what
 // the fetch will actually read, and ResultWindowLimit is where the
 // server starts answering HTTP 400 whatever the caller asked for. At
-// the issue call site both are 10,000, which is why the predicate is
-// "total > 10,000" and why exactly 10,000 is not sliced — that offset
-// is live-confirmed reachable (p=20&ps=500 returns HTTP 200).
+// the issue call site both start at 10,000, which is why the predicate
+// is "total > 10,000" and why exactly 10,000 is not sliced — that offset
+// is live-confirmed reachable (p=20&ps=500 returns HTTP 200). A 5xx
+// page-size fallback shrinks the fetchable side to 4,000, 2,000 or
+// 1,000 (20 pages of 200, 100 or 50), and the slicer re-derives its
+// ceiling from every PageResult so the predicate follows.
 //
 // The arguments are the EFFECTIVE values a PageResult reports, never
 // the caller's own PaginatedOpts: applyDefaults has a pointer receiver
@@ -303,8 +306,9 @@ type issueSlicer struct {
 	scope TruncationScope
 
 	// pageSize, pageLimit and ceiling are the EFFECTIVE values the
-	// fetches use, taken from the first PageResult rather than
-	// re-derived (see windowCeiling).
+	// fetches use, taken from the latest PageResult rather than
+	// re-derived (see windowCeiling). A page-size fallback can lower
+	// them mid-walk; nothing raises them.
 	pageSize  int
 	pageLimit int
 	ceiling   int

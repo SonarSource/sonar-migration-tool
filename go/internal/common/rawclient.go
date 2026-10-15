@@ -95,6 +95,7 @@ type RawClient struct {
 	onTruncation func(TruncationRecord)
 }
 
+// NewRawClient wraps an sqapi.Client's HTTP infrastructure.
 func NewRawClient(httpClient *http.Client, baseURL string) *RawClient {
 	return &RawClient{
 		httpClient: httpClient,
@@ -288,6 +289,13 @@ func (r *RawClient) GetPaginated(ctx context.Context, opts PaginatedOpts) ([]jso
 // not derived from Fetched < Total: ExtractArray wraps an object at the
 // result key (api/rules/search "actives") as a single element, so that
 // comparison would fire on perfectly healthy responses.
+//
+// The page size adapts. An HTTP 5xx restarts the fetch from page 1 at
+// the next smaller size (500 -> 200 -> 100 -> 50), discarding the failed
+// attempt's items, and a smaller size that works is remembered for
+// opts.Path for the rest of the client's life. A 5xx at 50 is returned.
+// PageSize in the result is the size that succeeded, so a caller deriving
+// a ceiling from PageSize x PageLimit sees it shrink with the fallback.
 func (r *RawClient) GetPaginatedResult(ctx context.Context, opts PaginatedOpts) (PageResult, error) {
 	opts.applyDefaults()
 
