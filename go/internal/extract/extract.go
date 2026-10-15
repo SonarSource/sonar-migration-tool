@@ -328,7 +328,6 @@ func ListAllProjectKeys(ctx context.Context, cfg ExtractConfig) ([]string, error
 	items, err := raw.GetPaginated(ctx, PaginatedOpts{
 		Path:        "api/projects/search",
 		ResultKey:   "components",
-		MaxPageSize: common.ProjectSearchPageSize,
 	})
 	if err != nil {
 		return nil, err
