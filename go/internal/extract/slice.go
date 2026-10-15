@@ -479,10 +479,29 @@ func (s *issueSlicer) fetchIssueWindow(ctx context.Context, w issueWindow, depth
 // fetchWindowItems reads a window the probe said would fit, and absorbs
 // it.
 func (s *issueSlicer) fetchWindowItems(ctx context.Context, w issueWindow, probed int) error {
+	previousCeiling := s.ceiling
+
 	res, err := s.fetchWindow(ctx, w, false)
 	if err != nil {
 		return err
 	}
+
+	// If an HTTP 5xx forced a smaller page size and the result
+	// is now truncated, do not absorb the incomplete result.
+	// Re-probe and partition the window using the new ceiling.
+	if res.Truncated && s.ceiling < previousCeiling {
+		s.e.Logger.Warn(
+			"issue page size decreased; re-slicing the affected window",
+			"project", s.scope.ProjectKey,
+			"branch", s.scope.Branch,
+			"window", w.label(),
+			"previous_ceiling", previousCeiling,
+			"new_ceiling", s.ceiling,
+			"page_size", res.PageSize,
+		)
+		return s.fetchIssueWindow(ctx, w, 0)
+	}
+
 	s.windows++
 	if err := s.absorb(res.Items); err != nil {
 		return err
@@ -793,7 +812,16 @@ func (s *issueSlicer) fetchWindow(ctx context.Context, w issueWindow, stopOnTrun
 		StopOnTruncation:         stopOnTruncation,
 		SuppressTruncationRecord: true,
 		Scope:                    s.scope,
-	})
+		})
+
+	// Keep the slicer's ceiling aligned with the effective page size.
+	// A successful 5xx fallback may reduce 500 to 200, 100 or 50.
+	if err == nil {
+		s.pageSize = res.PageSize
+		s.pageLimit = res.PageLimit
+		s.ceiling = windowCeiling(res.PageLimit, res.PageSize)
+	}
+
 	// PagesRead is zero on failure even though a request was made, so
 	// the audit count must not trust it blindly.
 	s.requests += max(1, res.PagesRead)
