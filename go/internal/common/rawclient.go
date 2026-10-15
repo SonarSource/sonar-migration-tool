@@ -93,12 +93,38 @@ type RawClient struct {
 	onTruncation func(TruncationRecord)
 }
 
-// NewRawClient wraps an sqapi.Client's HTTP infrastructure.
 func NewRawClient(httpClient *http.Client, baseURL string) *RawClient {
 	return &RawClient{
 		httpClient: httpClient,
 		baseURL:    baseURL,
 		pageSizes:  make(map[string]int),
+	}
+}
+
+// pageSizeFor returns the smaller of the requested page size
+// and any previously remembered size for the endpoint.
+func (r *RawClient) pageSizeFor(path string, requested int) int {
+	r.pageSizeMu.Lock()
+	defer r.pageSizeMu.Unlock()
+
+	if size, ok := r.pageSizes[path]; ok && size < requested {
+		return size
+	}
+	return requested
+}
+
+// rememberPageSize stores a smaller successful page size
+// for future requests to the same endpoint.
+func (r *RawClient) rememberPageSize(path string, size int) {
+	r.pageSizeMu.Lock()
+	defer r.pageSizeMu.Unlock()
+
+	if r.pageSizes == nil {
+		r.pageSizes = make(map[string]int)
+	}
+
+	if current, ok := r.pageSizes[path]; !ok || size < current {
+		r.pageSizes[path] = size
 	}
 }
 
