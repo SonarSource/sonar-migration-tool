@@ -44,7 +44,7 @@ func projectTasks() []TaskDef {
 				opts := PaginatedOpts{
 					Path:        "api/projects/search",
 					ResultKey:   "components",
-					MaxPageSize: 50,
+					MaxPageSize: common.ProjectSearchPageSize,
 				}
 				if len(e.ProjectKeys) > 0 {
 					opts.Params = url.Values{"projects": {strings.Join(e.ProjectKeys, ",")}}
