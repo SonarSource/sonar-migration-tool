@@ -194,13 +194,14 @@ http.Transport → base TCP/TLS transport
 ```
 
 ### Retry contract
-<!-- updated: 2026-08-11_11:35:00 -->
+<!-- updated: 2026-10-15_22:18:05 -->
 
 `retryTransport` guarantees the following to its callers:
 
 - **Giving up preserves the response.** When a retryable status (429/500/502/503/504) survives the whole schedule, the transport returns that response with a **readable body** and a nil error, so the caller can build a meaningful error from the real status and payload. Any bytes the 429 classifier peeked at are spliced back in front of the remainder, so the caller reads the payload byte-for-byte. (Closing the body here was the cause of issue #505: `http: read on closed response body`.)
 - **Retrying releases the connection.** On the retry path only, the body is drained and closed so the connection returns to the pool.
 - **Retried requests re-send their body.** `req.Body` is rewound via `http.Request.GetBody` before each re-attempt. A request that carries a body but has no `GetBody` is never retried — re-issuing it would transmit an empty payload. Use `strings.Reader`, `bytes.Reader` or `bytes.Buffer` as the body (as every write helper in `cloud/` does) so `http.NewRequest` populates `GetBody` automatically.
+- **Callers can opt a request out of retrying slow failures.** A request whose context comes from `WithoutRetryOnSlowStatus(ctx, after, codes...)` is handed back at once, with a readable body as above, when it waited at least `after` for a response carrying one of `codes`. A faster response with the same status, and every other outcome, keeps the normal schedule; 429 is never handed back early; requests without that context are unaffected. It is for callers whose recovery is not an identical retry, such as a paginated fetch that answers a slow 504 by asking again with a smaller page size.
 
 Response types are defined in the `types` sub-package. The `server` and `cloud` sub-packages provide typed endpoint methods that return these types.
 

@@ -5,6 +5,7 @@
 package sqapi_test
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -46,6 +47,49 @@ func alwaysFailingServer(t *testing.T, status int, headers map[string]string, pa
 	}))
 	t.Cleanup(ts.Close)
 	return ts, &attempts
+}
+
+// TestRetryTransportWithoutRetryOnSlowStatus checks the per-request
+// opt-out: an opted-out status that took long enough comes back after
+// one attempt with its body readable, while a faster one, another
+// retryable status, a 429, and the same status on a plain context all
+// keep the normal schedule.
+func TestRetryTransportWithoutRetryOnSlowStatus(t *testing.T) {
+	cases := []struct {
+		name         string
+		status       int
+		optOut       []int
+		after        time.Duration
+		wantAttempts int32
+	}{
+		{"slow opted-out 504 is handed back at once", http.StatusGatewayTimeout, []int{http.StatusGatewayTimeout}, 0, 1},
+		{"504 faster than the threshold is still retried", http.StatusGatewayTimeout, []int{http.StatusGatewayTimeout}, time.Hour, 3},
+		{"503 is still retried under a 504 opt-out", http.StatusServiceUnavailable, []int{http.StatusGatewayTimeout}, 0, 3},
+		{"504 is retried without the opt-out", http.StatusGatewayTimeout, nil, 0, 3},
+		{"429 is never handed back early", http.StatusTooManyRequests, []int{http.StatusTooManyRequests}, 0, 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts, attempts := alwaysFailingServer(t, tc.status, nil, sonar500Body)
+			transport := sqapi.NewRetryTransport(http.DefaultTransport, []time.Duration{0, 0})
+			ctx := context.Background()
+			if tc.optOut != nil {
+				ctx = sqapi.WithoutRetryOnSlowStatus(ctx, tc.after, tc.optOut...)
+			}
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL, nil)
+			require.NoError(t, err)
+
+			resp, err := transport.RoundTrip(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+
+			assert.Equal(t, tc.status, resp.StatusCode)
+			assert.Equal(t, sonar500Body, string(body))
+			assert.Equal(t, tc.wantAttempts, attempts.Load())
+		})
+	}
 }
 
 // TestRetryTransportGiveUpReturnsReadableBody is the regression test for

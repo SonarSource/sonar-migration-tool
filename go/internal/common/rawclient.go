@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	sqapi "github.com/sonar-solutions/sq-api-go"
 )
 
 // HTTPError represents an HTTP error response with a status code.
@@ -298,7 +300,7 @@ func (r *RawClient) GetPaginatedResult(ctx context.Context, opts PaginatedOpts) 
 
 		// Each attempt starts pagination from page 1.
 		// Partial results from failed attempts are discarded.
-		result, err := r.getPaginatedAtSize(ctx, attemptOpts)
+		result, err := r.getPaginatedAtSize(paginatedAttemptContext(ctx, pageSize), attemptOpts)
 
 		if err == nil {
 			if pageSize < requestedSize {
@@ -337,6 +339,29 @@ func (r *RawClient) GetPaginatedResult(ctx context.Context, opts PaginatedOpts) 
 
 		pageSize = nextSize
 	}
+}
+
+// slowGatewayTimeout separates a 504 that means "this page took too
+// long" from a proxy blip. A gateway answers 504 for a slow upstream only
+// after its own timeout, typically tens of seconds (AWS load balancers
+// and nginx default to 60s), so a 504 that took at least this long is a
+// page-size signal. A faster one keeps the SDK's normal retries, which
+// absorb a brief burst instead of letting it lower the endpoint's page
+// size for the rest of the run. A variable so tests can shorten it.
+var slowGatewayTimeout = 5 * time.Second
+
+// paginatedAttemptContext tells the SDK not to retry a slow 504 at the
+// same page size while a smaller one remains. Here a slow 504 is the
+// fallback's signal: an identical retry costs another full load-balancer
+// delay, and because http.Client.Timeout bounds every SDK attempt
+// together, it can turn a recoverable 504 into a fatal client timeout.
+// At the minimum size there is nothing smaller to try, so the SDK's
+// normal retries stay in force.
+func paginatedAttemptContext(ctx context.Context, pageSize int) context.Context {
+	if _, ok := nextSmallerPageSize(pageSize); ok {
+		return sqapi.WithoutRetryOnSlowStatus(ctx, slowGatewayTimeout, http.StatusGatewayTimeout)
+	}
+	return ctx
 }
 
 // getPaginatedAtSize performs one complete pagination attempt
