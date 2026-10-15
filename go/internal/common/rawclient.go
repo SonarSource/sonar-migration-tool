@@ -294,6 +294,60 @@ func (r *RawClient) GetPaginated(ctx context.Context, opts PaginatedOpts) ([]jso
 func (r *RawClient) GetPaginatedResult(ctx context.Context, opts PaginatedOpts) (PageResult, error) {
 	opts.applyDefaults()
 
+	requestedSize := opts.MaxPageSize
+	pageSize := r.pageSizeFor(opts.Path, requestedSize)
+
+	for {
+		attemptOpts := opts
+		attemptOpts.MaxPageSize = pageSize
+
+		// Each attempt starts pagination from page 1.
+		// Partial results from failed attempts are discarded.
+		result, err := r.getPaginatedAtSize(ctx, attemptOpts)
+
+		if err == nil {
+			if pageSize < requestedSize {
+				r.rememberPageSize(opts.Path, pageSize)
+			}
+			return result, nil
+		}
+
+		// Only HTTP 5xx errors trigger a smaller page size.
+		var httpErr *HTTPError
+		if !errors.As(err, &httpErr) ||
+			httpErr.StatusCode < 500 ||
+			httpErr.StatusCode >= 600 {
+			return PageResult{}, err
+		}
+
+		nextSize, ok := nextSmallerPageSize(pageSize)
+		if !ok {
+			slog.Error(
+				"paginated API request failed with HTTP 5xx at minimum fallback page size",
+				"endpoint", opts.Path,
+				"page_size", pageSize,
+				"status", httpErr.StatusCode,
+				"error", err,
+			)
+			return PageResult{}, err
+		}
+
+		slog.Warn(
+			"paginated API request returned HTTP 5xx; retrying with smaller page size",
+			"endpoint", opts.Path,
+			"status", httpErr.StatusCode,
+			"page_size", pageSize,
+			"retry_page_size", nextSize,
+		)
+
+		pageSize = nextSize
+	}
+}
+
+// getPaginatedAtSize performs one complete pagination attempt
+// using a fixed page size.
+func (r *RawClient) getPaginatedAtSize(ctx context.Context, opts PaginatedOpts) (PageResult, error) {	opts.applyDefaults()
+
 	params := CloneParams(opts.Params)
 	params.Set(opts.PageParam, "1")
 	params.Set(opts.SizeParam, strconv.Itoa(opts.MaxPageSize))
