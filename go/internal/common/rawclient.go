@@ -83,7 +83,7 @@ type RawClient struct {
 	// Remember successful page sizes separately for each API endpoint.
 	// The mutex protects concurrent extraction requests.
 	pageSizeMu sync.Mutex
-	pageSizes map[string]int
+	pageSizes  map[string]int
 
 	// onTruncation receives one record per truncated paginated fetch.
 	// It lives on the client rather than in PaginatedOpts so a single
