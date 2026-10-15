@@ -1,4 +1,5 @@
-// Copyright (C) SonarSource Sàrl
+
+ // Copyright (C) SonarSource Sàrl
 // For more information, see https://sonarsource.com/legal/
 // mailto:info AT sonarsource DOT com
 
@@ -219,7 +220,7 @@ type PaginatedOpts struct {
 
 	// SuppressTruncationRecord keeps a clamp out of the artefact
 	// because the caller will record a more accurate reason itself.
-	// The slicer's entry fetch sets it: there, a clamp is the trigger
+	// The slicer's entry fetch sets it: a clamp is the trigger
 	// to go and fetch the rest, not a loss.
 	SuppressTruncationRecord bool
 }
@@ -240,8 +241,7 @@ func (o *PaginatedOpts) applyDefaults() {
 }
 
 // PageResult is the complete outcome of a paginated fetch: the items,
-// plus everything the caller needs in order to know what was NOT
-// fetched.
+// plus everything the caller needs to know what was NOT fetched.
 //
 // PageSize and PageLimit carry the EFFECTIVE values the fetch actually
 // used, after applyDefaults. Nothing downstream should re-derive them:
@@ -346,7 +346,8 @@ func (r *RawClient) GetPaginatedResult(ctx context.Context, opts PaginatedOpts) 
 
 // getPaginatedAtSize performs one complete pagination attempt
 // using a fixed page size.
-func (r *RawClient) getPaginatedAtSize(ctx context.Context, opts PaginatedOpts) (PageResult, error) {	opts.applyDefaults()
+func (r *RawClient) getPaginatedAtSize(ctx context.Context, opts PaginatedOpts) (PageResult, error) {
+	opts.applyDefaults()
 
 	params := CloneParams(opts.Params)
 	params.Set(opts.PageParam, "1")
@@ -567,8 +568,8 @@ func ExtractTotal(body []byte, dotPath string) int {
 
 // ExtractTotalOK extracts the total count and reports whether it was
 // actually there. The distinction matters: a 0 from an unparseable
-// body, a 0 from a missing key and a genuine 0 are three different
-// situations, and treating the first two as "this window is empty" is
+// body, a 0 from a missing key and a genuine zero are three different
+// situations, and treating either of the first two as "nothing here" is
 // how a fetch silently drops everything it was supposed to return
 // (#574).
 func ExtractTotalOK(body []byte, dotPath string) (int, bool) {
