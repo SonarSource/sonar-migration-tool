@@ -142,106 +142,108 @@ func TestAdaptivePaginationStopsAtMinimumPageSize(t *testing.T) {
 	}
 }
 
+// endpointSizeCase is one endpoint and the page size it should settle
+// on in TestAdaptivePaginationConcurrentEndpointMemory.
+type endpointSizeCase struct {
+	path     string
+	wantSize int
+}
+
+var concurrentEndpointCases = []endpointSizeCase{
+	{"api/projects/search", 100},
+	{"api/issues/search", 500},
+}
+
+// concurrentEndpointServer serves project search only at ps=100 or
+// below and issue search at any size, 25 items each. calls returns a
+// copy of the page sizes requested on a server path, in arrival order.
+func concurrentEndpointServer(t *testing.T) (server *httptest.Server, calls func(path string) []int) {
+	t.Helper()
+
+	var mu sync.Mutex
+	requests := make(map[string][]int)
+	record := func(r *http.Request) int {
+		size, _ := strconv.Atoi(r.URL.Query().Get("ps"))
+		mu.Lock()
+		requests[r.URL.Path] = append(requests[r.URL.Path], size)
+		mu.Unlock()
+		return size
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/projects/search", func(w http.ResponseWriter, r *http.Request) {
+		// Project search succeeds only at ps=100 or below.
+		if record(r) > 100 {
+			http.Error(w, "gateway timeout", http.StatusGatewayTimeout)
+			return
+		}
+		writeAdaptiveTestPage(t, w, r, 25)
+	})
+	mux.HandleFunc("/api/issues/search", func(w http.ResponseWriter, r *http.Request) {
+		// This endpoint works at the default ps=500.
+		record(r)
+		writeAdaptiveTestPage(t, w, r, 25)
+	})
+
+	server = httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	calls = func(path string) []int {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]int(nil), requests[path]...)
+	}
+	return server, calls
+}
+
+// fetchAndCheckPageSize fetches tc.path once and reports the first way
+// the result misses tc.wantSize or a complete 25-item page.
+func fetchAndCheckPageSize(raw *RawClient, tc endpointSizeCase) error {
+	result, err := raw.GetPaginatedResult(context.Background(), PaginatedOpts{
+		Path:      tc.path,
+		ResultKey: "items",
+	})
+	switch {
+	case err != nil:
+		return fmt.Errorf("%s: %w", tc.path, err)
+	case result.PageSize != tc.wantSize:
+		return fmt.Errorf("%s: page size %d, want %d", tc.path, result.PageSize, tc.wantSize)
+	case result.Fetched != 25 || result.Truncated:
+		return fmt.Errorf("%s: unexpected result: %+v", tc.path, result)
+	}
+	return nil
+}
+
+// checkEndpoints fetches every concurrent endpoint case once, sending
+// each failure to errs.
+func checkEndpoints(raw *RawClient, errs chan<- error) {
+	for _, tc := range concurrentEndpointCases {
+		if err := fetchAndCheckPageSize(raw, tc); err != nil {
+			errs <- err
+		}
+	}
+}
+
 // TestAdaptivePaginationConcurrentEndpointMemory verifies that
 // concurrent callers can share one RawClient safely while each API
 // endpoint maintains its own effective page size.
 func TestAdaptivePaginationConcurrentEndpointMemory(t *testing.T) {
 	const workers = 16
 
-	var mu sync.Mutex
-	requests := make(map[string][]int)
-
-	record := func(r *http.Request) int {
-		size, _ := strconv.Atoi(r.URL.Query().Get("ps"))
-
-		mu.Lock()
-		requests[r.URL.Path] = append(requests[r.URL.Path], size)
-		mu.Unlock()
-
-		return size
-	}
-
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("/api/projects/search",
-		func(w http.ResponseWriter, r *http.Request) {
-			size := record(r)
-
-			// Project search succeeds only at ps=100 or below.
-			if size > 100 {
-				http.Error(
-					w, "gateway timeout", http.StatusGatewayTimeout,
-				)
-				return
-			}
-
-			writeAdaptiveTestPage(t, w, r, 25)
-		},
-	)
-
-	mux.HandleFunc("/api/issues/search",
-		func(w http.ResponseWriter, r *http.Request) {
-			record(r)
-
-			// This endpoint works at the default ps=500.
-			writeAdaptiveTestPage(t, w, r, 25)
-		},
-	)
-
-	server := httptest.NewServer(mux)
-	defer server.Close()
-
+	server, calls := concurrentEndpointServer(t)
 	raw := NewRawClient(server.Client(), server.URL+"/")
 
 	var wg sync.WaitGroup
 	start := make(chan struct{})
-	errs := make(chan error, workers*4)
+	// At most one error per worker per case, so no send can block.
+	errs := make(chan error, workers*len(concurrentEndpointCases))
 
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
-
 		go func() {
 			defer wg.Done()
 			<-start
-
-			for _, testCase := range []struct {
-				path     string
-				wantSize int
-			}{
-				{"api/projects/search", 100},
-				{"api/issues/search", 500},
-			} {
-				result, err := raw.GetPaginatedResult(
-					context.Background(),
-					PaginatedOpts{
-						Path:      testCase.path,
-						ResultKey: "items",
-					},
-				)
-
-				if err != nil {
-					errs <- fmt.Errorf(
-						"%s: %w", testCase.path, err,
-					)
-					continue
-				}
-
-				if result.PageSize != testCase.wantSize {
-					errs <- fmt.Errorf(
-						"%s: page size %d, want %d",
-						testCase.path,
-						result.PageSize,
-						testCase.wantSize,
-					)
-				}
-
-				if result.Fetched != 25 || result.Truncated {
-					errs <- fmt.Errorf(
-						"%s: unexpected result: %+v",
-						testCase.path, result,
-					)
-				}
-			}
+			checkEndpoints(raw, errs)
 		}()
 	}
 
@@ -256,50 +258,16 @@ func TestAdaptivePaginationConcurrentEndpointMemory(t *testing.T) {
 
 	// After concurrent fallbacks, the cache must still remember
 	// 100 for projects and 500 for issues.
-	for _, testCase := range []struct {
-		path     string
-		wantSize int
-	}{
-		{"api/projects/search", 100},
-		{"api/issues/search", 500},
-	} {
-		result, err := raw.GetPaginatedResult(
-			context.Background(),
-			PaginatedOpts{
-				Path:      testCase.path,
-				ResultKey: "items",
-			},
-		)
-		if err != nil {
-			t.Fatalf("%s: final fetch: %v", testCase.path, err)
+	for _, tc := range concurrentEndpointCases {
+		if err := fetchAndCheckPageSize(raw, tc); err != nil {
+			t.Errorf("final fetch: %v", err)
 		}
-		if result.PageSize != testCase.wantSize {
-			t.Errorf(
-				"%s: cached page size %d, want %d",
-				testCase.path,
-				result.PageSize,
-				testCase.wantSize,
-			)
+		got := calls("/" + tc.path)
+		if len(got) == 0 {
+			t.Fatalf("no requests reached %s", tc.path)
 		}
-	}
-
-	mu.Lock()
-	projectCalls := append(
-		[]int(nil), requests["/api/projects/search"]...,
-	)
-	issueCalls := append(
-		[]int(nil), requests["/api/issues/search"]...,
-	)
-	mu.Unlock()
-
-	if len(projectCalls) == 0 || len(issueCalls) == 0 {
-		t.Fatal("expected calls to both API endpoints")
-	}
-
-	if got := projectCalls[len(projectCalls)-1]; got != 100 {
-		t.Errorf("last project request used ps=%d, want 100", got)
-	}
-	if got := issueCalls[len(issueCalls)-1]; got != 500 {
-		t.Errorf("last issue request used ps=%d, want 500", got)
+		if last := got[len(got)-1]; last != tc.wantSize {
+			t.Errorf("last %s request used ps=%d, want %d", tc.path, last, tc.wantSize)
+		}
 	}
 }
