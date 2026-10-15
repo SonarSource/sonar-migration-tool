@@ -139,7 +139,7 @@ Migration of project-level and component-level quality measures.
 - New code period metrics
 
 ### Phase 2: Scale, Reliability & Version Compatibility (P0/P1)
-<!-- updated: 2026-06-04_12:00:00 -->
+<!-- updated: 2026-10-16_00:15:10 -->
 
 These handle edge cases, scale challenges, and cross-version compatibility that CloudVoyager solved through production experience.
 
@@ -149,7 +149,8 @@ Automatic handling of projects with more than 10,000 issues, which hit SonarQube
 
 **What it enables:**
 - Date-window bisection algorithm ("search slicing") to extract all issues regardless of count
-- Recursive subdivision of date ranges until each window returns under 10,000 results
+- Recursive subdivision of date ranges until each window returns under the result ceiling (10,000, or less after a page-size fallback)
+- Adaptive page size: a paginated read that fails with HTTP 5xx restarts at a smaller page size (500 → 200 → 100 → 50), remembered per endpoint, with no configuration — see [TROUBLESHOOTING.md](TROUBLESHOOTING.md#http-504-gateway-timeout-on-large-pages)
 - Facet slicing (issue type, severity, then rule, directory and file) as a fallback when a single creation second is itself still over the ceiling — see [TROUBLESHOOTING.md](TROUBLESHOOTING.md#a-project-migrated-with-exactly-10000-issues) ([#630](https://github.com/SonarSource/sonar-migration-tool/issues/630))
 - Transparent large-scale extraction for both issues and hotspots
 - Deduplication of results across overlapping date windows
