@@ -803,7 +803,7 @@ func (s *issueSlicer) fetchWindow(ctx context.Context, w issueWindow, stopOnTrun
 		// a request the server answers with HTTP 400.
 		return common.PageResult{}, fmt.Errorf("refusing a zero-width issue window %s", w.label())
 	}
-res, err := s.e.Raw.GetPaginatedResult(ctx, PaginatedOpts{
+	res, err := s.e.Raw.GetPaginatedResult(ctx, PaginatedOpts{
 		Path:                     issuesSearchAPI,
 		Params:                   windowParams(s.base, w),
 		ResultKey:                issueResultKey,
