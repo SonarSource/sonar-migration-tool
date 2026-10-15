@@ -127,6 +127,7 @@ func (r *RawClient) rememberPageSize(path string, size int) {
 		r.pageSizes[path] = size
 	}
 }
+
 // nextSmallerPageSize returns the next fallback page size.
 // The fallback sequence is 500 -> 200 -> 100 -> 50.
 func nextSmallerPageSize(current int) (int, bool) {
