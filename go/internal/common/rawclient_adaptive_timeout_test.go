@@ -28,8 +28,10 @@ import (
 // page-size fallback ever sees the 504.
 //
 // The contract under test is the agreed one: only HTTP 5xx steps the
-// page size down. A client timeout reaches the caller unchanged, and an
-// operator facing a slow load balancer raises --timeout above its delay.
+// page size down, with no user configuration. A paginated attempt that
+// can still fall back waits up to twice the client's timeout, so a
+// gateway that answers 504 just after the default timeout is heard; a
+// client timeout itself still reaches the caller unchanged.
 
 // testSlowGatewayTimeout stands in for slowGatewayTimeout, scaled down
 // with the test's load-balancer delays. An immediate 504 stays well
@@ -157,16 +159,15 @@ func TestAdaptivePaginationDelayed504StepsDownAfterOneRequest(t *testing.T) {
 	}
 }
 
-// The reported load-balancer configuration, scaled down: the load
-// balancer answers 504 after ~64s and the operator has raised --timeout
-// to 90s. The first 504 must be enough to fall back. A same-size retry
-// would start after the 504 and run into the 90s budget, turning a
-// recoverable 504 into a fatal client timeout: here the retried attempt
-// could not finish before 200+100+200 = 500ms.
-func TestAdaptivePaginationTimeoutJustAboveLoadBalancerDelay(t *testing.T) {
+// The reported load-balancer configuration, scaled down, with no user
+// configuration: the client keeps its default 60s timeout and the load
+// balancer answers 504 after ~64s. A paginated attempt that can still
+// fall back waits up to twice the timeout, so the 504 arrives, and it is
+// handed straight to the fallback instead of being retried at ps=500.
+func TestAdaptivePaginationDefaultTimeoutHearsGateway504(t *testing.T) {
 	const (
-		lbDelay       = 200 * time.Millisecond
-		clientTimeout = 450 * time.Millisecond
+		clientTimeout = 300 * time.Millisecond // the default 60s, scaled
+		lbDelay       = 320 * time.Millisecond // the gateway's ~64s, scaled
 	)
 	ts, counter := countingServer(t, func(w http.ResponseWriter, r *http.Request, size, _ int) {
 		if size > 200 {
@@ -239,6 +240,53 @@ func TestAdaptivePaginationCallerCancellationIsNotAPageSizeSignal(t *testing.T) 
 	}
 	if got := counter.count(200); got != 0 {
 		t.Errorf("ps=200 requests = %d, want 0: cancellation must not trigger fallback", got)
+	}
+}
+
+// assertTimesOutAt checks that err is a client timeout reported after
+// about timeout, not after the doubled paginated budget.
+func assertTimesOutAt(t *testing.T, err error, elapsed, timeout time.Duration) {
+	t.Helper()
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Fatalf("err = %v, want a client timeout", err)
+	}
+	if elapsed >= paginatedTimeoutFactor*timeout {
+		t.Errorf("timed out after %v, want the normal %v timeout, not the paginated %v",
+			elapsed, timeout, paginatedTimeoutFactor*timeout)
+	}
+}
+
+// Requests outside adaptive pagination keep the client's normal timeout:
+// the doubled budget is only for attempts that can still fall back.
+func TestRawClientGetKeepsNormalTimeout(t *testing.T) {
+	const clientTimeout = 300 * time.Millisecond
+	ts, _ := countingServer(t, func(w http.ResponseWriter, r *http.Request, _, _ int) {
+		delayedStatus(w, r, 2*clientTimeout, http.StatusGatewayTimeout)
+	})
+
+	start := time.Now()
+	_, err := sdkRawClient(t, ts.URL, clientTimeout).Get(context.Background(), "api/server/version", nil)
+
+	assertTimesOutAt(t, err, time.Since(start), clientTimeout)
+}
+
+// At the minimum page size there is nothing smaller to fall back to, so
+// the attempt keeps the client's normal timeout too.
+func TestAdaptivePaginationMinimumPageSizeKeepsNormalTimeout(t *testing.T) {
+	const clientTimeout = 300 * time.Millisecond
+	ts, counter := countingServer(t, func(w http.ResponseWriter, r *http.Request, _, _ int) {
+		delayedStatus(w, r, 2*clientTimeout, http.StatusGatewayTimeout)
+	})
+	opts := projectSearchOpts()
+	opts.MaxPageSize = 50
+
+	start := time.Now()
+	_, err := sdkRawClient(t, ts.URL, clientTimeout).GetPaginatedResult(context.Background(), opts)
+
+	assertTimesOutAt(t, err, time.Since(start), clientTimeout)
+	if got := counter.count(50); got != 1 {
+		t.Errorf("ps=50 requests = %d, want 1", got)
 	}
 }
 

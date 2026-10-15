@@ -296,6 +296,9 @@ func (r *RawClient) GetPaginated(ctx context.Context, opts PaginatedOpts) ([]jso
 // opts.Path for the rest of the client's life. A 5xx at 50 is returned.
 // PageSize in the result is the size that succeeded, so a caller deriving
 // a ceiling from PageSize x PageLimit sees it shrink with the fallback.
+// While a smaller size remains, each request waits up to twice the
+// client's timeout, so a gateway's 504 can arrive before the client gives
+// up (see paginatedAttempt).
 func (r *RawClient) GetPaginatedResult(ctx context.Context, opts PaginatedOpts) (PageResult, error) {
 	opts.applyDefaults()
 
@@ -308,7 +311,8 @@ func (r *RawClient) GetPaginatedResult(ctx context.Context, opts PaginatedOpts) 
 
 		// Each attempt starts pagination from page 1.
 		// Partial results from failed attempts are discarded.
-		result, err := r.getPaginatedAtSize(paginatedAttemptContext(ctx, pageSize), attemptOpts)
+		attemptCtx, client := r.paginatedAttempt(ctx, pageSize)
+		result, err := r.getPaginatedAtSize(attemptCtx, client, attemptOpts)
 
 		if err == nil {
 			if pageSize < requestedSize {
@@ -358,30 +362,50 @@ func (r *RawClient) GetPaginatedResult(ctx context.Context, opts PaginatedOpts) 
 // size for the rest of the run. A variable so tests can shorten it.
 var slowGatewayTimeout = 5 * time.Second
 
-// paginatedAttemptContext tells the SDK not to retry a slow 504 at the
-// same page size while a smaller one remains. Here a slow 504 is the
-// fallback's signal: an identical retry costs another full load-balancer
-// delay, and because http.Client.Timeout bounds every SDK attempt
-// together, it can turn a recoverable 504 into a fatal client timeout.
-// At the minimum size there is nothing smaller to try, so the SDK's
-// normal retries stay in force.
-func paginatedAttemptContext(ctx context.Context, pageSize int) context.Context {
-	if _, ok := nextSmallerPageSize(pageSize); ok {
-		return sqapi.WithoutRetryOnSlowStatus(ctx, slowGatewayTimeout, http.StatusGatewayTimeout)
+// paginatedTimeoutFactor is how many times the client's timeout a
+// paginated request may wait while a smaller page size remains. Common
+// gateways (AWS load balancers, nginx, Apache, Azure Front Door) give up
+// on a slow upstream after 60s, the client's own default, so the two
+// race and the client usually loses: it times out just before the 504
+// that would trigger the fallback. Twice the timeout waits that 504 out
+// with room to spare.
+const paginatedTimeoutFactor = 2
+
+// paginatedAttempt returns the context and client for one pagination
+// attempt at pageSize. While a smaller size remains, a slow 504 is the
+// fallback's signal, so the attempt
+//   - waits up to paginatedTimeoutFactor times the client's timeout, so
+//     a gateway's 504 arrives before the client gives up, and
+//   - tells the SDK not to retry a slow 504 at the same size: an
+//     identical retry costs another full gateway delay, and because
+//     http.Client.Timeout bounds every SDK attempt together, it can turn
+//     a recoverable 504 into a fatal client timeout.
+//
+// The longer-timeout client is a copy sharing the same Transport, so
+// auth, retries and the connection pool are unchanged, and it is made
+// per attempt so it always follows the client as configured now. At the
+// minimum size there is nothing smaller to try, so the attempt uses the
+// client and its normal retries unchanged, as does every request outside
+// GetPaginatedResult.
+func (r *RawClient) paginatedAttempt(ctx context.Context, pageSize int) (context.Context, *http.Client) {
+	if _, ok := nextSmallerPageSize(pageSize); !ok {
+		return ctx, r.httpClient
 	}
-	return ctx
+	patient := *r.httpClient
+	patient.Timeout *= paginatedTimeoutFactor
+	return sqapi.WithoutRetryOnSlowStatus(ctx, slowGatewayTimeout, http.StatusGatewayTimeout), &patient
 }
 
 // getPaginatedAtSize performs one complete pagination attempt
-// using a fixed page size.
-func (r *RawClient) getPaginatedAtSize(ctx context.Context, opts PaginatedOpts) (PageResult, error) {
+// using a fixed page size, sending every page through client.
+func (r *RawClient) getPaginatedAtSize(ctx context.Context, client *http.Client, opts PaginatedOpts) (PageResult, error) {
 	opts.applyDefaults()
 
 	params := CloneParams(opts.Params)
 	params.Set(opts.PageParam, "1")
 	params.Set(opts.SizeParam, strconv.Itoa(opts.MaxPageSize))
 
-	body, err := r.doGet(ctx, opts.Path, params)
+	body, err := r.doGetWith(ctx, client, opts.Path, params)
 	if err != nil {
 		return PageResult{}, err
 	}
@@ -425,7 +449,7 @@ func (r *RawClient) getPaginatedAtSize(ctx context.Context, opts PaginatedOpts) 
 		params := CloneParams(opts.Params)
 		params.Set(opts.PageParam, strconv.Itoa(page))
 		params.Set(opts.SizeParam, strconv.Itoa(opts.MaxPageSize))
-		body, err := r.doGet(ctx, opts.Path, params)
+		body, err := r.doGetWith(ctx, client, opts.Path, params)
 		if err != nil {
 			return PageResult{}, err
 		}
@@ -509,6 +533,12 @@ var bodyReadRetryBackoff = []time.Duration{
 }
 
 func (r *RawClient) doGet(ctx context.Context, path string, params url.Values) ([]byte, error) {
+	return r.doGetWith(ctx, r.httpClient, path, params)
+}
+
+// doGetWith is doGet through a given client: GetPaginatedResult passes a
+// longer-timeout copy of the RawClient's own (see paginatedAttempt).
+func (r *RawClient) doGetWith(ctx context.Context, client *http.Client, path string, params url.Values) ([]byte, error) {
 	u := r.baseURL + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
@@ -520,7 +550,7 @@ func (r *RawClient) doGet(ctx context.Context, path string, params url.Values) (
 
 	var lastReadErr error
 	for attempt := 0; ; attempt++ {
-		resp, err := r.httpClient.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			return nil, err
 		}
