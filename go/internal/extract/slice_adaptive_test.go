@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // issuePage504Transport simulates a load balancer returning HTTP 504
