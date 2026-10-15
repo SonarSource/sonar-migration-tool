@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
 // issuePage504Transport simulates a load balancer returning HTTP 504
@@ -94,6 +96,47 @@ func assertAdaptiveIssueRecovery(
 	}
 	if audit.UnexplainedDrift() != 0 {
 		t.Errorf("unexplained drift: got %d, want 0", audit.UnexplainedDrift())
+	}
+}
+
+// TestAdaptiveReSliceKeepsWindowDepth verifies that a window re-sliced
+// after a page-size fallback keeps its place in the walk. Re-entered one
+// level below maxSliceDepth, it must reach the depth backstop instead of
+// restarting the count at zero and bisecting up to 48 levels further.
+func TestAdaptiveReSliceKeepsWindowDepth(t *testing.T) {
+	const total = 6000
+
+	corpus := newIssueCorpus(t)
+	corpus.addSpread(corpusStart, total, time.Second, "deep")
+
+	e, _ := corpus.start()
+	installIssuePage504(e)
+
+	var sink issueCollector
+	s := &issueSlicer{
+		e:         e,
+		base:      taskIssueParams(),
+		sink:      sink.sink,
+		scope:     TruncationScope{Task: issuesTaskName, ProjectKey: "p1", Branch: "main"},
+		seen:      make(map[string]bool),
+		pageSize:  issuePageSize,
+		pageLimit: issuePageLimit,
+		ceiling:   windowCeiling(issuePageLimit, issuePageSize),
+	}
+
+	// The window fits the 10,000 ceiling it was probed against, but the
+	// 504 drops the page size to 200 and the ceiling to 4,000.
+	w := issueWindow{start: corpusStart, end: corpusStart.Add(total * time.Second)}
+	if err := s.fetchWindowItems(context.Background(), w, total, maxSliceDepth-1); err != nil {
+		t.Fatalf("fetchWindowItems: %v", err)
+	}
+
+	if s.ceiling != 4000 {
+		t.Fatalf("ceiling = %d, want 4000 after the fallback", s.ceiling)
+	}
+	if s.degradedReason != common.ReasonMaxDepth {
+		t.Errorf("degradedReason = %q, want %q: the re-slice must keep the window's depth",
+			s.degradedReason, common.ReasonMaxDepth)
 	}
 }
 

@@ -473,12 +473,15 @@ func (s *issueSlicer) fetchIssueWindow(ctx context.Context, w issueWindow, depth
 		}
 		return s.fetchAtomicWindow(ctx, w, total, depth)
 	}
-	return s.fetchWindowItems(ctx, w, total)
+	return s.fetchWindowItems(ctx, w, total, depth)
 }
 
 // fetchWindowItems reads a window the probe said would fit, and absorbs
-// it.
-func (s *issueSlicer) fetchWindowItems(ctx context.Context, w issueWindow, probed int) error {
+// it. If a page-size fallback lowered the ceiling in between and the
+// fetch came back truncated, it re-slices the window instead; depth is
+// the window's place in the walk, so that re-slice stays bounded by
+// maxSliceDepth.
+func (s *issueSlicer) fetchWindowItems(ctx context.Context, w issueWindow, probed, depth int) error {
 	previousCeiling := s.ceiling
 
 	res, err := s.fetchWindow(ctx, w, false)
@@ -488,7 +491,10 @@ func (s *issueSlicer) fetchWindowItems(ctx context.Context, w issueWindow, probe
 
 	// If an HTTP 5xx forced a smaller page size and the result
 	// is now truncated, do not absorb the incomplete result.
-	// Re-probe and partition the window using the new ceiling.
+	// Re-probe and partition the window using the new ceiling,
+	// one level deeper rather than back at zero: the re-entry
+	// counts toward maxSliceDepth, so the backstop alone still
+	// bounds the walk.
 	if res.Truncated && s.ceiling < previousCeiling {
 		s.e.Logger.Warn(
 			"issue page size decreased; re-slicing the affected window",
@@ -499,7 +505,7 @@ func (s *issueSlicer) fetchWindowItems(ctx context.Context, w issueWindow, probe
 			"new_ceiling", s.ceiling,
 			"page_size", res.PageSize,
 		)
-		return s.fetchIssueWindow(ctx, w, 0)
+		return s.fetchIssueWindow(ctx, w, depth+1)
 	}
 
 	s.windows++
@@ -644,7 +650,7 @@ func (s *issueSlicer) closeAtomicWindow(ctx context.Context, w issueWindow, open
 	if total > s.ceiling {
 		return s.fetchAtomicWindow(ctx, closed, total, depth)
 	}
-	return s.fetchWindowItems(ctx, closed, total)
+	return s.fetchWindowItems(ctx, closed, total, depth)
 }
 
 // widenOpenEdge asks whether w's open edge selects anything beyond its
