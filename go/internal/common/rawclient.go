@@ -16,8 +16,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 	"sync"
+	"time"
 )
 
 // HTTPError represents an HTTP error response with a status code.
@@ -84,6 +84,7 @@ type RawClient struct {
     // The mutex protects concurrent extraction requests.
     pageSizeMu sync.Mutex
     pageSizes map[string]int
+		
 	// onTruncation receives one record per truncated paginated fetch.
 	// It lives on the client rather than in PaginatedOpts so a single
 	// installation covers every call site, including the ones nobody
