@@ -137,6 +137,9 @@ func (r *RawClient) GetRaw(ctx context.Context, path string, params url.Values) 
 	return r.doGet(ctx, path, params)
 }
 
+// ProjectSearchPageSize limits project search requests to
+// avoid timeouts on large SonarQube Server instances.
+const ProjectSearchPageSize = 50
 // PaginatedOpts configures a paginated fetch.
 type PaginatedOpts struct {
 	Path        string
