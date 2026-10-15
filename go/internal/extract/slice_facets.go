@@ -418,8 +418,6 @@ func (s *issueSlicer) fetchByRemainingFacets(ctx context.Context, w issueWindow,
 	return nil
 }
 
-// fetchCellOrError is the non-give-up leaf: the caller has already
-// confirmed this cell fits, so only the fetch itself can still fail.
 // fetchCellOrError fetches a facet cell that was expected to fit.
 // If pagination reduces the effective ceiling, retry by partitioning
 // the cell through the remaining facets rather than losing issues.
