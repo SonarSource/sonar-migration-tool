@@ -345,8 +345,8 @@ func TestAdaptivePaginationMinimumPageSizeKeepsSDKRetries(t *testing.T) {
 }
 
 // A fast 504 is a proxy blip, not a page-size signal: the SDK retries it
-// at the same size, so a brief burst does not lower the endpoint's page
-// size for the rest of the run.
+// at the same size, so a burst shorter than about 1 second does not lower
+// the endpoint's page size for the rest of the run.
 func TestAdaptivePaginationFast504RetriedAtSameSize(t *testing.T) {
 	ts, counter := countingServer(t, func(w http.ResponseWriter, r *http.Request, size, nth int) {
 		if size == 500 && nth <= 2 {

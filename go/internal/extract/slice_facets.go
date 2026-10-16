@@ -425,9 +425,9 @@ func (s *issueSlicer) fetchByRemainingFacets(ctx context.Context, w issueWindow,
 
 // fetchCellOrError fetches a facet cell the probe said would fit, given
 // its probed cellTotal and the facets still available below it. The
-// cell can still come back truncated: a page-size fallback lowered the
-// ceiling after the probe, the cell grew, or the fetch carried no
-// readable total. With finer facets left it is partitioned
+// cell can still come back truncated: the cell grew after the probe, or
+// the fetch carried no readable total. A page-size fallback is not a
+// cause, because it does not lower the ceiling (see windowCeiling). With finer facets left it is partitioned
 // through them, and the fetch stops after page 1 because a truncated
 // result would be thrown away. With none left, the result in hand is the
 // most the cell can give, so it is read in full and given up on directly
@@ -450,7 +450,7 @@ func (s *issueSlicer) fetchCellOrError(ctx context.Context, w issueWindow, cellT
 
 	if !finer {
 		return s.recordGiveUp(w, cellTotal, cellLabel(filters...),
-			"the facet cascade (rules, directories, files) is exhausted and this cell came back over the ceiling (page-size fallback or growth since the probe)", res)
+			"the facet cascade (rules, directories, files) is exhausted and this cell came back over the ceiling (growth since the probe or no readable total)", res)
 	}
 
 	s.e.Logger.Warn(

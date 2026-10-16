@@ -375,7 +375,7 @@ file.
 | `--enterprise_key <key>` | `target.enterprise_key` | SonarQube Cloud enterprise key (defaults to `--default_organization`). |
 | `--export_dir <dir>` | `export_directory` | Working directory (default `./migration-files/`). |
 | `--concurrency <n>` | `concurrency` | Max concurrent HTTP requests. |
-| `--timeout <s>` | `timeout` | HTTP request timeout in seconds. |
+| `--timeout <s>` | `timeout` | HTTP request timeout in seconds. A paginated request that can still fall back to a smaller page size waits up to twice this. |
 | `--pem_file_path <path>` | `source.pem_file_path` | Client mTLS PEM file. |
 | `--key_file_path <path>` | `source.key_file_path` | Client mTLS key file. |
 | `--cert_password <pw>` | `source.cert_password` | Client mTLS password. |

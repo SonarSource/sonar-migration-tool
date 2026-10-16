@@ -131,6 +131,23 @@ func (r *RawClient) rememberPageSize(path string, size int) {
 	}
 }
 
+// pageLimitAt returns the page cap to use at pageSize. Callers size
+// PageLimit for the page size they asked for (20 pages x 500 = the
+// 10,000-result ceiling). After a fallback, the same number of smaller
+// pages would read fewer items, so the cap grows by the same factor the
+// page size shrank and PageSize x PageLimit stays constant. A cap of 0
+// (no cap) stays 0.
+//
+// The cap rounds up so the ceiling never falls. That cannot carry a
+// ceiling within ResultWindowLimit past it, where the server answers
+// HTTP 400 rather than a short page: every fallback size divides 10,000.
+func pageLimitAt(limit, requestedSize, pageSize int) int {
+	if limit <= 0 || pageSize >= requestedSize {
+		return limit
+	}
+	return (limit*requestedSize + pageSize - 1) / pageSize // round up
+}
+
 // nextSmallerPageSize returns the next fallback page size.
 // The fallback sequence is 500 -> 200 -> 100 -> 50.
 func nextSmallerPageSize(current int) (int, bool) {
@@ -294,8 +311,9 @@ func (r *RawClient) GetPaginated(ctx context.Context, opts PaginatedOpts) ([]jso
 // the next smaller size (500 -> 200 -> 100 -> 50), discarding the failed
 // attempt's items, and a smaller size that works is remembered for
 // opts.Path for the rest of the client's life. A 5xx at 50 is returned.
-// PageSize in the result is the size that succeeded, so a caller deriving
-// a ceiling from PageSize x PageLimit sees it shrink with the fallback.
+// PageSize in the result is the size that succeeded. PageLimit grows as the
+// size shrinks (see pageLimitAt), so PageSize x PageLimit, and the item
+// ceiling a caller derives from it, does not fall with the fallback.
 // While a smaller size remains, each request waits up to twice the
 // client's timeout, so a gateway's 504 can arrive before the client gives
 // up (see paginatedAttempt).
@@ -308,6 +326,7 @@ func (r *RawClient) GetPaginatedResult(ctx context.Context, opts PaginatedOpts) 
 	for {
 		attemptOpts := opts
 		attemptOpts.MaxPageSize = pageSize
+		attemptOpts.PageLimit = pageLimitAt(opts.PageLimit, requestedSize, pageSize)
 
 		// Each attempt starts pagination from page 1.
 		// Partial results from failed attempts are discarded.
@@ -358,8 +377,10 @@ func (r *RawClient) GetPaginatedResult(ctx context.Context, opts PaginatedOpts) 
 // after its own timeout, typically tens of seconds (AWS load balancers
 // and nginx default to 60s), so a 504 that took at least this long is a
 // page-size signal. A faster one keeps the SDK's normal retries, which
-// absorb a brief burst instead of letting it lower the endpoint's page
-// size for the rest of the run. A variable so tests can shorten it.
+// absorb a burst shorter than about 1 second (they back off 0.1s, 0.2s
+// and 0.4s) instead of letting it lower the endpoint's page size for the
+// rest of the run. A longer outage still steps the size down. A variable
+// so tests can shorten it.
 var slowGatewayTimeout = 5 * time.Second
 
 // paginatedTimeoutFactor is how many times the client's timeout a

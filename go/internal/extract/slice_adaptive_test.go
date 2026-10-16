@@ -12,8 +12,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
 // issuePage504Transport simulates a load balancer returning HTTP 504
@@ -97,55 +95,18 @@ func assertAdaptiveIssueRecovery(
 	if audit.UnexplainedDrift() != 0 {
 		t.Errorf("unexplained drift: got %d, want 0", audit.UnexplainedDrift())
 	}
-}
-
-// TestAdaptiveReSliceKeepsWindowDepth verifies that a window re-sliced
-// after a page-size fallback keeps its place in the walk. Re-entered one
-// level below maxSliceDepth, it must reach the depth backstop instead of
-// restarting the count at zero and bisecting up to 48 levels further.
-func TestAdaptiveReSliceKeepsWindowDepth(t *testing.T) {
-	const total = 6000
-
-	corpus := newIssueCorpus(t)
-	corpus.addSpread(corpusStart, total, time.Second, "deep")
-
-	e, _ := corpus.start()
-	installIssuePage504(e)
-
-	var sink issueCollector
-	s := &issueSlicer{
-		e:         e,
-		base:      taskIssueParams(),
-		sink:      sink.sink,
-		scope:     TruncationScope{Task: issuesTaskName, ProjectKey: "p1", Branch: "main"},
-		seen:      make(map[string]bool),
-		pageSize:  issuePageSize,
-		pageLimit: issuePageLimit,
-		ceiling:   windowCeiling(issuePageLimit, issuePageSize),
-	}
-
-	// The window fits the 10,000 ceiling it was probed against, but the
-	// 504 drops the page size to 200 and the ceiling to 4,000.
-	w := issueWindow{start: corpusStart, end: corpusStart.Add(total * time.Second)}
-	if err := s.fetchWindowItems(context.Background(), w, total, maxSliceDepth-1); err != nil {
-		t.Fatalf("fetchWindowItems: %v", err)
-	}
-
-	if s.ceiling != 4000 {
-		t.Fatalf("ceiling = %d, want 4000 after the fallback", s.ceiling)
-	}
-	if s.degradedReason != common.ReasonMaxDepth {
-		t.Errorf("degradedReason = %q, want %q: the re-slice must keep the window's depth",
-			s.degradedReason, common.ReasonMaxDepth)
+	if audit.Duplicates != 0 {
+		t.Errorf("reconciliation duplicates: got %d, want 0", audit.Duplicates)
 	}
 }
 
 // TestAdaptiveIssueDateSlicingRecoversAfter504 verifies that a
-// later-page HTTP 504 reduces ps from 500 to 200, lowers the
-// effective ceiling from 10000 to 4000, and recovers every issue
-// through date slicing.
+// later-page HTTP 504 inside a date window reduces ps from 500 to 200,
+// keeps the effective ceiling at 10,000, and recovers every issue
+// through date slicing. The project is past 10,000 so the walk slices
+// at all; each window then reads at ps=200 with a raised page cap.
 func TestAdaptiveIssueDateSlicingRecoversAfter504(t *testing.T) {
-	const total = 6000
+	const total = 12000
 
 	corpus := newIssueCorpus(t)
 	corpus.addSpread(corpusStart, total, time.Second, "issue")
@@ -176,10 +137,10 @@ func TestAdaptiveIssueDateSlicingRecoversAfter504(t *testing.T) {
 
 // TestAdaptiveIssueFacetSlicingRecoversAfter504 verifies that
 // a single-second burst is still recovered when a facet cell
-// encounters HTTP 504 and its effective page ceiling decreases.
+// encounters HTTP 504 and falls back to a smaller page size.
 //
-// Each type/severity group contains 6000 issues. The rule facet
-// divides each group into two smaller, recoverable cells.
+// Each type/severity group contains 6000 issues, which fits the
+// 10,000 ceiling at every page size, so each cell is read whole.
 func TestAdaptiveIssueFacetSlicingRecoversAfter504(t *testing.T) {
 	const perRule = 3000
 	const total = perRule * 4

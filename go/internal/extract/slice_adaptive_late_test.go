@@ -141,9 +141,9 @@ func assertLateSliceFallback(
 }
 
 // TestAdaptiveLateDateFallbackRecoversAllIssues proves that an
-// HTTP 504 during a date-window fetch causes re-slicing using
-// the new 4,000-issue ceiling, without losing or duplicating
-// any issues.
+// HTTP 504 during a date-window fetch steps the window down to
+// ps=200 with the 10,000-issue ceiling intact, without losing or
+// duplicating any issues.
 func TestAdaptiveLateDateFallbackRecoversAllIssues(t *testing.T) {
 	const total = 12000
 
@@ -151,7 +151,7 @@ func TestAdaptiveLateDateFallbackRecoversAllIssues(t *testing.T) {
 
 	// Spread issues across time. The initial 10,000 ceiling
 	// forces date slicing into approximately 6,000-issue
-	// windows, which then require further slicing at ps=200.
+	// windows, which are then read whole at ps=200.
 	corpus.addSpread(
 		corpusStart,
 		total,
@@ -181,12 +181,9 @@ func TestAdaptiveLateDateFallbackRecoversAllIssues(t *testing.T) {
 	assertAdaptiveIssueRecovery(t, &sink, tracker, total)
 }
 
-// TestAdaptiveLateFacetFallbackRecoversAllIssues proves that
-// a previously valid 6,000-issue facet cell is partitioned
-// further after its effective ceiling falls to 4,000.
-//
-// The rule facet splits each 6,000-issue cell into two
-// 3,000-issue cells.
+// TestAdaptiveLateFacetFallbackRecoversAllIssues proves that an
+// HTTP 504 inside a 6,000-issue facet cell steps it down to ps=200
+// without losing or duplicating any issues.
 func TestAdaptiveLateFacetFallbackRecoversAllIssues(t *testing.T) {
 	const perRule = 3000
 	const total = perRule * 4
@@ -251,11 +248,11 @@ func TestAdaptiveLateFacetFallbackRecoversAllIssues(t *testing.T) {
 	assertAdaptiveIssueRecovery(t, &sink, tracker, total)
 }
 
-// TestAdaptiveTruncatedFacetCellStopsAfterFirstPage proves that a
-// facet cell found truncated after a fallback, with finer facets still
-// available, costs one page before it is partitioned instead of the 20
-// pages that would be thrown away.
-func TestAdaptiveTruncatedFacetCellStopsAfterFirstPage(t *testing.T) {
+// TestAdaptiveFacetCellStaysCompleteAfterFallback proves that a facet
+// cell that fitted the ceiling when probed still fits after a fallback:
+// the raised page cap reads it whole at ps=200, so it is never
+// partitioned by a finer facet and nothing is recorded as lost.
+func TestAdaptiveFacetCellStaysCompleteAfterFallback(t *testing.T) {
 	const perRule = 3000
 	const total = perRule * 4
 
@@ -266,7 +263,7 @@ func TestAdaptiveTruncatedFacetCellStopsAfterFirstPage(t *testing.T) {
 		{"CODE_SMELL", "MINOR", "java:S3"},
 		{"CODE_SMELL", "MINOR", "java:S4"},
 	} {
-		corpus.addBurstTagged(corpusStart, perRule, fmt.Sprintf("stop-%d", i), cell.typ, cell.sev, cell.rule)
+		corpus.addBurstTagged(corpusStart, perRule, fmt.Sprintf("whole-%d", i), cell.typ, cell.sev, cell.rule)
 	}
 
 	e, tracker := corpus.start()
@@ -278,25 +275,32 @@ func TestAdaptiveTruncatedFacetCellStopsAfterFirstPage(t *testing.T) {
 	}
 
 	// The 504 fired inside a type/severity cell, and that cell was then
-	// fetched at ps=200, so the check below is not vacuous.
+	// fetched at ps=200, so the checks below are not vacuous.
 	assertLateSliceFallback(t, corpus, tr)
 
-	// The 6,000-issue BUG/MAJOR cell is refetched at ps=200 after the
-	// 504 and found over the new 4,000 ceiling: page 1 says so, and the
-	// rule facet partitions it from there.
+	// Each 6,000-issue cell is 30 pages at ps=200. Reading past page 20
+	// is what the raised cap buys; a rule filter would mean the cell was
+	// found over a lowered ceiling and partitioned.
+	pastOldCap := false
 	for _, q := range corpus.allQueries() {
-		if q.Get("ps") == "200" && q.Get(typesParam) != "" && q.Get(rulesParam) == "" && q.Get("p") != "1" {
-			t.Errorf("truncated cell read past page 1 before partitioning: %v", q)
+		if q.Get(rulesParam) != "" {
+			t.Errorf("cell partitioned by rule after the fallback: %v", q)
 		}
+		if q.Get("ps") == "200" && q.Get(typesParam) != "" && q.Get("p") == "30" {
+			pastOldCap = true
+		}
+	}
+	if !pastOldCap {
+		t.Error("no type/severity cell was read to page 30 at ps=200")
 	}
 	assertAdaptiveIssueRecovery(t, &sink, tracker, total)
 }
 
-// TestAdaptiveTruncatedLeafCellIsReadOnce proves that a files-level
-// cell found truncated after a fallback, with no finer facet left, is
-// read once, kept and recorded, instead of being read in full, thrown
-// away, and read again by the give-up path.
-func TestAdaptiveTruncatedLeafCellIsReadOnce(t *testing.T) {
+// TestAdaptiveLeafCellStaysCompleteAfterFallback proves that a
+// files-level cell, with no finer facet left, is read whole and once
+// after a fallback: every ps=200 page of each file is requested exactly
+// once, and nothing is recorded as lost.
+func TestAdaptiveLeafCellStaysCompleteAfterFallback(t *testing.T) {
 	const perFile = 6000
 
 	corpus := newIssueCorpus(t)
@@ -314,19 +318,9 @@ func TestAdaptiveTruncatedLeafCellIsReadOnce(t *testing.T) {
 		t.Fatalf("late HTTP 504 injections: got %d, want 1", got)
 	}
 
-	// Each file cell is read at ps=200 exactly once: 20 pages, each once.
-	assertFilePagesReadOnce(t, corpus, 2)
-
-	// The 4,000-issue ceiling keeps 4,000 of each 6,000-issue file, once
-	// each, and records the other 2,000 per file as lost.
-	assertDeliveredOnce(t, &sink, 8000, 2*perFile)
-	state := tracker.State()
-	if lost := recordedLoss(state); len(state.Records) != 2 || lost != 4000 {
-		t.Errorf("records = %+v, want two recording 4,000 lost in total", state.Records)
-	}
-	if drift := onlyReconciliation(t, state).UnexplainedDrift(); drift != 0 {
-		t.Errorf("unexplained drift: got %d, want 0", drift)
-	}
+	// Each file cell is read at ps=200 exactly once: 30 pages, each once.
+	assertFilePagesReadOnce(t, corpus, 2, perFile/200)
+	assertAdaptiveIssueRecovery(t, &sink, tracker, 2*perFile)
 }
 
 // TestAdaptiveTruncatedCellWithoutTotalIsPartitioned proves that a facet
@@ -370,8 +364,9 @@ func TestAdaptiveTruncatedCellWithoutTotalIsPartitioned(t *testing.T) {
 }
 
 // assertFilePagesReadOnce checks that every ps=200 page of every
-// files-level cell was requested exactly once, across files cells.
-func assertFilePagesReadOnce(t *testing.T, corpus *issueCorpus, files int) {
+// files-level cell was requested exactly once, across files cells of
+// pagesPerFile pages each.
+func assertFilePagesReadOnce(t *testing.T, corpus *issueCorpus, files, pagesPerFile int) {
 	t.Helper()
 	pageReads := make(map[string]int)
 	for _, q := range corpus.allQueries() {
@@ -384,7 +379,7 @@ func assertFilePagesReadOnce(t *testing.T, corpus *issueCorpus, files int) {
 			t.Errorf("%s read %d times at ps=200, want once", page, n)
 		}
 	}
-	if want := files * issuePageLimit; len(pageReads) != want {
+	if want := files * pagesPerFile; len(pageReads) != want {
 		t.Errorf("distinct ps=200 file pages = %d, want %d", len(pageReads), want)
 	}
 }

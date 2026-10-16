@@ -57,17 +57,17 @@ A paginated request that can still fall back to a smaller page size already wait
 ---
 
 ### HTTP 504 Gateway Timeout on large pages
-<!-- updated: 2026-10-16_00:50:30 by Claude -->
+<!-- updated: 2026-10-16_13:21:04 by Claude -->
 
 **Symptom**: `extract` logs an HTTP 504 (or another 5xx) from a search endpoint such as `api/projects/search` or `api/issues/search`, often after about 60 seconds. A load balancer or reverse proxy in front of SonarQube Server gave up waiting for a large page.
 
 **What the tool does**: paginated reads adapt their page size, with nothing to configure.
 
 - A request that fails with HTTP 5xx restarts that fetch from page 1 at a smaller page size: 500 → 200 → 100 → 50. Items from the failed attempt are discarded, so nothing is duplicated.
-- The size that works is remembered per endpoint for the rest of the run, so only the first request pays for the wait.
+- The size that works is remembered per endpoint for the rest of the run, so once one request has fallen back, later requests to that endpoint start at the smaller size. Requests to the same endpoint that were already in flight at that point each pay the wait once.
 - While a smaller page size remains, a paginated request waits up to twice `--timeout` (120 s by default). Common gateways (AWS load balancers, nginx, Azure Front Door) answer 504 after 60 s, the tool's own default, so without this the tool would time out just before the gateway's 504 arrived.
-- A 504 that took 5 s or more is not retried at the same page size. A faster one is treated as a blip and retried as usual.
-- Issue extraction still returns every issue: the per-query ceiling falls with the page size (10,000 / 4,000 / 2,000 / 1,000 at 500 / 200 / 100 / 50), and the issue slicer partitions further to stay under it.
+- A 504 that took 5 s or more is not retried at the same page size. A faster one is retried as usual, which absorbs a burst shorter than about 1 second without lowering the page size.
+- A smaller page size loses nothing: the page cap grows as the page size shrinks (20 / 50 / 100 / 200 pages at 500 / 200 / 100 / 50), so issues, hotspots, the component measures tree and project analyses still read up to 10,000 items per query, the server's own limit. The only cost is more, smaller requests.
 
 Each step down is logged:
 
@@ -288,11 +288,11 @@ curl -u "$SC_TOKEN:" \
 ---
 
 ## A project migrated with exactly 10,000 issues
-<!-- updated: 2026-10-16_00:15:10 -->
+<!-- updated: 2026-10-16_13:21:04 -->
 
 **Symptom.** A source project you know has far more than 10,000 issues arrives on SonarQube Cloud with exactly 10,000, or with some other suspiciously round shortfall. The migration report's Limitations section carries a bullet naming the project, and the `extract` run printed a warning block just before its "Extract Complete" line.
 
-**Cause.** SonarQube Server returns at most 10,000 results for any single search query — an Elasticsearch `index.max_result_window` limit, not a tool setting. Requesting a row past the 10,000th is an outright HTTP 400, so a query whose total is larger can only ever yield the first 10,000. Since [#574](https://github.com/SonarSource/sonar-migration-tool/issues/574) the tool works around this for issues by slicing the query into issue-creation-date ranges until each one fits, falling back since [#630](https://github.com/SonarSource/sonar-migration-tool/issues/630) to slicing by issue type, severity, rule, directory and file when a single creation second is still over the ceiling — and it reports whatever it still could not retrieve rather than truncating in silence. If a load balancer forced a smaller page size (see [HTTP 504 Gateway Timeout on large pages](#http-504-gateway-timeout-on-large-pages)), the per-query ceiling is lower — 4,000, 2,000 or 1,000 — and slicing adapts to it automatically.
+**Cause.** SonarQube Server returns at most 10,000 results for any single search query — an Elasticsearch `index.max_result_window` limit, not a tool setting. Requesting a row past the 10,000th is an outright HTTP 400, so a query whose total is larger can only ever yield the first 10,000. Since [#574](https://github.com/SonarSource/sonar-migration-tool/issues/574) the tool works around this for issues by slicing the query into issue-creation-date ranges until each one fits, falling back since [#630](https://github.com/SonarSource/sonar-migration-tool/issues/630) to slicing by issue type, severity, rule, directory and file when a single creation second is still over the ceiling — and it reports whatever it still could not retrieve rather than truncating in silence. If a load balancer forced a smaller page size (see [HTTP 504 Gateway Timeout on large pages](#http-504-gateway-timeout-on-large-pages)), the ceiling is still 10,000: the tool reads proportionally more pages, so the only cost is more requests.
 
 **Confirm it.** The atomic-window case — the rare one neither date nor facet slicing can fix — logs its own line from the slicer, with a `cause` field spelling out specifically why the cascade stopped where it did:
 
