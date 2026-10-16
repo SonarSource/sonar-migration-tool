@@ -427,11 +427,12 @@ func (s *issueSlicer) fetchByRemainingFacets(ctx context.Context, w issueWindow,
 // its probed cellTotal and the facets still available below it. The
 // cell can still come back truncated: the cell grew after the probe, or
 // the fetch carried no readable total. A page-size fallback is not a
-// cause, because it does not lower the ceiling (see windowCeiling). With finer facets left it is partitioned
-// through them, and the fetch stops after page 1 because a truncated
-// result would be thrown away. With none left, the result in hand is the
-// most the cell can give, so it is read in full and given up on directly
-// instead of being fetched a second time.
+// cause, because it does not lower the ceiling (see windowCeiling).
+// With finer facets left it is partitioned through them, and the fetch
+// stops after page 1 because a truncated result would be thrown away.
+// With none left, the result in hand is the most the cell can give, so
+// it is read in full and given up on directly instead of being fetched
+// a second time.
 func (s *issueSlicer) fetchCellOrError(ctx context.Context, w issueWindow, cellTotal int, remainingFacets []string, filters ...[2]string) error {
 	finer := len(remainingFacets) > 0
 	res, err := s.fetchAndAbsorbCell(ctx, w, finer, filters...)

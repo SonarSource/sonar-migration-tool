@@ -47,20 +47,18 @@ func TestPageLimitAt(t *testing.T) {
 // TestAdaptiveFallbackKeepsPageCapCeiling reproduces the review finding
 // on #645: an earlier fetch drops the endpoint to ps=100, and a later
 // capped fetch on the same endpoint must still read every item up to the
-// 20 x 500 ceiling it was sized for, not 20 x 100 = 2,000.
+// 20 x 500 ceiling it was sized for, not 20 x 100 = 2,000. A project past
+// that ceiling is still clamped at exactly 10,000, never beyond it.
 func TestAdaptiveFallbackKeepsPageCapCeiling(t *testing.T) {
 	const bigProject = 2500
+	totals := map[string]int{"small": 10, "big": bigProject, "over": 12000}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if size, _ := strconv.Atoi(r.URL.Query().Get("ps")); size > 100 {
 			http.Error(w, "gateway timeout", http.StatusGatewayTimeout)
 			return
 		}
-		total := 10
-		if r.URL.Query().Get("project") == "big" {
-			total = bigProject
-		}
-		writeAdaptiveTestPage(t, w, r, total)
+		writeAdaptiveTestPage(t, w, r, totals[r.URL.Query().Get("project")])
 	}))
 	defer server.Close()
 
@@ -97,6 +95,17 @@ func TestAdaptiveFallbackKeepsPageCapCeiling(t *testing.T) {
 	}
 	assertCompleteUniqueKeys(t, res.Items, bigProject)
 	if len(records) != 0 {
-		t.Errorf("truncation records = %+v, want none", records)
+		t.Fatalf("truncation records = %+v, want none", records)
+	}
+
+	// The record must state the cap the fetch really used, so the report
+	// names the server's limit and not a lower one the tool set.
+	over := fetch("over")
+	if over.Fetched != ResultWindowLimit || !over.Truncated || over.Reason != ReasonPageLimitClamp {
+		t.Errorf("over project: fetched=%d truncated=%v reason=%q, want %d, true, %q",
+			over.Fetched, over.Truncated, over.Reason, ResultWindowLimit, ReasonPageLimitClamp)
+	}
+	if len(records) != 1 || records[0].Lost != 2000 || records[0].PageSize != 100 || records[0].PageLimit != 100 {
+		t.Errorf("records = %+v, want one: 2,000 lost at page size 100, page limit 100", records)
 	}
 }
