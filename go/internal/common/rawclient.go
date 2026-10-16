@@ -16,7 +16,10 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	sqapi "github.com/sonar-solutions/sq-api-go"
 )
 
 // HTTPError represents an HTTP error response with a status code.
@@ -79,6 +82,11 @@ type RawClient struct {
 	httpClient *http.Client
 	baseURL    string // normalised with trailing slash
 
+	// Remember successful page sizes separately for each API endpoint.
+	// The mutex protects concurrent extraction requests.
+	pageSizeMu sync.Mutex
+	pageSizes  map[string]int
+
 	// onTruncation receives one record per truncated paginated fetch.
 	// It lives on the client rather than in PaginatedOpts so a single
 	// installation covers every call site, including the ones nobody
@@ -89,7 +97,66 @@ type RawClient struct {
 
 // NewRawClient wraps an sqapi.Client's HTTP infrastructure.
 func NewRawClient(httpClient *http.Client, baseURL string) *RawClient {
-	return &RawClient{httpClient: httpClient, baseURL: baseURL}
+	return &RawClient{
+		httpClient: httpClient,
+		baseURL:    baseURL,
+		pageSizes:  make(map[string]int),
+	}
+}
+
+// pageSizeFor returns the smaller of the requested page size
+// and any previously remembered size for the endpoint.
+func (r *RawClient) pageSizeFor(path string, requested int) int {
+	r.pageSizeMu.Lock()
+	defer r.pageSizeMu.Unlock()
+
+	if size, ok := r.pageSizes[path]; ok && size < requested {
+		return size
+	}
+	return requested
+}
+
+// rememberPageSize stores a smaller successful page size
+// for future requests to the same endpoint.
+func (r *RawClient) rememberPageSize(path string, size int) {
+	r.pageSizeMu.Lock()
+	defer r.pageSizeMu.Unlock()
+
+	if r.pageSizes == nil {
+		r.pageSizes = make(map[string]int)
+	}
+
+	if current, ok := r.pageSizes[path]; !ok || size < current {
+		r.pageSizes[path] = size
+	}
+}
+
+// pageLimitAt returns the page cap to use at pageSize. Callers size
+// PageLimit for the page size they asked for (20 pages x 500 = the
+// 10,000-result ceiling). After a fallback, the same number of smaller
+// pages would read fewer items, so the cap grows by the same factor the
+// page size shrank and PageSize x PageLimit stays constant. A cap of 0
+// (no cap) stays 0.
+//
+// The cap rounds up so the ceiling never falls. That cannot carry a
+// ceiling within ResultWindowLimit past it, where the server answers
+// HTTP 400 rather than a short page: every fallback size divides 10,000.
+func pageLimitAt(limit, requestedSize, pageSize int) int {
+	if limit <= 0 || pageSize >= requestedSize {
+		return limit
+	}
+	return (limit*requestedSize + pageSize - 1) / pageSize // round up
+}
+
+// nextSmallerPageSize returns the next fallback page size.
+// The fallback sequence is 500 -> 200 -> 100 -> 50.
+func nextSmallerPageSize(current int) (int, bool) {
+	for _, size := range []int{200, 100, 50} {
+		if current > size {
+			return size, true
+		}
+	}
+	return 0, false
 }
 
 // BaseURL returns the client's base URL.
@@ -168,7 +235,7 @@ type PaginatedOpts struct {
 
 	// SuppressTruncationRecord keeps a clamp out of the artefact
 	// because the caller will record a more accurate reason itself.
-	// The slicer's entry fetch sets it: there, a clamp is the trigger
+	// The slicer's entry fetch sets it: a clamp is the trigger
 	// to go and fetch the rest, not a loss.
 	SuppressTruncationRecord bool
 }
@@ -189,8 +256,7 @@ func (o *PaginatedOpts) applyDefaults() {
 }
 
 // PageResult is the complete outcome of a paginated fetch: the items,
-// plus everything the caller needs in order to know what was NOT
-// fetched.
+// plus everything the caller needs to know what was NOT fetched.
 //
 // PageSize and PageLimit carry the EFFECTIVE values the fetch actually
 // used, after applyDefaults. Nothing downstream should re-derive them:
@@ -240,14 +306,129 @@ func (r *RawClient) GetPaginated(ctx context.Context, opts PaginatedOpts) ([]jso
 // not derived from Fetched < Total: ExtractArray wraps an object at the
 // result key (api/rules/search "actives") as a single element, so that
 // comparison would fire on perfectly healthy responses.
+//
+// The page size adapts. An HTTP 5xx restarts the fetch from page 1 at
+// the next smaller size (500 -> 200 -> 100 -> 50), discarding the failed
+// attempt's items, and a smaller size that works is remembered for
+// opts.Path for the rest of the client's life. A 5xx at 50 is returned.
+// PageSize in the result is the size that succeeded. PageLimit grows as the
+// size shrinks (see pageLimitAt), so PageSize x PageLimit, and the item
+// ceiling a caller derives from it, does not fall with the fallback.
+// While a smaller size remains, each request waits up to twice the
+// client's timeout, so a gateway's 504 can arrive before the client gives
+// up (see paginatedAttempt).
 func (r *RawClient) GetPaginatedResult(ctx context.Context, opts PaginatedOpts) (PageResult, error) {
+	opts.applyDefaults()
+
+	requestedSize := opts.MaxPageSize
+	pageSize := r.pageSizeFor(opts.Path, requestedSize)
+
+	for {
+		attemptOpts := opts
+		attemptOpts.MaxPageSize = pageSize
+		attemptOpts.PageLimit = pageLimitAt(opts.PageLimit, requestedSize, pageSize)
+
+		// Each attempt starts pagination from page 1.
+		// Partial results from failed attempts are discarded.
+		attemptCtx, client := r.paginatedAttempt(ctx, pageSize)
+		result, err := r.getPaginatedAtSize(attemptCtx, client, attemptOpts)
+
+		if err == nil {
+			if pageSize < requestedSize {
+				r.rememberPageSize(opts.Path, pageSize)
+			}
+			return result, nil
+		}
+
+		// Only HTTP 5xx errors trigger a smaller page size.
+		var httpErr *HTTPError
+		if !errors.As(err, &httpErr) ||
+			httpErr.StatusCode < 500 ||
+			httpErr.StatusCode >= 600 {
+			return PageResult{}, err
+		}
+
+		nextSize, ok := nextSmallerPageSize(pageSize)
+		if !ok {
+			slog.Error(
+				"paginated API request failed with HTTP 5xx at minimum fallback page size",
+				"endpoint", opts.Path,
+				"page_size", pageSize,
+				"status", httpErr.StatusCode,
+				"error", err,
+			)
+			return PageResult{}, err
+		}
+
+		slog.Warn(
+			"paginated API request returned HTTP 5xx; retrying with smaller page size",
+			"endpoint", opts.Path,
+			"status", httpErr.StatusCode,
+			"page_size", pageSize,
+			"retry_page_size", nextSize,
+		)
+
+		pageSize = nextSize
+	}
+}
+
+// slowGatewayTimeout separates a 504 that means "this page took too
+// long" from a proxy blip. A gateway answers 504 for a slow upstream only
+// after its own timeout, typically tens of seconds (AWS load balancers
+// and nginx default to 60s), so a 504 that took at least this long is a
+// page-size signal. A faster one keeps the SDK's normal retries, which
+// absorb a burst shorter than about 1 second (they back off 0.1s, 0.2s
+// and 0.4s) instead of letting it lower the endpoint's page size for the
+// rest of the run. A longer outage still steps the size down. A variable
+// so tests can shorten it.
+var slowGatewayTimeout = 5 * time.Second
+
+// paginatedTimeoutFactor is how many times the client's timeout a
+// paginated request may wait while a smaller page size remains. Common
+// gateways (AWS load balancers, nginx, Azure Front Door) answer a slow
+// upstream with 504 after 60s, the client's own default, so the two
+// race and the client usually loses: it times out just before the 504
+// that would trigger the fallback. Twice the timeout waits that 504 out
+// with room to spare. Gateways that send a slow 502 or 503 instead
+// (Apache httpd) still get the SDK's same-size retries, which this
+// budget does not cover.
+const paginatedTimeoutFactor = 2
+
+// paginatedAttempt returns the context and client for one pagination
+// attempt at pageSize. While a smaller size remains, a slow 504 is the
+// fallback's signal, so the attempt
+//   - waits up to paginatedTimeoutFactor times the client's timeout, so
+//     a gateway's 504 arrives before the client gives up, and
+//   - tells the SDK not to retry a slow 504 at the same size: an
+//     identical retry costs another full gateway delay, and because
+//     http.Client.Timeout bounds every SDK attempt together, it can turn
+//     a recoverable 504 into a fatal client timeout.
+//
+// The longer-timeout client is a copy sharing the same Transport, so
+// auth, retries and the connection pool are unchanged, and it is made
+// per attempt so it always follows the client as configured now. At the
+// minimum size there is nothing smaller to try, so the attempt uses the
+// client and its normal retries unchanged, as does every request outside
+// GetPaginatedResult.
+func (r *RawClient) paginatedAttempt(ctx context.Context, pageSize int) (context.Context, *http.Client) {
+	if _, ok := nextSmallerPageSize(pageSize); !ok {
+		return ctx, r.httpClient
+	}
+	patient := *r.httpClient
+	patient.Timeout *= paginatedTimeoutFactor
+	return sqapi.WithoutRetryOnSlowStatus(ctx, slowGatewayTimeout, http.StatusGatewayTimeout), &patient
+}
+
+// getPaginatedAtSize performs one complete pagination attempt
+// using a fixed page size, sending every page through client.
+func (r *RawClient) getPaginatedAtSize(ctx context.Context, client *http.Client, opts PaginatedOpts) (PageResult, error) {
 	opts.applyDefaults()
 
 	params := CloneParams(opts.Params)
 	params.Set(opts.PageParam, "1")
 	params.Set(opts.SizeParam, strconv.Itoa(opts.MaxPageSize))
 
-	body, err := r.doGet(ctx, opts.Path, params)
+	body, err := r.doGetWith(ctx, client, opts.Path, params)
 	if err != nil {
 		return PageResult{}, err
 	}
@@ -291,7 +472,7 @@ func (r *RawClient) GetPaginatedResult(ctx context.Context, opts PaginatedOpts) 
 		params := CloneParams(opts.Params)
 		params.Set(opts.PageParam, strconv.Itoa(page))
 		params.Set(opts.SizeParam, strconv.Itoa(opts.MaxPageSize))
-		body, err := r.doGet(ctx, opts.Path, params)
+		body, err := r.doGetWith(ctx, client, opts.Path, params)
 		if err != nil {
 			return PageResult{}, err
 		}
@@ -375,6 +556,12 @@ var bodyReadRetryBackoff = []time.Duration{
 }
 
 func (r *RawClient) doGet(ctx context.Context, path string, params url.Values) ([]byte, error) {
+	return r.doGetWith(ctx, r.httpClient, path, params)
+}
+
+// doGetWith is doGet through a given client: GetPaginatedResult passes a
+// longer-timeout copy of the RawClient's own (see paginatedAttempt).
+func (r *RawClient) doGetWith(ctx context.Context, client *http.Client, path string, params url.Values) ([]byte, error) {
 	u := r.baseURL + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
@@ -386,7 +573,7 @@ func (r *RawClient) doGet(ctx context.Context, path string, params url.Values) (
 
 	var lastReadErr error
 	for attempt := 0; ; attempt++ {
-		resp, err := r.httpClient.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			return nil, err
 		}
@@ -462,8 +649,8 @@ func ExtractTotal(body []byte, dotPath string) int {
 
 // ExtractTotalOK extracts the total count and reports whether it was
 // actually there. The distinction matters: a 0 from an unparseable
-// body, a 0 from a missing key and a genuine 0 are three different
-// situations, and treating the first two as "this window is empty" is
+// body, a 0 from a missing key and a genuine zero are three different
+// situations, and treating either of the first two as "nothing here" is
 // how a fetch silently drops everything it was supposed to return
 // (#574).
 func ExtractTotalOK(body []byte, dotPath string) (int, bool) {

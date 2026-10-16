@@ -42,7 +42,7 @@ This guide covers common issues when using the SonarQube to SonarCloud migration
 ---
 
 ### "Request timeout"
-<!-- updated: 2026-06-04_01:14:00.000 by Claude -->
+<!-- updated: 2026-10-16_00:15:10 by Claude -->
 
 **Cause**: Large datasets or slow network can exceed the default timeout.
 
@@ -51,6 +51,36 @@ This guide covers common issues when using the SonarQube to SonarCloud migration
 ```bash
 sonar-migration-tool extract --source_url <URL> --source_token <TOKEN> --timeout 120 --export_directory ./files/
 ```
+
+A paginated request that can still fall back to a smaller page size already waits up to twice `--timeout`. If a load balancer or proxy answers HTTP 504, see the next section.
+
+---
+
+### HTTP 504 Gateway Timeout on large pages
+<!-- updated: 2026-10-16_13:21:04 by Claude -->
+
+**Symptom**: `extract` logs an HTTP 504 (or another 5xx) from a search endpoint such as `api/projects/search` or `api/issues/search`, often after about 60 seconds. A load balancer or reverse proxy in front of SonarQube Server gave up waiting for a large page.
+
+**What the tool does**: paginated reads adapt their page size, with nothing to configure.
+
+- A request that fails with HTTP 5xx restarts that fetch from page 1 at a smaller page size: 500 → 200 → 100 → 50. Items from the failed attempt are discarded, so nothing is duplicated.
+- The size that works is remembered per endpoint for the rest of the run, so once one request has fallen back, later requests to that endpoint start at the smaller size. Requests to the same endpoint that were already in flight at that point each pay the wait once.
+- While a smaller page size remains, a paginated request waits up to twice `--timeout` (120 s by default). Common gateways (AWS load balancers, nginx, Azure Front Door) answer 504 after 60 s, the tool's own default, so without this the tool would time out just before the gateway's 504 arrived.
+- A 504 that took 5 s or more is not retried at the same page size. A faster one is retried as usual, which absorbs a burst shorter than about 1 second without lowering the page size.
+- A smaller page size loses nothing: the page cap grows as the page size shrinks (20 / 50 / 100 / 200 pages at 500 / 200 / 100 / 50), so issues, hotspots, the component measures tree and project analyses still read up to 10,000 items per query, the server's own limit. The only cost is more, smaller requests.
+
+Each step down is logged:
+
+```
+level=WARN msg="paginated API request returned HTTP 5xx; retrying with smaller page size" endpoint=api/projects/search status=504 page_size=500 retry_page_size=200
+```
+
+**When you need to act**:
+
+- `level=ERROR msg="paginated API request failed with HTTP 5xx at minimum fallback page size"`: the server failed even at 50 items per page. That points at the server or gateway, not the page size; check the SonarQube Server logs.
+- A timeout (`Client.Timeout exceeded`) instead of a 504: the gateway waits longer than twice `--timeout` (Cloudflare: 125 s; HAProxy, Traefik and Istio: no limit by default), or the server is slow with no gateway in front. Raise `--timeout` until twice its value exceeds the gateway's timeout; for example, `--timeout 90` gives paginated requests 180 s. A timeout by itself never changes the page size.
+- A slow HTTP 502 or 503 instead of a 504: some gateways report their own timeout this way (Apache httpd sends 502 after `ProxyTimeout`, 60 s by default; Google Cloud load balancers and IIS ARR after 30 s). Only a slow 504 skips the retries at the same page size, so a slow 502 or 503 is tried four times before the page size drops, and all four tries must fit within twice `--timeout`. Raise `--timeout` above twice the gateway's timeout; for Apache's default, `--timeout 125`.
+- The connection is reset or dropped with no HTTP status: some load balancers (AWS NLB, Azure Load Balancer, F5) do this instead of answering 504, so there is no 5xx to react to. Ask for the load balancer's idle timeout to be raised above the time SonarQube Server needs to return a 500-item page.
 
 ---
 
@@ -258,16 +288,16 @@ curl -u "$SC_TOKEN:" \
 ---
 
 ## A project migrated with exactly 10,000 issues
-<!-- updated: 2026-09-17_00:00:00 -->
+<!-- updated: 2026-10-16_13:21:04 -->
 
 **Symptom.** A source project you know has far more than 10,000 issues arrives on SonarQube Cloud with exactly 10,000, or with some other suspiciously round shortfall. The migration report's Limitations section carries a bullet naming the project, and the `extract` run printed a warning block just before its "Extract Complete" line.
 
-**Cause.** SonarQube Server returns at most 10,000 results for any single search query — an Elasticsearch `index.max_result_window` limit, not a tool setting. Requesting a row past the 10,000th is an outright HTTP 400, so a query whose total is larger can only ever yield the first 10,000. Since [#574](https://github.com/SonarSource/sonar-migration-tool/issues/574) the tool works around this for issues by slicing the query into issue-creation-date ranges until each one fits, falling back since [#630](https://github.com/SonarSource/sonar-migration-tool/issues/630) to slicing by issue type, severity, rule, directory and file when a single creation second is still over the ceiling — and it reports whatever it still could not retrieve rather than truncating in silence.
+**Cause.** SonarQube Server returns at most 10,000 results for any single search query — an Elasticsearch `index.max_result_window` limit, not a tool setting. Requesting a row past the 10,000th is an outright HTTP 400, so a query whose total is larger can only ever yield the first 10,000. Since [#574](https://github.com/SonarSource/sonar-migration-tool/issues/574) the tool works around this for issues by slicing the query into issue-creation-date ranges until each one fits, falling back since [#630](https://github.com/SonarSource/sonar-migration-tool/issues/630) to slicing by issue type, severity, rule, directory and file when a single creation second is still over the ceiling — and it reports whatever it still could not retrieve rather than truncating in silence. If a load balancer forced a smaller page size (see [HTTP 504 Gateway Timeout on large pages](#http-504-gateway-timeout-on-large-pages)), the ceiling is still 10,000: the tool reads proportionally more pages, so the only cost is more requests.
 
 **Confirm it.** The atomic-window case — the rare one neither date nor facet slicing can fix — logs its own line from the slicer, with a `cause` field spelling out specifically why the cascade stopped where it did:
 
 ```
-level=WARN msg="more than 10,000 issues could not be split below the search ceiling by date or facets" project=my-project branch=main window="[2025-09-05T17:29:07+0000, 2025-09-05T17:29:08+0000)" facets="types=BUG severities=MAJOR rules=java:S1234" cause="the facet cascade (rules, directories, files) is exhausted and this cell is still over the ceiling" total=17919 fetched=10000 lost=7919
+level=WARN msg="issues could not be split below the effective search ceiling by date or facets" project=my-project branch=main window="[2025-09-05T17:29:07+0000, 2025-09-05T17:29:08+0000)" facets="types=BUG severities=MAJOR rules=java:S1234" cause="the facet cascade (rules, directories, files) is exhausted and this cell is still over the ceiling" total=17919 fetched=10000 lost=7919
 ```
 
 `facets` names the exact cell the cascade gave up on (empty when it could not even start, e.g. the facet probe itself failed). `cause` is one of: the cascade running out of facets to fall back to (shown above), a facet spread across more than 100 distinct values, a facet that cannot account for every issue in the cell (some issues carry no value for it at all — e.g. project-scoped findings have no file path), a facet probe that failed outright, or one that came back with no values. On a server configured in MQR (Multi-Quality Rule) mode the same line reads `impactSoftwareQualities=...  impactSeverities=...` instead — the cascade detects the instance's mode automatically (SonarQube Server only; see [#630](https://github.com/SonarSource/sonar-migration-tool/issues/630)) and needs no configuration on your side.

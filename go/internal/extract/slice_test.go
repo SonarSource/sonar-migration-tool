@@ -97,6 +97,12 @@ type issueCorpus struct {
 	// any window carrying both bounds.
 	omitTotalOnInteriorWindows bool
 
+	// omitTotalOnFilteredFetches drops paging.total from any data fetch
+	// (ps > 1) scoped by a type filter, while one-row probes keep it: a
+	// facet cell whose probe can say how big it is but whose fetch
+	// cannot.
+	omitTotalOnFilteredFetches bool
+
 	// failAfterPages answers HTTP 500 once this many data pages (ps=500)
 	// have been served. A window fetch reads at most 20 pages, so 20
 	// guarantees at least one window reached the sink first.
@@ -396,8 +402,7 @@ func (c *issueCorpus) writePage(w http.ResponseWriter, q corpusQuery) {
 	}
 
 	body := map[string]any{issueResultKey: items}
-	interior := q.afterSet && q.beforeSet
-	if !interior || !c.omitTotalOnInteriorWindows {
+	if !c.omitsTotal(q) {
 		total := len(selected)
 		if !q.afterSet && !q.beforeSet {
 			total += c.extraTotal
@@ -408,6 +413,15 @@ func (c *issueCorpus) writePage(w http.ResponseWriter, q corpusQuery) {
 		body["facets"] = []map[string]any{c.facetBlock(q.facet, selected)}
 	}
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// omitsTotal reports whether the response to q leaves paging.total out,
+// per omitTotalOnInteriorWindows and omitTotalOnFilteredFetches.
+func (c *issueCorpus) omitsTotal(q corpusQuery) bool {
+	interior := q.afterSet && q.beforeSet
+	filteredFetch := q.types != nil && q.pageSize > 1
+	return (interior && c.omitTotalOnInteriorWindows) ||
+		(filteredFetch && c.omitTotalOnFilteredFetches)
 }
 
 // facetBlock computes the real server's faceting-after-filtering

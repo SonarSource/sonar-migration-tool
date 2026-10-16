@@ -242,31 +242,51 @@ func (s *issueSlicer) probeFacet(ctx context.Context, w issueWindow, facet strin
 	return nil, nil
 }
 
-// fetchAndAbsorbCell issues one capped fetch for w scoped by filters and
-// absorbs whatever it returns, handing back the raw PageResult so the
-// caller can reconcile against a known cell total (the give-up path) or
-// simply trust the cell fit (every other path).
-func (s *issueSlicer) fetchAndAbsorbCell(ctx context.Context, w issueWindow, filters ...[2]string) (common.PageResult, error) {
+// fetchAndAbsorbCell issues one capped fetch for w scoped by filters,
+// keeps the slicer's ceiling in step with the page size the fetch
+// actually used, and absorbs the result only when it is complete. A
+// truncated result comes back unabsorbed, because only the caller knows
+// whether to partition the cell further (fetchCellOrError) or keep what
+// came back and record the rest as lost (recordGiveUp).
+// stopOnTruncation ends the fetch after page 1 once it is known to be
+// truncated, for a caller that would throw a truncated result away.
+func (s *issueSlicer) fetchAndAbsorbCell(ctx context.Context, w issueWindow, stopOnTruncation bool, filters ...[2]string) (common.PageResult, error) {
 	if !w.safeToRequest() {
 		return common.PageResult{}, fmt.Errorf("refusing a zero-width issue window %s", w.label())
 	}
+
 	res, err := s.e.Raw.GetPaginatedResult(ctx, PaginatedOpts{
 		Path:                     issuesSearchAPI,
 		Params:                   facetParams(s.base, w, filters...),
 		ResultKey:                issueResultKey,
 		MaxPageSize:              issuePageSize,
 		PageLimit:                issuePageLimit,
+		StopOnTruncation:         stopOnTruncation,
 		SuppressTruncationRecord: true,
 		Scope:                    s.scope,
 	})
 	s.requests += max(1, res.PagesRead)
+
 	if err != nil {
 		return res, asDateBoundRejection(w, err)
 	}
+
+	// Update the effective issue ceiling after adaptive pagination.
+	s.pageSize = res.PageSize
+	s.pageLimit = res.PageLimit
+	s.ceiling = windowCeiling(res.PageLimit, res.PageSize)
+
+	// Do not absorb a partial cell here. The caller must either
+	// partition it further or explicitly record the missing issues.
+	if res.Truncated {
+		return res, nil
+	}
+
 	s.windows++
 	if err := s.absorb(res.Items); err != nil {
 		return res, err
 	}
+
 	return res, nil
 }
 
@@ -327,7 +347,7 @@ func (s *issueSlicer) fetchTypeCell(ctx context.Context, w issueWindow, tax issu
 	for _, sev := range severities {
 		severityFilter := [2]string{tax.severityParam, sev.Val}
 		if sev.Count <= s.ceiling {
-			if err := s.fetchCellOrError(ctx, w, typeFilter, severityFilter); err != nil {
+			if err := s.fetchCellOrError(ctx, w, sev.Count, facetCascadeOrder, typeFilter, severityFilter); err != nil {
 				return err
 			}
 			continue
@@ -391,7 +411,7 @@ func (s *issueSlicer) fetchByRemainingFacets(ctx context.Context, w issueWindow,
 	for _, v := range values {
 		cellFilters := append(append([][2]string(nil), filters...), [2]string{facet, v.Val})
 		if v.Count <= s.ceiling {
-			if err := s.fetchCellOrError(ctx, w, cellFilters...); err != nil {
+			if err := s.fetchCellOrError(ctx, w, v.Count, rest, cellFilters...); err != nil {
 				return err
 			}
 			continue
@@ -403,11 +423,51 @@ func (s *issueSlicer) fetchByRemainingFacets(ctx context.Context, w issueWindow,
 	return nil
 }
 
-// fetchCellOrError is the non-give-up leaf: the caller has already
-// confirmed this cell fits, so only the fetch itself can still fail.
-func (s *issueSlicer) fetchCellOrError(ctx context.Context, w issueWindow, filters ...[2]string) error {
-	_, err := s.fetchAndAbsorbCell(ctx, w, filters...)
-	return err
+// fetchCellOrError fetches a facet cell the probe said would fit, given
+// its probed cellTotal and the facets still available below it. The
+// cell can still come back truncated: the cell grew after the probe, or
+// the fetch carried no readable total. A page-size fallback is not a
+// cause, because it does not lower the ceiling (see windowCeiling).
+// With finer facets left it is partitioned through them, and the fetch
+// stops after page 1 because a truncated result would be thrown away.
+// With none left, the result in hand is the most the cell can give, so
+// it is read in full and given up on directly instead of being fetched
+// a second time.
+func (s *issueSlicer) fetchCellOrError(ctx context.Context, w issueWindow, cellTotal int, remainingFacets []string, filters ...[2]string) error {
+	finer := len(remainingFacets) > 0
+	res, err := s.fetchAndAbsorbCell(ctx, w, finer, filters...)
+	if err != nil {
+		return err
+	}
+
+	if !res.Truncated {
+		return nil
+	}
+
+	// The fetch's own total is fresher than the probe's, when readable.
+	if res.TotalKnown {
+		cellTotal = res.Total
+	}
+
+	if !finer {
+		return s.recordGiveUp(w, cellTotal, cellLabel(filters...),
+			"the facet cascade (rules, directories, files) is exhausted and this cell came back over the ceiling (growth since the probe or no readable total)", res)
+	}
+
+	s.e.Logger.Warn(
+		"issue facet cell exceeds effective pagination ceiling; trying finer facets",
+		"project", s.scope.ProjectKey,
+		"branch", s.scope.Branch,
+		"window", w.label(),
+		"facets", cellLabel(filters...),
+		"total", cellTotal,
+		"page_size", res.PageSize,
+		"ceiling", s.ceiling,
+	)
+
+	return s.fetchByRemainingFacets(
+		ctx, w, cellTotal, remainingFacets, filters...,
+	)
 }
 
 // giveUpOnWindow is the cascade's terminal case at any level: fetch
@@ -426,15 +486,30 @@ func (s *issueSlicer) fetchCellOrError(ctx context.Context, w issueWindow, filte
 // bucket cap, one that could not account for every issue in the cell,
 // a probe failure, or the cascade's own ordered facet list running out.
 func (s *issueSlicer) giveUpOnWindow(ctx context.Context, w issueWindow, total int, detail, cause string, filters ...[2]string) error {
-	res, err := s.fetchAndAbsorbCell(ctx, w, filters...)
+	res, err := s.fetchAndAbsorbCell(ctx, w, false, filters...)
 	if err != nil {
 		return err
 	}
+	return s.recordGiveUp(w, total, detail, cause, res)
+}
+
+// recordGiveUp keeps what a give-up fetch returned and records the rest
+// of total as lost. fetchAndAbsorbCell absorbs only complete results, so
+// a truncated one is absorbed here; either way each item reaches the
+// sink exactly once.
+func (s *issueSlicer) recordGiveUp(w issueWindow, total int, detail, cause string, res common.PageResult) error {
+	if res.Truncated {
+		s.windows++
+		if err := s.absorb(res.Items); err != nil {
+			return err
+		}
+	}
+
 	lost := total - res.Fetched
 	if lost < 0 {
 		lost = 0
 	}
-	s.e.Logger.Warn("more than 10,000 issues could not be split below the search ceiling by date or facets",
+	s.e.Logger.Warn("issues could not be split below the effective search ceiling by date or facets",
 		"project", s.scope.ProjectKey, "branch", s.scope.Branch, "window", w.label(),
 		"facets", detail, "cause", cause, "total", total, "fetched", res.Fetched, "lost", lost)
 	start, end := w.bounds()

@@ -160,8 +160,9 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	for attempt := 0; ; attempt++ {
 		t.waitOnGate(req.Context())
 
+		start := time.Now()
 		resp, err := t.inner.RoundTrip(req)
-		if !shouldRetry(resp, err) {
+		if !shouldRetry(resp, err) || retrySkipped(req, resp, time.Since(start)) {
 			if pausedForRateLimit {
 				t.fireRecovery(req, attempt, totalWaited)
 			}
@@ -321,6 +322,48 @@ func shouldRetry(resp *http.Response, err error) bool {
 		return true
 	}
 	return retryableStatusCodes[resp.StatusCode]
+}
+
+// skipRetryKey is the context key under which WithoutRetryOnSlowStatus
+// stores its skipRetry.
+type skipRetryKey struct{}
+
+type skipRetry struct {
+	after time.Duration
+	codes map[int]bool
+}
+
+// WithoutRetryOnSlowStatus returns a copy of ctx under which a request
+// that waits at least after for a response carrying one of codes is
+// handed back at once, with its body readable, instead of being retried.
+// A faster response with the same status, and every other outcome, keeps
+// the normal schedule; requests made with any other context are
+// unaffected. 429 is never handed back early, so rate limits always go
+// through the shared backoff gate. A later call replaces an earlier one
+// rather than adding to it.
+//
+// It exists for callers with a better recovery than an identical retry:
+// a paginated fetch that answers a slow 504 by asking again with a
+// smaller page size gains nothing from repeating the slow request first,
+// and each repeat spends time from the http.Client.Timeout that bounds
+// all attempts together. A fast 504 is more likely a proxy blip, which
+// the normal retries absorb.
+func WithoutRetryOnSlowStatus(ctx context.Context, after time.Duration, codes ...int) context.Context {
+	skip := skipRetry{after: after, codes: make(map[int]bool, len(codes))}
+	for _, code := range codes {
+		skip.codes[code] = true
+	}
+	return context.WithValue(ctx, skipRetryKey{}, skip)
+}
+
+// retrySkipped reports whether the request's context asked for resp to
+// be handed back rather than retried, given how long it took to arrive.
+func retrySkipped(req *http.Request, resp *http.Response, waited time.Duration) bool {
+	if resp == nil || resp.StatusCode == http.StatusTooManyRequests {
+		return false
+	}
+	skip, ok := req.Context().Value(skipRetryKey{}).(skipRetry)
+	return ok && skip.codes[resp.StatusCode] && waited >= skip.after
 }
 
 // drainAndClose empties the response body so the underlying connection

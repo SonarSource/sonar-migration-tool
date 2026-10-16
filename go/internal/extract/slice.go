@@ -23,7 +23,8 @@ const (
 	// /api/issues/search will serve, and page 21 is HTTP 400 rather
 	// than a short answer. It is never relaxed anywhere in this file —
 	// slicing works by narrowing what a page contains, never by
-	// reaching past the offset the server allows.
+	// reaching past the offset the server allows. A page-size fallback
+	// raises the cap in GetPaginatedResult so the offset stays the same.
 	issuePageLimit = 20
 
 	// issuePageSize is set explicitly rather than left to
@@ -271,9 +272,13 @@ func windowParams(base url.Values, w issueWindow) url.Values {
 // One derivation, no second constant: PageLimit x MaxPageSize is what
 // the fetch will actually read, and ResultWindowLimit is where the
 // server starts answering HTTP 400 whatever the caller asked for. At
-// the issue call site both are 10,000, which is why the predicate is
-// "total > 10,000" and why exactly 10,000 is not sliced — that offset
-// is live-confirmed reachable (p=20&ps=500 returns HTTP 200).
+// the issue call site both start at 10,000, which is why the predicate
+// is "total > 10,000" and why exactly 10,000 is not sliced — that offset
+// is live-confirmed reachable (p=20&ps=500 returns HTTP 200). A 5xx
+// page-size fallback trades page size for page count (50 pages of 200,
+// 100 of 100, 200 of 50), so the fetchable side stays at 10,000; the
+// slicer still re-derives its ceiling from every PageResult rather than
+// assuming that.
 //
 // The arguments are the EFFECTIVE values a PageResult reports, never
 // the caller's own PaginatedOpts: applyDefaults has a pointer receiver
@@ -303,8 +308,10 @@ type issueSlicer struct {
 	scope TruncationScope
 
 	// pageSize, pageLimit and ceiling are the EFFECTIVE values the
-	// fetches use, taken from the first PageResult rather than
-	// re-derived (see windowCeiling).
+	// fetches use, taken from the latest PageResult rather than
+	// re-derived (see windowCeiling). A page-size fallback lowers
+	// pageSize and raises pageLimit by the same factor mid-walk, so the
+	// ceiling stays put.
 	pageSize  int
 	pageLimit int
 	ceiling   int
@@ -477,12 +484,15 @@ func (s *issueSlicer) fetchIssueWindow(ctx context.Context, w issueWindow, depth
 }
 
 // fetchWindowItems reads a window the probe said would fit, and absorbs
-// it.
+// it. A page-size fallback during the fetch does not lower the ceiling
+// (see windowCeiling), so a window that fitted when probed still fits
+// unless it grew in between.
 func (s *issueSlicer) fetchWindowItems(ctx context.Context, w issueWindow, probed int) error {
 	res, err := s.fetchWindow(ctx, w, false)
 	if err != nil {
 		return err
 	}
+
 	s.windows++
 	if err := s.absorb(res.Items); err != nil {
 		return err
@@ -794,6 +804,16 @@ func (s *issueSlicer) fetchWindow(ctx context.Context, w issueWindow, stopOnTrun
 		SuppressTruncationRecord: true,
 		Scope:                    s.scope,
 	})
+
+	// Keep the slicer's ceiling aligned with the effective page size and
+	// cap. A successful 5xx fallback may reduce 500 to 200, 100 or 50,
+	// and raises the page cap to match.
+	if err == nil {
+		s.pageSize = res.PageSize
+		s.pageLimit = res.PageLimit
+		s.ceiling = windowCeiling(res.PageLimit, res.PageSize)
+	}
+
 	// PagesRead is zero on failure even though a request was made, so
 	// the audit count must not trust it blindly.
 	s.requests += max(1, res.PagesRead)
