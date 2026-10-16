@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/extract"
@@ -17,9 +18,17 @@ import (
 
 var extractCmd = &cobra.Command{
 	Use:   "extract",
-	Short: "Extract data from a SonarQube Server instance",
-	Long:  "Extracts data from a SonarQube Server instance and stores it in the export directory as new line delimited json files.",
-	Args:  cobra.NoArgs,
+	Short: "Extract data from a SonarQube Server instance and build the mapping CSVs",
+	Long: `Extracts data from a SonarQube Server instance and stores it in the export directory as new line delimited json files.
+
+It then groups the projects into organizations and maps groups, permission
+templates, quality profiles, quality gates, and portfolios to them, which
+the structure and mappings commands used to do (issue #503). Edit
+organizations.csv, then run migrate. Every extract in the export directory
+is included, so extracting a second server updates the CSVs for both. An
+existing organizations.csv or projects.csv is first saved as
+<name>.csv.bak-<timestamp>.`,
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := buildExtractConfig(cmd, args)
 		if err != nil {
@@ -29,6 +38,12 @@ var extractCmd = &cobra.Command{
 			return fmt.Errorf("URL and TOKEN are required (--source_url/--source_token flags or in config file)")
 		}
 		warnIfInsecure(cfg.Insecure)
+		// #503 — resolved before any network call, so a config file that
+		// names its target org in an unreadable way fails fast.
+		orgKey, err := resolveStructureOrgKey(cmd)
+		if err != nil {
+			return err
+		}
 		// #582 — reject an invalid --branch_regexp pattern up front, before
 		// any network call, rather than failing deep inside RunExtract (which
 		// still compiles it defensively for callers that skip this RunE,
@@ -61,6 +76,9 @@ var extractCmd = &cobra.Command{
 			for _, key := range skipped {
 				fmt.Fprintf(os.Stderr, "  - %s\n", key)
 			}
+		}
+		if err := runExtractStructure(cfg.ExportDirectory, cfg.Objects, orgKey, time.Now()); err != nil {
+			return err
 		}
 		printExportDirNotice(cfg.ExportDirectory)
 		return nil
