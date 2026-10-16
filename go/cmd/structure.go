@@ -18,8 +18,11 @@ import (
 
 var structureCmd = &cobra.Command{
 	Use:   "structure",
-	Short: "Group projects into organizations",
-	Long: `Groups projects into organizations based on DevOps Bindings and Server Urls. Outputs organizations and projects as CSVs.
+	Short: deprecatedByExtractShortPrefix + "Group projects into organizations",
+	Long: `Deprecated: extract now runs this step automatically, so a migration only
+needs extract, then migrate (issue #503). This command still works.
+
+Groups projects into organizations based on DevOps Bindings and Server Urls. Outputs organizations and projects as CSVs.
 
 The export directory can be supplied directly via --export_directory or
 read from the same JSON config file the extract / migrate commands use
@@ -29,6 +32,8 @@ or target.default_organization in the unified shape — its key is
 pre-populated as sonarcloud_org_key (issue #566).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		defer common.LogCommandDuration(slog.Default(), "structure", time.Now())
+		warnDeprecatedByExtract("structure")
+		defer warnDeprecatedByExtract("structure")
 
 		exportDir, err := resolveStructureExportDir(cmd)
 		if err != nil {
