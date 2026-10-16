@@ -37,7 +37,7 @@ fresh checkout stays green.
 | Tier | File | Needs | What it covers |
 |---|---|---|---|
 | 0 | `tier0_cli_test.go` | nothing | Every subcommand exists; every flag is still registered; every up-front validation error still fires with the right message and exit code; the credential scrubber actually redacts. |
-| 1 | `tier1_source_test.go` | source SonarQube Server | `extract` (+ resume) → `structure` → `mappings` → `report` (both types) → `predictive-report`. Asserts the 7 CSVs, both markdown reports, and a valid PDF. Makes **no** SonarQube Cloud writes. |
+| 1 | `tier1_source_test.go` | source SonarQube Server | `extract` (+ resume) → `structure` → `mappings` → `report` (both types) → `predictive-report`. Asserts `extract` alone writes the 7 CSVs, that the resumed `extract` backs up `organizations.csv` and `projects.csv` (#503), that the deprecated `structure` and `mappings` log their deprecation notice twice, both markdown reports, and a valid PDF. Makes **no** SonarQube Cloud writes. |
 | 2 | `tier2_full_test.go` | source + target, **destructive** | Path A (`transfer`) and Path B (`extract`→`structure`→`mappings`→`migrate`), each verified with `regtest`; plus idempotency, `sync-issues`, `analysis_report`, and report-accuracy assertions. |
 | 3 | `tier3_gui_test.go` | nothing | The `gui` command's HTTP routes and WebSocket upgrade. |
 

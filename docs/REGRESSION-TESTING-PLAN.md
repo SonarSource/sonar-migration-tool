@@ -10,7 +10,7 @@ After any fix or feature, run **both** migration paths against real SonarQube Se
 
 Both paths must be tested because they exercise different code paths:
 - **Transfer** (`transfer`) — single-command, auto-populates CSVs, targets one project via `--project_key_regexp`
-- **Full migration** (`extract` → `structure` → `mappings` → `migrate`) — multi-step, manual CSV review, migrates all projects
+- **Full migration** (`extract` → `migrate`) — multi-step, manual CSV review, migrates all projects
 
 ---
 
@@ -83,16 +83,10 @@ rm -rf ./migration-files/
 Must exit 0.
 
 ### B3. Structure
-```bash
-./sonar-migration-tool structure --config config.json 2>&1 | tee /tmp/smt-structure.log
-```
-Must exit 0. Review `migration-files/organizations.csv` — confirm `sonarcloud_org_key` is populated for every organization.
+`extract` already ran this step (#503), so there is no command to run. Review `migration-files/organizations.csv` — confirm `sonarcloud_org_key` is populated for every organization.
 
 ### B4. Mappings
-```bash
-./sonar-migration-tool mappings --config config.json 2>&1 | tee /tmp/smt-mappings.log
-```
-Must exit 0. Spot-check `gates.csv`, `profiles.csv`, `groups.csv`, `templates.csv`, `portfolios.csv` — ensure mappings look correct.
+`extract` already ran this step (#503), so there is no command to run. Spot-check `gates.csv`, `profiles.csv`, `groups.csv`, `templates.csv`, `portfolios.csv` — ensure mappings look correct.
 
 ### B5. Migrate
 ```bash
@@ -110,8 +104,8 @@ Exit code 0 = **ALL PASS**. Exit code 1 = failures exist — read the table, fix
 
 ### B7. Scan logs for silent failures
 ```bash
-grep -Ei "panic|fatal" /tmp/smt-extract.log /tmp/smt-structure.log /tmp/smt-mappings.log /tmp/smt-migrate.log
-grep -Ei "error|fail" /tmp/smt-extract.log /tmp/smt-structure.log /tmp/smt-mappings.log /tmp/smt-migrate.log | grep -v "INFO"
+grep -Ei "panic|fatal" /tmp/smt-extract.log /tmp/smt-migrate.log
+grep -Ei "error|fail" /tmp/smt-extract.log /tmp/smt-migrate.log | grep -v "INFO"
 ```
 
 ---
