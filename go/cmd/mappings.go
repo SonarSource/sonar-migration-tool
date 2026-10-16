@@ -17,14 +17,19 @@ import (
 
 var mappingsCmd = &cobra.Command{
 	Use:   "mappings",
-	Short: "Map entities to organizations",
-	Long: `Maps groups, permission templates, quality profiles, quality gates, and portfolios to relevant organizations. Outputs CSVs for each entity type.
+	Short: deprecatedByExtractShortPrefix + "Map entities to organizations",
+	Long: `Deprecated: extract now runs this step automatically, so a migration only
+needs extract, then migrate (issue #503). This command still works.
+
+Maps groups, permission templates, quality profiles, quality gates, and portfolios to relevant organizations. Outputs CSVs for each entity type.
 
 The export directory can be supplied directly via --export_directory or
 read from the same JSON config file the extract / migrate commands use
 via --config (issue #275).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		defer common.LogCommandDuration(slog.Default(), "mappings", time.Now())
+		warnDeprecatedByExtract("mappings")
+		defer warnDeprecatedByExtract("mappings")
 
 		exportDir, err := resolveMappingsExportDir(cmd)
 		if err != nil {
