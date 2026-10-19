@@ -446,69 +446,88 @@ func (r *RawClient) GetPaginatedResult(ctx context.Context, opts PaginatedOpts) 
 	startSize := r.pageSizes.sizeFor(opts.Path, requestedSize, time.Now())
 	pageSize := startSize
 	walk := newPaginationWalk()
-	fellBack := false
-	slowFailedAt := 0 // smallest size that failed slowly; 0 when none did
-	minSizeRetries := 0
+	var st fallbackState
 
 	for {
 		attemptCtx, client := r.paginatedAttempt(ctx)
 		result, err := r.walkPages(attemptCtx, client, opts, requestedSize, pageSize, walk)
-
 		if err == nil {
-			if fellBack {
-				r.rememberFallback(opts.Path, pageSize, slowFailedAt)
+			if pageSize < startSize {
+				r.rememberFallback(opts.Path, pageSize, st.slowFailedAt)
 			}
 			return result, nil
 		}
 
-		var httpErr *HTTPError
-		if !errors.As(err, &httpErr) || !isPageSizeFallbackStatus(httpErr.StatusCode) {
+		next, err := st.next(opts.Path, startSize, pageSize, err)
+		if err != nil {
 			return PageResult{Requests: walk.requests}, err
 		}
-		slow := httpErr.Elapsed >= slowGatewayTimeout
-		if slow {
-			slowFailedAt = pageSize
+		if next < pageSize {
+			walk.resize(next)
 		}
+		pageSize = next
+	}
+}
 
-		nextSize, ok := nextSmallerPageSize(pageSize)
-		if !ok && slow && minSizeRetries < minPageSizeSlowRetries {
-			minSizeRetries++
-			slog.Warn(
-				"paginated API request returned a slow HTTP 5xx at the minimum page size; retrying",
-				"endpoint", opts.Path,
-				"status", httpErr.StatusCode,
-				"page_size", pageSize,
-				"retry", minSizeRetries,
-			)
-			continue
-		}
-		if !ok {
-			slog.Error(
-				"paginated API request failed with HTTP 5xx at minimum fallback page size",
-				"endpoint", opts.Path,
-				"page_size", pageSize,
-				"status", httpErr.StatusCode,
-				"error", err,
-			)
-			if pageSize != startSize {
-				err = fmt.Errorf("%s failed at every page size from %d down to %d: %w",
-					opts.Path, startSize, pageSize, err)
-			}
-			return PageResult{Requests: walk.requests}, err
-		}
+// fallbackState is what one paginated fetch carries between attempts.
+type fallbackState struct {
+	slowFailedAt   int // smallest size that failed slowly; 0 when none did
+	minSizeRetries int // retries made at the minimum page size
+}
 
+// next decides what a fetch of path does after the attempt at pageSize
+// failed with err: try a smaller size, try the minimum size again after
+// a slow failure there, or return the error.
+func (st *fallbackState) next(path string, startSize, pageSize int, err error) (int, error) {
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || !isPageSizeFallbackStatus(httpErr.StatusCode) {
+		return 0, err
+	}
+	slow := httpErr.Elapsed >= slowGatewayTimeout
+	if slow {
+		st.slowFailedAt = pageSize
+	}
+
+	if nextSize, ok := nextSmallerPageSize(pageSize); ok {
 		slog.Warn(
 			"paginated API request returned HTTP 5xx; retrying with smaller page size",
-			"endpoint", opts.Path,
+			"endpoint", path,
 			"status", httpErr.StatusCode,
 			"page_size", pageSize,
 			"retry_page_size", nextSize,
 		)
-
-		walk.resize(nextSize)
-		pageSize = nextSize
-		fellBack = true
+		return nextSize, nil
 	}
+	if slow && st.minSizeRetries < minPageSizeSlowRetries {
+		st.minSizeRetries++
+		slog.Warn(
+			"paginated API request returned a slow HTTP 5xx at the minimum page size; retrying",
+			"endpoint", path,
+			"status", httpErr.StatusCode,
+			"page_size", pageSize,
+			"retry", st.minSizeRetries,
+		)
+		return pageSize, nil
+	}
+	return 0, minimumSizeFailure(path, startSize, pageSize, httpErr, err)
+}
+
+// minimumSizeFailure logs and returns the error of a fetch of path that
+// failed at the minimum page size. When the fetch started above it, the
+// error is wrapped to name the sizes tried; it still unwraps to httpErr.
+func minimumSizeFailure(path string, startSize, pageSize int, httpErr *HTTPError, err error) error {
+	slog.Error(
+		"paginated API request failed with HTTP 5xx at minimum fallback page size",
+		"endpoint", path,
+		"page_size", pageSize,
+		"status", httpErr.StatusCode,
+		"error", err,
+	)
+	if pageSize == startSize {
+		return err
+	}
+	return fmt.Errorf("%s failed at every page size from %d down to %d: %w",
+		path, startSize, pageSize, err)
 }
 
 // rememberFallback records what a fetch of path that fell back learned.
@@ -644,72 +663,100 @@ func (w *paginationWalk) add(items []json.RawMessage, pageSize int) {
 	w.aligned = w.aligned && w.lastFull
 }
 
-// walkPages reads one attempt's pages at pageSize through client,
-// continuing from what walk already holds.
-func (r *RawClient) walkPages(ctx context.Context, client *http.Client, opts PaginatedOpts,
-	requestedSize, pageSize int, walk *paginationWalk) (PageResult, error) {
-
-	if !walk.started {
-		body, items, err := r.fetchPage(ctx, client, opts, 1, pageSize, walk)
-		if err != nil {
-			return PageResult{}, err
-		}
-		walk.total, walk.totalKnown = ExtractTotalOK(body, opts.TotalKey)
-		walk.items = make([]json.RawMessage, 0, walk.total)
-		walk.started = true
-		walk.add(items, pageSize)
-	}
-
-	pageLimit := pageLimitAt(opts.PageLimit, requestedSize, pageSize)
-	pages := TotalPages(walk.total, pageSize)
-	if !walk.totalKnown {
+// bounds returns how many pages an attempt at pageSize reads, the page
+// cap at that size, and whether the cap cut the walk short.
+func (w *paginationWalk) bounds(limit, requestedSize, pageSize int) (pages, pageLimit int, clamped bool) {
+	pageLimit = pageLimitAt(limit, requestedSize, pageSize)
+	pages = TotalPages(w.total, pageSize)
+	if !w.totalKnown {
 		// Without a total there is no page count. Read enough pages to
 		// cover one page at the requested size, stopping at the first
 		// short one, so a fallback returns at least as much as the
 		// original page would have, instead of less.
 		pages = (requestedSize + pageSize - 1) / pageSize
 	}
-	clamped := false
 	if pageLimit > 0 && pages > pageLimit {
-		pages = pageLimit
 		// Without a total there is nothing to clamp: the result is
 		// either complete (a short page) or unknown_total (a full one).
-		clamped = walk.totalKnown
+		return pageLimit, pageLimit, w.totalKnown
 	}
-	// Without a total, read on while pages come back full. A caller that
-	// stops on truncation throws a truncated result away, so for it a
-	// full first page is enough to stop on, as it is at the requested
-	// size.
-	if !(clamped && opts.StopOnTruncation) {
-		for walk.nextPage <= pages && (walk.totalKnown || (walk.lastFull && !opts.StopOnTruncation)) {
-			if err := ctx.Err(); err != nil {
-				return PageResult{}, err
-			}
-			_, items, err := r.fetchPage(ctx, client, opts, walk.nextPage, pageSize, walk)
-			if err != nil {
-				return PageResult{}, err
-			}
-			walk.add(items, pageSize)
+	return pages, pageLimit, false
+}
+
+// walkPages reads one attempt's pages at pageSize through client,
+// continuing from what walk already holds.
+func (r *RawClient) walkPages(ctx context.Context, client *http.Client, opts PaginatedOpts,
+	requestedSize, pageSize int, walk *paginationWalk) (PageResult, error) {
+
+	if !walk.started {
+		if err := r.startWalk(ctx, client, opts, pageSize, walk); err != nil {
+			return PageResult{}, err
 		}
 	}
+	pages, pageLimit, clamped := walk.bounds(opts.PageLimit, requestedSize, pageSize)
+	if !(clamped && opts.StopOnTruncation) {
+		if err := r.readPages(ctx, client, opts, pageSize, pages, walk); err != nil {
+			return PageResult{}, err
+		}
+	}
+	return r.finishPaginated(walk.result(pageSize, pageLimit, clamped), opts), nil
+}
 
+// startWalk reads page 1, which carries the total.
+func (r *RawClient) startWalk(ctx context.Context, client *http.Client, opts PaginatedOpts,
+	pageSize int, walk *paginationWalk) error {
+
+	body, items, err := r.fetchPage(ctx, client, opts, 1, pageSize, walk)
+	if err != nil {
+		return err
+	}
+	walk.total, walk.totalKnown = ExtractTotalOK(body, opts.TotalKey)
+	walk.items = make([]json.RawMessage, 0, walk.total)
+	walk.started = true
+	walk.add(items, pageSize)
+	return nil
+}
+
+// readPages reads on from walk.nextPage up to pages. Without a total it
+// reads on only while pages come back full. A caller that stops on
+// truncation throws a truncated result away, so for it a full first page
+// is enough to stop on, as it is at the requested size.
+func (r *RawClient) readPages(ctx context.Context, client *http.Client, opts PaginatedOpts,
+	pageSize, pages int, walk *paginationWalk) error {
+
+	for walk.nextPage <= pages && (walk.totalKnown || (walk.lastFull && !opts.StopOnTruncation)) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		_, items, err := r.fetchPage(ctx, client, opts, walk.nextPage, pageSize, walk)
+		if err != nil {
+			return err
+		}
+		walk.add(items, pageSize)
+	}
+	return nil
+}
+
+// result is the PageResult for what the walk holds, read at pageSize
+// under pageLimit.
+func (w *paginationWalk) result(pageSize, pageLimit int, clamped bool) PageResult {
 	res := PageResult{
-		Items:      walk.items,
-		Total:      walk.total,
-		TotalKnown: walk.totalKnown,
-		Fetched:    len(walk.items),
-		PagesRead:  walk.pagesRead,
-		Requests:   walk.requests,
+		Items:      w.items,
+		Total:      w.total,
+		TotalKnown: w.totalKnown,
+		Fetched:    len(w.items),
+		PagesRead:  w.pagesRead,
+		Requests:   w.requests,
 		PageSize:   pageSize,
 		PageLimit:  pageLimit,
 	}
 	switch {
-	case !walk.totalKnown && walk.lastFull:
+	case !w.totalKnown && w.lastFull:
 		res.Reason = ReasonUnknownTotal
 	case clamped:
 		res.Reason = ReasonPageLimitClamp
 	}
-	return r.finishPaginated(res, opts), nil
+	return res
 }
 
 // fetchPage requests one page and returns its body and items.

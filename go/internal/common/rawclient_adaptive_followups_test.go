@@ -359,65 +359,56 @@ func TestPageSizeTable(t *testing.T) {
 	now := time.Now()
 	later := now.Add(2 * time.Minute)
 
-	t.Run("fast-learned size expires", func(t *testing.T) {
-		tbl := newPageSizeTable()
-		tbl.remember("p", 200, false, now)
-		if got := tbl.sizeFor("p", 500, now); got != 200 {
-			t.Errorf("before expiry = %d, want 200", got)
-		}
-		if got := tbl.sizeFor("p", 500, later); got != 500 {
-			t.Errorf("after expiry = %d, want 500", got)
-		}
-	})
-	t.Run("slow-learned size is kept", func(t *testing.T) {
-		tbl := newPageSizeTable()
-		tbl.remember("p", 200, true, now)
-		if got := tbl.sizeFor("p", 500, later); got != 200 {
-			t.Errorf("= %d, want 200", got)
-		}
-	})
-	t.Run("expired fast size falls back to the slow one", func(t *testing.T) {
-		tbl := newPageSizeTable()
-		tbl.remember("p", 200, true, now)
-		tbl.remember("p", 100, false, now)
-		if got := tbl.sizeFor("p", 500, now); got != 100 {
-			t.Errorf("before expiry = %d, want 100", got)
-		}
-		if got := tbl.sizeFor("p", 500, later); got != 200 {
-			t.Errorf("after expiry = %d, want the slow-learned 200", got)
-		}
-	})
-	t.Run("a larger size never replaces a smaller one", func(t *testing.T) {
-		tbl := newPageSizeTable()
-		tbl.remember("p", 100, true, now)
-		tbl.remember("p", 200, true, now)
-		if got := tbl.sizeFor("p", 500, now); got != 100 {
-			t.Errorf("= %d, want 100", got)
-		}
-	})
-	t.Run("a fast size larger than the slow one does not apply", func(t *testing.T) {
-		tbl := newPageSizeTable()
-		tbl.remember("p", 100, true, now)
-		tbl.remember("p", 200, false, now)
-		if got := tbl.sizeFor("p", 500, now); got != 100 {
-			t.Errorf("= %d, want the slow-learned 100", got)
-		}
-	})
-	t.Run("re-learning the fast size starts its expiry again", func(t *testing.T) {
-		tbl := newPageSizeTable()
-		tbl.remember("p", 200, false, now)
-		tbl.remember("p", 200, false, now.Add(40*time.Second))
-		if got := tbl.sizeFor("p", 500, now.Add(90*time.Second)); got != 200 {
-			t.Errorf("= %d, want 200: the second remember should have extended it", got)
-		}
-	})
-	t.Run("never above the requested size", func(t *testing.T) {
-		tbl := newPageSizeTable()
-		tbl.remember("p", 200, true, now)
-		if got := tbl.sizeFor("p", 100, now); got != 100 {
-			t.Errorf("= %d, want 100", got)
-		}
-	})
+	type learn struct {
+		size   int
+		sticky bool
+		at     time.Time
+	}
+	type check struct {
+		requested int
+		at        time.Time
+		want      int
+	}
+	cases := []struct {
+		name   string
+		learn  []learn
+		checks []check
+	}{
+		{"fast-learned size expires",
+			[]learn{{200, false, now}},
+			[]check{{500, now, 200}, {500, later, 500}}},
+		{"slow-learned size is kept",
+			[]learn{{200, true, now}},
+			[]check{{500, later, 200}}},
+		{"expired fast size falls back to the slow one",
+			[]learn{{200, true, now}, {100, false, now}},
+			[]check{{500, now, 100}, {500, later, 200}}},
+		{"a larger size never replaces a smaller one",
+			[]learn{{100, true, now}, {200, true, now}},
+			[]check{{500, now, 100}}},
+		{"a fast size larger than the slow one does not apply",
+			[]learn{{100, true, now}, {200, false, now}},
+			[]check{{500, now, 100}}},
+		{"re-learning the fast size starts its expiry again",
+			[]learn{{200, false, now}, {200, false, now.Add(40 * time.Second)}},
+			[]check{{500, now.Add(90 * time.Second), 200}}},
+		{"never above the requested size",
+			[]learn{{200, true, now}},
+			[]check{{100, now, 100}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl := newPageSizeTable()
+			for _, l := range tc.learn {
+				tbl.remember("p", l.size, l.sticky, l.at)
+			}
+			for _, c := range tc.checks {
+				if got := tbl.sizeFor("p", c.requested, c.at); got != c.want {
+					t.Errorf("sizeFor(%d) at +%v = %d, want %d", c.requested, c.at.Sub(now), got, c.want)
+				}
+			}
+		})
+	}
 }
 
 // Clients built with NewSharedRawClient for the same server share what
