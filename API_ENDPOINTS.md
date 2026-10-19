@@ -63,7 +63,7 @@ All endpoints are GET requests used during the `extract` phase to read data from
 | Endpoint | Purpose | Parameters |
 |----------|---------|------------|
 | `GET /api/projects/search` | List all projects (paginated) | `p`, `ps` |
-| `GET /api/projects/license_usage` | License usage data | — |
+| `GET /api/projects/license_usage` | License usage data (optional: a failure is logged and skipped) | — |
 | `GET /api/navigation/component` | Project details (name, qualifier, etc.) | `component` |
 | `GET /api/components/show` | Project tags | `component` |
 | `GET /api/components/search` | Search components | varies |

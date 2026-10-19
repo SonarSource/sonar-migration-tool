@@ -6,6 +6,7 @@ package extract
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
@@ -56,9 +57,7 @@ func systemTasks() []TaskDef {
 		{
 			Name:     "getUsage",
 			Editions: []Edition{EditionDeveloper, EditionEnterprise, EditionDatacenter},
-			Run: func(ctx context.Context, e *Executor) error {
-				return fetchAndWriteArray(ctx, e, "getUsage", "api/projects/license_usage", "projects", nil, nil)
-			},
+			Run:      runGetUsage,
 		},
 		serverArrayTask("getBindings", "api/alm_settings/list", "almSettings"),
 		{
@@ -89,4 +88,37 @@ func systemTasks() []TaskDef {
 			},
 		},
 	}
+}
+
+// runGetUsage extracts each project's licensed lines of code from
+// api/projects/license_usage. The data is optional: the report only uses
+// it to size projects, and falls back to each project's ncloc measure
+// (getProjectMeasures) for any project it does not cover. The endpoint
+// returns every project in one unpaginated response, so on an instance
+// with thousands of projects it can take longer than the client's
+// timeout or a load balancer in front of the server allows. A failed
+// fetch is therefore logged and skipped instead of stopping the extract.
+// Cancellation still stops the task, and a failure to write what was
+// fetched is still an error.
+func runGetUsage(ctx context.Context, e *Executor) error {
+	const taskName = "getUsage"
+	if err := acquireSem(ctx, e.Sem); err != nil {
+		return fmt.Errorf(taskErrFmt, taskName, err)
+	}
+	items, err := e.Raw.GetArray(ctx, "api/projects/license_usage", "projects", nil)
+	<-e.Sem
+	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf(taskErrFmt, taskName, err)
+		}
+		e.Logger.Warn(taskName+" skipped: api/projects/license_usage failed; "+
+			"the report sizes projects from their ncloc measure instead",
+			"err", err)
+		return nil
+	}
+	w, err := e.Store.Writer(taskName)
+	if err != nil {
+		return err
+	}
+	return w.WriteChunk(items)
 }

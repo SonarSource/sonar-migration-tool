@@ -112,6 +112,7 @@ func TestTier1_SourcePipeline(t *testing.T) {
 		if cfg.org != "" {
 			assertOrgMapping(t, exportDir, cfg.org)
 		}
+		assertMeasuresIncludeNcloc(t, runDir)
 	})
 
 	t.Run("extract_resume", func(t *testing.T) {
@@ -542,5 +543,39 @@ func assertDeprecatedByExtract(t *testing.T, res cliResult, command string) {
 	const notice = "this command is deprecated: extract now runs structure and mappings automatically"
 	if got := strings.Count(res.combined(), notice); got != 2 {
 		t.Errorf("%s: expected the deprecation notice twice (start and end), found %d:\n%s", command, got, res.combined())
+  }
+}
+
+// assertMeasuresIncludeNcloc checks that getProjectMeasures recorded an
+// ncloc measure, which the report sizes projects from when getUsage
+// (api/projects/license_usage) was skipped. A project that was never
+// analyzed has no measures at all, so an empty task is not a failure.
+func assertMeasuresIncludeNcloc(t *testing.T, runDir string) {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(runDir, "getProjectMeasures", "results.*.jsonl"))
+	if err != nil {
+		t.Fatalf("listing getProjectMeasures results: %v", err)
+	}
+	sawMeasure := false
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("reading %q: %v", f, err)
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			var rec struct {
+				Metric string `json:"metric"`
+			}
+			if line == "" || json.Unmarshal([]byte(line), &rec) != nil {
+				continue
+			}
+			sawMeasure = true
+			if rec.Metric == "ncloc" {
+				return
+			}
+		}
+	}
+	if sawMeasure {
+		t.Errorf("getProjectMeasures under %q has measures but no ncloc measure", runDir)
 	}
 }
