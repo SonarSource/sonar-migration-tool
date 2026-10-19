@@ -237,6 +237,56 @@ func TestProcessProjectDetails(t *testing.T) {
 	}
 }
 
+// When extract skipped getUsage (api/projects/license_usage timed out on
+// a large instance), projects are sized from their ncloc measure instead.
+func TestProcessProjectDetails_NclocFallbackWithoutUsage(t *testing.T) {
+	dir, mapping := setupExtract(t, map[string][]map[string]any{
+		"getProjectDetails": {
+			{"key": testProj1, "name": "P1", "qualityProfiles": []any{}},
+			{"key": testProj2, "name": "P2", "qualityProfiles": []any{}},
+		},
+		"getProjectMeasures": {
+			{"projectKey": testProj1, "metric": "ncloc", "value": "150000"},
+			{"projectKey": testProj1, "metric": "coverage", "value": "80.0"},
+		},
+	})
+	projects := ProcessProjectDetails(dir, mapping, idMap())
+	p1 := projects[testServerID][testProj1]
+	if p1["loc"] != 150000 || p1["tier"] != "l" {
+		t.Errorf("proj-1: got loc=%v tier=%v, want 150000 / l", p1["loc"], p1["tier"])
+	}
+	// No usage and no ncloc measure (never analyzed): stays unsized.
+	p2 := projects[testServerID][testProj2]
+	if p2["loc"] != 0 || p2["tier"] != "unknown" {
+		t.Errorf("proj-2: got loc=%v tier=%v, want 0 / unknown", p2["loc"], p2["tier"])
+	}
+}
+
+// License usage, which counts a project's largest branch, wins over the
+// main-branch ncloc measure for every project it covers.
+func TestProcessProjectDetails_UsageWinsOverNcloc(t *testing.T) {
+	dir, mapping := setupExtract(t, map[string][]map[string]any{
+		"getProjectDetails": {
+			{"key": testProj1, "name": "P1", "qualityProfiles": []any{}},
+			{"key": testProj2, "name": "P2", "qualityProfiles": []any{}},
+		},
+		"getUsage": {
+			{"projectKey": testProj1, "linesOfCode": float64(15000)},
+		},
+		"getProjectMeasures": {
+			{"projectKey": testProj1, "metric": "ncloc", "value": "900"},
+			{"projectKey": testProj2, "metric": "ncloc", "value": "2000"},
+		},
+	})
+	projects := ProcessProjectDetails(dir, mapping, idMap())
+	if p := projects[testServerID][testProj1]; p["loc"] != 15000 || p["tier"] != "m" {
+		t.Errorf("proj-1: got loc=%v tier=%v, want 15000 / m from getUsage", p["loc"], p["tier"])
+	}
+	if p := projects[testServerID][testProj2]; p["loc"] != 2000 || p["tier"] != "s" {
+		t.Errorf("proj-2: got loc=%v tier=%v, want 2000 / s from ncloc", p["loc"], p["tier"])
+	}
+}
+
 // --- Servers ---
 
 func TestGenerateServerMarkdown(t *testing.T) {
