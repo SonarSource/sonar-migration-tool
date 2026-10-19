@@ -112,8 +112,22 @@ func NewRawClient(httpClient *http.Client, baseURL string) *RawClient {
 }
 
 // sharedPageSizes holds one learned-page-size table per server base URL
-// for NewSharedRawClient.
+// for NewSharedRawClient, keyed by sharedPageSizeKey.
 var sharedPageSizes sync.Map // base URL -> *pageSizeTable
+
+// sharedPageSizeKey is baseURL without its trailing slashes, so the same
+// server shares one table however its URL was written.
+func sharedPageSizeKey(baseURL string) string {
+	return strings.TrimRight(baseURL, "/")
+}
+
+// ForgetSharedPageSizes drops what NewSharedRawClient clients learned for
+// baseURL, so the next one starts again at the requested sizes. The table
+// otherwise lives as long as the process. Tests use it to keep learned
+// sizes from leaking between test servers.
+func ForgetSharedPageSizes(baseURL string) {
+	sharedPageSizes.Delete(sharedPageSizeKey(baseURL))
+}
 
 // NewSharedRawClient is NewRawClient with learned page sizes shared by
 // every client this process builds with it for the same base URL. extract
@@ -121,7 +135,7 @@ var sharedPageSizes sync.Map // base URL -> *pageSizeTable
 // listing and for the run that follows it; sharing means a fallback the
 // pre-flight paid a gateway timeout to learn is not paid for again.
 func NewSharedRawClient(httpClient *http.Client, baseURL string) *RawClient {
-	table, _ := sharedPageSizes.LoadOrStore(baseURL, newPageSizeTable())
+	table, _ := sharedPageSizes.LoadOrStore(sharedPageSizeKey(baseURL), newPageSizeTable())
 	return &RawClient{
 		httpClient: httpClient,
 		baseURL:    baseURL,
@@ -205,17 +219,23 @@ func (t *pageSizeTable) remember(path string, size int, sticky bool, now time.Ti
 // smaller pages that reaches the same ceiling. A cap of 0 (no cap)
 // stays 0.
 //
-// The cap rounds down, so the walk never reads past the caller's
-// ceiling, which may be ResultWindowLimit, where the server answers HTTP
-// 400 rather than a short page. Every fallback size divides 10,000 and
-// every cap in use, so in practice the ceiling is kept exactly. When a
-// size does not divide it, the walk stops short of the ceiling and the
-// result reports a clamp, instead of failing past it.
+// The cap rounds up, so a fallback never reads fewer items than the
+// caller's ceiling: 3 pages of 500 become 8 pages of 200, not 7. It never
+// rounds past ResultWindowLimit when the caller's ceiling was within it,
+// because there the server answers HTTP 400 rather than a short page: a
+// 10,000 ceiling at a size that does not divide it keeps the whole pages
+// that fit. Every fallback size divides 10,000 and every cap in use, so
+// today the ceiling is kept exactly.
 func pageLimitAt(limit, requestedSize, pageSize int) int {
 	if limit <= 0 || pageSize >= requestedSize {
 		return limit
 	}
-	return limit * requestedSize / pageSize // round down
+	ceiling := limit * requestedSize
+	pages := (ceiling + pageSize - 1) / pageSize // round up
+	if ceiling <= ResultWindowLimit && pages*pageSize > ResultWindowLimit {
+		pages = ResultWindowLimit / pageSize
+	}
+	return pages
 }
 
 // fallbackPageSizes is the page size sequence a fallback steps through.
@@ -407,11 +427,13 @@ func (r *RawClient) GetPaginated(ctx context.Context, opts PaginatedOpts) ([]jso
 // pageSizeFallbackStatuses) moves the fetch to the next smaller size
 // (500 -> 200 -> 100 -> 50) and carries on from where it stopped: items
 // already read are kept up to the last offset the smaller pages can
-// resume from (see paginationWalk.resize), so nothing is read twice and
-// nothing is skipped. The size that works is remembered for opts.Path
-// (see pageSizeTable). A failure at 50 is returned, wrapped to say every
-// size failed; a slow one only after two more tries at 50 (see
-// minPageSizeSlowRetries). PageSize in the result is the size that succeeded.
+// resume from (see paginationWalk.resize). No item is returned twice or
+// skipped, but up to one smaller page of items is requested again. The
+// size that works is remembered for opts.Path (see pageSizeTable). A
+// failure at 50 is returned; a slow one only after two more tries at 50
+// (see minPageSizeSlowRetries). When the fetch started above 50, the
+// error is wrapped to name the sizes tried, from the first one down to
+// 50. PageSize in the result is the size that succeeded.
 // PageLimit grows as the size shrinks (see pageLimitAt), so the item
 // ceiling a caller derives from PageSize x PageLimit does not fall with
 // the fallback. Every request waits up to twice the client's timeout, so
@@ -424,7 +446,8 @@ func (r *RawClient) GetPaginatedResult(ctx context.Context, opts PaginatedOpts) 
 	startSize := r.pageSizes.sizeFor(opts.Path, requestedSize, time.Now())
 	pageSize := startSize
 	walk := newPaginationWalk()
-	fellBack, slowFailure := false, false
+	fellBack := false
+	slowFailedAt := 0 // smallest size that failed slowly; 0 when none did
 	minSizeRetries := 0
 
 	for {
@@ -433,7 +456,7 @@ func (r *RawClient) GetPaginatedResult(ctx context.Context, opts PaginatedOpts) 
 
 		if err == nil {
 			if fellBack {
-				r.pageSizes.remember(opts.Path, pageSize, slowFailure, time.Now())
+				r.rememberFallback(opts.Path, pageSize, slowFailedAt)
 			}
 			return result, nil
 		}
@@ -443,7 +466,9 @@ func (r *RawClient) GetPaginatedResult(ctx context.Context, opts PaginatedOpts) 
 			return PageResult{Requests: walk.requests}, err
 		}
 		slow := httpErr.Elapsed >= slowGatewayTimeout
-		slowFailure = slowFailure || slow
+		if slow {
+			slowFailedAt = pageSize
+		}
 
 		nextSize, ok := nextSmallerPageSize(pageSize)
 		if !ok && slow && minSizeRetries < minPageSizeSlowRetries {
@@ -483,6 +508,29 @@ func (r *RawClient) GetPaginatedResult(ctx context.Context, opts PaginatedOpts) 
 		walk.resize(nextSize)
 		pageSize = nextSize
 		fellBack = true
+	}
+}
+
+// rememberFallback records what a fetch of path that fell back learned.
+// Only a slow failure is a reliable page-size signal, so the size just
+// below the smallest one that failed slowly is kept for good. The size
+// the fetch succeeded at is kept too, until it expires, when a fast
+// failure took the fetch further down: 500 slow, 200 a fast blip and
+// 100 working keeps 200 for good and 100 for fastFallbackMemory, so the
+// endpoint goes back to 200 once the blip has passed.
+func (r *RawClient) rememberFallback(path string, size, slowFailedAt int) {
+	now := time.Now()
+	if slowFailedAt == 0 {
+		r.pageSizes.remember(path, size, false, now)
+		return
+	}
+	sticky := slowFailedAt
+	if below, ok := nextSmallerPageSize(slowFailedAt); ok {
+		sticky = below
+	}
+	r.pageSizes.remember(path, sticky, true, now)
+	if size < sticky {
+		r.pageSizes.remember(path, size, false, now)
 	}
 }
 
@@ -621,13 +669,19 @@ func (r *RawClient) walkPages(ctx context.Context, client *http.Client, opts Pag
 		// original page would have, instead of less.
 		pages = (requestedSize + pageSize - 1) / pageSize
 	}
-	clamped := pageLimit > 0 && pages > pageLimit
-	if clamped {
+	clamped := false
+	if pageLimit > 0 && pages > pageLimit {
 		pages = pageLimit
+		// Without a total there is nothing to clamp: the result is
+		// either complete (a short page) or unknown_total (a full one).
+		clamped = walk.totalKnown
 	}
-
+	// Without a total, read on while pages come back full. A caller that
+	// stops on truncation throws a truncated result away, so for it a
+	// full first page is enough to stop on, as it is at the requested
+	// size.
 	if !(clamped && opts.StopOnTruncation) {
-		for walk.nextPage <= pages && (walk.totalKnown || walk.lastFull) {
+		for walk.nextPage <= pages && (walk.totalKnown || (walk.lastFull && !opts.StopOnTruncation)) {
 			if err := ctx.Err(); err != nil {
 				return PageResult{}, err
 			}

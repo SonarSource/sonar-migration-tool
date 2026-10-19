@@ -291,8 +291,8 @@ func TestAdaptivePaginationMinimumPageSizeHearsGateway504(t *testing.T) {
 	if !IsHTTPError(err, http.StatusGatewayTimeout) {
 		t.Fatalf("err = %v, want the gateway's HTTP 504", err)
 	}
-	if got := counter.count(50); got != 1+minPageSizeSlowRetries {
-		t.Errorf("ps=50 requests = %d, want %d", got, 1+minPageSizeSlowRetries)
+	if got := counter.count(50); got != 3 {
+		t.Errorf("ps=50 requests = %d, want 3 (one try and two retries)", got)
 	}
 }
 

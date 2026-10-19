@@ -180,9 +180,15 @@ func TestAdaptiveLateDateFallbackRecoversAllIssues(t *testing.T) {
 	assertLateSliceFallback(t, corpus, tr)
 	assertAdaptiveIssueRecovery(t, &sink, tracker, total)
 
-	// The audit counts every request the slicer made, the page of the
-	// attempt the fallback set aside and the injected 504 included. The
-	// 504 never reached the corpus server, so it is added back here.
+	assertAuditCountsEveryRequest(t, corpus, tr, tracker)
+}
+
+// assertAuditCountsEveryRequest checks that the slicer's reconciliation
+// counts every request it made, the pages of the attempt a fallback set
+// aside and the injected 504 included. The 504 never reached the corpus
+// server, so it is added back here.
+func assertAuditCountsEveryRequest(t *testing.T, corpus *issueCorpus, tr *lateSlice504Transport, tracker *TruncationTracker) {
+	t.Helper()
 	audit := onlyReconciliation(t, tracker.State())
 	if want := len(corpus.allQueries()) + int(tr.failures.Load()); audit.Requests != want {
 		t.Errorf("reconciliation requests = %d, want %d (every request made)", audit.Requests, want)
@@ -254,6 +260,7 @@ func TestAdaptiveLateFacetFallbackRecoversAllIssues(t *testing.T) {
 
 	assertLateSliceFallback(t, corpus, tr)
 	assertAdaptiveIssueRecovery(t, &sink, tracker, total)
+	assertAuditCountsEveryRequest(t, corpus, tr, tracker)
 }
 
 // TestAdaptiveFacetCellStaysCompleteAfterFallback proves that a facet

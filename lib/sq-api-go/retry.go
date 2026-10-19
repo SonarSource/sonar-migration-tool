@@ -75,7 +75,9 @@ type RetryLogFunc func(method, url string, status, attempt, total int)
 // HTTP method, URL path, the number of retries that preceded the recovery,
 // and the cumulative time this request spent waiting on rate-limit backoff.
 // It is NOT called when a request exhausts its retry schedule still seeing
-// 429 (that is a failure, not a resume), nor for 5xx/network-error retries.
+// 429 (that is a failure, not a resume), nor for 5xx/network-error retries,
+// nor when a request that was throttled is then handed back early with a
+// slow status under WithoutRetryOnSlowStatus (it did not get through).
 type RecoveryLogFunc func(method, url string, retries int, waited time.Duration)
 
 // rateLimitGate is a shared barrier that holds new requests when an
@@ -353,10 +355,10 @@ type skipRetry struct {
 // rather than adding to it.
 //
 // It exists for callers with a better recovery than an identical retry:
-// a paginated fetch that answers a slow 504 by asking again with a
+// a paginated fetch that answers a slow 5xx by asking again with a
 // smaller page size gains nothing from repeating the slow request first,
 // and each repeat spends time from the http.Client.Timeout that bounds
-// all attempts together. A fast 504 is more likely a proxy blip, which
+// all attempts together. A fast 5xx is more likely a proxy blip, which
 // the normal retries absorb.
 func WithoutRetryOnSlowStatus(ctx context.Context, after time.Duration, codes ...int) context.Context {
 	skip := skipRetry{after: after, codes: make(map[int]bool, len(codes))}

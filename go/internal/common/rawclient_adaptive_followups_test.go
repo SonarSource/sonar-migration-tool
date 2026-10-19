@@ -93,20 +93,27 @@ func TestAdaptivePaginationSlow502And503StepDownAfterOneRequest(t *testing.T) {
 
 // A 5xx that says nothing about page size is returned at once.
 func TestAdaptivePaginationNonFallbackStatusIsReturned(t *testing.T) {
-	var log pageLog
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.add(r)
-		http.Error(w, "not implemented", http.StatusNotImplemented)
-	}))
-	t.Cleanup(ts.Close)
+	for _, status := range []int{http.StatusNotImplemented, http.StatusHTTPVersionNotSupported} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			var log pageLog
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				log.add(r)
+				http.Error(w, http.StatusText(status), status)
+			}))
+			t.Cleanup(ts.Close)
 
-	_, err := NewRawClient(ts.Client(), ts.URL+"/").GetPaginatedResult(context.Background(), projectSearchOpts())
+			res, err := NewRawClient(ts.Client(), ts.URL+"/").GetPaginatedResult(context.Background(), projectSearchOpts())
 
-	if !IsHTTPError(err, http.StatusNotImplemented) {
-		t.Fatalf("err = %v, want HTTP 501", err)
-	}
-	if got := log.get(); !reflect.DeepEqual(got, []string{"1:500"}) {
-		t.Errorf("requests = %v, want only [1:500]", got)
+			if !IsHTTPError(err, status) {
+				t.Fatalf("err = %v, want HTTP %d", err, status)
+			}
+			if got := log.get(); !reflect.DeepEqual(got, []string{"1:500"}) {
+				t.Errorf("requests = %v, want only [1:500]", got)
+			}
+			if res.Requests != 1 {
+				t.Errorf("Requests = %d, want 1, set on error too", res.Requests)
+			}
+		})
 	}
 }
 
@@ -164,16 +171,23 @@ func TestAdaptivePaginationLargeRequestStepsTo500(t *testing.T) {
 // that page held, not just one smaller page.
 func TestAdaptivePaginationWithoutTotalKeepsOriginalPageWorth(t *testing.T) {
 	cases := []struct {
-		name       string
-		total      int
-		wantItems  int
-		wantReason TruncationReason
+		name         string
+		total        int
+		stop         bool
+		wantItems    int
+		wantReason   TruncationReason
+		wantRequests int
 	}{
 		// 300 items fit the original page: read until the short page.
-		{"fits the original page", 300, 300, ""},
+		{"fits the original page", 300, false, 300, "", 3},
+		// 400 items: two full pages, then an empty one shows the end.
+		{"ends on a page boundary", 400, false, 400, "", 4},
 		// 900 items: the original page would have held 500 and reported
 		// unknown_total. Three pages of 200 cover those 500.
-		{"more than the original page", 900, 600, ReasonUnknownTotal},
+		{"more than the original page", 900, false, 600, ReasonUnknownTotal, 4},
+		// A caller that stops on truncation stops at the first full
+		// page, as it would have at the requested size.
+		{"stop on truncation", 900, true, 200, ReasonUnknownTotal, 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -189,13 +203,18 @@ func TestAdaptivePaginationWithoutTotalKeepsOriginalPageWorth(t *testing.T) {
 			t.Cleanup(ts.Close)
 			captureDefaultLogger(t)
 
-			res, err := NewRawClient(ts.Client(), ts.URL+"/").GetPaginatedResult(context.Background(), projectSearchOpts())
+			opts := projectSearchOpts()
+			opts.StopOnTruncation = tc.stop
+			res, err := NewRawClient(ts.Client(), ts.URL+"/").GetPaginatedResult(context.Background(), opts)
 
 			if err != nil {
 				t.Fatalf("GetPaginatedResult: %v", err)
 			}
 			if res.PageSize != 200 || res.Reason != tc.wantReason {
 				t.Errorf("PageSize=%d Reason=%q, want 200 / %q", res.PageSize, res.Reason, tc.wantReason)
+			}
+			if res.Requests != tc.wantRequests {
+				t.Errorf("Requests = %d, want %d (the failed ps=500 one included)", res.Requests, tc.wantRequests)
 			}
 			assertCompleteUniqueKeys(t, res.Items, tc.wantItems)
 		})
@@ -268,7 +287,7 @@ func TestAdaptivePaginationRestartsAfterShortPage(t *testing.T) {
 // fastFallbackMemory, so a short burst of errors cannot hold an endpoint
 // at a small page size for the rest of the run.
 func TestAdaptivePaginationFastFallbackExpires(t *testing.T) {
-	shortFallbackMemory(t, 50*time.Millisecond)
+	shortFallbackMemory(t, 300*time.Millisecond)
 	var log pageLog
 	var mu sync.Mutex
 	failing := true
@@ -305,7 +324,7 @@ func TestAdaptivePaginationFastFallbackExpires(t *testing.T) {
 	if got := fetch(); got != 200 {
 		t.Errorf("fetch within the memory PageSize = %d, want the remembered 200", got)
 	}
-	time.Sleep(60 * time.Millisecond)
+	time.Sleep(350 * time.Millisecond)
 	if got := fetch(); got != 500 {
 		t.Errorf("fetch after the memory expired PageSize = %d, want 500 again", got)
 	}
@@ -376,6 +395,22 @@ func TestPageSizeTable(t *testing.T) {
 			t.Errorf("= %d, want 100", got)
 		}
 	})
+	t.Run("a fast size larger than the slow one does not apply", func(t *testing.T) {
+		tbl := newPageSizeTable()
+		tbl.remember("p", 100, true, now)
+		tbl.remember("p", 200, false, now)
+		if got := tbl.sizeFor("p", 500, now); got != 100 {
+			t.Errorf("= %d, want the slow-learned 100", got)
+		}
+	})
+	t.Run("re-learning the fast size starts its expiry again", func(t *testing.T) {
+		tbl := newPageSizeTable()
+		tbl.remember("p", 200, false, now)
+		tbl.remember("p", 200, false, now.Add(40*time.Second))
+		if got := tbl.sizeFor("p", 500, now.Add(90*time.Second)); got != 200 {
+			t.Errorf("= %d, want 200: the second remember should have extended it", got)
+		}
+	})
 	t.Run("never above the requested size", func(t *testing.T) {
 		tbl := newPageSizeTable()
 		tbl.remember("p", 200, true, now)
@@ -397,7 +432,7 @@ func TestNewSharedRawClientSharesLearnedSizes(t *testing.T) {
 		writeAdaptiveTestPage(t, w, r, 30)
 	}))
 	t.Cleanup(ts.Close)
-	t.Cleanup(func() { sharedPageSizes.Delete(ts.URL + "/") })
+	t.Cleanup(func() { ForgetSharedPageSizes(ts.URL) })
 	captureDefaultLogger(t)
 
 	first := NewSharedRawClient(ts.Client(), ts.URL+"/")
@@ -455,4 +490,114 @@ type waitThenSend struct {
 func (w waitThenSend) RoundTrip(r *http.Request) (*http.Response, error) {
 	time.Sleep(w.wait)
 	return w.next.RoundTrip(r)
+}
+
+// A slow failure at 500 followed by a fast blip at 200 keeps 200 for good
+// and 100 only until it expires, so the endpoint goes back to 200 once
+// the blip has passed instead of staying at 100 for the whole run.
+func TestAdaptivePaginationSlowThenFastKeepsSizeBelowSlowFailure(t *testing.T) {
+	var mu sync.Mutex
+	blip := true
+	ts, counter := countingServer(t, func(w http.ResponseWriter, r *http.Request, size, _ int) {
+		mu.Lock()
+		fail200 := blip
+		if size == 100 {
+			blip = false
+		}
+		mu.Unlock()
+		switch {
+		case size == 500:
+			delayedStatus(w, r, 2*testSlowGatewayTimeout, http.StatusGatewayTimeout)
+		case size == 200 && fail200:
+			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		default:
+			writeAdaptiveTestPage(t, w, r, 30)
+		}
+	})
+	raw := sdkRawClient(t, ts.URL, 5*time.Second)
+	shortFallbackMemory(t, 300*time.Millisecond)
+	captureDefaultLogger(t)
+
+	fetch := func() int {
+		t.Helper()
+		res, err := raw.GetPaginatedResult(context.Background(), projectSearchOpts())
+		if err != nil {
+			t.Fatalf("GetPaginatedResult: %v", err)
+		}
+		return res.PageSize
+	}
+
+	if got := fetch(); got != 100 {
+		t.Fatalf("first fetch PageSize = %d, want 100", got)
+	}
+	if got := fetch(); got != 100 {
+		t.Errorf("fetch within the memory PageSize = %d, want 100", got)
+	}
+	time.Sleep(350 * time.Millisecond)
+	if got := fetch(); got != 200 {
+		t.Errorf("fetch after the fast size expired PageSize = %d, want the 200 kept below the slow failure", got)
+	}
+	if got := counter.count(500); got != 1 {
+		t.Errorf("ps=500 requests = %d, want 1: 500 failed slowly and is not tried again", got)
+	}
+}
+
+// A cap the smaller size does not divide still reads every item up to
+// the caller's ceiling: 3 x 500 = 1,500 is 8 pages of 200, not 7.
+func TestAdaptivePaginationOddCapLosesNothing(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("ps") == "500" {
+			http.Error(w, "gateway timeout", http.StatusGatewayTimeout)
+			return
+		}
+		writeAdaptiveTestPage(t, w, r, 1500)
+	}))
+	t.Cleanup(ts.Close)
+	captureDefaultLogger(t)
+
+	opts := projectSearchOpts()
+	opts.PageLimit = 3
+	res, err := NewRawClient(ts.Client(), ts.URL+"/").GetPaginatedResult(context.Background(), opts)
+
+	if err != nil {
+		t.Fatalf("GetPaginatedResult: %v", err)
+	}
+	if res.Truncated {
+		t.Errorf("Truncated with Reason %q, want a complete result", res.Reason)
+	}
+	assertCompleteUniqueKeys(t, res.Items, 1500)
+}
+
+// The defaults the docs quote. Tests replace most of them, so pin them
+// here.
+func TestAdaptivePaginationDefaults(t *testing.T) {
+	if slowGatewayTimeout != 5*time.Second {
+		t.Errorf("slowGatewayTimeout = %v, want 5s", slowGatewayTimeout)
+	}
+	if fastFallbackMemory != 5*time.Minute {
+		t.Errorf("fastFallbackMemory = %v, want 5m", fastFallbackMemory)
+	}
+	if paginatedTimeoutFactor != 2 {
+		t.Errorf("paginatedTimeoutFactor = %d, want 2", paginatedTimeoutFactor)
+	}
+	if minPageSizeSlowRetries != 2 {
+		t.Errorf("minPageSizeSlowRetries = %d, want 2 (three tries at 50)", minPageSizeSlowRetries)
+	}
+	if want := []int{500, 200, 100, 50}; !reflect.DeepEqual(fallbackPageSizes, want) {
+		t.Errorf("fallbackPageSizes = %v, want %v", fallbackPageSizes, want)
+	}
+}
+
+// ForgetSharedPageSizes resets what shared clients learned, however the
+// base URL is written.
+func TestForgetSharedPageSizes(t *testing.T) {
+	const base = "https://forget.example.com"
+	NewSharedRawClient(http.DefaultClient, base+"/").pageSizes.remember("api/x", 200, true, time.Now())
+	if got := NewSharedRawClient(http.DefaultClient, base).pageSizes.sizeFor("api/x", 500, time.Now()); got != 200 {
+		t.Fatalf("shared size = %d, want 200 with or without the trailing slash", got)
+	}
+	ForgetSharedPageSizes(base + "/")
+	if got := NewSharedRawClient(http.DefaultClient, base).pageSizes.sizeFor("api/x", 500, time.Now()); got != 500 {
+		t.Errorf("after forgetting, size = %d, want 500", got)
+	}
 }

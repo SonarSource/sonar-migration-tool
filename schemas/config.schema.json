@@ -22,7 +22,7 @@
       "type": "integer",
       "minimum": 1,
       "default": 60,
-      "description": "Default HTTP request timeout in seconds. A paginated request waits up to twice this. Overridden per command by source.timeout / target.timeout."
+      "description": "Default HTTP request timeout in seconds. Paginated reads by extract, including the extract step of transfer and sync-issues, wait up to twice this. Overridden per command by source.timeout / target.timeout."
     },
     "export_directory": {
       "type": "string",
