@@ -147,17 +147,13 @@ Ready-to-copy examples ship in [`examples/`](examples/): [`config.minimal.exampl
 
 ### Step 4 — Run the migration
 
-If you want to migrate all SQS projects in a single organization you can run the 4 phases in order, without any manual step. With `--default_organization`, every project goes to the **same** SonarQube Cloud organization, so you don't need to edit `organizations.csv` by hand:
+If you want to migrate all SQS projects in a single organization you can run the 2 commands in order, without any manual step. With `--default_organization`, every project goes to the **same** SonarQube Cloud organization, so you don't need to edit `organizations.csv` by hand:
 
 ```bash
-# 1. Extract everything from SonarQube Server
+# 1. Extract everything from SonarQube Server, and generate the mapping files
 ./sonar-migration-tool extract
 
-# 2. Group projects and generate the mapping files
-./sonar-migration-tool structure
-./sonar-migration-tool mappings
-
-# 3. Push every project to a single SonarQube Cloud organization
+# 2. Push every project to a single SonarQube Cloud organization
 ./sonar-migration-tool migrate --default_organization <YOUR_SQC_ORG>
 ```
 
@@ -216,9 +212,8 @@ Full reference, more examples, and the config-file format: 👉 **[Using `transf
 
 ### Migrating many SonarQube Server instances into one SonarQube Cloud Enterprise
 
-* Run `extract` for as many SonarQube Server instances as you have
-* Run `structure` and `mappings` once
-* Edit `organizations.csv` to map projects to SonarQube Cloud organizations (per row, column 2)
+* Run `extract` for as many SonarQube Server instances as you have, into the same export directory. Each run rebuilds the mapping files for every server extracted so far.
+* After the last `extract`, edit `organizations.csv` to map projects to SonarQube Cloud organizations (per row, column 2)
 * Run `migrate`
 
 ```bash
@@ -226,9 +221,6 @@ Full reference, more examples, and the config-file format: 👉 **[Using `transf
 ./sonar-migration-tool extract --source_url <YOUR_SQS_2_URL> --source_token <YOUR_SQS_2_TOKEN>
 ...
 ./sonar-migration-tool extract --source_url <YOUR_SQS_n_URL> --source_token <YOUR_SQS_n_TOKEN>
-
-./sonar-migration-tool structure
-./sonar-migration-tool mappings
 
 # → edit organizations.csv to set sonarcloud_org_key per row (column 2)
 
@@ -262,9 +254,9 @@ You may want to rerun the command with the extra `--debug` flag to get more trou
 | Command | Purpose |
 |---|---|
 | `transfer` | One-command end-to-end migration (extract → structure → mappings → migrate → PDF report) |
-| `extract` | Extract data from a SonarQube Server instance |
-| `structure` | Group extracted projects into organizations |
-| `mappings` | Generate entity mapping CSVs |
+| `extract` | Extract data from a SonarQube Server instance and generate the mapping CSVs |
+| `structure` | **Deprecated**, `extract` now does this. Group extracted projects into organizations. See [STRUCTURE-MAPPINGS-DEPRECATED.md](docs/STRUCTURE-MAPPINGS-DEPRECATED.md) |
+| `mappings` | **Deprecated**, `extract` now does this. Generate entity mapping CSVs. See [STRUCTURE-MAPPINGS-DEPRECATED.md](docs/STRUCTURE-MAPPINGS-DEPRECATED.md) |
 | `migrate` | Push configuration and data to SonarQube Cloud |
 | `sync-issues` | Sync issue/hotspot triage state from SonarQube Server to an already-migrated SonarQube Cloud project |
 | `wizard` | Interactive guided migration (terminal) |

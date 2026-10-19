@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -99,6 +100,18 @@ func TestTier1_SourcePipeline(t *testing.T) {
 			t.Errorf("no non-empty results.*.jsonl file found under %q", runDir)
 		}
 
+		// #503: extract runs structure and mappings itself, so every CSV
+		// migrate needs is already there. A first extract has nothing to
+		// back up.
+		assertCSVColumns(t, exportDir, "organizations.csv", "sonarcloud_org_key")
+		assertCSV(t, exportDir, "projects.csv")
+		assertExtractMappingCSVs(t, exportDir)
+		if backups := csvBackups(t, exportDir); len(backups) != 0 {
+			t.Errorf("a first extract must not write CSV backups, found %v", backups)
+		}
+		if cfg.org != "" {
+			assertOrgMapping(t, exportDir, cfg.org)
+		}
 		assertMeasuresIncludeNcloc(t, runDir)
 	})
 
@@ -129,6 +142,15 @@ func TestTier1_SourcePipeline(t *testing.T) {
 		if len(runs) != 1 {
 			t.Errorf("expected exactly one run directory after resuming, found %d: %v", len(runs), runs)
 		}
+
+		// #503: the second extract regenerates the CSVs, so the copies the
+		// first one wrote, which an operator may have edited, are saved.
+		backups := csvBackups(t, exportDir)
+		for _, prefix := range []string{"organizations.csv.bak-", "projects.csv.bak-"} {
+			if !slices.ContainsFunc(backups, func(b string) bool { return strings.HasPrefix(b, prefix) }) {
+				t.Errorf("expected a %s* backup after re-extracting, found %v", prefix, backups)
+			}
+		}
 	})
 
 	t.Run("structure", func(t *testing.T) {
@@ -139,6 +161,7 @@ func TestTier1_SourcePipeline(t *testing.T) {
 
 		res := runCLI(t, "structure", "--config", cfg.path, "--export_directory", exportDir)
 		requireExit(t, res, 0, "structure")
+		assertDeprecatedByExtract(t, res, "structure")
 
 		// structure emits sonarcloud_org_key EMPTY by design when the config
 		// names no single target org — the operator maps it to a Cloud org
@@ -182,24 +205,13 @@ func TestTier1_SourcePipeline(t *testing.T) {
 
 		res := runCLI(t, "mappings", "--config", cfg.path, "--export_directory", exportDir)
 		requireExit(t, res, 0, "mappings")
+		assertDeprecatedByExtract(t, res, "mappings")
 
 		// These CSVs can legitimately be empty on a minimal instance (no
 		// permission templates, no portfolios, ...), so they only get a
 		// tolerant existence + row-count check rather than assertCSV's
 		// hard failure on zero rows.
-		for _, name := range []string{"templates.csv", "profiles.csv", "gates.csv", "portfolios.csv", "groups.csv"} {
-			path := filepath.Join(exportDir, name)
-			if !fileExists(path) {
-				t.Errorf("expected %s to exist under %q", name, exportDir)
-				continue
-			}
-			rows, err := structure.LoadCSV(exportDir, name)
-			if err != nil {
-				t.Errorf("loading %s: %v", name, err)
-				continue
-			}
-			logf(t, "csv: %s has %d rows (may legitimately be empty)\n", name, len(rows))
-		}
+		assertExtractMappingCSVs(t, exportDir)
 	})
 
 	t.Run("report_migration", func(t *testing.T) {
@@ -484,6 +496,54 @@ func withoutInsecureWarning(out, warning string) string {
 		}
 	}
 	return strings.Join(kept, "\n")
+}
+
+// assertExtractMappingCSVs checks the CSVs mappings writes. They can
+// legitimately be empty on a minimal instance (no permission templates,
+// no portfolios, ...), so they only get a tolerant existence + row-count
+// check rather than assertCSV's hard failure on zero rows.
+func assertExtractMappingCSVs(t *testing.T, exportDir string) {
+	t.Helper()
+	for _, name := range []string{"templates.csv", "profiles.csv", "gates.csv", "portfolios.csv", "groups.csv"} {
+		path := filepath.Join(exportDir, name)
+		if !fileExists(path) {
+			t.Errorf("expected %s to exist under %q", name, exportDir)
+			continue
+		}
+		rows, err := structure.LoadCSV(exportDir, name)
+		if err != nil {
+			t.Errorf("loading %s: %v", name, err)
+			continue
+		}
+		logf(t, "csv: %s has %d rows (may legitimately be empty)\n", name, len(rows))
+	}
+}
+
+// csvBackups lists the <name>.csv.bak-<timestamp> files extract writes
+// before it regenerates an existing CSV (#503).
+func csvBackups(t *testing.T, exportDir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(exportDir)
+	if err != nil {
+		t.Fatalf("reading export dir %q: %v", exportDir, err)
+	}
+	var backups []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.Contains(e.Name(), ".csv.bak-") {
+			backups = append(backups, e.Name())
+		}
+	}
+	return backups
+}
+
+// assertDeprecatedByExtract checks the deprecated structure and mappings
+// commands warn when they start and again when they end (#503).
+func assertDeprecatedByExtract(t *testing.T, res cliResult, command string) {
+	t.Helper()
+	const notice = "this command is deprecated: extract now runs structure and mappings automatically"
+	if got := strings.Count(res.combined(), notice); got != 2 {
+		t.Errorf("%s: expected the deprecation notice twice (start and end), found %d:\n%s", command, got, res.combined())
+  }
 }
 
 // assertMeasuresIncludeNcloc checks that getProjectMeasures recorded an
