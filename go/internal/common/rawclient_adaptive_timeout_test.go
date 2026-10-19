@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -28,10 +29,10 @@ import (
 // page-size fallback ever sees the 504.
 //
 // The contract under test is the agreed one: only HTTP 5xx steps the
-// page size down, with no user configuration. A paginated attempt that
-// can still fall back waits up to twice the client's timeout, so a
-// gateway that answers 504 just after the default timeout is heard; a
-// client timeout itself still reaches the caller unchanged.
+// page size down, with no user configuration. A paginated attempt waits
+// up to twice the client's timeout, so a gateway that answers 504 just
+// after the default timeout is heard; a client timeout itself still
+// reaches the caller unchanged.
 
 // testSlowGatewayTimeout stands in for slowGatewayTimeout, scaled down
 // with the test's load-balancer delays. An immediate 504 stays well
@@ -258,7 +259,7 @@ func assertTimesOutAt(t *testing.T, err error, elapsed, timeout time.Duration) {
 }
 
 // Requests outside adaptive pagination keep the client's normal timeout:
-// the doubled budget is only for attempts that can still fall back.
+// the doubled budget is only for paginated fetches.
 func TestRawClientGetKeepsNormalTimeout(t *testing.T) {
 	const clientTimeout = 300 * time.Millisecond
 	ts, _ := countingServer(t, func(w http.ResponseWriter, r *http.Request, _, _ int) {
@@ -271,23 +272,57 @@ func TestRawClientGetKeepsNormalTimeout(t *testing.T) {
 	assertTimesOutAt(t, err, time.Since(start), clientTimeout)
 }
 
-// At the minimum page size there is nothing smaller to fall back to, so
-// the attempt keeps the client's normal timeout too.
-func TestAdaptivePaginationMinimumPageSizeKeepsNormalTimeout(t *testing.T) {
+// At the minimum page size there is nothing smaller to fall back to, but
+// the attempt still waits up to twice the client's timeout: a gateway
+// that answers just after the client's own timeout is reported as the
+// 504 it sent rather than as a client timeout that hides it. The SDK does
+// not retry the slow 504; GetPaginatedResult tries twice more itself
+// before giving up.
+func TestAdaptivePaginationMinimumPageSizeHearsGateway504(t *testing.T) {
 	const clientTimeout = 300 * time.Millisecond
 	ts, counter := countingServer(t, func(w http.ResponseWriter, r *http.Request, _, _ int) {
-		delayedStatus(w, r, 2*clientTimeout, http.StatusGatewayTimeout)
+		delayedStatus(w, r, clientTimeout*3/2, http.StatusGatewayTimeout)
 	})
 	opts := projectSearchOpts()
 	opts.MaxPageSize = 50
 
-	start := time.Now()
 	_, err := sdkRawClient(t, ts.URL, clientTimeout).GetPaginatedResult(context.Background(), opts)
 
-	assertTimesOutAt(t, err, time.Since(start), clientTimeout)
-	if got := counter.count(50); got != 1 {
-		t.Errorf("ps=50 requests = %d, want 1", got)
+	if !IsHTTPError(err, http.StatusGatewayTimeout) {
+		t.Fatalf("err = %v, want the gateway's HTTP 504", err)
 	}
+	if got := counter.count(50); got != 1+minPageSizeSlowRetries {
+		t.Errorf("ps=50 requests = %d, want %d", got, 1+minPageSizeSlowRetries)
+	}
+}
+
+// A server that is slow for a while at the minimum page size gets more
+// tries there, and the fetch resumes from the page that failed.
+func TestAdaptivePaginationMinimumPageSizeRetriesSlow5xx(t *testing.T) {
+	var log pageLog
+	var slowLeft atomic.Int32
+	slowLeft.Store(2)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if page, _ := log.add(r); page == 2 && slowLeft.Add(-1) >= 0 {
+			delayedStatus(w, r, 2*testSlowGatewayTimeout, http.StatusServiceUnavailable)
+			return
+		}
+		writeAdaptiveTestPage(t, w, r, 120)
+	}))
+	t.Cleanup(ts.Close)
+	opts := projectSearchOpts()
+	opts.MaxPageSize = 50
+
+	res, err := sdkRawClient(t, ts.URL, 5*time.Second).GetPaginatedResult(context.Background(), opts)
+
+	if err != nil {
+		t.Fatalf("GetPaginatedResult: %v", err)
+	}
+	want := []string{"1:50", "2:50", "2:50", "2:50", "3:50"}
+	if got := log.get(); !reflect.DeepEqual(got, want) {
+		t.Errorf("requests = %v, want %v", got, want)
+	}
+	assertCompleteUniqueKeys(t, res.Items, 120)
 }
 
 // Requests outside adaptive pagination keep the SDK's normal 504 retries.
@@ -310,9 +345,8 @@ func TestRawClientGetStillRetries504(t *testing.T) {
 	}
 }
 
-// At the minimum page size there is no smaller size to fall back to, so
-// the SDK's normal 504 retries remain the last line of defence, slow or
-// fast. Above it, a slow 504 must not be retried at the same size.
+// At every page size, the minimum included, a fast 504 keeps the SDK's
+// normal retries, and a slow one is not retried at the same size.
 func TestAdaptivePaginationMinimumPageSizeKeepsSDKRetries(t *testing.T) {
 	ts, counter := countingServer(t, func(w http.ResponseWriter, r *http.Request, size, nth int) {
 		switch {
@@ -373,9 +407,9 @@ func TestAdaptivePaginationFast504RetriedAtSameSize(t *testing.T) {
 	assertCompleteUniqueKeys(t, res.Items, 30)
 }
 
-// Only 504 skips the same-size SDK retry. A transient 500/502/503 is
-// still retried at the same size, so one blip does not permanently
-// lower the endpoint's page size for the rest of the run.
+// A fast 500/502/503 is retried at the same size like a fast 504, so one
+// blip does not lower the endpoint's page size. Only a slow one skips
+// the same-size retry.
 func TestAdaptivePaginationTransient503RetriedAtSameSize(t *testing.T) {
 	ts, counter := countingServer(t, func(w http.ResponseWriter, r *http.Request, size, nth int) {
 		if size == 500 && nth == 1 {

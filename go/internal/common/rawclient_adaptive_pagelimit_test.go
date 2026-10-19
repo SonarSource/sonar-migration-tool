@@ -27,7 +27,10 @@ func TestPageLimitAt(t *testing.T) {
 		{"500 to 50", 20, 500, 50, 200},
 		{"webhook sample to 200", 10, 500, 200, 25},
 		{"webhook sample to 50", 10, 500, 50, 100},
-		{"rounds up", 3, 150, 100, 5},
+		{"ce/activity 1000 to 500", 1, 1000, 500, 2},
+		// 3 x 150 = 450 items: 4 pages of 100 stop short of it, 5 would
+		// read past it, possibly into a server's HTTP 400 range.
+		{"rounds down when the size does not divide the ceiling", 3, 150, 100, 4},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -36,8 +39,13 @@ func TestPageLimitAt(t *testing.T) {
 				t.Fatalf("pageLimitAt(%d, %d, %d) = %d, want %d",
 					tc.limit, tc.requestedSize, tc.pageSize, got, tc.want)
 			}
-			if tc.limit > 0 && got*tc.pageSize < tc.limit*tc.requestedSize {
-				t.Errorf("ceiling fell: %d x %d < %d x %d",
+			if tc.limit > 0 && got*tc.pageSize > tc.limit*tc.requestedSize {
+				t.Errorf("ceiling exceeded: %d x %d > %d x %d",
+					got, tc.pageSize, tc.limit, tc.requestedSize)
+			}
+			if tc.limit > 0 && (tc.limit*tc.requestedSize)%tc.pageSize == 0 &&
+				got*tc.pageSize != tc.limit*tc.requestedSize {
+				t.Errorf("ceiling not kept: %d x %d != %d x %d",
 					got, tc.pageSize, tc.limit, tc.requestedSize)
 			}
 		})

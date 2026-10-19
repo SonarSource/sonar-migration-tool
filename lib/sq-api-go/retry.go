@@ -10,7 +10,9 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"net/http/httptrace"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -160,12 +162,17 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	for attempt := 0; ; attempt++ {
 		t.waitOnGate(req.Context())
 
-		start := time.Now()
-		resp, err := t.inner.RoundTrip(req)
-		if !shouldRetry(resp, err) || retrySkipped(req, resp, time.Since(start)) {
+		sent, sinceSent := timeSend(req)
+		resp, err := t.inner.RoundTrip(sent)
+		if !shouldRetry(resp, err) {
 			if pausedForRateLimit {
 				t.fireRecovery(req, attempt, totalWaited)
 			}
+			return resp, err
+		}
+		// Handed back early, the request still failed, so this is never
+		// a rate-limit recovery, even when it was throttled before.
+		if retrySkipped(req, resp, sinceSent()) {
 			return resp, err
 		}
 
@@ -336,7 +343,10 @@ type skipRetry struct {
 // WithoutRetryOnSlowStatus returns a copy of ctx under which a request
 // that waits at least after for a response carrying one of codes is
 // handed back at once, with its body readable, instead of being retried.
-// A faster response with the same status, and every other outcome, keeps
+// The wait is counted from when the request is written to the
+// connection, so time spent waiting for a WithAPIRateLimiter slot does
+// not count. A faster response with the same status, and every other
+// outcome, keeps
 // the normal schedule; requests made with any other context are
 // unaffected. 429 is never handed back early, so rate limits always go
 // through the shared backoff gate. A later call replaces an earlier one
@@ -354,6 +364,34 @@ func WithoutRetryOnSlowStatus(ctx context.Context, after time.Duration, codes ..
 		skip.codes[code] = true
 	}
 	return context.WithValue(ctx, skipRetryKey{}, skip)
+}
+
+// timeSend returns the request to send for one attempt and a func that
+// reports how long ago it was written to the connection. The clock
+// starts at that write, not here, because throttleTransport sits below
+// this transport: time spent waiting for a rate-limit slot must not make
+// a fast response look slow to retrySkipped. Only a request under
+// WithoutRetryOnSlowStatus is traced; any other is sent unchanged and
+// timed from the call.
+func timeSend(req *http.Request) (*http.Request, func() time.Duration) {
+	start := time.Now()
+	if _, ok := req.Context().Value(skipRetryKey{}).(skipRetry); !ok {
+		return req, func() time.Duration { return time.Since(start) }
+	}
+	var wrote atomic.Pointer[time.Time]
+	trace := &httptrace.ClientTrace{
+		WroteRequest: func(httptrace.WroteRequestInfo) {
+			now := time.Now()
+			wrote.Store(&now)
+		},
+	}
+	traced := req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+	return traced, func() time.Duration {
+		if at := wrote.Load(); at != nil {
+			return time.Since(*at)
+		}
+		return time.Since(start)
+	}
 }
 
 // retrySkipped reports whether the request's context asked for resp to

@@ -13,10 +13,12 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	sqapi "github.com/sonar-solutions/sq-api-go"
@@ -28,6 +30,11 @@ type HTTPError struct {
 	Method     string
 	URL        string
 	Body       string
+
+	// Elapsed is how long the response carrying StatusCode took, from
+	// the last time the request was sent. Waiting for a rate-limit slot
+	// and the SDK's retries before that attempt do not count.
+	Elapsed time.Duration
 }
 
 func (e *HTTPError) Error() string {
@@ -82,10 +89,9 @@ type RawClient struct {
 	httpClient *http.Client
 	baseURL    string // normalised with trailing slash
 
-	// Remember successful page sizes separately for each API endpoint.
-	// The mutex protects concurrent extraction requests.
-	pageSizeMu sync.Mutex
-	pageSizes  map[string]int
+	// pageSizes remembers the page size a fallback settled on, per API
+	// endpoint. NewSharedRawClient shares one table per server.
+	pageSizes *pageSizeTable
 
 	// onTruncation receives one record per truncated paginated fetch.
 	// It lives on the client rather than in PaginatedOpts so a single
@@ -95,68 +101,157 @@ type RawClient struct {
 	onTruncation func(TruncationRecord)
 }
 
-// NewRawClient wraps an sqapi.Client's HTTP infrastructure.
+// NewRawClient wraps an sqapi.Client's HTTP infrastructure. Its learned
+// page sizes are its own; see NewSharedRawClient.
 func NewRawClient(httpClient *http.Client, baseURL string) *RawClient {
 	return &RawClient{
 		httpClient: httpClient,
 		baseURL:    baseURL,
-		pageSizes:  make(map[string]int),
+		pageSizes:  newPageSizeTable(),
 	}
 }
 
-// pageSizeFor returns the smaller of the requested page size
-// and any previously remembered size for the endpoint.
-func (r *RawClient) pageSizeFor(path string, requested int) int {
-	r.pageSizeMu.Lock()
-	defer r.pageSizeMu.Unlock()
+// sharedPageSizes holds one learned-page-size table per server base URL
+// for NewSharedRawClient.
+var sharedPageSizes sync.Map // base URL -> *pageSizeTable
 
-	if size, ok := r.pageSizes[path]; ok && size < requested {
-		return size
-	}
-	return requested
-}
-
-// rememberPageSize stores a smaller successful page size
-// for future requests to the same endpoint.
-func (r *RawClient) rememberPageSize(path string, size int) {
-	r.pageSizeMu.Lock()
-	defer r.pageSizeMu.Unlock()
-
-	if r.pageSizes == nil {
-		r.pageSizes = make(map[string]int)
-	}
-
-	if current, ok := r.pageSizes[path]; !ok || size < current {
-		r.pageSizes[path] = size
+// NewSharedRawClient is NewRawClient with learned page sizes shared by
+// every client this process builds with it for the same base URL. extract
+// builds a separate client for the --project_key_regexp pre-flight
+// listing and for the run that follows it; sharing means a fallback the
+// pre-flight paid a gateway timeout to learn is not paid for again.
+func NewSharedRawClient(httpClient *http.Client, baseURL string) *RawClient {
+	table, _ := sharedPageSizes.LoadOrStore(baseURL, newPageSizeTable())
+	return &RawClient{
+		httpClient: httpClient,
+		baseURL:    baseURL,
+		pageSizes:  table.(*pageSizeTable),
 	}
 }
 
-// pageLimitAt returns the page cap to use at pageSize. Callers size
-// PageLimit for the page size they asked for (20 pages x 500 = the
-// 10,000-result ceiling). After a fallback, the same number of smaller
-// pages would read fewer items, so the cap grows by the same factor the
-// page size shrank and PageSize x PageLimit stays constant. A cap of 0
-// (no cap) stays 0.
+// fastFallbackMemory is how long a page size learned only from fast
+// failures is kept (see pageSizeTable). A variable so tests can shorten it.
+var fastFallbackMemory = 5 * time.Minute
+
+// pageSizeTable remembers, per endpoint path, the page size a fallback
+// settled on, so later fetches start there.
 //
-// The cap rounds up so the ceiling never falls. That cannot carry a
-// ceiling within ResultWindowLimit past it, where the server answers
-// HTTP 400 rather than a short page: every fallback size divides 10,000.
+// A size learned from a slow failure (at least slowGatewayTimeout) is
+// kept for the life of the table: a gateway timeout is a reliable sign
+// the page is too heavy, and finding it again would cost a full gateway
+// delay. A size learned only from fast failures expires after
+// fastFallbackMemory, and the next fetch then starts at the requested
+// size again. A short burst of fast errors, such as a server restarting
+// behind a load balancer, therefore cannot lower an endpoint's page size
+// for the rest of a long run, and an endpoint that fails fast on large
+// pages every time costs only a few fast requests to find out again.
+//
+// The two are kept apart, so a fast-learned size that expires falls back
+// to the slow-learned one rather than to the requested size.
+type pageSizeTable struct {
+	mu    sync.Mutex
+	sizes map[string]learnedPageSize
+}
+
+type learnedPageSize struct {
+	sticky      int       // learned from a slow failure; 0 when none
+	fast        int       // learned from fast failures only; 0 when none
+	fastExpires time.Time // when fast stops applying
+}
+
+func newPageSizeTable() *pageSizeTable {
+	return &pageSizeTable{sizes: make(map[string]learnedPageSize)}
+}
+
+// sizeFor returns the smallest of the requested page size and the sizes
+// still remembered for path.
+func (t *pageSizeTable) sizeFor(path string, requested int, now time.Time) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	l := t.sizes[path]
+	size := requested
+	if l.sticky > 0 && l.sticky < size {
+		size = l.sticky
+	}
+	if l.fast > 0 && now.Before(l.fastExpires) && l.fast < size {
+		size = l.fast
+	}
+	return size
+}
+
+// remember records that a fetch of path succeeded at size after a
+// fallback. sticky is whether any failure in that fetch was slow. A
+// smaller size replaces a larger one, and re-learning the current
+// fast-learned size starts its expiry again.
+func (t *pageSizeTable) remember(path string, size int, sticky bool, now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	l := t.sizes[path]
+	switch {
+	case sticky:
+		if l.sticky == 0 || size < l.sticky {
+			l.sticky = size
+		}
+	case l.fast == 0 || !now.Before(l.fastExpires) || size <= l.fast:
+		l.fast, l.fastExpires = size, now.Add(fastFallbackMemory)
+	}
+	t.sizes[path] = l
+}
+
+// pageLimitAt returns the page cap to use at pageSize. A caller sizes
+// PageLimit for the page size it asked for, so what it really sets is an
+// item ceiling, PageLimit x requested size: 20 pages x 500 is the
+// 10,000-result ceiling. After a fallback the cap becomes the number of
+// smaller pages that reaches the same ceiling. A cap of 0 (no cap)
+// stays 0.
+//
+// The cap rounds down, so the walk never reads past the caller's
+// ceiling, which may be ResultWindowLimit, where the server answers HTTP
+// 400 rather than a short page. Every fallback size divides 10,000 and
+// every cap in use, so in practice the ceiling is kept exactly. When a
+// size does not divide it, the walk stops short of the ceiling and the
+// result reports a clamp, instead of failing past it.
 func pageLimitAt(limit, requestedSize, pageSize int) int {
 	if limit <= 0 || pageSize >= requestedSize {
 		return limit
 	}
-	return (limit*requestedSize + pageSize - 1) / pageSize // round up
+	return limit * requestedSize / pageSize // round down
 }
 
-// nextSmallerPageSize returns the next fallback page size.
-// The fallback sequence is 500 -> 200 -> 100 -> 50.
+// fallbackPageSizes is the page size sequence a fallback steps through.
+var fallbackPageSizes = []int{500, 200, 100, 50}
+
+// nextSmallerPageSize returns the next fallback page size below current:
+// 500 -> 200 -> 100 -> 50, entering the sequence at 500 for a fetch that
+// asked for more (api/ce/activity asks for 1000).
 func nextSmallerPageSize(current int) (int, bool) {
-	for _, size := range []int{200, 100, 50} {
+	for _, size := range fallbackPageSizes {
 		if current > size {
 			return size, true
 		}
 	}
 	return 0, false
+}
+
+// pageSizeFallbackStatuses are the statuses that send a paginated fetch
+// to a smaller page size: what a server, or a gateway in front of it,
+// answers when a page takes too long or is too heavy to build. Another
+// 5xx, such as 501 Not Implemented or 505, says nothing about page size
+// and is returned at once.
+var pageSizeFallbackStatuses = []int{
+	http.StatusInternalServerError,
+	http.StatusBadGateway,
+	http.StatusServiceUnavailable,
+	http.StatusGatewayTimeout,
+}
+
+func isPageSizeFallbackStatus(code int) bool {
+	for _, c := range pageSizeFallbackStatuses {
+		if c == code {
+			return true
+		}
+	}
+	return false
 }
 
 // BaseURL returns the client's base URL.
@@ -269,7 +364,8 @@ type PageResult struct {
 	Total      int  // paging total as reported by the server
 	TotalKnown bool // false when the total key was absent or unparseable
 	Fetched    int  // len(Items)
-	PagesRead  int  // requests that returned items, page 1 included
+	PagesRead  int  // page requests that succeeded, page 1 included
+	Requests   int  // page requests made, failed ones included; also set on error
 	PageSize   int  // effective MaxPageSize
 	PageLimit  int  // effective PageLimit (0 = uncapped)
 	Truncated  bool // set only when Reason != ""
@@ -307,48 +403,60 @@ func (r *RawClient) GetPaginated(ctx context.Context, opts PaginatedOpts) ([]jso
 // result key (api/rules/search "actives") as a single element, so that
 // comparison would fire on perfectly healthy responses.
 //
-// The page size adapts. An HTTP 5xx restarts the fetch from page 1 at
-// the next smaller size (500 -> 200 -> 100 -> 50), discarding the failed
-// attempt's items, and a smaller size that works is remembered for
-// opts.Path for the rest of the client's life. A 5xx at 50 is returned.
-// PageSize in the result is the size that succeeded. PageLimit grows as the
-// size shrinks (see pageLimitAt), so PageSize x PageLimit, and the item
-// ceiling a caller derives from it, does not fall with the fallback.
-// While a smaller size remains, each request waits up to twice the
-// client's timeout, so a gateway's 504 can arrive before the client gives
-// up (see paginatedAttempt).
+// The page size adapts. An HTTP 500, 502, 503 or 504 (see
+// pageSizeFallbackStatuses) moves the fetch to the next smaller size
+// (500 -> 200 -> 100 -> 50) and carries on from where it stopped: items
+// already read are kept up to the last offset the smaller pages can
+// resume from (see paginationWalk.resize), so nothing is read twice and
+// nothing is skipped. The size that works is remembered for opts.Path
+// (see pageSizeTable). A failure at 50 is returned, wrapped to say every
+// size failed; a slow one only after two more tries at 50 (see
+// minPageSizeSlowRetries). PageSize in the result is the size that succeeded.
+// PageLimit grows as the size shrinks (see pageLimitAt), so the item
+// ceiling a caller derives from PageSize x PageLimit does not fall with
+// the fallback. Every request waits up to twice the client's timeout, so
+// a gateway's 504 can arrive before the client gives up (see
+// paginatedAttempt).
 func (r *RawClient) GetPaginatedResult(ctx context.Context, opts PaginatedOpts) (PageResult, error) {
 	opts.applyDefaults()
 
 	requestedSize := opts.MaxPageSize
-	pageSize := r.pageSizeFor(opts.Path, requestedSize)
+	startSize := r.pageSizes.sizeFor(opts.Path, requestedSize, time.Now())
+	pageSize := startSize
+	walk := newPaginationWalk()
+	fellBack, slowFailure := false, false
+	minSizeRetries := 0
 
 	for {
-		attemptOpts := opts
-		attemptOpts.MaxPageSize = pageSize
-		attemptOpts.PageLimit = pageLimitAt(opts.PageLimit, requestedSize, pageSize)
-
-		// Each attempt starts pagination from page 1.
-		// Partial results from failed attempts are discarded.
-		attemptCtx, client := r.paginatedAttempt(ctx, pageSize)
-		result, err := r.getPaginatedAtSize(attemptCtx, client, attemptOpts)
+		attemptCtx, client := r.paginatedAttempt(ctx)
+		result, err := r.walkPages(attemptCtx, client, opts, requestedSize, pageSize, walk)
 
 		if err == nil {
-			if pageSize < requestedSize {
-				r.rememberPageSize(opts.Path, pageSize)
+			if fellBack {
+				r.pageSizes.remember(opts.Path, pageSize, slowFailure, time.Now())
 			}
 			return result, nil
 		}
 
-		// Only HTTP 5xx errors trigger a smaller page size.
 		var httpErr *HTTPError
-		if !errors.As(err, &httpErr) ||
-			httpErr.StatusCode < 500 ||
-			httpErr.StatusCode >= 600 {
-			return PageResult{}, err
+		if !errors.As(err, &httpErr) || !isPageSizeFallbackStatus(httpErr.StatusCode) {
+			return PageResult{Requests: walk.requests}, err
 		}
+		slow := httpErr.Elapsed >= slowGatewayTimeout
+		slowFailure = slowFailure || slow
 
 		nextSize, ok := nextSmallerPageSize(pageSize)
+		if !ok && slow && minSizeRetries < minPageSizeSlowRetries {
+			minSizeRetries++
+			slog.Warn(
+				"paginated API request returned a slow HTTP 5xx at the minimum page size; retrying",
+				"endpoint", opts.Path,
+				"status", httpErr.StatusCode,
+				"page_size", pageSize,
+				"retry", minSizeRetries,
+			)
+			continue
+		}
 		if !ok {
 			slog.Error(
 				"paginated API request failed with HTTP 5xx at minimum fallback page size",
@@ -357,7 +465,11 @@ func (r *RawClient) GetPaginatedResult(ctx context.Context, opts PaginatedOpts) 
 				"status", httpErr.StatusCode,
 				"error", err,
 			)
-			return PageResult{}, err
+			if pageSize != startSize {
+				err = fmt.Errorf("%s failed at every page size from %d down to %d: %w",
+					opts.Path, startSize, pageSize, err)
+			}
+			return PageResult{Requests: walk.requests}, err
 		}
 
 		slog.Warn(
@@ -368,123 +480,201 @@ func (r *RawClient) GetPaginatedResult(ctx context.Context, opts PaginatedOpts) 
 			"retry_page_size", nextSize,
 		)
 
+		walk.resize(nextSize)
 		pageSize = nextSize
+		fellBack = true
 	}
 }
 
-// slowGatewayTimeout separates a 504 that means "this page took too
-// long" from a proxy blip. A gateway answers 504 for a slow upstream only
-// after its own timeout, typically tens of seconds (AWS load balancers
-// and nginx default to 60s), so a 504 that took at least this long is a
-// page-size signal. A faster one keeps the SDK's normal retries, which
-// absorb a burst shorter than about 1 second (they back off 0.1s, 0.2s
-// and 0.4s) instead of letting it lower the endpoint's page size for the
-// rest of the run. A longer outage still steps the size down. A variable
-// so tests can shorten it.
+// slowGatewayTimeout separates a 5xx that means "this page took too
+// long" from a proxy blip. A gateway answers a slow upstream only after
+// its own timeout, typically tens of seconds (AWS load balancers and
+// nginx send 504 after 60s, Apache httpd 502), so a 500, 502, 503 or 504
+// that took at least this long is a page-size signal. A faster one keeps
+// the SDK's normal retries, which absorb a burst shorter than about 1
+// second (they back off 0.1s, 0.2s and 0.4s). The time is measured from
+// the request being sent, so waiting for a rate-limit slot does not
+// count. A variable so tests can shorten it.
 var slowGatewayTimeout = 5 * time.Second
 
+// minPageSizeSlowRetries is how many more times a fetch already at the
+// minimum page size tries again after a slow 5xx. Above the minimum, a
+// slow 5xx moves to a smaller size instead of being retried; at the
+// minimum there is none, and the SDK does not retry a slow 5xx in a
+// paginated attempt, so these retries stand in for it. A server that is
+// slow for a while gets three tries at 50, each with the full doubled
+// timeout, and each resumes from the page that failed. A fast 5xx has
+// already had the SDK's retries and is not tried again here.
+const minPageSizeSlowRetries = 2
+
 // paginatedTimeoutFactor is how many times the client's timeout a
-// paginated request may wait while a smaller page size remains. Common
-// gateways (AWS load balancers, nginx, Azure Front Door) answer a slow
-// upstream with 504 after 60s, the client's own default, so the two
-// race and the client usually loses: it times out just before the 504
-// that would trigger the fallback. Twice the timeout waits that 504 out
-// with room to spare. Gateways that send a slow 502 or 503 instead
-// (Apache httpd) still get the SDK's same-size retries, which this
-// budget does not cover.
+// paginated request may wait. Common gateways (AWS load balancers,
+// nginx, Azure Front Door) answer a slow upstream with 504 after 60s,
+// the client's own default, so the two race and the client usually
+// loses: it times out just before the 504 that would trigger the
+// fallback. Twice the timeout waits that 504 out with room to spare.
 const paginatedTimeoutFactor = 2
 
 // paginatedAttempt returns the context and client for one pagination
-// attempt at pageSize. While a smaller size remains, a slow 504 is the
-// fallback's signal, so the attempt
+// attempt. A slow 5xx is the fallback's signal, so the attempt
 //   - waits up to paginatedTimeoutFactor times the client's timeout, so
-//     a gateway's 504 arrives before the client gives up, and
-//   - tells the SDK not to retry a slow 504 at the same size: an
-//     identical retry costs another full gateway delay, and because
-//     http.Client.Timeout bounds every SDK attempt together, it can turn
-//     a recoverable 504 into a fatal client timeout.
+//     a gateway's answer arrives before the client gives up, and
+//   - tells the SDK not to retry a slow 500, 502, 503 or 504 at the same
+//     size: an identical retry costs another full gateway delay, and
+//     because http.Client.Timeout bounds every SDK attempt together, it
+//     can turn a recoverable 5xx into a fatal client timeout.
+//
+// This holds at the minimum page size too, where there is nothing
+// smaller to try: a gateway timeout there is reported as the 5xx it is,
+// not as a client timeout that hides it, and GetPaginatedResult retries
+// it itself (see minPageSizeSlowRetries).
 //
 // The longer-timeout client is a copy sharing the same Transport, so
 // auth, retries and the connection pool are unchanged, and it is made
-// per attempt so it always follows the client as configured now. At the
-// minimum size there is nothing smaller to try, so the attempt uses the
-// client and its normal retries unchanged, as does every request outside
-// GetPaginatedResult.
-func (r *RawClient) paginatedAttempt(ctx context.Context, pageSize int) (context.Context, *http.Client) {
-	if _, ok := nextSmallerPageSize(pageSize); !ok {
-		return ctx, r.httpClient
-	}
+// per attempt so it always follows the client as configured now. Every
+// request outside GetPaginatedResult uses the client unchanged.
+func (r *RawClient) paginatedAttempt(ctx context.Context) (context.Context, *http.Client) {
 	patient := *r.httpClient
 	patient.Timeout *= paginatedTimeoutFactor
-	return sqapi.WithoutRetryOnSlowStatus(ctx, slowGatewayTimeout, http.StatusGatewayTimeout), &patient
+	return sqapi.WithoutRetryOnSlowStatus(ctx, slowGatewayTimeout, pageSizeFallbackStatuses...), &patient
 }
 
-// getPaginatedAtSize performs one complete pagination attempt
-// using a fixed page size, sending every page through client.
-func (r *RawClient) getPaginatedAtSize(ctx context.Context, client *http.Client, opts PaginatedOpts) (PageResult, error) {
-	opts.applyDefaults()
+// paginationWalk is what one paginated fetch has read so far. It lives
+// across attempts, so an attempt at a smaller page size continues from
+// where the failed one stopped.
+type paginationWalk struct {
+	items      []json.RawMessage
+	total      int
+	totalKnown bool
+	started    bool // page 1 was read, so total and totalKnown are set
+	nextPage   int  // next page to read, at the current page size
+	aligned    bool // every page read was full, so len(items) is the offset reached
+	lastFull   bool // the last page read was full
+	pagesRead  int  // page requests that succeeded, across attempts
+	requests   int  // page requests made, across attempts
+}
 
-	params := CloneParams(opts.Params)
-	params.Set(opts.PageParam, "1")
-	params.Set(opts.SizeParam, strconv.Itoa(opts.MaxPageSize))
+func newPaginationWalk() *paginationWalk {
+	w := &paginationWalk{}
+	w.restart()
+	return w
+}
 
-	body, err := r.doGetWith(ctx, client, opts.Path, params)
-	if err != nil {
-		return PageResult{}, err
+// restart forgets the items read so far, so the next attempt begins at
+// page 1. The request counts are kept.
+func (w *paginationWalk) restart() {
+	w.items = nil
+	w.total, w.totalKnown = 0, false
+	w.started = false
+	w.nextPage = 1
+	w.aligned = true
+	w.lastFull = false
+}
+
+// resize prepares the walk to continue at newSize. Page p at size s
+// starts at offset (p-1) x s, so the walk keeps the items below the
+// largest multiple of newSize it has reached and resumes at the page
+// that starts there; the few items past that offset are read again as
+// part of that page. When a short page was read, len(items) is not an
+// offset any more, and the walk restarts from page 1.
+func (w *paginationWalk) resize(newSize int) {
+	keep := len(w.items) / newSize * newSize
+	if !w.started || !w.aligned || keep == 0 {
+		w.restart()
+		return
 	}
-	items, err := ExtractArray(body, opts.ResultKey)
-	if err != nil {
-		return PageResult{}, err
+	w.items = w.items[:keep]
+	w.nextPage = keep/newSize + 1
+}
+
+// add records a page that came back with items at pageSize.
+func (w *paginationWalk) add(items []json.RawMessage, pageSize int) {
+	w.items = append(w.items, items...)
+	w.pagesRead++
+	w.nextPage++
+	w.lastFull = len(items) == pageSize
+	w.aligned = w.aligned && w.lastFull
+}
+
+// walkPages reads one attempt's pages at pageSize through client,
+// continuing from what walk already holds.
+func (r *RawClient) walkPages(ctx context.Context, client *http.Client, opts PaginatedOpts,
+	requestedSize, pageSize int, walk *paginationWalk) (PageResult, error) {
+
+	if !walk.started {
+		body, items, err := r.fetchPage(ctx, client, opts, 1, pageSize, walk)
+		if err != nil {
+			return PageResult{}, err
+		}
+		walk.total, walk.totalKnown = ExtractTotalOK(body, opts.TotalKey)
+		walk.items = make([]json.RawMessage, 0, walk.total)
+		walk.started = true
+		walk.add(items, pageSize)
 	}
-	total, totalKnown := ExtractTotalOK(body, opts.TotalKey)
-	pages := TotalPages(total, opts.MaxPageSize)
-	clamped := opts.PageLimit > 0 && pages > opts.PageLimit
+
+	pageLimit := pageLimitAt(opts.PageLimit, requestedSize, pageSize)
+	pages := TotalPages(walk.total, pageSize)
+	if !walk.totalKnown {
+		// Without a total there is no page count. Read enough pages to
+		// cover one page at the requested size, stopping at the first
+		// short one, so a fallback returns at least as much as the
+		// original page would have, instead of less.
+		pages = (requestedSize + pageSize - 1) / pageSize
+	}
+	clamped := pageLimit > 0 && pages > pageLimit
 	if clamped {
-		pages = opts.PageLimit
+		pages = pageLimit
 	}
 
-	all := make([]json.RawMessage, 0, total)
-	all = append(all, items...)
+	if !(clamped && opts.StopOnTruncation) {
+		for walk.nextPage <= pages && (walk.totalKnown || walk.lastFull) {
+			if err := ctx.Err(); err != nil {
+				return PageResult{}, err
+			}
+			_, items, err := r.fetchPage(ctx, client, opts, walk.nextPage, pageSize, walk)
+			if err != nil {
+				return PageResult{}, err
+			}
+			walk.add(items, pageSize)
+		}
+	}
 
 	res := PageResult{
-		Items:      all,
-		Total:      total,
-		TotalKnown: totalKnown,
-		Fetched:    len(all),
-		PagesRead:  1,
-		PageSize:   opts.MaxPageSize,
-		PageLimit:  opts.PageLimit,
+		Items:      walk.items,
+		Total:      walk.total,
+		TotalKnown: walk.totalKnown,
+		Fetched:    len(walk.items),
+		PagesRead:  walk.pagesRead,
+		Requests:   walk.requests,
+		PageSize:   pageSize,
+		PageLimit:  pageLimit,
 	}
 	switch {
-	case !totalKnown && len(items) == opts.MaxPageSize:
+	case !walk.totalKnown && walk.lastFull:
 		res.Reason = ReasonUnknownTotal
 	case clamped:
 		res.Reason = ReasonPageLimitClamp
 	}
-	if res.Reason != "" && opts.StopOnTruncation {
-		return r.finishPaginated(res, opts), nil
-	}
-
-	for page := 2; page <= pages; page++ {
-		if err := ctx.Err(); err != nil {
-			return PageResult{}, err
-		}
-		params := CloneParams(opts.Params)
-		params.Set(opts.PageParam, strconv.Itoa(page))
-		params.Set(opts.SizeParam, strconv.Itoa(opts.MaxPageSize))
-		body, err := r.doGetWith(ctx, client, opts.Path, params)
-		if err != nil {
-			return PageResult{}, err
-		}
-		pageItems, err := ExtractArray(body, opts.ResultKey)
-		if err != nil {
-			return PageResult{}, err
-		}
-		res.Items = append(res.Items, pageItems...)
-		res.PagesRead++
-	}
-	res.Fetched = len(res.Items)
 	return r.finishPaginated(res, opts), nil
+}
+
+// fetchPage requests one page and returns its body and items.
+func (r *RawClient) fetchPage(ctx context.Context, client *http.Client, opts PaginatedOpts,
+	page, pageSize int, walk *paginationWalk) ([]byte, []json.RawMessage, error) {
+
+	params := CloneParams(opts.Params)
+	params.Set(opts.PageParam, strconv.Itoa(page))
+	params.Set(opts.SizeParam, strconv.Itoa(pageSize))
+	walk.requests++
+	body, err := r.doGetWith(ctx, client, opts.Path, params)
+	if err != nil {
+		return nil, nil, err
+	}
+	items, err := ExtractArray(body, opts.ResultKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	return body, items, nil
 }
 
 // finishPaginated stamps Truncated and emits the record. Both
@@ -555,6 +745,31 @@ var bodyReadRetryBackoff = []time.Duration{
 	400 * time.Millisecond,
 }
 
+// sendClock records when a request was last written to the connection,
+// through an httptrace hook that fires on every attempt the SDK's retry
+// transport makes. It is what HTTPError.Elapsed is measured from, so the
+// time a request spends waiting for a rate-limit slot, which happens
+// before it is written, never makes a fast response look slow.
+type sendClock struct{ last atomic.Pointer[time.Time] }
+
+func (c *sendClock) trace(ctx context.Context) context.Context {
+	return httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		WroteRequest: func(httptrace.WroteRequestInfo) {
+			now := time.Now()
+			c.last.Store(&now)
+		},
+	})
+}
+
+// since returns the time since the request was last sent, or since
+// fallback if it was never seen being sent.
+func (c *sendClock) since(fallback time.Time) time.Duration {
+	if t := c.last.Load(); t != nil {
+		return time.Since(*t)
+	}
+	return time.Since(fallback)
+}
+
 func (r *RawClient) doGet(ctx context.Context, path string, params url.Values) ([]byte, error) {
 	return r.doGetWith(ctx, r.httpClient, path, params)
 }
@@ -563,7 +778,8 @@ func (r *RawClient) doGet(ctx context.Context, path string, params url.Values) (
 // longer-timeout copy of the RawClient's own (see paginatedAttempt).
 func (r *RawClient) doGetWith(ctx context.Context, client *http.Client, path string, params url.Values) ([]byte, error) {
 	u := r.baseURL + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	var sent sendClock
+	req, err := http.NewRequestWithContext(sent.trace(ctx), http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -573,10 +789,12 @@ func (r *RawClient) doGetWith(ctx context.Context, client *http.Client, path str
 
 	var lastReadErr error
 	for attempt := 0; ; attempt++ {
+		start := time.Now()
 		resp, err := client.Do(req)
 		if err != nil {
 			return nil, err
 		}
+		elapsed := sent.since(start)
 		body, readErr := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if readErr == nil {
@@ -586,6 +804,7 @@ func (r *RawClient) doGetWith(ctx context.Context, client *http.Client, path str
 					Method:     http.MethodGet,
 					URL:        req.URL.String(),
 					Body:       Truncate(body, 500),
+					Elapsed:    elapsed,
 				}
 			}
 			return body, nil

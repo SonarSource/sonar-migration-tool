@@ -179,6 +179,14 @@ func TestAdaptiveLateDateFallbackRecoversAllIssues(t *testing.T) {
 
 	assertLateSliceFallback(t, corpus, tr)
 	assertAdaptiveIssueRecovery(t, &sink, tracker, total)
+
+	// The audit counts every request the slicer made, the page of the
+	// attempt the fallback set aside and the injected 504 included. The
+	// 504 never reached the corpus server, so it is added back here.
+	audit := onlyReconciliation(t, tracker.State())
+	if want := len(corpus.allQueries()) + int(tr.failures.Load()); audit.Requests != want {
+		t.Errorf("reconciliation requests = %d, want %d (every request made)", audit.Requests, want)
+	}
 }
 
 // TestAdaptiveLateFacetFallbackRecoversAllIssues proves that an
@@ -298,8 +306,8 @@ func TestAdaptiveFacetCellStaysCompleteAfterFallback(t *testing.T) {
 
 // TestAdaptiveLeafCellStaysCompleteAfterFallback proves that a
 // files-level cell, with no finer facet left, is read whole and once
-// after a fallback: every ps=200 page of each file is requested exactly
-// once, and nothing is recorded as lost.
+// after a fallback: no ps=200 page of either file is requested twice,
+// and nothing is recorded as lost.
 func TestAdaptiveLeafCellStaysCompleteAfterFallback(t *testing.T) {
 	const perFile = 6000
 
@@ -318,8 +326,11 @@ func TestAdaptiveLeafCellStaysCompleteAfterFallback(t *testing.T) {
 		t.Fatalf("late HTTP 504 injections: got %d, want 1", got)
 	}
 
-	// Each file cell is read at ps=200 exactly once: 30 pages, each once.
-	assertFilePagesReadOnce(t, corpus, 2, perFile/200)
+	// 30 ps=200 pages per file, each read at most once. The first file
+	// failed on page 2 at ps=500 and resumed from the 400 items its page
+	// 1 held, at page 3 of 200, so its pages 1 and 2 at ps=200 are never
+	// requested. The second file starts at the remembered ps=200.
+	assertFilePagesReadOnce(t, corpus, 2*perFile/200-2)
 	assertAdaptiveIssueRecovery(t, &sink, tracker, 2*perFile)
 }
 
@@ -363,10 +374,9 @@ func TestAdaptiveTruncatedCellWithoutTotalIsPartitioned(t *testing.T) {
 	}
 }
 
-// assertFilePagesReadOnce checks that every ps=200 page of every
-// files-level cell was requested exactly once, across files cells of
-// pagesPerFile pages each.
-func assertFilePagesReadOnce(t *testing.T, corpus *issueCorpus, files, pagesPerFile int) {
+// assertFilePagesReadOnce checks that no ps=200 page of a files-level
+// cell was requested more than once, and that wantDistinct pages were.
+func assertFilePagesReadOnce(t *testing.T, corpus *issueCorpus, wantDistinct int) {
 	t.Helper()
 	pageReads := make(map[string]int)
 	for _, q := range corpus.allQueries() {
@@ -379,8 +389,8 @@ func assertFilePagesReadOnce(t *testing.T, corpus *issueCorpus, files, pagesPerF
 			t.Errorf("%s read %d times at ps=200, want once", page, n)
 		}
 	}
-	if want := files * pagesPerFile; len(pageReads) != want {
-		t.Errorf("distinct ps=200 file pages = %d, want %d", len(pageReads), want)
+	if len(pageReads) != wantDistinct {
+		t.Errorf("distinct ps=200 file pages = %d, want %d", len(pageReads), wantDistinct)
 	}
 }
 

@@ -110,7 +110,7 @@ sonar-migration-tool extract --source_url <URL> --source_token <TOKEN> --export_
 | `--extract_id` | Resume a previous extraction by its ID |
 | `--target_task` | Run a specific task (with its dependencies) |
 | `--concurrency` | Max concurrent requests (default: server-detected) |
-| `--timeout` | Request timeout in seconds. A paginated request that can still fall back to a smaller page size waits up to twice this. |
+| `--timeout` | Request timeout in seconds. A paginated request waits up to twice this. |
 | `--extract_type` | Type of extract to run |
 | `--export_directory` | Output directory (default: `./migration-files`) |
 | `--skip_project_data_migration` | Skip the issue / source / SCM-blame extract (project data is extracted by default) |
