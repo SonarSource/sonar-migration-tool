@@ -24,8 +24,8 @@ The recommended shape ("unified config") carries one top-level block of defaults
 
 | Command | Reads |
 |---|---|
-| `extract` | top-level + `source` |
-| `structure`, `mappings` | top-level; `structure` also reads `target.default_organization` |
+| `extract` | top-level + `source`; also `target.default_organization`, to pre-populate `organizations.csv` (#503) |
+| `structure`, `mappings` (deprecated) | top-level; `structure` also reads `target.default_organization` |
 | `predictive-report` | top-level + `target.default_organization` |
 | `migrate`, `reset` | top-level + `target` |
 | `transfer` | top-level + `source` + `target` |
@@ -282,6 +282,8 @@ sonar-migration-tool extract --source_url <url> --source_token <token> [flags]
 
 ### `structure` / `mappings` / `predictive-report`
 
+`structure` and `mappings` are deprecated: `extract` now runs both after a successful extract (#503). They still work. See [STRUCTURE-MAPPINGS-DEPRECATED.md](STRUCTURE-MAPPINGS-DEPRECATED.md).
+
 ```bash
 sonar-migration-tool structure --config config.json
 sonar-migration-tool mappings  --config config.json
@@ -294,7 +296,7 @@ sonar-migration-tool predictive-report --config config.json
 | `--export_directory <dir>` | Override the config file's `export_directory`. |
 | `--default_organization <key>` | `predictive-report` only. SonarQube Cloud org assumed for every project when `organizations.csv` has no mapping. Defaults to the config file's `target.default_organization`. Ignored (with a WARN) when any row already carries a `sonarcloud_org_key`. #566 |
 
-`structure` and `predictive-report` both honour `target.default_organization`, so a unified config that names a single target organization needs no manual edit of `organizations.csv`: `structure` writes the key into every row, and `predictive-report` fills any row still blank before predicting. Neither contacts SonarQube Cloud to do it, so `predictive-report` still makes no Cloud API calls. #566
+`extract`, `structure` and `predictive-report` all honour `target.default_organization`, so a unified config that names a single target organization needs no manual edit of `organizations.csv`: `extract` (or `structure`) writes the key into every row, and `predictive-report` fills any row still blank before predicting. Neither contacts SonarQube Cloud to do it, so `predictive-report` still makes no Cloud API calls. #566
 
 ### `migrate`
 

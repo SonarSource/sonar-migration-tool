@@ -5,7 +5,7 @@
 > - Want the same multi-phase workflow but with prompts instead of typing each command? Use the **`wizard`** command — interactive and guided.
 > - Want full control over each phase, multiple SonarQube Server instances, or to inspect / edit the mapping CSVs before pushing? You're in the right place — keep reading.
 
-The `migrate` command is the **final phase** of a six-phase pipeline. You run it together with the underlying `extract`, `structure`, and `mappings` commands to move configuration from one or more SonarQube Server instances into SonarQube Cloud. Use it when you need:
+The `migrate` command is the **final phase** of a four-phase pipeline. You run it after `extract`, which also builds the mapping CSVs, to move configuration from one or more SonarQube Server instances into SonarQube Cloud. Use it when you need:
 
 - To migrate **many** projects from one or more SonarQube Server instances.
 - To review and edit the per-entity mapping CSVs (`gates.csv`, `profiles.csv`, `groups.csv`, `templates.csv`, `portfolios.csv`) before pushing to SonarQube Cloud.
@@ -18,13 +18,13 @@ The `migrate` command is the **final phase** of a six-phase pipeline. You run it
 ## Migration Workflow
 
 ```
-┌───────────┐   ┌───────────┐   ┌───────────┐   ┌──────────┐   ┌──────────┐   ┌─────────┐
-│  EXTRACT  │──►│ STRUCTURE │──►│ ORG MAP   │──►│ MAPPINGS │──►│ VALIDATE │──►│ MIGRATE │
-│  Phase 1  │   │  Phase 2  │   │  Phase 3  │   │ Phase 4  │   │  Phase 5  │   │ Phase 6 │
-└───────────┘   └───────────┘   └───────────┘   └──────────┘   └──────────┘   └─────────┘
+┌──────────────────────┐   ┌───────────┐   ┌──────────┐   ┌─────────┐
+│ EXTRACT + CSVs       │──►│ ORG MAP   │──►│ VALIDATE │──►│ MIGRATE │
+│ Phase 1              │   │ Phase 2   │   │ Phase 3  │   │ Phase 4 │
+└──────────────────────┘   └───────────┘   └──────────┘   └─────────┘
 ```
 
-> **Note on the diagram:** Phase 3 ("Org Map") is the human step of editing `organizations.csv` — the tool produces the file in Phase 2, you fill in the SonarQube Cloud org keys, and Phase 4 reads the result.
+> **Note on the diagram:** Phase 1 extracts the data, then groups the projects into organizations and writes the mapping CSVs. Phase 2 ("Org Map") is the human step of editing `organizations.csv`: you fill in the SonarQube Cloud org keys, and `migrate` reads the result. Before issue #503 the CSVs came from two separate commands, `structure` and `mappings`. They still work but are deprecated, see [STRUCTURE-MAPPINGS-DEPRECATED.md](STRUCTURE-MAPPINGS-DEPRECATED.md).
 
 ---
 
@@ -123,25 +123,11 @@ sonar-migration-tool extract --source_url <URL> --source_token <TOKEN> --export_
 | `--key_file_path` | Client certificate key file (mTLS) |
 | `--cert_password` | Client certificate password (mTLS) |
 
-For multiple servers, run `extract` once per server — `structure` aggregates the results.
+When the extract succeeds, `extract` also groups the projects into organizations and writes every CSV that `migrate` needs: `organizations.csv`, `projects.csv`, `gates.csv`, `profiles.csv`, `groups.csv`, `templates.csv` and `portfolios.csv`. This is what the `structure` and `mappings` commands used to do (issue #503). With `--config`, a config file that names a single target organization pre-populates `sonarcloud_org_key`, as `structure --config` did.
 
-### Step 3 — Structure
+`extract` includes every extract in the export directory, so for multiple servers you run it once per server and the CSVs cover all of them. When `organizations.csv` or `projects.csv` already exists, `extract` first copies it to `<name>.csv.bak-<timestamp>` and logs a `WARN` naming the copy, so the edits you made are never lost. Re-apply them to the new file. When `--objects` leaves out the `projects` category, there is nothing to group, so the CSVs are not written.
 
-Reads the extracted data and generates an `organizations.csv` file.
-
-```bash
-sonar-migration-tool structure --export_directory ./files/
-
-# Or reuse the extract config (export_directory is read from it)
-sonar-migration-tool structure --config extract-config.json
-```
-
-| Flag | Description |
-|---|---|
-| `--export_directory` | Root directory containing the extract output (default: `./migration-files`) |
-| `--config` | Path to a JSON config file (same shape as `extract --config`). `export_directory` is read from it; when exactly one SonarCloud organization is defined, its key pre-populates `sonarcloud_org_key`. `--export_directory` on the CLI overrides the config value. |
-
-### Step 4 — Edit `organizations.csv`
+### Step 3 — Edit `organizations.csv`
 
 Open `files/organizations.csv` in any spreadsheet editor or text editor. Fill in the `sonarcloud_org_key` column with the key of the SonarQube Cloud organization where each group of projects should be migrated.
 
@@ -156,35 +142,9 @@ Save the file when you are done.
 
 > **Sending individual projects elsewhere:** `organizations.csv` has one row per DevOps binding, so every project that was never bound on SonarQube Server shares the server-URL row and lands in the same organization. To dispatch those projects across several organizations, fill in the `sonarcloud_org_key` column in `projects.csv` — see [Mapping unbound SonarQube Server projects](MAPPING-UNBOUND-PROJECTS.md). A project bound to GitHub.com, GitLab.com, Bitbucket Cloud or Azure DevOps Services cannot be redirected and the override is ignored with a `WARN`. (Issue #612.)
 
-> **Shortcut for single-org migrations:** if every project on every server is going to land in the same SonarQube Cloud organization, you can skip this step and pass `--default_organization <org-key>` (or set `target.default_organization` in the config file) when running `migrate` in Step 6. The tool fills `sonarcloud_org_key` for every row in `organizations.csv` automatically. If you have already mapped any row by hand, the flag is ignored and a `WARN` is logged. (Issue #281.) Running `structure --config` with that same config file fills the column in straight away, and `predictive-report` applies the same default, so a preview run agrees with the migration. (Issue #566.)
+> **Shortcut for single-org migrations:** if every project on every server is going to land in the same SonarQube Cloud organization, you can skip this step and pass `--default_organization <org-key>` (or set `target.default_organization` in the config file) when running `migrate` in Step 4. The tool fills `sonarcloud_org_key` for every row in `organizations.csv` automatically. If you have already mapped any row by hand, the flag is ignored and a `WARN` is logged. (Issue #281.) Running `extract --config` with that same config file fills the column in straight away, and `predictive-report` applies the same default, so a preview run agrees with the migration. (Issue #566.)
 
-### Step 5 — Mappings
-
-Generates the per-entity mapping CSVs (gates, profiles, groups, templates, portfolios).
-
-```bash
-sonar-migration-tool mappings --export_directory ./files/
-
-# Or reuse the extract config
-sonar-migration-tool mappings --config extract-config.json
-```
-
-| Flag | Description |
-|---|---|
-| `--export_directory` | Root directory containing the extract output (default: `./migration-files`) |
-| `--config` | Path to JSON config file (same shape as `extract --config`); `export_directory` is read from it. `--export_directory` on the CLI overrides the config value. |
-
-This produces:
-
-- `gates.csv` — Quality Gate mappings
-- `profiles.csv` — Quality Profile mappings
-- `groups.csv` — Group mappings
-- `templates.csv` — Permission Template mappings
-- `portfolios.csv` — Portfolio mappings
-
-You can review or edit any of these before proceeding.
-
-### Step 6 — Migrate
+### Step 4 — Migrate
 
 Push everything to SonarQube Cloud. You'll need your SonarQube Cloud admin token and enterprise key.
 
@@ -213,10 +173,9 @@ sonar-migration-tool migrate --target_token <TOKEN> --enterprise_key <ENTERPRISE
 
 If you are migrating from multiple SonarQube Server instances:
 
-1. **Extract from each server separately** — run `extract` once per server, each time pointing to a different URL and token.
-2. **Run `structure`** — this step automatically aggregates data from all extractions into a single `organizations.csv`.
-3. **Edit `organizations.csv`** — fill in the `sonarcloud_org_key` for each server row.
-4. **Continue with `mappings` and `migrate`** as described above. The tool handles all servers in one pass.
+1. **Extract from each server separately**: run `extract` once per server, each time pointing to a different URL and token, with the same `--export_directory`. Each run rebuilds the CSVs from every extract in the directory.
+2. **Edit `organizations.csv`**: fill in the `sonarcloud_org_key` for each server row. Do this after the last extract, because each extract rewrites the file (it keeps a `.bak-<timestamp>` copy of the previous one).
+3. **Run `migrate`** as described above. The tool handles all servers in one pass.
 
 ---
 
@@ -246,7 +205,7 @@ sonar-migration-tool report --report_type migration --export_directory ./files/
 
 ### `predictive-report` — preview the migration before you commit
 
-Generates the same PDF migration summary the `migrate` step produces, but *before* migrating — from the output of `extract` + `structure` and the user-edited mapping CSVs. Useful to preview how the migration will go without touching SonarQube Cloud.
+Generates the same PDF migration summary the `migrate` step produces, but *before* migrating — from the output of `extract` and the user-edited mapping CSVs. Useful to preview how the migration will go without touching SonarQube Cloud.
 
 ```bash
 sonar-migration-tool predictive-report --export_directory ./files/
@@ -318,7 +277,8 @@ sonar-migration-tool reset <TOKEN> <ENTERPRISE_KEY> --export_directory ./files/
 | `extract.json` | Metadata about the extraction (timestamps, server info, etc.) |
 | `requests.log` | Log of all API requests made during extraction |
 | `results.*.jsonl` | Raw extracted data in JSON Lines format (one file per entity) |
-| `organizations.csv` | Server-to-organization mapping (you edit this) |
+| `organizations.csv` | Server-to-organization mapping (you edit this). Written by `extract`. |
+| `<name>.csv.bak-<timestamp>` | Copy of an existing `organizations.csv` or `projects.csv`, saved by `extract` before it rewrites the file (issue #503) |
 | `projects.csv` | List of all extracted projects. Its `sonarcloud_org_key` column is an optional per-project organization override you may edit — see [Mapping unbound SonarQube Server projects](MAPPING-UNBOUND-PROJECTS.md). Its `shared_repo_binding` column flags projects whose DevOps platform repository binding is shared with another project without `monorepo` enabled on SonarQube Server — SonarQube Cloud allows only one non-monorepo project per repository, so flagged projects will collide at migrate time unless you enable `monorepo` for them on SonarQube Server and re-run `extract`. (Issue #622.) |
 | `gates.csv` | Quality Gate mappings |
 | `profiles.csv` | Quality Profile mappings |

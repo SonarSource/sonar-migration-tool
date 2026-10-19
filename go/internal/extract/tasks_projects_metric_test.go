@@ -42,3 +42,20 @@ func TestMeasureMetricKeysFor_VersionRename(t *testing.T) {
 		})
 	}
 }
+
+// ncloc is what the report sizes a project from when getUsage
+// (api/projects/license_usage) was skipped or does not cover it.
+func TestMeasureMetricKeysFor_IncludesNcloc(t *testing.T) {
+	for _, v := range []string{"9.9", "2026.4"} {
+		keys := strings.Split(measureMetricKeysFor(common.ParseVersion(v)), ",")
+		found := false
+		for _, k := range keys {
+			if k == "ncloc" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("version %s: expected ncloc in metrics list, got %v", v, keys)
+		}
+	}
+}

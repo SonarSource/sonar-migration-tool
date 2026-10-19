@@ -6,7 +6,7 @@
 
 ## How to use it
 
-1. Run `extract`, then `structure`, then `mappings` as usual.
+1. Run `extract` as usual. It also writes `organizations.csv` and `projects.csv` (issue #503).
 2. Edit `organizations.csv` and fill in `sonarcloud_org_key` for each row, or plan to pass `--default_organization`. **You still need this.** The per-project column is an override, not a replacement: a run with no organization mapping at all still stops with exit code 2 and asks you to review `organizations.csv`.
 3. Open `projects.csv` in a spreadsheet or text editor. For each project you want to send somewhere else, put the target organization key in the `sonarcloud_org_key` cell. Leave every other cell empty.
 4. Run `migrate`.
@@ -22,7 +22,7 @@ legacy-batch,,Legacy Batch,Sonar way,...
 
 `payments-api` migrates into `acme-payments`, `billing-web` into `acme-billing`, and `legacy-batch` into whatever `organizations.csv` maps its server URL to.
 
-Re-running `structure` rewrites `projects.csv` from the extract and clears the column, the same way it rewrites `organizations.csv`. Edit the file after `structure`, not before.
+Re-running `extract` rewrites `projects.csv` from the extract and clears the column, the same way it rewrites `organizations.csv`. It saves the previous file as `projects.csv.bak-<timestamp>` first and logs a `WARN` naming it, so you can copy your overrides back from it. Edit the file after the last `extract`, not before. The deprecated `structure` command rewrites the file too, but keeps no copy.
 
 **`transfer` cannot be used for this.** `transfer` runs `structure` itself, inside the same command and immediately before it migrates, so it rewrites `projects.csv` and any override you had put there is gone before it is read. Use the step-by-step `migrate` workflow above instead. If you have already run `transfer`, its export directory is usable as-is: edit `projects.csv` and run `migrate` against that directory.
 

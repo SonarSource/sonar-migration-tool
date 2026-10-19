@@ -22,7 +22,8 @@ var tiers = []struct {
 	{"xl", 500000}, {"l", 100000}, {"m", 10000}, {"s", 1000}, {"xs", 0},
 }
 
-// ProcessProjectDetails extracts project metadata from getProjectDetails and getUsage.
+// ProcessProjectDetails extracts project metadata from getProjectDetails, and
+// each project's LOC from getUsage or, failing that, getProjectMeasures.
 func ProcessProjectDetails(dir string, mapping structure.ExtractMapping, idMap ServerIDMapping) Projects {
 	projects := make(Projects)
 	for _, item := range readData(dir, mapping, "getProjectDetails") {
@@ -106,17 +107,41 @@ func ensureProject(projects Projects, sid, key string) {
 }
 
 // processProjectUsage enriches projects with LOC data and tier assignment.
+// LOC comes from getUsage (api/projects/license_usage). A project it does
+// not cover, which is every project when extract skipped getUsage, falls
+// back to its main branch's ncloc measure from getProjectMeasures. That
+// can read lower than license usage, which counts a project's largest
+// branch. A project with neither keeps loc 0 and tier "unknown".
 func processProjectUsage(dir string, mapping structure.ExtractMapping, idMap ServerIDMapping, projects Projects) {
+	sized := make(map[string]map[string]bool)
 	for _, item := range readData(dir, mapping, "getUsage") {
 		sid := serverID(idMap, item.ServerURL)
 		projectKey := report.ExtractString(item.Data, pathProjectKey)
 		if projects[sid] == nil || projects[sid][projectKey] == nil {
 			continue
 		}
-		loc := report.ExtractInt(item.Data, "$.linesOfCode", 0)
-		projects[sid][projectKey]["loc"] = loc
-		projects[sid][projectKey]["tier"] = assignTier(loc)
+		setProjectLOC(projects[sid][projectKey], report.ExtractInt(item.Data, "$.linesOfCode", 0))
+		if sized[sid] == nil {
+			sized[sid] = make(map[string]bool)
+		}
+		sized[sid][projectKey] = true
 	}
+	for _, item := range readData(dir, mapping, "getProjectMeasures") {
+		if report.ExtractString(item.Data, "$.metric") != "ncloc" {
+			continue
+		}
+		sid := serverID(idMap, item.ServerURL)
+		projectKey := report.ExtractString(item.Data, pathProjectKey)
+		if projects[sid] == nil || projects[sid][projectKey] == nil || sized[sid][projectKey] {
+			continue
+		}
+		setProjectLOC(projects[sid][projectKey], report.ExtractInt(item.Data, "$.value", 0))
+	}
+}
+
+func setProjectLOC(project map[string]any, loc int) {
+	project["loc"] = loc
+	project["tier"] = assignTier(loc)
 }
 
 func assignTier(loc int) string {

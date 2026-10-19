@@ -89,6 +89,23 @@ level=WARN msg="paginated API request returned a slow HTTP 5xx at the minimum pa
 
 ---
 
+### `getUsage skipped`: license usage timed out
+<!-- updated: 2026-10-19_12:18:44 by Claude -->
+
+**Symptom**: `extract` logs a warning like this, usually about 60 seconds into the run:
+
+```
+level=WARN msg="getUsage skipped: api/projects/license_usage failed; the report sizes projects from their ncloc measure instead" err="... context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+```
+
+**Cause**: `api/projects/license_usage` returns every project's licensed lines of code in one unpaginated response. On an instance with thousands of projects, SonarQube Server can take minutes to build it, longer than `--timeout` or a load balancer in front of the server allows.
+
+**What the tool does**: the extract carries on. The data is only used to size projects in the report (the LOC tiers), and the report sizes each project from its main branch's `ncloc` measure instead, which `extract` already fetches per project. Before this fallback, the timeout stopped phase 1 of the extract.
+
+**When you need to act**: usually never. License usage counts a project's largest branch while `ncloc` covers the main branch, so a project whose largest branch is not its main branch can land in a smaller tier. Raising `--timeout` only helps when nothing in front of the server cuts the request off sooner.
+
+---
+
 ### "Connection refused" or SSL errors
 <!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 

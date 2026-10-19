@@ -21,12 +21,13 @@ var acceptedIssuesRename = common.MustParseVersion("10.2")
 // from /api/measures/search for each project. The "accepted" issue metric
 // was renamed in SonarQube Server 10.2: prior versions exposed it as
 // "wont_fix_issues", 10.2+ uses "accepted_issues". Issue #278.
+// ncloc sizes a project in the report when getUsage has no data for it.
 func measureMetricKeysFor(version common.Version) string {
 	acceptedMetric := "accepted_issues"
 	if version.Less(acceptedIssuesRename) {
 		acceptedMetric = "wont_fix_issues"
 	}
-	return "ncloc_language_distribution,new_violations," + acceptedMetric +
+	return "ncloc,ncloc_language_distribution,new_violations," + acceptedMetric +
 		",alert_status,false_positive_issues,violations," +
 		"new_lines_to_cover,lines_to_cover,new_coverage,coverage," +
 		"uncovered_lines,new_uncovered_lines"
