@@ -98,6 +98,8 @@ func TestTier1_SourcePipeline(t *testing.T) {
 		if !foundResults {
 			t.Errorf("no non-empty results.*.jsonl file found under %q", runDir)
 		}
+
+		assertMeasuresIncludeNcloc(t, runDir)
 	})
 
 	t.Run("extract_resume", func(t *testing.T) {
@@ -482,4 +484,38 @@ func withoutInsecureWarning(out, warning string) string {
 		}
 	}
 	return strings.Join(kept, "\n")
+}
+
+// assertMeasuresIncludeNcloc checks that getProjectMeasures recorded an
+// ncloc measure, which the report sizes projects from when getUsage
+// (api/projects/license_usage) was skipped. A project that was never
+// analyzed has no measures at all, so an empty task is not a failure.
+func assertMeasuresIncludeNcloc(t *testing.T, runDir string) {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(runDir, "getProjectMeasures", "results.*.jsonl"))
+	if err != nil {
+		t.Fatalf("listing getProjectMeasures results: %v", err)
+	}
+	sawMeasure := false
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("reading %q: %v", f, err)
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			var rec struct {
+				Metric string `json:"metric"`
+			}
+			if line == "" || json.Unmarshal([]byte(line), &rec) != nil {
+				continue
+			}
+			sawMeasure = true
+			if rec.Metric == "ncloc" {
+				return
+			}
+		}
+	}
+	if sawMeasure {
+		t.Errorf("getProjectMeasures under %q has measures but no ncloc measure", runDir)
+	}
 }
