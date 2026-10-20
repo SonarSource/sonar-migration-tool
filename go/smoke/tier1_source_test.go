@@ -113,6 +113,7 @@ func TestTier1_SourcePipeline(t *testing.T) {
 			assertOrgMapping(t, exportDir, cfg.org)
 		}
 		assertMeasuresIncludeNcloc(t, runDir)
+		assertExtractBookkeeping(t, runDir)
 	})
 
 	t.Run("extract_resume", func(t *testing.T) {
@@ -128,6 +129,11 @@ func TestTier1_SourcePipeline(t *testing.T) {
 			"--extract_id", extractRunID)
 		requireExit(t, res, 0, "extract_resume")
 		logf(t, "extract_resume output:\n%s\n", res.combined())
+		// Every task of the first run finished, so resuming must not run
+		// any of them again from the start.
+		if strings.Contains(res.combined(), "did not finish in the earlier attempt") {
+			t.Errorf("resuming a finished extract re-ran tasks:\n%s", res.combined())
+		}
 
 		entries, err := os.ReadDir(exportDir)
 		if err != nil {
@@ -577,5 +583,19 @@ func assertMeasuresIncludeNcloc(t *testing.T, runDir string) {
 	}
 	if sawMeasure {
 		t.Errorf("getProjectMeasures under %q has measures but no ncloc measure", runDir)
+	}
+}
+
+// assertExtractBookkeeping checks what extract records for a resume:
+// finished tasks are marked in .done, and a run against a healthy server
+// skips no project, so it writes no failed_projects.json.
+func assertExtractBookkeeping(t *testing.T, runDir string) {
+	t.Helper()
+	if !fileExists(filepath.Join(runDir, ".done", "getProjects")) {
+		t.Errorf("expected a done marker for getProjects under %q", filepath.Join(runDir, ".done"))
+	}
+	if fileExists(filepath.Join(runDir, "failed_projects.json")) {
+		data, _ := os.ReadFile(filepath.Join(runDir, "failed_projects.json"))
+		t.Errorf("expected no failed_projects.json against a healthy server, got:\n%s", data)
 	}
 }

@@ -13,7 +13,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
@@ -152,6 +154,15 @@ type Executor struct {
 	mu              sync.Mutex
 	skippedProjects map[string]bool
 
+	// failedProjects are the projects a per-project request failed for
+	// after every retry (see recordProjectFailure). They are skipped for
+	// the rest of the run like skippedProjects, and written to
+	// common.FailedProjectsFileName so structure leaves them out of the
+	// migration. failStreak counts per-project failures since the last
+	// per-project success.
+	failedProjects map[string]common.FailedProject
+	failStreak     atomic.Int32
+
 	// mqrMode caches whether the source server is configured in MQR
 	// (Multi-Quality Rule) mode, probed lazily the first time the
 	// issue-search facet-slicing cascade needs it (#630, see
@@ -172,11 +183,70 @@ func (e *Executor) RecordSkipped(projectKey string) {
 	e.skippedProjects[projectKey] = true
 }
 
-// IsSkipped returns true if the project has been marked as skipped.
+// IsSkipped returns true if the project has been marked as skipped, for
+// insufficient privileges or after a failed request.
 func (e *Executor) IsSkipped(projectKey string) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.skippedProjects[projectKey]
+	_, failed := e.failedProjects[projectKey]
+	return e.skippedProjects[projectKey] || failed
+}
+
+// maxConsecutiveProjectFailures is how many per-project failures in a
+// row, with no per-project success between them, stop the extract. One
+// slow or failing project is skipped so the run can finish; this many in
+// a row means the server or the network is down, and skipping every
+// remaining project would only produce an empty migration. A variable so
+// tests can lower it.
+var maxConsecutiveProjectFailures = int32(25)
+
+// recordProjectFailure skips projectKey for the rest of the run after a
+// request for it in taskName failed with err, and returns how many
+// per-project failures in a row there now are. The first failure of a
+// project is the one kept.
+func (e *Executor) recordProjectFailure(projectKey, taskName string, err error) int32 {
+	e.mu.Lock()
+	if e.failedProjects == nil {
+		e.failedProjects = make(map[string]common.FailedProject)
+	}
+	if _, seen := e.failedProjects[projectKey]; !seen {
+		e.failedProjects[projectKey] = common.FailedProject{Key: projectKey, Task: taskName, Error: err.Error()}
+	}
+	e.mu.Unlock()
+	return e.failStreak.Add(1)
+}
+
+// recordProjectSuccess ends a run of per-project failures.
+func (e *Executor) recordProjectSuccess() {
+	e.failStreak.Store(0)
+}
+
+// FailedProjects returns the projects skipped after a failed request,
+// sorted by key.
+func (e *Executor) FailedProjects() []common.FailedProject {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	list := make([]common.FailedProject, 0, len(e.failedProjects))
+	for _, fp := range e.failedProjects {
+		list = append(list, fp)
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].Key < list[j].Key })
+	return list
+}
+
+// restoreFailedProjects takes back the projects an earlier attempt of
+// this extract skipped, so a resumed run keeps skipping them. Their data
+// is missing from the tasks that finished before, so trying them again
+// in the tasks still to run would only give them part of their data.
+func (e *Executor) restoreFailedProjects(list []common.FailedProject) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, fp := range list {
+		if e.failedProjects == nil {
+			e.failedProjects = make(map[string]common.FailedProject)
+		}
+		e.failedProjects[fp.Key] = fp
+	}
 }
 
 // SkippedProjectKeys returns a sorted list of project keys that were skipped.
@@ -226,7 +296,10 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 	}
 
 	store := NewDataStore(extractDir)
-	plan = filterCompleted(plan, store)
+	plan, failedBefore, err := prepareResume(plan, store, extractDir)
+	if err != nil {
+		return nil, err
+	}
 
 	executor := newExecutor(raw, store, client.BaseURL(), edition, version, cfg.Concurrency)
 	executor.ProjectKeys = cfg.ProjectKeys
@@ -234,6 +307,7 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 	executor.MigrateHistory = cfg.MigrateHistory
 	executor.HistoryMaxPoints = cfg.HistoryMaxPoints
 	executor.HistoryMinIntervalDays = cfg.HistoryMinIntervalDays
+	executor.restoreFailedProjects(failedBefore)
 
 	if cfg.BranchRegexp != "" {
 		branchRe, err := CompileProjectKeyPattern(cfg.BranchRegexp)
@@ -273,6 +347,7 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 	// is real whether or not a later phase then failed, and the tracker
 	// is the only place it exists until the artefact is written (#574).
 	flushTruncation(extractDir, executor.Truncation, executor.Logger)
+	phaseErr = keepFailedProjects(extractDir, executor, phaseErr)
 	if phaseErr != nil {
 		return nil, phaseErr
 	}
@@ -283,6 +358,7 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 	// rather than widening RunExtract's return gives all of its callers
 	// (extract, transfer, sync_issues, the wizard) the same warning.
 	PrintTruncationBlock(os.Stderr, executor.Truncation.State())
+	PrintFailedProjectsBlock(os.Stderr, executor.FailedProjects())
 
 	fmt.Printf("%s %s - Extract Complete: %s\n", smtver.ToolName, smtver.Version, extractID)
 	return executor.SkippedProjectKeys(), nil
@@ -439,6 +515,11 @@ func runPhase(ctx context.Context, e *Executor, taskNames []string, registry map
 			if err != nil {
 				return fmt.Errorf("task %s: %w", name, err)
 			}
+			// On disk, so a resumed run knows this task finished even
+			// when another task in the phase failed.
+			if err := e.Store.MarkDone(name); err != nil {
+				return err
+			}
 			e.Progress.MarkTaskComplete(name)
 			return nil
 		})
@@ -586,18 +667,81 @@ func writeMetadataFile(dir string, m extractMeta) error {
 	return os.WriteFile(filepath.Join(dir, "extract.json"), data, 0o644)
 }
 
-func filterCompleted(plan [][]string, store *DataStore) [][]string {
+// prepareResume readies a run in an extract directory an earlier attempt
+// may have used: it drops the tasks that attempt finished from plan (see
+// filterCompleted) and returns the projects it skipped after a failed
+// request, which this run keeps skipping.
+func prepareResume(plan [][]string, store *DataStore, extractDir string) ([][]string, []common.FailedProject, error) {
+	plan, err := filterCompleted(plan, store, slog.Default())
+	if err != nil {
+		return nil, nil, err
+	}
+	failed, err := common.ReadFailedProjects(extractDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	return plan, failed, nil
+}
+
+// keepFailedProjects writes the projects this run skipped after a failed
+// request to the extract directory, on both exits: a resumed run must
+// keep skipping the projects this attempt left incomplete. It returns
+// phaseErr, or the write error when the phases succeeded.
+func keepFailedProjects(extractDir string, e *Executor, phaseErr error) error {
+	err := common.WriteFailedProjects(extractDir, e.FailedProjects())
+	if err == nil {
+		return phaseErr
+	}
+	e.Logger.Error("writing the failed projects list", "err", err)
+	if phaseErr != nil {
+		return phaseErr
+	}
+	return err
+}
+
+// filterCompleted drops from plan the tasks an earlier attempt of this
+// extract finished, so a resumed run does not repeat them. A task counts
+// as finished only when MarkDone recorded it: a task that was cut off
+// part-way also left a directory, and treating that as finished used to
+// skip the rest of its work without a word. The partial output of such a
+// task is deleted and the task runs again from the start. An extract
+// written before the marker existed has none, so all of its tasks run
+// again: slower, but never silently incomplete.
+func filterCompleted(plan [][]string, store *DataStore, logger *slog.Logger) ([][]string, error) {
 	var filtered [][]string
+	var rerun []string
 	for _, phase := range plan {
-		var fp []string
-		for _, task := range phase {
-			if !store.TaskDirExists(task) {
-				fp = append(fp, task)
-			}
+		fp, discarded, err := tasksToRun(phase, store)
+		if err != nil {
+			return nil, err
 		}
+		rerun = append(rerun, discarded...)
 		if len(fp) > 0 {
 			filtered = append(filtered, fp)
 		}
 	}
-	return filtered
+	if len(rerun) > 0 {
+		logger.Warn("resuming: these tasks did not finish in the earlier attempt and run again from the start",
+			"tasks", strings.Join(rerun, ","))
+	}
+	return filtered, nil
+}
+
+// tasksToRun returns the tasks of phase that are not done, and those of
+// them whose partial output it deleted.
+func tasksToRun(phase []string, store *DataStore) (run, discarded []string, err error) {
+	for _, task := range phase {
+		if store.IsDone(task) {
+			continue
+		}
+		gone, err := store.DiscardUnfinished(task)
+		if err != nil {
+			return nil, nil, err
+		}
+		if gone {
+			discarded = append(discarded, task)
+		}
+		run = append(run, task)
+	}
+	return run, discarded, nil
 }

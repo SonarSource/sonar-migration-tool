@@ -94,7 +94,7 @@ func forEachDepFiltered(ctx context.Context, e *Executor, taskName, depTask stri
 	g.SetLimit(cap(e.Sem))
 	for _, item := range filtered {
 		g.Go(func() error {
-			err := runWithSem(ctx, e, taskName, item, w, fn)
+			err := runWithSem(ctx, e, taskName, projectKeyOf(depTask, item), item, w, fn)
 			prog.Increment()
 			return err
 		})
@@ -102,8 +102,20 @@ func forEachDepFiltered(ctx context.Context, e *Executor, taskName, depTask stri
 	return g.Wait()
 }
 
-// runWithSem acquires the semaphore, runs fn, and handles non-fatal HTTP errors.
-func runWithSem(ctx context.Context, e *Executor, taskName string,
+// projectKeyOf returns the source project an item of depTask belongs to,
+// or "" when it belongs to none (a rule, a user, a quality profile).
+// getProjects items are projects; the per-project items other tasks fan
+// out over (branches, files) carry a projectKey field.
+func projectKeyOf(depTask string, item json.RawMessage) string {
+	if depTask == "getProjects" {
+		return extractField(item, "key")
+	}
+	return extractField(item, "projectKey")
+}
+
+// runWithSem acquires the semaphore, runs fn, and handles non-fatal
+// errors. projectKey is the project item belongs to, "" for none.
+func runWithSem(ctx context.Context, e *Executor, taskName, projectKey string,
 	item json.RawMessage, w *ChunkWriter,
 	fn func(ctx context.Context, item json.RawMessage, w *ChunkWriter) error) error {
 
@@ -113,7 +125,13 @@ func runWithSem(ctx context.Context, e *Executor, taskName string,
 	defer func() { <-e.Sem }()
 
 	if err := fn(ctx, item, w); err != nil {
-		return handleNonFatalErr(e, taskName, item, err)
+		if isNonFatalHTTPErr(err) {
+			return handleNonFatalErr(e, taskName, item, err)
+		}
+		return skipFailedProject(ctx, e, taskName, projectKey, err)
+	}
+	if projectKey != "" {
+		e.recordProjectSuccess()
 	}
 	return nil
 }

@@ -189,7 +189,7 @@ func TestRunWithSem_Success(t *testing.T) {
 	w, _ := e.Store.Writer("testRunWithSem")
 	item := json.RawMessage(`{"key":"proj1"}`)
 
-	err := runWithSem(context.Background(), e, "testTask", item, w,
+	err := runWithSem(context.Background(), e, "testTask", "", item, w,
 		func(ctx context.Context, item json.RawMessage, w *ChunkWriter) error {
 			return w.WriteOne(item)
 		})
@@ -211,7 +211,7 @@ func TestRunWithSem_NonFatalError(t *testing.T) {
 	w, _ := e.Store.Writer("testRunWithSemSkip")
 	item := json.RawMessage(`{"key":"proj-skip"}`)
 
-	err := runWithSem(context.Background(), e, "testTask", item, w,
+	err := runWithSem(context.Background(), e, "testTask", "", item, w,
 		func(ctx context.Context, item json.RawMessage, w *ChunkWriter) error {
 			return &common.HTTPError{StatusCode: 403, Method: "GET", URL: "/api/test"}
 		})
@@ -235,7 +235,7 @@ func TestRunWithSem_CancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := runWithSem(ctx, e, "testTask", item, w,
+	err := runWithSem(ctx, e, "testTask", "", item, w,
 		func(ctx context.Context, item json.RawMessage, w *ChunkWriter) error {
 			return nil
 		})

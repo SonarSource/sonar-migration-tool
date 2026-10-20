@@ -223,3 +223,54 @@ func (ds *DataStore) TaskDirExists(taskName string) bool {
 	info, err := os.Stat(ds.taskDir(taskName))
 	return err == nil && info.IsDir()
 }
+
+// taskDoneDir is the directory, beside the task directories, where
+// MarkDone records finished tasks: one empty file per task. Keeping the
+// markers out of the task directories leaves those exactly as before,
+// including a task that wrote nothing having none.
+const taskDoneDir = ".done"
+
+func (ds *DataStore) doneMarker(taskName string) string {
+	return filepath.Join(ds.baseDir, taskDoneDir, taskDirSanitizer.Replace(taskName))
+}
+
+// MarkDone records, on disk, that a task finished, and marks it complete.
+// A task's directory exists from its first write, so its existence says
+// only that the task started; the marker, written after the task has
+// returned and every chunk it wrote is closed, is what says it finished.
+// A nil DataStore records nothing, so hand-built executors without one
+// (tests) need no change.
+func (ds *DataStore) MarkDone(taskName string) error {
+	if ds == nil {
+		return nil
+	}
+	marker := ds.doneMarker(taskName)
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		return fmt.Errorf("creating %s: %w", filepath.Dir(marker), err)
+	}
+	if err := os.WriteFile(marker, nil, 0o644); err != nil {
+		return fmt.Errorf("marking task %s done: %w", taskName, err)
+	}
+	ds.MarkComplete(taskName)
+	return nil
+}
+
+// IsDone reports whether MarkDone recorded the task as finished on disk.
+func (ds *DataStore) IsDone(taskName string) bool {
+	info, err := os.Stat(ds.doneMarker(taskName))
+	return err == nil && !info.IsDir()
+}
+
+// DiscardUnfinished deletes the output of a task that started but did
+// not finish, so running it again cannot mix new output with the partial
+// output of the earlier attempt. It reports whether there was anything
+// to delete; a finished task is left alone.
+func (ds *DataStore) DiscardUnfinished(taskName string) (bool, error) {
+	if ds.IsDone(taskName) || !ds.TaskDirExists(taskName) {
+		return false, nil
+	}
+	if err := os.RemoveAll(ds.taskDir(taskName)); err != nil {
+		return false, fmt.Errorf("discarding unfinished task %s: %w", taskName, err)
+	}
+	return true, nil
+}
