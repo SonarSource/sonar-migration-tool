@@ -136,6 +136,9 @@ func TestAdaptivePaginationErrorNamesEverySize(t *testing.T) {
 	if res.Requests != 4 {
 		t.Errorf("Requests = %d, want 4 (one per size), set on error too", res.Requests)
 	}
+	if res.PageSize != 50 {
+		t.Errorf("PageSize = %d, want 50, the size of the last attempt", res.PageSize)
+	}
 }
 
 // api/ce/activity asks for 1000; its fallback enters the sequence at 500
@@ -185,9 +188,11 @@ func TestAdaptivePaginationWithoutTotalKeepsOriginalPageWorth(t *testing.T) {
 		// 900 items: the original page would have held 500 and reported
 		// unknown_total. Three pages of 200 cover those 500.
 		{"more than the original page", 900, false, 600, ReasonUnknownTotal, 4},
-		// A caller that stops on truncation stops at the first full
-		// page, as it would have at the requested size.
-		{"stop on truncation", 900, true, 200, ReasonUnknownTotal, 2},
+		// A caller that stops on truncation gets the verdict it would
+		// have had at 500: 300 items are complete, not truncated after
+		// one full page of 200.
+		{"stop on truncation, fits the original page", 300, true, 300, "", 3},
+		{"stop on truncation, more than the original page", 900, true, 600, ReasonUnknownTotal, 4},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

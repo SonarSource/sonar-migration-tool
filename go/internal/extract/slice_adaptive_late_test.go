@@ -409,3 +409,21 @@ func recordedLoss(state common.TruncationState) int {
 	}
 	return lost
 }
+
+// adopt follows the page size and cap a fetch reports, a failed one's
+// last attempt included, and keeps them when a fetch reports none.
+func TestIssueSlicerAdopt(t *testing.T) {
+	s := &issueSlicer{pageSize: 500, pageLimit: 20}
+
+	s.adopt(common.PageResult{Requests: 4, PageSize: 50, PageLimit: 200})
+	if s.pageSize != 50 || s.pageLimit != 200 || s.requests != 4 {
+		t.Errorf("after a failed fetch at 50: size=%d limit=%d requests=%d, want 50/200/4",
+			s.pageSize, s.pageLimit, s.requests)
+	}
+
+	s.adopt(common.PageResult{})
+	if s.pageSize != 50 || s.pageLimit != 200 || s.requests != 5 {
+		t.Errorf("after a fetch that reported nothing: size=%d limit=%d requests=%d, want 50/200/5",
+			s.pageSize, s.pageLimit, s.requests)
+	}
+}

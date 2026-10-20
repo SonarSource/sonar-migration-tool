@@ -803,21 +803,23 @@ func (s *issueSlicer) fetchWindow(ctx context.Context, w issueWindow, stopOnTrun
 		Scope:                    s.scope,
 	})
 
-	s.adopt(res, err)
+	s.adopt(res)
 	return res, asDateBoundRejection(w, err)
 }
 
 // adopt takes in what one issue fetch reports. Requests counts every
 // page request the fetch made, including those of attempts a page-size
 // fallback discarded, and is set on failure too; the floor of 1 covers a
-// fetch that failed before reporting any. After a successful fetch the
-// slicer follows its effective page size and cap, which a fallback may
-// have changed, so truncation records name the size really used. The
-// ceiling they give does not change with a fallback (see pageLimitAt),
-// but deriving it from the same result keeps it from drifting.
-func (s *issueSlicer) adopt(res common.PageResult, err error) {
+// fetch that failed before reporting any. The slicer then follows the
+// fetch's effective page size and cap, which a fallback may have
+// changed, so truncation records name the size really used. A failed
+// fetch reports those of its last attempt; one that reports none leaves
+// them as they were. The ceiling they give does not change with a
+// fallback (see pageLimitAt), but deriving it from the same result keeps
+// it from drifting.
+func (s *issueSlicer) adopt(res common.PageResult) {
 	s.requests += max(1, res.Requests)
-	if err != nil {
+	if res.PageSize == 0 {
 		return
 	}
 	s.pageSize, s.pageLimit = res.PageSize, res.PageLimit

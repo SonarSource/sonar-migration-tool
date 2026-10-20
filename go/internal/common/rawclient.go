@@ -374,7 +374,7 @@ func (o *PaginatedOpts) applyDefaults() {
 // plus everything the caller needs to know what was NOT fetched.
 //
 // PageSize and PageLimit carry the EFFECTIVE values the fetch actually
-// used, after applyDefaults. Nothing downstream should re-derive them:
+// used, after applyDefaults; on error, those of its last attempt. Nothing downstream should re-derive them:
 // applyDefaults has a pointer receiver and runs on a by-value copy of
 // the opts, so a caller inspecting its own PaginatedOpts sees
 // MaxPageSize == 0 and any page arithmetic built on that collapses to
@@ -385,7 +385,7 @@ type PageResult struct {
 	TotalKnown bool // false when the total key was absent or unparseable
 	Fetched    int  // len(Items)
 	PagesRead  int  // page requests that succeeded, page 1 included
-	Requests   int  // page requests made, failed ones included; also set on error
+	Requests   int  // page requests made, failed ones included; also set on error, with PageSize and PageLimit
 	PageSize   int  // effective MaxPageSize
 	PageLimit  int  // effective PageLimit (0 = uncapped)
 	Truncated  bool // set only when Reason != ""
@@ -428,7 +428,9 @@ func (r *RawClient) GetPaginated(ctx context.Context, opts PaginatedOpts) ([]jso
 // (500 -> 200 -> 100 -> 50) and carries on from where it stopped: items
 // already read are kept up to the last offset the smaller pages can
 // resume from (see paginationWalk.resize). No item is returned twice or
-// skipped, but up to one smaller page of items is requested again. The
+// skipped. Usually up to one smaller page of items is requested again;
+// after a short page, or when nothing can be kept, the fetch starts over
+// from page 1. The
 // size that works is remembered for opts.Path (see pageSizeTable). A
 // failure at 50 is returned; a slow one only after two more tries at 50
 // (see minPageSizeSlowRetries). When the fetch started above 50, the
@@ -460,7 +462,11 @@ func (r *RawClient) GetPaginatedResult(ctx context.Context, opts PaginatedOpts) 
 
 		next, err := st.next(opts.Path, startSize, pageSize, err)
 		if err != nil {
-			return PageResult{Requests: walk.requests}, err
+			return PageResult{
+				Requests:  walk.requests,
+				PageSize:  pageSize,
+				PageLimit: pageLimitAt(opts.PageLimit, requestedSize, pageSize),
+			}, err
 		}
 		if next < pageSize {
 			walk.resize(next)
@@ -718,13 +724,15 @@ func (r *RawClient) startWalk(ctx context.Context, client *http.Client, opts Pag
 }
 
 // readPages reads on from walk.nextPage up to pages. Without a total it
-// reads on only while pages come back full. A caller that stops on
-// truncation throws a truncated result away, so for it a full first page
-// is enough to stop on, as it is at the requested size.
+// reads on only while pages come back full, and pages is then just
+// enough to cover one page at the requested size. A StopOnTruncation
+// caller reads the same: a full page at a smaller size does not mean the
+// original page would have been full, so stopping sooner would label a
+// complete result truncated.
 func (r *RawClient) readPages(ctx context.Context, client *http.Client, opts PaginatedOpts,
 	pageSize, pages int, walk *paginationWalk) error {
 
-	for walk.nextPage <= pages && (walk.totalKnown || (walk.lastFull && !opts.StopOnTruncation)) {
+	for walk.nextPage <= pages && (walk.totalKnown || walk.lastFull) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}

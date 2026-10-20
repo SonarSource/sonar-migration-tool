@@ -76,7 +76,7 @@ func init() {
 			"Concurrency is dynamically adjusted to approach this rate without exceeding it (#573).",
 		minAPIMaxRatePerMin, maxAPIMaxRatePerMin))
 	f.Int("project_data_build_concurrency", 0, "Maximum number of scanner reports built at once during project-data migration (default: adaptive to memory available to this process, floor 4, cap 20; falls back to 4 when memory can't be detected, e.g. non-Linux). Set explicitly to override — lower it if the migration runs out of memory; raise it toward --concurrency if report building is the bottleneck.")
-	f.Int("timeout", 0, "Per-HTTP-request timeout in seconds (default: 60). Maps to the top-level timeout config field.")
+	f.Int("timeout", 0, "Per-HTTP-request timeout in seconds (default: 60). The project lookup and profile comparison, which page through results, wait up to twice this. Maps to the top-level timeout config field.")
 	f.String("export_directory", "", "Root directory containing all SonarQube exports")
 	f.String("target_task", "", "Name of a specific migration task to complete")
 	f.Bool("skip_profiles", false, "Skip quality profile migration/provisioning in SonarQube Cloud")

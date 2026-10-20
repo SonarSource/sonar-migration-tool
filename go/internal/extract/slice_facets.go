@@ -265,7 +265,7 @@ func (s *issueSlicer) fetchAndAbsorbCell(ctx context.Context, w issueWindow, sto
 		SuppressTruncationRecord: true,
 		Scope:                    s.scope,
 	})
-	s.adopt(res, err)
+	s.adopt(res)
 	if err != nil {
 		return res, asDateBoundRejection(w, err)
 	}
