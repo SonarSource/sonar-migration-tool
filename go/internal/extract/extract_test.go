@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -526,7 +527,8 @@ func TestRunExtractResumability(t *testing.T) {
 	dir := t.TempDir()
 	extractID := "04-16-2026-01"
 
-	// Pre-create getProjects output to simulate a completed task.
+	// Pre-create getProjects output and its done marker to simulate a
+	// task an earlier attempt finished.
 	projectsDir := filepath.Join(dir, extractID, "getProjects")
 	_ = os.MkdirAll(projectsDir, 0o755)
 	_ = os.WriteFile(
@@ -534,6 +536,9 @@ func TestRunExtractResumability(t *testing.T) {
 		[]byte(`{"key":"proj1","name":"P1"}`+"\n"),
 		0o644,
 	)
+	if err := NewDataStore(filepath.Join(dir, extractID)).MarkDone("getProjects"); err != nil {
+		t.Fatal(err)
+	}
 
 	cfg := ExtractConfig{
 		URL: srv.URL, Token: testToken, ExportDirectory: dir,
@@ -548,6 +553,46 @@ func TestRunExtractResumability(t *testing.T) {
 	content, _ := os.ReadFile(filepath.Join(projectsDir, testResultsFile))
 	if string(content) != `{"key":"proj1","name":"P1"}`+"\n" {
 		t.Errorf("expected original file preserved, got %q", string(content))
+	}
+}
+
+// A task an earlier attempt started but did not finish left a directory
+// and no done marker. Resuming must not trust that directory: its partial
+// output is discarded and the task runs again, so nothing it had not
+// reached yet goes missing.
+func TestRunExtractResumeRerunsUnfinishedTask(t *testing.T) {
+	srv := newMockServer()
+	defer srv.Close()
+
+	dir := t.TempDir()
+	extractID := "04-16-2026-02"
+	projectsDir := filepath.Join(dir, extractID, "getProjects")
+	_ = os.MkdirAll(projectsDir, 0o755)
+	_ = os.WriteFile(filepath.Join(projectsDir, testResultsFile),
+		[]byte(`{"key":"partial-only"}`+"\n"), 0o644)
+
+	cfg := ExtractConfig{
+		URL: srv.URL, Token: testToken, ExportDirectory: dir,
+		ExtractID: extractID, TargetTask: "getProjects", Concurrency: 5,
+	}
+	if _, err := RunExtract(context.Background(), cfg); err != nil {
+		t.Fatalf("RunExtract failed: %v", err)
+	}
+
+	items, err := NewDataStore(filepath.Join(dir, extractID)).ReadAll("getProjects")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	for _, item := range items {
+		keys = append(keys, extractField(item, "key"))
+	}
+	sort.Strings(keys)
+	if want := []string{"proj1", "proj2"}; !reflect.DeepEqual(keys, want) {
+		t.Errorf("getProjects keys after resume = %v, want %v: the partial output must be replaced", keys, want)
+	}
+	if !NewDataStore(filepath.Join(dir, extractID)).IsDone("getProjects") {
+		t.Error("expected getProjects to be marked done after the resumed run")
 	}
 }
 
@@ -1131,10 +1176,11 @@ func TestRunExtractInstallsTheObserver(t *testing.T) {
 func TestRunExtractWritesTheTruncationArtefactOnTaskFailure(t *testing.T) {
 	mux := truncatingComponentTreeMux()
 	// getProjectSourceCode runs in a later phase than
-	// getProjectComponentTree, and HTTP 500 is not in isNonFatalHTTPErr,
-	// so this fails the whole run after the truncation was recorded.
+	// getProjectComponentTree. HTTP 400 is neither skipped as a missing
+	// item nor as a failed project (it would fail for every project), so
+	// this fails the whole run after the truncation was recorded.
 	mux.HandleFunc("GET /api/sources/raw", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusBadRequest)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -1145,7 +1191,7 @@ func TestRunExtractWritesTheTruncationArtefactOnTaskFailure(t *testing.T) {
 		TargetTask: "getProjectSourceCode", Concurrency: 1,
 	}
 	if _, err := RunExtract(context.Background(), cfg); err == nil {
-		t.Fatal("expected RunExtract to fail on the HTTP 500 from api/sources/raw")
+		t.Fatal("expected RunExtract to fail on the HTTP 400 from api/sources/raw")
 	}
 
 	state := readTruncationArtefact(t, firstExtractDir(t, dir))

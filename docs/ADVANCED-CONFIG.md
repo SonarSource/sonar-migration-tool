@@ -264,7 +264,7 @@ sonar-migration-tool extract --source_url <url> --source_token <token> [flags]
 | `--source_token <token>` | SonarQube Server authentication token. (Legacy `--token` is still accepted but deprecated.) |
 | `--export_directory <dir>` | Output directory (default `./migration-files`). |
 | `--extract_type <name>` | Type of extract to run (default `all`). |
-| `--extract_id <id>` | Resume a previous extraction. |
+| `--extract_id <id>` | Resume a previous extraction. Finished tasks are kept; a task that was cut off runs again from the start. |
 | `--target_task <task>` | Run a specific task (with its dependencies). |
 | `--concurrency <n>` | Max concurrent requests. |
 | `--timeout <s>` | Request timeout in seconds. A paginated request waits up to twice this. |

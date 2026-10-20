@@ -141,6 +141,36 @@ sonar-migration-tool extract --source_url <URL> --source_token <TOKEN> \
 
 ---
 
+### Projects skipped because a request for them failed
+<!-- updated: 2026-10-20_20:16:47 by Claude -->
+
+**Symptom**: `extract` finishes, but logs a warning like this for one or more projects, and lists them at the end of the run:
+
+```
+level=WARN msg="getProjectIssuesFull: request failed after every retry; skipping the project and leaving it out of the migration" project=my-project err="... HTTP 504 ..."
+```
+
+**Cause**: a request for that project failed with HTTP 500, 502, 503 or 504, or a timeout or dropped connection, even after the tool's retries and its page-size fallback. On a large instance behind a load balancer with a short timeout, one slow project used to stop an extract that had been running for hours.
+
+**What the tool does**: it skips that project for the rest of the run and carries on with the others. The skipped projects are listed in `failed_projects.json` in the extract directory, and `structure` (run by `extract` itself) leaves them out of `projects.csv`, so `migrate` never migrates a project whose data is incomplete. A request that would fail for every project (HTTP 400, 401, 429), or a failure for something that is not a project (a rule, a user, a quality profile), still stops the run. So do 25 project failures in a row with no success between them: that means the server or the network is down, not that one project is failing.
+
+**When you need to act**: migrate the skipped projects in a separate run once the server answers them, with `extract` and then `migrate` again and `--project_key_regexp` matching them. If many projects are skipped, see [HTTP 504 Gateway Timeout on large pages](#http-504-gateway-timeout-on-large-pages): raising the load balancer's idle timeout usually helps most.
+
+---
+
+### Resuming a failed extract (`--extract_id`)
+<!-- updated: 2026-10-20_20:16:47 by Claude -->
+
+Run `extract` again with `--extract_id <ID of the failed extract>` and the same export directory:
+
+- Tasks that finished are kept and not run again, including tasks that finished in the same phase as the one that failed.
+- A task that was cut off part-way runs again from the start, after its partial output is deleted, so nothing it had not reached yet goes missing. A warning names these tasks.
+- Projects the earlier attempt skipped after a failed request (see the previous section) stay skipped. The tasks that finished before have none of their data, so trying them again would only give them part of it.
+
+An extract made by a version of the tool from before this behaviour has no record of which tasks finished, so all of its tasks run again: slower, but never silently incomplete.
+
+---
+
 ### Migration task fails midway
 <!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 

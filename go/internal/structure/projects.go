@@ -6,6 +6,8 @@ package structure
 
 import (
 	"encoding/json"
+	"log/slog"
+	"path/filepath"
 	"strings"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
@@ -204,6 +206,7 @@ func MapProjectStructure(directory string, mapping ExtractMapping) ([]Binding, [
 	identityByProjectKey := make(map[string]string)
 
 	detailItems, _ := ReadExtractData(directory, mapping, "getProjectDetails")
+	detailItems = withoutFailedProjects(detailItems, failedProjectKeys(directory, mapping))
 	for _, item := range detailItems {
 		var detail map[string]any
 		json.Unmarshal(item.Data, &detail)
@@ -295,6 +298,46 @@ func MapProjectStructure(directory string, mapping ExtractMapping) ([]Binding, [
 type projectBindingEntry struct {
 	Binding        map[string]any
 	ProjectBinding map[string]any
+}
+
+// failedProjectKeys returns, keyed serverURL+projectKey, the projects
+// extract skipped after a request for them failed (see
+// common.FailedProjectsFileName). Their extracted data is incomplete, so
+// they are left out of projects.csv and migrate never migrates them. A
+// WARN says how many, so the gap is never silent.
+func failedProjectKeys(directory string, mapping ExtractMapping) map[string]bool {
+	failed := make(map[string]bool)
+	for serverURL, extractID := range mapping {
+		list, err := common.ReadFailedProjects(filepath.Join(directory, extractID))
+		if err != nil {
+			slog.Warn("could not read the extract's failed projects list; no project is left out",
+				"extract", extractID, "err", err)
+			continue
+		}
+		for _, fp := range list {
+			failed[serverURL+fp.Key] = true
+		}
+	}
+	if len(failed) > 0 {
+		slog.Warn("leaving out of the migration the projects extract could not read in full; see failed_projects.json in the extract directory",
+			"projects", len(failed))
+	}
+	return failed
+}
+
+// withoutFailedProjects drops the getProjectDetails items of failed
+// projects (see failedProjectKeys).
+func withoutFailedProjects(items []ExtractItem, failed map[string]bool) []ExtractItem {
+	if len(failed) == 0 {
+		return items
+	}
+	kept := items[:0:0]
+	for _, item := range items {
+		if !failed[item.ServerURL+common.ExtractField(item.Data, "key")] {
+			kept = append(kept, item)
+		}
+	}
+	return kept
 }
 
 func getNewCodeDef(defs map[string]map[string]map[string]newCodeDefinition, serverURL, projectKey, branch string) newCodeDefinition {
