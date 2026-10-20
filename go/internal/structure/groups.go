@@ -85,18 +85,24 @@ func addProjectGroups(results map[string]Group, projectOrgMapping map[string]str
 }
 
 // addTemplateGroups adds groups from permission template assignments.
+// A template can be mapped to several organizations, so each group is added
+// to every organization its template maps to (issue #648).
 func addTemplateGroups(results map[string]Group, templates []Template, mapping ExtractMapping, directory string) {
-	// Build template → org mapping.
-	templateOrgs := make(map[string]string)
+	// Build template → set of org keys mapping.
+	templateOrgs := make(map[string]map[string]bool)
 	for _, t := range templates {
-		templateOrgs[t.ServerURL+t.SourceTemplateKey] = t.SonarQubeOrgKey
+		k := t.ServerURL + t.SourceTemplateKey
+		if templateOrgs[k] == nil {
+			templateOrgs[k] = make(map[string]bool)
+		}
+		templateOrgs[k][t.SonarQubeOrgKey] = true
 	}
 
 	for _, key := range []string{"getTemplateGroupsScanners", "getTemplateGroupsViewers"} {
 		items, _ := ReadExtractData(directory, mapping, key)
 		for _, item := range items {
 			templateID := common.ExtractField(item.Data, "templateId")
-			orgKey, ok := templateOrgs[item.ServerURL+templateID]
+			orgs, ok := templateOrgs[item.ServerURL+templateID]
 			if !ok {
 				continue
 			}
@@ -104,7 +110,9 @@ func addTemplateGroups(results map[string]Group, templates []Template, mapping E
 			var g map[string]any
 			json.Unmarshal(item.Data, &g)
 			description := getString(g, "description")
-			addGroupResult(results, orgKey, name, item.ServerURL, description)
+			for orgKey := range orgs {
+				addGroupResult(results, orgKey, name, item.ServerURL, description)
+			}
 		}
 	}
 }
