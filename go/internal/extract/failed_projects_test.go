@@ -53,25 +53,39 @@ func TestSkipFailedProject(t *testing.T) {
 			e := newTestExecutor(t)
 			got := skipFailedProject(tc.ctx, e, "getProjectMeasures", tc.projectKey, tc.err)
 			if tc.wantSkip {
-				if got != nil {
-					t.Fatalf("expected the project to be skipped, got %v", got)
-				}
-				if !e.IsSkipped(tc.projectKey) {
-					t.Error("expected the project to be skipped for the rest of the run")
-				}
-				list := e.FailedProjects()
-				if len(list) != 1 || list[0].Key != tc.projectKey || list[0].Task != "getProjectMeasures" {
-					t.Errorf("FailedProjects = %+v, want one entry for %s", list, tc.projectKey)
-				}
-				return
-			}
-			if !errors.Is(got, tc.err) {
-				t.Errorf("expected the error to stop the run, got %v", got)
-			}
-			if len(e.FailedProjects()) != 0 {
-				t.Errorf("expected no failed project, got %+v", e.FailedProjects())
+				assertProjectSkipped(t, e, got, tc.projectKey)
+			} else {
+				assertRunStopped(t, e, got, tc.err)
 			}
 		})
+	}
+}
+
+// assertProjectSkipped checks that skipFailedProject skipped key and let
+// the run carry on.
+func assertProjectSkipped(t *testing.T, e *Executor, got error, key string) {
+	t.Helper()
+	if got != nil {
+		t.Fatalf("expected the project to be skipped, got %v", got)
+	}
+	if !e.IsSkipped(key) {
+		t.Error("expected the project to be skipped for the rest of the run")
+	}
+	list := e.FailedProjects()
+	if len(list) != 1 || list[0].Key != key || list[0].Task != "getProjectMeasures" {
+		t.Errorf("FailedProjects = %+v, want one entry for %s", list, key)
+	}
+}
+
+// assertRunStopped checks that skipFailedProject returned want, which
+// stops the run, and skipped no project.
+func assertRunStopped(t *testing.T, e *Executor, got, want error) {
+	t.Helper()
+	if !errors.Is(got, want) {
+		t.Errorf("expected the error to stop the run, got %v", got)
+	}
+	if len(e.FailedProjects()) != 0 {
+		t.Errorf("expected no failed project, got %+v", e.FailedProjects())
 	}
 }
 
