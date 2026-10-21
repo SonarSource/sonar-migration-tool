@@ -50,7 +50,7 @@ func forEachDep(ctx context.Context, e *Executor, taskName, depTask string,
 
 	return forEachDepFiltered(ctx, e, taskName, depTask,
 		func(item json.RawMessage) bool {
-			key := extractField(item, "key")
+			key := projectKeyOf(depTask, item)
 			return key == "" || !e.IsSkipped(key)
 		}, fn)
 }
@@ -123,6 +123,10 @@ func runWithSem(ctx context.Context, e *Executor, taskName, projectKey string,
 		return err
 	}
 	defer func() { <-e.Sem }()
+
+	if projectKey != "" && e.IsSkipped(projectKey) {
+		return nil
+	}
 
 	if err := fn(ctx, item, w); err != nil {
 		if isNonFatalHTTPErr(err) {
