@@ -11,7 +11,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"syscall"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
@@ -67,7 +66,7 @@ func isProjectFailure(ctx context.Context, err error) bool {
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return true
 	}
-	return errors.Is(err, syscall.ECONNRESET) ||
+	return isConnReset(err) ||
 		errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF)
 }
 
