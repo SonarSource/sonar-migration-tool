@@ -236,7 +236,7 @@ func init() {
 		"Max sustained %s API calls/min for the target side, as a sliding window (default: 1500, valid range [%d,%d]). "+
 			"Concurrency on the target side is dynamically adjusted to approach this rate without exceeding it (#573).",
 		scCloudName, minAPIMaxRatePerMin, maxAPIMaxRatePerMin))
-	f.Int(flagTimeout, 0, "HTTP request timeout in seconds, applied to both source and target (default: 60). A paginated request that can still fall back to a smaller page size waits up to twice this. Use source.timeout / target.timeout in the config file to set them independently.")
+	f.Int(flagTimeout, 0, "HTTP request timeout in seconds, applied to both source and target (default: 60). Paginated reads from SonarQube Server (the extract step), and the migrate step's project lookup and profile comparison, wait up to twice this. Use source.timeout / target.timeout in the config file to set them independently.")
 	f.String(flagPEMFilePath, "", "Path to client mTLS PEM file for the source server (maps to source.pem_file_path)")
 	f.String(flagKeyFilePath, "", "Path to client mTLS key file for the source server (maps to source.key_file_path)")
 	f.String(flagCertPassword, "", "Password for the source server mTLS client certificate (maps to source.cert_password)")

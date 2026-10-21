@@ -46,7 +46,7 @@ Only `source.url` / `source.token` (for `extract`) and `target.url` / `target.to
 |---|---|---|---|:--:|---|
 | `concurrency` | `--concurrency` | all | `10` | No | Max parallel HTTP calls. Overridable per block via `source`/`target`. |
 | `project_data_build_concurrency` | `--project_data_build_concurrency` | migrate | `4` | No | Max number of scanner reports built at once during project-data migration. Lower it if the migration runs out of memory on a large instance; raise it toward `concurrency` if report building is the bottleneck. Overridable via `target.project_data_build_concurrency`. |
-| `timeout` | `--timeout` | extract, transfer | `60` | No | HTTP request timeout in seconds. A paginated request that can still fall back to a smaller page size waits up to twice this. Overridable per block. |
+| `timeout` | `--timeout` | extract, migrate, sync-issues, transfer | `60` | No | HTTP request timeout in seconds. Paginated reads by `extract` (and the extract step of `transfer` and `sync-issues`), and `migrate`'s project lookup and profile comparison, wait up to twice this; `migrate`'s issue and hotspot sync does not. Overridable per block. |
 | `export_directory` | `--export_directory` (`--export_dir` on `transfer`) | all | `./migration-files` | No | Root directory for extract / migrate output. |
 | `skip_issue_sync` | `--skip_issue_sync` | extract, migrate, transfer | `false` | No | Skip the final per-issue / per-hotspot metadata sync (#299). Accepts `true`/`on`/`yes`/`1` (case-insensitive). CLI flag is a one-way override. |
 | `skip_project_data_migration` | `--skip_project_data_migration` | extract, migrate, transfer | `false` | No | Skip the entire project-data migration (import + trailing sync). Implies `skip_issue_sync` (#303). |
@@ -122,7 +122,7 @@ All optional.
 |---|---|---|
 | `concurrency` | `10` | Default max parallel HTTP calls. |
 | `project_data_build_concurrency` | `4` | Default max number of scanner reports built at once during project-data migration. |
-| `timeout` | `60` | Default HTTP request timeout in seconds. A paginated request that can still fall back to a smaller page size waits up to twice this. |
+| `timeout` | `60` | Default HTTP request timeout in seconds. Paginated reads by `extract` (and the extract step of `transfer` and `sync-issues`), and `migrate`'s project lookup and profile comparison, wait up to twice this; `migrate`'s issue and hotspot sync does not. |
 | `export_directory` | `./migration-files` | Root directory for extract / migrate output. |
 | `skip_issue_sync` | `false` | When `true` (or `"on"` / `"yes"` / `1`), skip the final per-issue and per-hotspot metadata sync that runs after project data is replayed. Defaults to `false` so the sync happens. Accepted aliases are case-insensitive. Issue #299. |
 | `skip_project_data_migration` | `false` | When `true` (or `"on"` / `"yes"` / `1`), skip the entire project-data migration: the project-data import AND the trailing issue + hotspot sync. Useful when customers cut over to SonarQube Cloud by re-scanning rather than importing historical state. Implies `skip_issue_sync` — there's nothing to sync against. Same FlexibleBool aliases. Issue #303. |
@@ -267,7 +267,7 @@ sonar-migration-tool extract --source_url <url> --source_token <token> [flags]
 | `--extract_id <id>` | Resume a previous extraction. |
 | `--target_task <task>` | Run a specific task (with its dependencies). |
 | `--concurrency <n>` | Max concurrent requests. |
-| `--timeout <s>` | Request timeout in seconds. A paginated request that can still fall back to a smaller page size waits up to twice this. |
+| `--timeout <s>` | Request timeout in seconds. A paginated request waits up to twice this. |
 | `--skip_project_data_migration` | Skip the issue / source / SCM-blame extract (extracted by default). |
 | `--skip_issue_sync` | Drop the per-issue / per-hotspot sync metadata from the extract (no `additionalFields=_all`, no per-hotspot detail). Pair with migrate-side `--skip_issue_sync`. #398. |
 | `--objects <list>` | Comma-separated object categories to extract (`settings`, `permission_templates`/`pt`, `quality_profiles`/`qp`, `quality_gates`/`qg`, `projects`, `portfolios`, `groups`, `license_profiles`/`lp`). Omit to extract everything. #536. |
@@ -377,7 +377,7 @@ file.
 | `--enterprise_key <key>` | `target.enterprise_key` | SonarQube Cloud enterprise key (defaults to `--default_organization`). |
 | `--export_dir <dir>` | `export_directory` | Working directory (default `./migration-files/`). |
 | `--concurrency <n>` | `concurrency` | Max concurrent HTTP requests. |
-| `--timeout <s>` | `timeout` | HTTP request timeout in seconds. A paginated request that can still fall back to a smaller page size waits up to twice this. |
+| `--timeout <s>` | `timeout` | HTTP request timeout in seconds. Paginated reads from SonarQube Server (the extract step), and the migrate step's project lookup and profile comparison, wait up to twice this. |
 | `--pem_file_path <path>` | `source.pem_file_path` | Client mTLS PEM file. |
 | `--key_file_path <path>` | `source.key_file_path` | Client mTLS key file. |
 | `--cert_password <pw>` | `source.cert_password` | Client mTLS password. |
@@ -429,9 +429,9 @@ does and what you will see in the logs.
 | Network / connection errors | Yes |
 | Other `4xx` (e.g. `400`, `401`, `403`, `404`) | No — these indicate a caller mistake and fail immediately |
 
-One exception: while a paginated fetch can still use a smaller page size, a `504` that took 5 s
-or more is not retried at the same size. The tool restarts that fetch at a smaller page size
-instead — see [HTTP 504 Gateway Timeout on large pages](TROUBLESHOOTING.md#http-504-gateway-timeout-on-large-pages).
+One exception: in a paginated fetch, a `500`, `502`, `503` or `504` that took 5 s or more, counted
+from when the request was sent, is not retried at the same size. The tool carries on with that
+fetch at a smaller page size instead, and at 50, the smallest, tries it up to three times in all — see [HTTP 504 Gateway Timeout on large pages](TROUBLESHOOTING.md#http-504-gateway-timeout-on-large-pages).
 
 ### Backoff schedules
 

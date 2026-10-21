@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
@@ -961,6 +962,61 @@ func TestListAllProjectKeys_SkipsItemsWithoutKey(t *testing.T) {
 	want := []string{"proj-a"}
 	if !reflect.DeepEqual(keys, want) {
 		t.Errorf("keys = %v, want %v", keys, want)
+	}
+}
+
+// The --project_key_regexp pre-flight (ListAllProjectKeys) and the run
+// that follows build separate clients. A page size the first one paid a
+// fallback to learn must carry over, so the second starts there instead
+// of failing at 500 again.
+func TestListAllProjectKeys_SharesLearnedPageSize(t *testing.T) {
+	var mu sync.Mutex
+	var sizes []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/server/version", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, testServerVersion)
+	})
+	mux.HandleFunc("GET /api/system/info", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"edition": "developer"})
+	})
+	mux.HandleFunc("GET /api/projects/search", func(w http.ResponseWriter, r *http.Request) {
+		ps := r.URL.Query().Get("ps")
+		mu.Lock()
+		sizes = append(sizes, ps)
+		mu.Unlock()
+		if ps == "500" {
+			http.Error(w, "gateway timeout", http.StatusGatewayTimeout)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"paging":     map[string]any{"total": 1},
+			"components": []map[string]any{{"key": "proj-a"}},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	t.Cleanup(func() { common.ForgetSharedPageSizes(srv.URL) })
+
+	list := func() []string {
+		t.Helper()
+		mu.Lock()
+		before := len(sizes)
+		mu.Unlock()
+		if _, err := ListAllProjectKeys(context.Background(), ExtractConfig{URL: srv.URL, Token: testToken}); err != nil {
+			t.Fatalf("ListAllProjectKeys: %v", err)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), sizes[before:]...)
+	}
+
+	// The first client tries 500 (the SDK retries the fast 504 at that
+	// size) and settles on 200.
+	if first := list(); first[0] != "500" || first[len(first)-1] != "200" {
+		t.Fatalf("first listing page sizes = %v, want 500 first and 200 last", first)
+	}
+	if second := list(); !reflect.DeepEqual(second, []string{"200"}) {
+		t.Errorf("second listing page sizes = %v, want [200]: the second client must start at the learned size", second)
 	}
 }
 
