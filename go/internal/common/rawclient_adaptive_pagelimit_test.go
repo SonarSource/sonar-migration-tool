@@ -27,7 +27,13 @@ func TestPageLimitAt(t *testing.T) {
 		{"500 to 50", 20, 500, 50, 200},
 		{"webhook sample to 200", 10, 500, 200, 25},
 		{"webhook sample to 50", 10, 500, 50, 100},
-		{"rounds up", 3, 150, 100, 5},
+		{"ce/activity 1000 to 500", 1, 1000, 500, 2},
+		// 3 x 500 = 1,500 items: 7 pages of 200 would lose 100 of them.
+		{"rounds up when the size does not divide the ceiling", 3, 500, 200, 8},
+		{"rounds up a small ceiling", 3, 150, 100, 5},
+		// 20 x 500 = 10,000, the result window: 34 pages of 300 would
+		// ask for item 10,200, which the server answers with HTTP 400.
+		{"never rounds past the result window", 20, 500, 300, 33},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -36,7 +42,11 @@ func TestPageLimitAt(t *testing.T) {
 				t.Fatalf("pageLimitAt(%d, %d, %d) = %d, want %d",
 					tc.limit, tc.requestedSize, tc.pageSize, got, tc.want)
 			}
-			if tc.limit > 0 && got*tc.pageSize < tc.limit*tc.requestedSize {
+			ceiling := tc.limit * tc.requestedSize
+			if tc.limit > 0 && ceiling <= ResultWindowLimit && got*tc.pageSize > ResultWindowLimit {
+				t.Errorf("past the result window: %d x %d > %d", got, tc.pageSize, ResultWindowLimit)
+			}
+			if tc.limit > 0 && got*tc.pageSize < ceiling && (got+1)*tc.pageSize <= ResultWindowLimit {
 				t.Errorf("ceiling fell: %d x %d < %d x %d",
 					got, tc.pageSize, tc.limit, tc.requestedSize)
 			}

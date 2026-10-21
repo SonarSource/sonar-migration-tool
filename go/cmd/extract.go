@@ -103,7 +103,7 @@ func init() {
 	f.String("export_directory", DefaultExportDirectory, "Root directory to output the export")
 	f.String("extract_type", "", "Type of extract to run")
 	f.Int("concurrency", 0, "Maximum number of concurrent requests")
-	f.Int("timeout", 0, "HTTP request timeout in seconds (default: 60). A paginated request that can still fall back to a smaller page size waits up to twice this.")
+	f.Int("timeout", 0, "HTTP request timeout in seconds (default: 60). A paginated request waits up to twice this.")
 	f.String("extract_id", "", "ID of an extract to resume in case of failures")
 	f.String("target_task", "", "Target task to complete; all dependent tasks will be included")
 	f.Bool(flagSkipProjectDataMigration, false, "Skip extracting project data (issues, hotspots, source code, SCM blame). Defaults to false — project data is extracted by default. #303.")

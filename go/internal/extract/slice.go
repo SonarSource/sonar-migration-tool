@@ -379,8 +379,6 @@ func fetchProjectIssues(ctx context.Context, e *Executor, projectKey, branch str
 	if err != nil {
 		return err
 	}
-	s.pageSize, s.pageLimit = res.PageSize, res.PageLimit
-	s.ceiling = windowCeiling(res.PageLimit, res.PageSize)
 	s.initialTotal, s.totalKnown = res.Total, res.TotalKnown
 
 	if !res.Truncated {
@@ -805,19 +803,27 @@ func (s *issueSlicer) fetchWindow(ctx context.Context, w issueWindow, stopOnTrun
 		Scope:                    s.scope,
 	})
 
-	// Keep the slicer's ceiling aligned with the effective page size and
-	// cap. A successful 5xx fallback may reduce 500 to 200, 100 or 50,
-	// and raises the page cap to match.
-	if err == nil {
-		s.pageSize = res.PageSize
-		s.pageLimit = res.PageLimit
-		s.ceiling = windowCeiling(res.PageLimit, res.PageSize)
-	}
-
-	// PagesRead is zero on failure even though a request was made, so
-	// the audit count must not trust it blindly.
-	s.requests += max(1, res.PagesRead)
+	s.adopt(res)
 	return res, asDateBoundRejection(w, err)
+}
+
+// adopt takes in what one issue fetch reports. Requests counts every
+// page request the fetch made, including those of attempts a page-size
+// fallback discarded, and is set on failure too; the floor of 1 covers a
+// fetch that failed before reporting any. The slicer then follows the
+// fetch's effective page size and cap, which a fallback may have
+// changed, so truncation records name the size really used. A failed
+// fetch reports those of its last attempt; one that reports none leaves
+// them as they were. The ceiling they give does not change with a
+// fallback (see pageLimitAt), but deriving it from the same result keeps
+// it from drifting.
+func (s *issueSlicer) adopt(res common.PageResult) {
+	s.requests += max(1, res.Requests)
+	if res.PageSize == 0 {
+		return
+	}
+	s.pageSize, s.pageLimit = res.PageSize, res.PageLimit
+	s.ceiling = windowCeiling(res.PageLimit, res.PageSize)
 }
 
 // probeWindowTotal asks how many issues a window holds, with one

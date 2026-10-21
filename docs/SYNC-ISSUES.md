@@ -117,7 +117,7 @@ sonar-migration-tool sync-issues -c config.json
 | `--project_key_pattern` | `target.project_key_pattern` | Template for target project keys, built from `<ORIGINAL_PROJECT_KEY>` and `<ORGANIZATION_KEY>` (default: `<ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>`) |
 | `--export_dir` | `export_directory` | Working directory for intermediate files (default: `./migration-files/`) |
 | `--concurrency` | `concurrency` | Max concurrent HTTP requests (default: `25`) |
-| `--timeout` | `timeout` | HTTP request timeout in seconds. A paginated request that can still fall back to a smaller page size waits up to twice this. |
+| `--timeout` | `timeout` | HTTP request timeout in seconds. Paginated reads from SonarQube Server (the extract step) wait up to twice this. |
 | `--pem_file_path` | `source.pem_file_path` | Client mTLS PEM file for the source server |
 | `--key_file_path` | `source.key_file_path` | Client mTLS key file for the source server |
 | `--cert_password` | `source.cert_password` | Password for the source server mTLS client certificate |

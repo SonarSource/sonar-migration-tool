@@ -379,7 +379,9 @@ func initClient(ctx context.Context, cfg ExtractConfig) (*sqapi.Client, *RawClie
 		return nil, nil, nil, "", fmt.Errorf("certificate error: %w", client.CertErr())
 	}
 
-	raw := NewRawClient(client.HTTPClient(), client.BaseURL())
+	// Shared, so page sizes the --project_key_regexp pre-flight
+	// (ListAllProjectKeys) learned carry over to the run that follows.
+	raw := common.NewSharedRawClient(client.HTTPClient(), client.BaseURL())
 	edition, err := detectEdition(ctx, raw)
 	if err != nil {
 		return nil, nil, nil, "", fmt.Errorf("detecting edition: %w", err)

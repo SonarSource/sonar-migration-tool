@@ -265,16 +265,10 @@ func (s *issueSlicer) fetchAndAbsorbCell(ctx context.Context, w issueWindow, sto
 		SuppressTruncationRecord: true,
 		Scope:                    s.scope,
 	})
-	s.requests += max(1, res.PagesRead)
-
+	s.adopt(res)
 	if err != nil {
 		return res, asDateBoundRejection(w, err)
 	}
-
-	// Update the effective issue ceiling after adaptive pagination.
-	s.pageSize = res.PageSize
-	s.pageLimit = res.PageLimit
-	s.ceiling = windowCeiling(res.PageLimit, res.PageSize)
 
 	// Do not absorb a partial cell here. The caller must either
 	// partition it further or explicitly record the missing issues.

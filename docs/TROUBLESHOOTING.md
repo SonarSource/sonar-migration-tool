@@ -52,22 +52,22 @@ This guide covers common issues when using the SonarQube to SonarCloud migration
 sonar-migration-tool extract --source_url <URL> --source_token <TOKEN> --timeout 120 --export_directory ./files/
 ```
 
-A paginated request that can still fall back to a smaller page size already waits up to twice `--timeout`. If a load balancer or proxy answers HTTP 504, see the next section.
+A paginated request already waits up to twice `--timeout`. If a load balancer or proxy answers HTTP 504, see the next section.
 
 ---
 
 ### HTTP 504 Gateway Timeout on large pages
-<!-- updated: 2026-10-16_13:21:04 by Claude -->
+<!-- updated: 2026-10-19_12:18:44 by Claude -->
 
-**Symptom**: `extract` logs an HTTP 504 (or another 5xx) from a search endpoint such as `api/projects/search` or `api/issues/search`, often after about 60 seconds. A load balancer or reverse proxy in front of SonarQube Server gave up waiting for a large page.
+**Symptom**: `extract` logs an HTTP 504 (or a 500, 502 or 503) from a search endpoint such as `api/projects/search` or `api/issues/search`, often after about 60 seconds. A load balancer or reverse proxy in front of SonarQube Server gave up waiting for a large page.
 
-**What the tool does**: paginated reads adapt their page size, with nothing to configure.
+**What the tool does**: paginated reads adapt their page size, with nothing to configure. This applies to every `extract` read (including the extract step of `transfer` and `sync-issues`), and to a few small `migrate` lookups (the project lookup and the profile comparison). It does not apply to the issue and hotspot sync in `migrate`: those reads use the normal `--timeout` and keep their page size.
 
-- A request that fails with HTTP 5xx restarts that fetch from page 1 at a smaller page size: 500 → 200 → 100 → 50. Items from the failed attempt are discarded, so nothing is duplicated.
-- The size that works is remembered per endpoint for the rest of the run, so once one request has fallen back, later requests to that endpoint start at the smaller size. Requests to the same endpoint that were already in flight at that point each pay the wait once.
-- While a smaller page size remains, a paginated request waits up to twice `--timeout` (120 s by default). Common gateways (AWS load balancers, nginx, Azure Front Door) answer 504 after 60 s, the tool's own default, so without this the tool would time out just before the gateway's 504 arrived.
-- A 504 that took 5 s or more is not retried at the same page size. A faster one is retried as usual, which absorbs a burst shorter than about 1 second without lowering the page size.
-- A smaller page size loses nothing: the page cap grows as the page size shrinks (20 / 50 / 100 / 200 pages at 500 / 200 / 100 / 50), so issues, hotspots, the component measures tree and project analyses still read up to 10,000 items per query, the server's own limit. The only cost is more, smaller requests.
+- A request that fails with HTTP 500, 502, 503 or 504 moves that fetch to a smaller page size: 500 → 200 → 100 → 50 (a fetch that asks for 1,000, such as `api/ce/activity`, steps to 500 first). The fetch carries on from where it stopped rather than starting over: the items already read are kept up to the last point the smaller pages line up with. No item is returned twice or skipped. Usually up to one smaller page of items is fetched again; if an earlier page came back short, or nothing can be kept, the fetch starts over from page 1. Any other 5xx, such as 501, is not about page size and fails the fetch at once.
+- The size that works is remembered per endpoint, so later requests to that endpoint start there. After a slow failure (see the next point), the size just below the one that failed slowly is kept for the rest of the run. A smaller size reached only through fast failures is kept for 5 minutes from when it was learned, and then the larger size is tried again, so a short burst of errors, such as the server restarting behind its load balancer, does not slow down the rest of a long run. Requests to the same endpoint that were already in flight each pay the wait once. With `--project_key_regexp`, the project listing done first and the extract that follows share what was learned.
+- A paginated request waits up to twice `--timeout` (120 s by default), at every page size. Common gateways (AWS load balancers, nginx, Azure Front Door) answer 504 after 60 s, the tool's own default, so without this the tool would time out just before the gateway's 504 arrived.
+- A 500, 502, 503 or 504 that took 5 s or more, counted from when the request was sent, is not retried at the same page size; at 50, the smallest, it is tried up to three times in all, resuming from the page that failed. That covers gateways that report their own timeout as 502 or 503 (Apache httpd, Google Cloud load balancers, IIS ARR) as well as 504. A faster one is retried as usual, which absorbs a burst shorter than about 1 second without lowering the page size. Waiting for a SonarQube Cloud rate-limit slot does not count towards the 5 s.
+- A smaller page size loses nothing: the page cap grows as the page size shrinks (20 / 50 / 100 / 200 pages at 500 / 200 / 100 / 50), so issues, hotspots, the component measures tree and project analyses still read up to 10,000 items per query, the server's own limit. A response with no total still returns at least as many items as one page at the original size would have. The only cost is more, smaller requests.
 
 Each step down is logged:
 
@@ -75,11 +75,16 @@ Each step down is logged:
 level=WARN msg="paginated API request returned HTTP 5xx; retrying with smaller page size" endpoint=api/projects/search status=504 page_size=500 retry_page_size=200
 ```
 
+A slow 5xx at 50, the smallest size, is retried there instead, and each retry is logged:
+
+```
+level=WARN msg="paginated API request returned a slow HTTP 5xx at the minimum page size; retrying" endpoint=api/projects/search status=504 page_size=50 retry=1
+```
+
 **When you need to act**:
 
-- `level=ERROR msg="paginated API request failed with HTTP 5xx at minimum fallback page size"`: the server failed even at 50 items per page. That points at the server or gateway, not the page size; check the SonarQube Server logs.
+- `level=ERROR msg="paginated API request failed with HTTP 5xx at minimum fallback page size"`, and, when the fetch started above 50, an error that contains `failed at every page size from <first size> down to 50`: the server failed even at 50 items per page. That points at the server or gateway, not the page size; check the SonarQube Server logs.
 - A timeout (`Client.Timeout exceeded`) instead of a 504: the gateway waits longer than twice `--timeout` (Cloudflare: 125 s; HAProxy, Traefik and Istio: no limit by default), or the server is slow with no gateway in front. Raise `--timeout` until twice its value exceeds the gateway's timeout; for example, `--timeout 90` gives paginated requests 180 s. A timeout by itself never changes the page size.
-- A slow HTTP 502 or 503 instead of a 504: some gateways report their own timeout this way (Apache httpd sends 502 after `ProxyTimeout`, 60 s by default; Google Cloud load balancers and IIS ARR after 30 s). Only a slow 504 skips the retries at the same page size, so a slow 502 or 503 is tried four times before the page size drops, and all four tries must fit within twice `--timeout`. Raise `--timeout` above twice the gateway's timeout; for Apache's default, `--timeout 125`.
 - The connection is reset or dropped with no HTTP status: some load balancers (AWS NLB, Azure Load Balancer, F5) do this instead of answering 504, so there is no 5xx to react to. Ask for the load balancer's idle timeout to be raised above the time SonarQube Server needs to return a 500-item page.
 
 ---

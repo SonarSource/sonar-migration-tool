@@ -126,7 +126,11 @@ func TestAdaptivePaginationRemembersFallbackPerEndpoint(t *testing.T) {
 	}
 }
 
-func TestAdaptivePaginationRestartsAfterLaterPageFailure(t *testing.T) {
+// A failure on page 2 at ps=500 keeps the 400 items page 1 holds below
+// the first 200-aligned offset and resumes there, at page 3 of 200,
+// instead of re-reading from page 1. Items 400-499 are read again as
+// part of that page, so every item comes back once, in order.
+func TestAdaptivePaginationResumesAfterLaterPageFailure(t *testing.T) {
 	var requests []string
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -160,8 +164,6 @@ func TestAdaptivePaginationRestartsAfterLaterPageFailure(t *testing.T) {
 	wantRequests := []string{
 		"1:500",
 		"2:500",
-		"1:200",
-		"2:200",
 		"3:200",
 		"4:200",
 	}
