@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"syscall"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
@@ -29,9 +30,16 @@ func skipFailedProject(ctx context.Context, e *Executor, taskName, projectKey st
 	if projectKey == "" || !isProjectFailure(ctx, err) {
 		return err
 	}
-	streak := e.recordProjectFailure(projectKey, taskName, err)
+	streak, isNew := e.recordProjectFailure(projectKey, taskName, err)
+	if !isNew {
+		return nil // already skipped, by a request in another task
+	}
 	if streak >= maxConsecutiveProjectFailures {
-		return fmt.Errorf("%s: %d projects in a row failed, so the server looks unavailable; stopping: %w",
+		if cerr := e.endOutage(); cerr != nil {
+			e.Logger.Error("taking back the tasks that finished during the outage", "err", cerr)
+		}
+		return fmt.Errorf("%s: %d projects in a row failed, so the server looks unavailable; stopping. "+
+			"Those projects are not recorded as failed: resume with --extract_id once the server answers: %w",
 			taskName, streak, err)
 	}
 	e.Logger.Warn(taskName+": request failed after every retry; skipping the project and leaving it out of the migration",
@@ -40,8 +48,12 @@ func skipFailedProject(ctx context.Context, e *Executor, taskName, projectKey st
 }
 
 // isProjectFailure reports whether err is a server or network failure the
-// SDK's retries and the page-size fallback could not get past, as opposed
-// to an error that would fail for every project or a cancelled run.
+// SDK's retries and the page-size fallback could not get past for one
+// project: an HTTP 500, 502, 503 or 504, a timeout, or a connection the
+// server or something in front of it cut (reset, or closed mid-response,
+// which Go reports as EOF). Any other network error, such as a refused
+// connection, a DNS failure or a bad certificate, would fail for every
+// project, and stops the run; so does a cancelled run.
 func isProjectFailure(ctx context.Context, err error) bool {
 	if ctx.Err() != nil {
 		return false
@@ -52,7 +64,11 @@ func isProjectFailure(ctx context.Context, err error) bool {
 		return true
 	}
 	var netErr net.Error
-	return errors.As(err, &netErr) || errors.Is(err, io.ErrUnexpectedEOF)
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	return errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF)
 }
 
 // PrintFailedProjectsBlock writes the end-of-run notice for the projects

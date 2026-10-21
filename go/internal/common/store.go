@@ -7,6 +7,7 @@ package common
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -259,6 +260,21 @@ func (ds *DataStore) MarkDone(taskName string) error {
 func (ds *DataStore) IsDone(taskName string) bool {
 	info, err := os.Stat(ds.doneMarker(taskName))
 	return err == nil && !info.IsDir()
+}
+
+// ClearDone takes back MarkDone, so a resumed run treats the task as
+// unfinished and runs it again from the start.
+func (ds *DataStore) ClearDone(taskName string) error {
+	if ds == nil {
+		return nil
+	}
+	if err := os.Remove(ds.doneMarker(taskName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("clearing done marker of %s: %w", taskName, err)
+	}
+	ds.mu.Lock()
+	delete(ds.completed, taskName)
+	ds.mu.Unlock()
+	return nil
 }
 
 // DiscardUnfinished deletes the output of a task that started but did

@@ -7,9 +7,11 @@ package extract
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -17,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
@@ -42,6 +45,13 @@ func TestSkipFailedProject(t *testing.T) {
 		{"HTTP 500", context.Background(), "p1", &common.HTTPError{StatusCode: 500}, true},
 		{"client timeout", context.Background(), "p1", timeout, true},
 		{"connection cut mid-body", context.Background(), "p1", io.ErrUnexpectedEOF, true},
+		{"connection reset", context.Background(), "p1", netOpError(syscall.ECONNRESET), true},
+		{"connection closed before a response", context.Background(), "p1", &url.Error{Op: "Get", URL: "u", Err: io.EOF}, true},
+		{"connection refused fails for every project", context.Background(), "p1", netOpError(syscall.ECONNREFUSED), false},
+		{"DNS failure fails for every project", context.Background(), "p1",
+			&url.Error{Op: "Get", URL: "u", Err: &net.DNSError{Err: "no such host", Name: "sq.example.com", IsNotFound: true}}, false},
+		{"bad certificate fails for every project", context.Background(), "p1",
+			&url.Error{Op: "Get", URL: "u", Err: x509.UnknownAuthorityError{}}, false},
 		{"HTTP 400 fails for every project", context.Background(), "p1", &common.HTTPError{StatusCode: 400}, false},
 		{"HTTP 401 fails for every project", context.Background(), "p1", &common.HTTPError{StatusCode: 401}, false},
 		{"HTTP 429 is systemic", context.Background(), "p1", &common.HTTPError{StatusCode: 429}, false},
@@ -274,5 +284,126 @@ func TestRunWithSemSuccessResetsFailureStreak(t *testing.T) {
 	}
 	if err := run("p4", fail); err == nil {
 		t.Fatal("p4: expected two failures in a row to stop the run")
+	}
+}
+
+// netOpError wraps errno the way a failed connection reaches the client.
+func netOpError(errno syscall.Errno) error {
+	return &url.Error{Op: "Get", URL: "https://sq.example.com/api/x",
+		Err: &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", errno)}}
+}
+
+// A project counts once toward the failures in a row, however many of its
+// in-flight requests fail.
+func TestSkipFailedProject_CountsAProjectOnce(t *testing.T) {
+	prev := maxConsecutiveProjectFailures
+	maxConsecutiveProjectFailures = 2
+	t.Cleanup(func() { maxConsecutiveProjectFailures = prev })
+
+	e := newTestExecutor(t)
+	gateway := &common.HTTPError{StatusCode: http.StatusGatewayTimeout}
+	for i := 0; i < 3; i++ {
+		if err := skipFailedProject(context.Background(), e, "getProjectIssuesFull", "p1", gateway); err != nil {
+			t.Fatalf("failure %d of the same project: %v", i+1, err)
+		}
+	}
+	if got := e.failStreak.Load(); got != 1 {
+		t.Errorf("failures in a row = %d, want 1 for one project", got)
+	}
+}
+
+// When the run stops on failures in a row, those projects are taken
+// back, and so is every task that finished during them: it may have
+// skipped them. Nothing is recorded as finished after that.
+func TestEndOutageTakesBackStreak(t *testing.T) {
+	prev := maxConsecutiveProjectFailures
+	maxConsecutiveProjectFailures = 2
+	t.Cleanup(func() { maxConsecutiveProjectFailures = prev })
+
+	e := newTestExecutor(t)
+	gateway := &common.HTTPError{StatusCode: http.StatusGatewayTimeout}
+
+	// A genuine failure, then a success: p0 stays skipped.
+	if err := skipFailedProject(context.Background(), e, "t", "p0", gateway); err != nil {
+		t.Fatal(err)
+	}
+	e.recordProjectSuccess()
+	if err := e.markTaskDone("before"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The outage: p1 fails, a task finishes, p2 fails and the run stops.
+	if err := skipFailedProject(context.Background(), e, "t", "p1", gateway); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.markTaskDone("during"); err != nil {
+		t.Fatal(err)
+	}
+	err := skipFailedProject(context.Background(), e, "t", "p2", gateway)
+	if err == nil || !strings.Contains(err.Error(), "not recorded as failed") {
+		t.Fatalf("expected the run to stop, saying the projects are not recorded, got %v", err)
+	}
+	if err := e.markTaskDone("after"); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := e.FailedProjects(); len(got) != 1 || got[0].Key != "p0" {
+		t.Errorf("FailedProjects = %+v, want only p0, the failure before the outage", got)
+	}
+	for task, want := range map[string]bool{"before": true, "during": false, "after": false} {
+		if got := e.Store.IsDone(task); got != want {
+			t.Errorf("IsDone(%s) = %v, want %v", task, got, want)
+		}
+	}
+}
+
+// The case from the review: the server goes down mid-run, the run stops,
+// the server comes back, and the resumed extract reads every project
+// instead of leaving the outage's projects out of the migration.
+func TestRunExtractResumeAfterOutageRetriesProjects(t *testing.T) {
+	prev := maxConsecutiveProjectFailures
+	maxConsecutiveProjectFailures = 2
+	t.Cleanup(func() { maxConsecutiveProjectFailures = prev })
+
+	var down atomic.Bool
+	down.Store(true)
+	mock := newMockServer()
+	t.Cleanup(mock.Close)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/measures/search" && down.Load() {
+			w.WriteHeader(http.StatusGatewayTimeout)
+			return
+		}
+		mock.Config.Handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	cfg := ExtractConfig{
+		URL: srv.URL, Token: testToken, ExportDirectory: dir, ExtractID: "04-16-2026-04",
+		TargetTask: "getProjectMeasures", Concurrency: 1,
+	}
+	if _, err := RunExtract(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "in a row failed") {
+		t.Fatalf("expected the outage to stop the run, got %v", err)
+	}
+	extractDir := filepath.Join(dir, cfg.ExtractID)
+	if list, _ := common.ReadFailedProjects(extractDir); len(list) != 0 {
+		t.Fatalf("failed_projects.json = %+v, want none after an outage", list)
+	}
+
+	down.Store(false)
+	if _, err := RunExtract(context.Background(), cfg); err != nil {
+		t.Fatalf("resume after the outage: %v", err)
+	}
+	items, err := NewDataStore(extractDir).ReadAll("getProjectMeasures")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := make(map[string]bool)
+	for _, item := range items {
+		seen[extractField(item, "projectKey")] = true
+	}
+	if !seen["proj1"] || !seen["proj2"] {
+		t.Errorf("measures extracted for %v, want proj1 and proj2", seen)
 	}
 }

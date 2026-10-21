@@ -7,6 +7,7 @@ package extract
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -163,6 +164,15 @@ type Executor struct {
 	failedProjects map[string]common.FailedProject
 	failStreak     atomic.Int32
 
+	// streakKeys are the projects that failed in the current run of
+	// failures, and doneInStreak the tasks that finished during it. When
+	// the run stops on maxConsecutiveProjectFailures they are taken back
+	// (see endOutage). outage is set then, so no task is recorded as
+	// finished afterwards. All three are guarded by mu.
+	streakKeys   []string
+	doneInStreak []string
+	outage       bool
+
 	// mqrMode caches whether the source server is configured in MQR
 	// (Multi-Quality Rule) mode, probed lazily the first time the
 	// issue-search facet-slicing cascade needs it (#630, see
@@ -202,23 +212,77 @@ var maxConsecutiveProjectFailures = int32(25)
 
 // recordProjectFailure skips projectKey for the rest of the run after a
 // request for it in taskName failed with err, and returns how many
-// per-project failures in a row there now are. The first failure of a
-// project is the one kept.
-func (e *Executor) recordProjectFailure(projectKey, taskName string, err error) int32 {
+// projects in a row have now failed. A project counts once: a second
+// failure of a project already skipped, from a request that was in
+// flight in another task, neither replaces its first one nor adds to the
+// count, and isNew is false for it.
+func (e *Executor) recordProjectFailure(projectKey, taskName string, err error) (streak int32, isNew bool) {
 	e.mu.Lock()
+	defer e.mu.Unlock()
+	if _, seen := e.failedProjects[projectKey]; seen {
+		return e.failStreak.Load(), false
+	}
 	if e.failedProjects == nil {
 		e.failedProjects = make(map[string]common.FailedProject)
 	}
-	if _, seen := e.failedProjects[projectKey]; !seen {
-		e.failedProjects[projectKey] = common.FailedProject{Key: projectKey, Task: taskName, Error: err.Error()}
-	}
-	e.mu.Unlock()
-	return e.failStreak.Add(1)
+	e.failedProjects[projectKey] = common.FailedProject{Key: projectKey, Task: taskName, Error: err.Error()}
+	e.streakKeys = append(e.streakKeys, projectKey)
+	return e.failStreak.Add(1), true
 }
 
-// recordProjectSuccess ends a run of per-project failures.
+// recordProjectSuccess ends a run of per-project failures. The projects
+// that failed in it stay skipped: the server answered in between, so
+// their failure was their own.
 func (e *Executor) recordProjectSuccess() {
+	if e.failStreak.Load() == 0 {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.streakKeys, e.doneInStreak = nil, nil
 	e.failStreak.Store(0)
+}
+
+// endOutage is called when maxConsecutiveProjectFailures projects have
+// failed in a row and the run is about to stop: the server or the
+// network is down, so those failures say nothing about the projects. It
+// takes them back, so they are not written to the failed projects list
+// and a resumed run extracts them, and it clears the done marker of every
+// task that finished during the run of failures, which may have skipped
+// some of them, so a resumed run does those tasks again. From here on no
+// task is recorded as finished.
+func (e *Executor) endOutage() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.outage = true
+	for _, key := range e.streakKeys {
+		delete(e.failedProjects, key)
+	}
+	var errs []error
+	for _, task := range e.doneInStreak {
+		errs = append(errs, e.Store.ClearDone(task))
+	}
+	e.streakKeys, e.doneInStreak = nil, nil
+	return errors.Join(errs...)
+}
+
+// markTaskDone records that a task finished, on disk (see
+// DataStore.MarkDone), unless the run is stopping on an outage. A task
+// that finishes during a run of failures is noted, so endOutage can take
+// it back.
+func (e *Executor) markTaskDone(name string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.outage {
+		return nil
+	}
+	if err := e.Store.MarkDone(name); err != nil {
+		return err
+	}
+	if e.failStreak.Load() > 0 {
+		e.doneInStreak = append(e.doneInStreak, name)
+	}
+	return nil
 }
 
 // FailedProjects returns the projects skipped after a failed request,
@@ -519,7 +583,7 @@ func runPhase(ctx context.Context, e *Executor, taskNames []string, registry map
 			}
 			// On disk, so a resumed run knows this task finished even
 			// when another task in the phase failed.
-			if err := e.Store.MarkDone(name); err != nil {
+			if err := e.markTaskDone(name); err != nil {
 				return err
 			}
 			e.Progress.MarkTaskComplete(name)
