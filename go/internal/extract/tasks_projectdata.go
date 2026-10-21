@@ -699,6 +699,10 @@ func iterateBranches(ctx context.Context, e *Executor, w *ChunkWriter,
 		if err := acquireSem(ctx, e.Sem); err != nil {
 			return err
 		}
+		if e.IsSkipped(projectKey) {
+			<-e.Sem
+			return nil // project skipped in another task meanwhile
+		}
 		err := fn(ctx, projectKey, branch, w)
 		<-e.Sem
 		if err != nil {

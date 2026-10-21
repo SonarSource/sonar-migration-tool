@@ -313,6 +313,34 @@ func TestForEachProjectBranchFailureSkipsRemainingBranches(t *testing.T) {
 	}
 }
 
+func TestForEachProjectBranchSkippedDuringTaskStopsRemainingBranches(t *testing.T) {
+	e := newTestExecutor(t)
+	e.ServerURL = "http://test/"
+
+	projects, _ := e.Store.Writer("getProjects")
+	b, _ := json.Marshal(map[string]any{"key": "p1"})
+	projects.WriteOne(b)
+	branches, _ := e.Store.Writer("getBranches")
+	for _, branch := range []string{"main", "develop"} {
+		b, _ := json.Marshal(map[string]any{"projectKey": "p1", "name": branch, "type": "LONG"})
+		branches.WriteOne(b)
+	}
+
+	var calls []string
+	err := forEachProjectBranch(ctx(t), e, "testTask",
+		func(ctx context.Context, projectKey, branch string, w *ChunkWriter) error {
+			calls = append(calls, branch)
+			e.RecordSkipped(projectKey)
+			return nil
+		})
+	if err != nil {
+		t.Fatalf("forEachProjectBranch: %v", err)
+	}
+	if len(calls) != 1 || calls[0] != "main" {
+		t.Errorf("calls = %v, want [main]", calls)
+	}
+}
+
 func TestProjectIssuesFullTask(t *testing.T) {
 	srv, e := newSrvExecutor(t, func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
