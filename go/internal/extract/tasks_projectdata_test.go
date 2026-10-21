@@ -274,6 +274,73 @@ func TestForEachProjectBranchError(t *testing.T) {
 	}
 }
 
+func TestForEachProjectBranchFailureSkipsRemainingBranches(t *testing.T) {
+	e := newTestExecutor(t)
+	e.ServerURL = "http://test/"
+
+	projects, _ := e.Store.Writer("getProjects")
+	for _, key := range []string{"p1", "p2"} {
+		b, _ := json.Marshal(map[string]any{"key": key})
+		projects.WriteOne(b)
+	}
+	branches, _ := e.Store.Writer("getBranches")
+	for _, item := range []map[string]any{
+		{"projectKey": "p1", "name": "main", "type": "LONG"},
+		{"projectKey": "p1", "name": "develop", "type": "LONG"},
+		{"projectKey": "p2", "name": "main", "type": "LONG"},
+	} {
+		b, _ := json.Marshal(item)
+		branches.WriteOne(b)
+	}
+
+	var calls []string
+	err := forEachProjectBranch(ctx(t), e, "testTask",
+		func(ctx context.Context, projectKey, branch string, w *ChunkWriter) error {
+			calls = append(calls, projectKey+"/"+branch)
+			if projectKey == "p1" {
+				return &common.HTTPError{StatusCode: http.StatusInternalServerError}
+			}
+			return nil
+		})
+	if err != nil {
+		t.Fatalf("forEachProjectBranch: %v", err)
+	}
+	if len(calls) != 2 || calls[0] != "p1/main" || calls[1] != "p2/main" {
+		t.Errorf("calls = %v, want [p1/main p2/main]", calls)
+	}
+	if !e.IsSkipped("p1") {
+		t.Error("expected failed project p1 to be skipped")
+	}
+}
+
+func TestForEachProjectBranchSkippedDuringTaskStopsRemainingBranches(t *testing.T) {
+	e := newTestExecutor(t)
+	e.ServerURL = "http://test/"
+
+	projects, _ := e.Store.Writer("getProjects")
+	b, _ := json.Marshal(map[string]any{"key": "p1"})
+	projects.WriteOne(b)
+	branches, _ := e.Store.Writer("getBranches")
+	for _, branch := range []string{"main", "develop"} {
+		b, _ := json.Marshal(map[string]any{"projectKey": "p1", "name": branch, "type": "LONG"})
+		branches.WriteOne(b)
+	}
+
+	var calls []string
+	err := forEachProjectBranch(ctx(t), e, "testTask",
+		func(ctx context.Context, projectKey, branch string, w *ChunkWriter) error {
+			calls = append(calls, branch)
+			e.RecordSkipped(projectKey)
+			return nil
+		})
+	if err != nil {
+		t.Fatalf("forEachProjectBranch: %v", err)
+	}
+	if len(calls) != 1 || calls[0] != "main" {
+		t.Errorf("calls = %v, want [main]", calls)
+	}
+}
+
 func TestProjectIssuesFullTask(t *testing.T) {
 	srv, e := newSrvExecutor(t, func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{

@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
 const (
@@ -144,6 +146,27 @@ func TestMapProjectStructure(t *testing.T) {
 	}
 	if !found {
 		t.Error("proj1 not found in projects")
+	}
+}
+
+// A project extract skipped after a failed request has incomplete data,
+// so it is left out of projects.csv and migrate never migrates it.
+func TestMapProjectStructure_LeavesOutFailedProjects(t *testing.T) {
+	dir := setupTestExtract(t)
+	if err := common.WriteFailedProjects(filepath.Join(dir, testExtractID), []common.FailedProject{
+		{Key: "proj2", Task: "getProjectIssues", Error: "HTTP 504"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, projects := MapProjectStructure(dir, ExtractMapping{testSQURL: testExtractID})
+
+	if len(projects) != 1 || projects[0].Key != "proj1" {
+		var keys []string
+		for _, p := range projects {
+			keys = append(keys, p.Key)
+		}
+		t.Fatalf("projects = %v, want only proj1", keys)
 	}
 }
 

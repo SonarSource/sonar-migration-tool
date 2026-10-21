@@ -189,7 +189,7 @@ func TestRunWithSem_Success(t *testing.T) {
 	w, _ := e.Store.Writer("testRunWithSem")
 	item := json.RawMessage(`{"key":"proj1"}`)
 
-	err := runWithSem(context.Background(), e, "testTask", item, w,
+	err := runWithSem(context.Background(), e, "testTask", "", item, w,
 		func(ctx context.Context, item json.RawMessage, w *ChunkWriter) error {
 			return w.WriteOne(item)
 		})
@@ -211,7 +211,7 @@ func TestRunWithSem_NonFatalError(t *testing.T) {
 	w, _ := e.Store.Writer("testRunWithSemSkip")
 	item := json.RawMessage(`{"key":"proj-skip"}`)
 
-	err := runWithSem(context.Background(), e, "testTask", item, w,
+	err := runWithSem(context.Background(), e, "testTask", "", item, w,
 		func(ctx context.Context, item json.RawMessage, w *ChunkWriter) error {
 			return &common.HTTPError{StatusCode: 403, Method: "GET", URL: "/api/test"}
 		})
@@ -235,11 +235,50 @@ func TestRunWithSem_CancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := runWithSem(ctx, e, "testTask", item, w,
+	err := runWithSem(ctx, e, "testTask", "", item, w,
 		func(ctx context.Context, item json.RawMessage, w *ChunkWriter) error {
 			return nil
 		})
 	if err == nil {
 		t.Error("expected error for cancelled context")
+	}
+}
+
+func TestForEachDepSkipsFilesForFailedProjects(t *testing.T) {
+	e := newTestExecutor(t)
+	e.Sem = make(chan struct{}, 1)
+	e.RecordSkipped("already-failed")
+
+	deps, err := e.Store.Writer("files")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []string{
+		`{"key":"already-failed-file","projectKey":"already-failed"}`,
+		`{"key":"failing-file","projectKey":"mid-task"}`,
+		`{"key":"should-not-run","projectKey":"mid-task"}`,
+		`{"key":"healthy-file","projectKey":"healthy"}`,
+	} {
+		if err := deps.WriteOne(json.RawMessage(item)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var processed []string
+	err = forEachDep(context.Background(), e, "readFiles", "files",
+		func(_ context.Context, item json.RawMessage, _ *ChunkWriter) error {
+			key := extractField(item, "key")
+			processed = append(processed, key)
+			if key == "failing-file" {
+				e.RecordSkipped("mid-task")
+			}
+			return nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(processed) != 2 || processed[0] != "failing-file" || processed[1] != "healthy-file" {
+		t.Errorf("processed files = %v, want [failing-file healthy-file]", processed)
 	}
 }

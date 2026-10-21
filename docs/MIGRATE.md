@@ -191,7 +191,7 @@ sonar-migration-tool extract --source_url <URL> --source_token <TOKEN> --extract
 sonar-migration-tool migrate --target_token <TOKEN> --enterprise_key <ENTERPRISE_KEY> --run_id <PREVIOUS_RUN_ID> --export_directory ./files/
 ```
 
-The tool tracks which tasks have already completed and skips them automatically.
+The tool tracks which tasks have already completed and skips them automatically. For `extract`, a task that was cut off part-way runs again from the start, so a resumed extract is never silently incomplete; see [TROUBLESHOOTING.md](TROUBLESHOOTING.md#resuming-a-failed-extract---extract_id).
 
 ---
 
