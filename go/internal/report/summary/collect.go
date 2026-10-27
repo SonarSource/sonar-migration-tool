@@ -1680,13 +1680,20 @@ func applyNCDFallbackPartials(succeeded, partial []EntityItem, ncdMap map[string
 			continue
 		}
 		moved := item
-		moved.Issues = append(append([]string(nil), item.Issues...),
-			fmt.Sprintf("The new code period %q does not exist on SonarQube Cloud and has been replaced by the org default.",
-				ncdTypeLabel(sqsType)))
+		msg := fmt.Sprintf("The new code period %q does not exist on SonarQube Cloud and has been replaced by the org default.",
+			ncdTypeLabel(sqsType))
+		if sqsType == "REFERENCE_BRANCH" {
+			msg += " " + referenceBranchSLBHint
+		}
+		moved.Issues = append(append([]string(nil), item.Issues...), msg)
 		partial = append(partial, moved)
 	}
 	return keep, partial
 }
+
+// referenceBranchSLBHint (#655) tells the reader how to keep the behavior of a
+// reference-branch new code definition, which SonarQube Cloud lacks.
+const referenceBranchSLBHint = "Branches whose new code is based on a reference branch can be migrated as short-lived branches with --use_slb_for_reference_branch_new_code (or use_slb_for_reference_branch_new_code in the config file)."
 
 // ncdTypeLabel maps the SonarQube Server new-code-definition enum
 // (REFERENCE_BRANCH, SPECIFIC_ANALYSIS, ...) to the human-readable
@@ -1733,7 +1740,7 @@ func applyNCDBranchOverridePartials(succeeded, partial []EntityItem, overrides m
 	if len(overrides) == 0 {
 		return succeeded, partial
 	}
-	const issue = "Per-branch new code period overrides do not exist on SonarQube Cloud; branches will inherit the project-level new code period."
+	const issue = "Per-branch new code period overrides do not exist on SonarQube Cloud; branches will inherit the project-level new code period. " + referenceBranchSLBHint
 	// First: tag matching projects already in Partial so they accumulate
 	// the explanatory Issue rather than appearing twice.
 	for i := range partial {

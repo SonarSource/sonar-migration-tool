@@ -59,10 +59,12 @@ const (
 	flagUnsupportedLanguages = "unsupported_languages"
 	flagMaxIssueComments     = "max_issue_comments"
 	// #554 — PoC project-history migration flags.
-	flagMigrateHistory         = "migrate_history"
-	flagHistoryMaxPoints       = "history_max_points"
-	flagHistoryMinIntervalDays = "history_min_interval_days"
-	flagBranchAnalyzedAfter    = "branch_analyzed_after"
+	flagMigrateHistory = "migrate_history"
+	// flagUseSLBForReferenceBranchNewCode — #655.
+	flagUseSLBForReferenceBranchNewCode = "use_slb_for_reference_branch_new_code"
+	flagHistoryMaxPoints                = "history_max_points"
+	flagHistoryMinIntervalDays          = "history_min_interval_days"
+	flagBranchAnalyzedAfter             = "branch_analyzed_after"
 
 	// #573 — SonarQube Cloud API rate limiting. minAPIMaxRatePerMin /
 	// maxAPIMaxRatePerMin bound --api_max_rate_per_min; out-of-range
@@ -249,6 +251,7 @@ func init() {
 		"\"skip\" does not migrate the project's issues/branches at all; "+
 		"\"warn\" submits the report unchanged and lets "+scCloudName+" reject it. (maps to unsupported_languages)")
 	f.Bool(flagMigrateHistory, false, "PoC: also migrate a bounded set of historical analysis snapshots (date + project-level measures) per migrated branch (every branch, not just main — #625), backdated on "+scCloudName+" (#554). Defaults to false — no change to existing single-snapshot behavior unless set. (maps to migrate_history)")
+	f.Bool(flagUseSLBForReferenceBranchNewCode, false, useSLBFlagUsage+" (maps to use_slb_for_reference_branch_new_code)")
 	f.Int(flagHistoryMaxPoints, 0, "Max historical snapshots migrated per branch (not per project — each migrated branch gets its own cap) when --"+flagMigrateHistory+" is set (default: no cap, every analysis is a candidate). Pass a positive number to bound it. (maps to history_max_points)")
 	f.Int(flagHistoryMinIntervalDays, extract.HistoryUnset, "Minimum spacing, in days, enforced between two migrated historical snapshots of the same branch when --"+flagMigrateHistory+" is set (default 0 — no spacing rule, every analysis in the source history becomes a candidate). (maps to history_min_interval_days)")
 	f.Int(flagMaxIssueComments, 0, fmt.Sprintf("Max most-recent source comments replayed onto each migrated issue/hotspot (default %d, max %d) — reduces "+scCloudName+" API pressure on long comment threads (#571). (maps to max_issue_comments)", migrate.DefaultMaxIssueComments, migrate.MaxAllowedIssueComments))
@@ -294,9 +297,11 @@ type transferConfig struct {
 	fastSync             bool
 	maxIssueComments     int
 	// #554 — PoC project-history migration.
-	migrateHistory         bool
-	historyMaxPoints       int
-	historyMinIntervalDays int
+	migrateHistory bool
+	// useSLBForReferenceBranchNewCode — #655.
+	useSLBForReferenceBranchNewCode bool
+	historyMaxPoints                int
+	historyMinIntervalDays          int
 	// #583 — independently resolved per phase; deliberately not merged or
 	// OR'd across sides like migrateHistory (see loadTransferFileDefaults).
 	branchAnalyzedAfterSource string
@@ -378,6 +383,10 @@ func applyFlagBool(cmd *cobra.Command, name string, target *bool) {
 		*target, _ = cmd.Flags().GetBool(name)
 	}
 }
+
+// useSLBFlagUsage is the shared help text of --use_slb_for_reference_branch_new_code (#655).
+const useSLBFlagUsage = "Migrate SonarQube Server branches whose new code is based on a reference branch as short-lived branches on " + scCloudName +
+	", which has no reference-branch new code definition. The project's long-lived branch pattern is temporarily adjusted while those branches are migrated, then restored. Defaults to false."
 
 // validateAPIMaxRatePerMin enforces #573's [minAPIMaxRatePerMin,
 // maxAPIMaxRatePerMin] bound on --api_max_rate_per_min. 0 means "unset" —
@@ -504,6 +513,8 @@ func loadTransferFileDefaults(path string) (transferConfig, error) {
 	// transfer: no history extracted, none replayed, no warning. Accept
 	// either.
 	cfg.migrateHistory = extractCfg.MigrateHistory || migrateCfg.MigrateHistory
+	// #655 — migrate-side only; the loader already resolved target-vs-top-level.
+	cfg.useSLBForReferenceBranchNewCode = migrateCfg.UseSLBForReferenceBranchNewCode
 	cfg.historyMaxPoints = extractCfg.HistoryMaxPoints
 	cfg.historyMinIntervalDays = extractCfg.HistoryMinIntervalDays
 	// #583 — unlike migrateHistory, branch_analyzed_after is NOT merged or
@@ -579,6 +590,8 @@ func resolveTransferConfig(cmd *cobra.Command) (transferConfig, error) {
 			cfg.migrateHistory = true
 		}
 	}
+	// --use_slb_for_reference_branch_new_code is one-way, like --migrate_history. #655.
+	applyOneWayBoolFlag(cmd, flagUseSLBForReferenceBranchNewCode, &cfg.useSLBForReferenceBranchNewCode)
 	applyFlagInt(cmd, flagHistoryMaxPoints, &cfg.historyMaxPoints)
 	applyFlagInt(cmd, flagHistoryMinIntervalDays, &cfg.historyMinIntervalDays)
 	// #583 — the single transfer flag sets both phases identically when
@@ -900,6 +913,8 @@ func runTransferMigrate(ctx context.Context, cfg transferConfig) (string, error)
 		ProjectKeyPattern:        cfg.projectKeyPattern,
 		MigrateHistory:           cfg.migrateHistory,
 		MaxIssueComments:         cfg.maxIssueComments,
+		// #655
+		UseSLBForReferenceBranchNewCode: cfg.useSLBForReferenceBranchNewCode,
 		// #583 — a no-op unless set; independent of the source-side cutoff.
 		BranchAnalyzedAfter: cfg.branchAnalyzedAfterTarget,
 	})
