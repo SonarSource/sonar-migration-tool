@@ -479,6 +479,14 @@ const BranchStatusUpToDate = "up_to_date"
 // drift again (#604).
 const BranchStatusCapped = "capped"
 
+// BranchStatusNoData is the importProjectData record status for a non-main
+// branch with no extracted component, which is therefore not migrated: its
+// data was purged on the source because it was not analyzed for too long
+// (#565). Like BranchStatusCapped it is neither "success" nor "skipped": the
+// project itself migrated, so the report notes the branch (and rates the
+// project Near Full Migration) instead of reporting the project as skipped.
+const BranchStatusNoData = "no_data"
+
 // targetBranchUpToDate reports whether SonarCloud already holds an analysis for
 // targetBranch that is at least as recent as the one this run would submit, and
 // returns that existing date.
@@ -820,7 +828,14 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	scmByComponent := loadExtractedSCM(e, input.ServerURL, input.ServerKey, input.Branch)
 
 	if len(components) == 0 {
-		return nil, branchReportMeta{}, &importResult{Status: "skipped"}, nil
+		// A main branch with no data is a project that was never analyzed
+		// (#432). Any other branch lost its data to the source's housekeeping.
+		if input.IsMain {
+			return nil, branchReportMeta{}, &importResult{Status: "skipped"}, nil
+		}
+		const reason = "not migrated: no components in the extracted data (not analyzed for too long, so the source code was purged on the source server)"
+		e.Logger.Warn("branch "+reason, "project", input.CloudKey, "branch", input.Branch)
+		return nil, branchReportMeta{}, &importResult{Status: BranchStatusNoData, Error: reason}, nil
 	}
 
 	// The source server returns no source TEXT for this branch even though line

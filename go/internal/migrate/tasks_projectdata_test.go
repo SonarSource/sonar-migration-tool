@@ -1362,6 +1362,7 @@ func TestImportBranchSkipsNoComponents(t *testing.T) {
 		ServerURL: testServerURL,
 		ServerKey: "proj1",
 		Branch:    "main",
+		IsMain:    true,
 	}
 
 	result, err := importBranch(context.Background(), e, input)
@@ -1370,6 +1371,16 @@ func TestImportBranchSkipsNoComponents(t *testing.T) {
 	}
 	if result.Status != "skipped" {
 		t.Errorf("expected skipped (no components), got %s", result.Status)
+	}
+
+	// #565 — a non-main branch with no data is reported as such, with a reason.
+	input.IsMain, input.Branch = false, "develop"
+	result, err = importBranch(context.Background(), e, input)
+	if err != nil {
+		t.Fatalf("importBranch (non-main): %v", err)
+	}
+	if result.Status != BranchStatusNoData || result.Error == "" {
+		t.Errorf("non-main with no components: want %s with a reason, got %s %q", BranchStatusNoData, result.Status, result.Error)
 	}
 }
 

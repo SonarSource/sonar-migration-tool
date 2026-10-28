@@ -432,7 +432,7 @@ func jsonStrSlice(raw json.RawMessage, key string) []string {
 // collectProjectData, so nothing is hidden by exempting the status here.
 func degradesProjectData(status string) bool {
 	switch status {
-	case statusSuccess, statusUpToDate, statusCapped:
+	case statusSuccess, statusUpToDate, statusCapped, statusNoData:
 		return false
 	default:
 		return true
@@ -474,6 +474,13 @@ func collectProjectSyncSkips(store *common.DataStore, scanMap map[string]project
 			Bucket:          projectBucketPartial,
 			// Operation/Detail intentionally empty — see applyProjectFailures.
 		})
+	}
+
+	// #565 — a branch not migrated because its data was purged on the source
+	// leaves the project Near Full Migration (route-only: the |noData: note
+	// carries the branch names), unless another event rates it lower.
+	for key := range collectBranchNoData(store) {
+		out = append(out, projectFailure{CloudProjectKey: key, Bucket: projectBucketNearPerfect})
 	}
 
 	// Per-project issue / hotspot sync rows — Near perfect when b+c > 0
