@@ -341,6 +341,10 @@ func importProjectBranches(ctx context.Context, e *Executor, proj json.RawMessag
 		}
 	}
 	defer shortLivedPatternGuard(ctx, e, cloudKey, slbNames)()
+	for _, name := range dropLongLivedBeforeShort(ctx, e, cloudKey, scBranches, nonMainBranches) {
+		// Gone from the target: it must not look "up to date" any more.
+		delete(bctx.TargetAnalysisDates, name)
+	}
 
 	// Phase 2: import non-main branches in parallel.
 	//
@@ -694,6 +698,7 @@ func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*i
 		BranchName:     targetBranch,
 		ProjectVersion: meta.ProjectVersion,
 		IsMain:         input.IsMain,
+		ShortLived:     input.ShortLived,
 	}
 
 	result, err := scanreport.SubmitReport(ctx, e.Raw.HTTPClient(), cfg, zipBytes)
@@ -852,7 +857,9 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	scmByComponent := loadExtractedSCM(e, input.ServerURL, input.ServerKey, input.Branch)
 
 	if len(components) == 0 {
-		return nil, branchReportMeta{}, &importResult{Status: "skipped"}, nil
+		const reason = "no components in the extracted data (the source branch is empty or its data was purged)"
+		e.Logger.Warn("branch skipped: "+reason, "project", input.CloudKey, "branch", input.Branch)
+		return nil, branchReportMeta{}, &importResult{Status: "skipped", Error: "skipped: " + reason}, nil
 	}
 
 	// The source server returns no source TEXT for this branch even though line

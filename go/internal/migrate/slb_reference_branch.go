@@ -8,6 +8,8 @@ import (
 	"context"
 	"regexp"
 	"strings"
+
+	"github.com/sonar-solutions/sq-api-go/types"
 )
 
 // #655 — SonarQube Cloud has no "reference branch" new code definition, but a
@@ -152,4 +154,37 @@ func shortLivedPatternGuard(ctx context.Context, e *Executor, cloudKey string, n
 		}
 		e.Logger.Info("long-lived branch pattern restored", "project", cloudKey)
 	}
+}
+
+// dropLongLivedBeforeShort deletes the target branches that must migrate as
+// short-lived but already exist as long-lived (typically from an earlier run
+// without the option): a branch's type cannot change, so the CE would reject
+// the report ("Invalid branch type 'SHORT'. Branch ... already exists with type
+// 'LONG'"). The branch is recreated as short-lived by its import. Returns the
+// names deleted; a failure is logged and leaves that branch to fail on import.
+func dropLongLivedBeforeShort(ctx context.Context, e *Executor, cloudKey string, existing []types.Branch, branches []branchInfo) []string {
+	if e.Cloud == nil || e.Cloud.Branches == nil {
+		return nil
+	}
+	longLived := map[string]bool{}
+	for _, b := range existing {
+		if !b.IsMain && strings.EqualFold(b.Type, "LONG") {
+			longLived[b.Name] = true
+		}
+	}
+	var deleted []string
+	for _, b := range branches {
+		if !b.ShortLived || !longLived[b.Name] {
+			continue
+		}
+		if err := e.Cloud.Branches.Delete(ctx, cloudKey, b.Name); err != nil {
+			logAPIWarn(e.Logger, "could not delete the long-lived branch to recreate it as short-lived", err,
+				"project", cloudKey, "branch", b.Name)
+			continue
+		}
+		e.Logger.Info("deleted long-lived branch to recreate it as short-lived",
+			"project", cloudKey, "branch", b.Name)
+		deleted = append(deleted, b.Name)
+	}
+	return deleted
 }

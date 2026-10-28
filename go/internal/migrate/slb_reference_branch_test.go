@@ -5,6 +5,7 @@
 package migrate
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,8 @@ import (
 	"sort"
 	"sync"
 	"testing"
+
+	"github.com/sonar-solutions/sq-api-go/types"
 )
 
 func TestLoadMigrateConfigFile_UseSLBForReferenceBranchNewCode(t *testing.T) {
@@ -165,5 +168,40 @@ func TestShortLivedPatternGuard(t *testing.T) {
 				t.Errorf("calls = %v, want %v", fake.calls, c.want)
 			}
 		})
+	}
+}
+
+func TestDropLongLivedBeforeShort(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		deleted []string
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/project_branches/delete", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		mu.Lock()
+		deleted = append(deleted, r.FormValue("branch"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	e := newCustomCloudTest(t, mux)
+
+	existing := []types.Branch{
+		{Name: "master", IsMain: true, Type: "LONG"},
+		{Name: "release-3.x", Type: "LONG"}, // short-lived on the source: delete
+		{Name: "develop", Type: "LONG"},     // stays long-lived: keep
+		{Name: "feature", Type: "SHORT"},    // already short: keep
+	}
+	branches := []branchInfo{
+		{Name: "release-3.x", ShortLived: true},
+		{Name: "develop"},
+		{Name: "feature", ShortLived: true},
+	}
+	got := dropLongLivedBeforeShort(context.Background(), e, "proj", existing, branches)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 1 || got[0] != "release-3.x" || len(deleted) != 1 || deleted[0] != "release-3.x" {
+		t.Errorf("want only release-3.x deleted, got returned=%v deleted=%v", got, deleted)
 	}
 }
