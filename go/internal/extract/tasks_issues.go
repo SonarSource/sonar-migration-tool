@@ -48,8 +48,6 @@ func issueTasks() []TaskDef {
 			Run: makeExpandedIssueTask("getProjectRecentIssueTypes", nil, url.Values{"createdInLast": {"30d"}})},
 		{Name: "getSafeHotspots", Editions: AllEditions, Dependencies: []string{"getProjects"},
 			Run: safeHotspotsTask()},
-		{Name: "getPluginIssues", Editions: AllEditions, Dependencies: []string{"getPluginRules"},
-			Run: pluginIssuesTask()},
 		{Name: "getProjectPluginIssues", Editions: AllEditions,
 			Dependencies: []string{"getProjects", "getPluginRules"},
 			Run:          makeJoinedRuleIssueTask("getProjectPluginIssues", "getPluginRules")},
@@ -70,20 +68,6 @@ func safeHotspotsTask() func(ctx context.Context, e *Executor) error {
 					return err
 				}
 				return w.WriteOne(EnrichRaw(raw, map[string]any{"projectKey": key, "serverUrl": e.ServerURL}))
-			})
-	}
-}
-
-func pluginIssuesTask() func(ctx context.Context, e *Executor) error {
-	return func(ctx context.Context, e *Executor) error {
-		return forEachDep(ctx, e, "getPluginIssues", "getPluginRules",
-			func(ctx context.Context, item json.RawMessage, w *ChunkWriter) error {
-				ruleKey := extractField(item, "key")
-				raw, err := e.Raw.Get(ctx, issuesSearchAPI, url.Values{"rules": {ruleKey}})
-				if err != nil {
-					return err
-				}
-				return w.WriteOne(EnrichRaw(raw, map[string]any{"serverUrl": e.ServerURL}))
 			})
 	}
 }

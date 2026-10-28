@@ -25,14 +25,9 @@ package common
 // (originally documented separately in each package's own file):
 //   - Rules (extract's tasks_rules.go: getRules, getRepos,
 //     getProfileRules, getRuleDetails, getPluginRules, getTemplateRules,
-//     getActiveProfileRules, getDeactivatedProfileRules, getPluginIssues;
+//     getActiveProfileRules, getDeactivatedProfileRules;
 //     migrate's tasks_rules.go: updateRuleTags, updateRuleDescriptions)
 //     are gated under quality_profiles rather than left unconditional.
-//     getPluginIssues specifically: its only dependency is
-//     getPluginRules, so excluding one without the other would leave
-//     getPluginIssues scheduled with its dependency's edge stripped by
-//     PlanPhasesExcluding, silently writing an empty plugin-issues
-//     dataset instead of not running at all.
 //   - SonarQube Applications (extract's tasks_views.go: getApplications,
 //     getApplicationDetails) are gated under portfolios — same source
 //     file, same edition gate as portfolios, and Applications have no
@@ -111,7 +106,6 @@ var objectCategoryTaskNames = map[string]struct {
 			"getRules", "getRepos", "getProfileRules", "getRuleDetails",
 			"getPluginRules", "getTemplateRules",
 			"getActiveProfileRules", "getDeactivatedProfileRules",
-			"getPluginIssues",
 		},
 		Migrate: []string{
 			"createProfiles", "setProfileParent", "restoreProfiles", "analyzeProfileRules",
