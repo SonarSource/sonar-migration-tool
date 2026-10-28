@@ -472,8 +472,7 @@ func TestRunExtractFull(t *testing.T) {
 		"getProjectMeasures", "getProjectWebhooks", "getProjectBindings",
 		"getProjectGroupsPermissions", "getProjectUsersScanners", "getProjectUsersViewers",
 		"getBranches", "getProjectPullRequests",
-		"getProjectIssues", "getAcceptedIssues", "getSafeHotspots",
-		"getProjectIssueTypes", "getProjectFixedIssueTypes", "getProjectRecentIssueTypes",
+		"getProjectIssueTypes", "getProjectRecentIssueTypes",
 		"getNewCodePeriods", "getGlobalNewCodePeriod", "getProjectAnalyses", "getProjectTasks",
 		// Per-profile tasks
 		"getProfileBackups", "getActiveProfileRules",
@@ -499,6 +498,14 @@ func TestRunExtractFull(t *testing.T) {
 	for _, task := range expectedTasks {
 		if _, err := os.Stat(filepath.Join(extractDir, task)); os.IsNotExist(err) {
 			t.Errorf("missing expected task output: %s", task)
+		}
+	}
+
+	// This run does not include project data, so the issue-count queries
+	// migrate never reads are not extracted either (#365).
+	for _, task := range []string{"getProjectIssues", "getAcceptedIssues", "getSafeHotspots", "getProjectFixedIssueTypes"} {
+		if _, err := os.Stat(filepath.Join(extractDir, task)); err == nil {
+			t.Errorf("%s must not be extracted when project data is skipped", task)
 		}
 	}
 
