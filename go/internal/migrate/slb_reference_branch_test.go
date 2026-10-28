@@ -15,6 +15,7 @@ import (
 	"sync"
 	"testing"
 
+	pb "github.com/sonar-solutions/sonar-migration-tool/internal/scanreport/proto"
 	"github.com/sonar-solutions/sq-api-go/types"
 )
 
@@ -203,5 +204,14 @@ func TestDropLongLivedBeforeShort(t *testing.T) {
 	defer mu.Unlock()
 	if len(got) != 1 || got[0] != "release-3.x" || len(deleted) != 1 || deleted[0] != "release-3.x" {
 		t.Errorf("want only release-3.x deleted, got returned=%v deleted=%v", got, deleted)
+	}
+}
+
+func TestReportBranchTypeFor(t *testing.T) {
+	if got := reportBranchTypeFor(true); got != pb.Metadata_PULL_REQUEST {
+		t.Errorf("short-lived: got %v, want PULL_REQUEST", got)
+	}
+	if got := reportBranchTypeFor(false); got != pb.Metadata_BRANCH {
+		t.Errorf("long-lived: got %v, want BRANCH", got)
 	}
 }

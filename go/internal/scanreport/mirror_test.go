@@ -118,7 +118,7 @@ func TestSubmitReportShortLivedBranchSendsShortType(t *testing.T) {
 	}, []byte("zip")); err != nil {
 		t.Fatal(err)
 	}
-	if cap.fields["characteristic"] != "branchType=SHORT" {
-		t.Errorf("short-lived branch must send branchType=SHORT, got %q", cap.fields["characteristic"])
+	if got := cap.fields["characteristic"]; got != "branchType=SHORT" {
+		t.Errorf("short-lived branch must send branchType=SHORT, got %q", got)
 	}
 }

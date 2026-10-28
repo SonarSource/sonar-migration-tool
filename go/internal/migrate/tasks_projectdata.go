@@ -805,9 +805,9 @@ func preCreateBranchAnalysis(ctx context.Context, e *Executor, input importBranc
 	}
 	branchType := "long"
 	if input.ShortLived {
-		// #655 — no explicit type: the project's long-lived branch pattern,
-		// adjusted by shortLivedPatternGuard, makes this branch short-lived.
-		branchType = ""
+		// #655 — registered explicitly, so the type does not depend on how the
+		// CE reads the project's long-lived branch pattern.
+		branchType = "short"
 	}
 	res, err := scanreport.PreCreateAnalysis(ctx, e.RawAPI.HTTPClient(), scanreport.AnalysisConfig{
 		APIURL:         e.APIURL,
@@ -1006,13 +1006,18 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 		return nil, branchReportMeta{}, nil, err
 	}
 
+	// #655 — a real scanner's report for a short-lived branch carries
+	// branch_type PULL_REQUEST (with the branch name and its reference branch,
+	// no pull_request_key); BRANCH makes the CE treat the branch as long-lived.
+	reportBranchType := reportBranchTypeFor(input.ShortLived)
+
 	reportData := &scanreport.ReportData{
 		Metadata: scanreport.BuildMetadata(scanreport.MetadataInput{
 			AnalysisDate:        analysisDate,
 			OrgKey:              input.OrgKey,
 			ProjectKey:          input.CloudKey,
 			BranchName:          targetBranch,
-			BranchType:          pb.Metadata_BRANCH,
+			BranchType:          reportBranchType,
 			ReferenceBranchName: input.ReferenceBranch,
 			ProjectVersion:      projectVersion,
 			QProfiles:           qprofiles,

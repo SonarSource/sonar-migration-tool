@@ -43,6 +43,7 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 	projectDataMap := collectProjectData(store)
 	ncdFallbackMap := collectNCDFallback(store)
 	ncdBranchOverrideSet := collectNCDBranchOverrides(store)
+	slbHintSet := collectSLBHints(store)
 	syncStatsMap := collectSyncStats(store)
 	branchSourcePurgedMap := collectBranchSourcePurged(store)
 	branchLimitSkippedMap := collectBranchLimitSkips(store)
@@ -61,8 +62,8 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 		section := collectSection(store, def, failuresByType, configFailures, exportDir, extractMapping)
 		if def.Name == "Projects" {
 			attachProjectData(section.Succeeded, projectDataMap)
-			section.Succeeded, section.Partial = applyNCDFallbackPartials(section.Succeeded, section.Partial, ncdFallbackMap)
-			section.Succeeded, section.Partial = applyNCDBranchOverridePartials(section.Succeeded, section.Partial, ncdBranchOverrideSet)
+			section.Succeeded, section.Partial = applyNCDFallbackPartials(section.Succeeded, section.Partial, ncdFallbackMap, slbHintSet)
+			section.Succeeded, section.Partial = applyNCDBranchOverridePartials(section.Succeeded, section.Partial, ncdBranchOverrideSet, slbHintSet)
 			// #228 — per-project follow-up operations (tags, settings,
 			// group permissions, links, webhooks) that failed for an
 			// otherwise-successfully-created project route the project
@@ -1663,7 +1664,7 @@ func collectNCDFallback(store *common.DataStore) map[string]string {
 // retains the cloud key (and any |scan: suffix) so dedup and rendering
 // keep working; an explanatory Issue is appended explaining what was
 // substituted.
-func applyNCDFallbackPartials(succeeded, partial []EntityItem, ncdMap map[string]string) ([]EntityItem, []EntityItem) {
+func applyNCDFallbackPartials(succeeded, partial []EntityItem, ncdMap map[string]string, slbHints map[string]bool) ([]EntityItem, []EntityItem) {
 	if len(ncdMap) == 0 {
 		return succeeded, partial
 	}
@@ -1682,7 +1683,7 @@ func applyNCDFallbackPartials(succeeded, partial []EntityItem, ncdMap map[string
 		moved := item
 		msg := fmt.Sprintf("The new code period %q does not exist on SonarQube Cloud and has been replaced by the org default.",
 			ncdTypeLabel(sqsType))
-		if sqsType == "REFERENCE_BRANCH" {
+		if slbHints[cloudKey] {
 			msg += " " + referenceBranchSLBHint
 		}
 		moved.Issues = append(append([]string(nil), item.Issues...), msg)
@@ -1691,9 +1692,26 @@ func applyNCDFallbackPartials(succeeded, partial []EntityItem, ncdMap map[string
 	return keep, partial
 }
 
-// referenceBranchSLBHint (#655) tells the reader how to keep the behavior of a
-// reference-branch new code definition, which SonarQube Cloud lacks.
-const referenceBranchSLBHint = "Branches whose new code is based on a reference branch can be migrated as short-lived branches with --use_slb_for_reference_branch_new_code (or use_slb_for_reference_branch_new_code in the config file)."
+// referenceBranchSLBHint (#655) is the predictive report's pointer to migrating
+// reference-branch new code branches as short-lived branches.
+const referenceBranchSLBHint = "Some branches have new code based on reference branch. They will be migrated with new code based on the org or project default new code (previous version or days). You may alternatively use the `use_slb_for_reference_branch_new_code` option to migrate these branches as short lived branches, so that they emulate new code based on the (main branch) reference."
+
+// collectSLBHints returns the cloud project keys whose setNewCodePeriods record
+// asks for the referenceBranchSLBHint: the project has reference-branch new
+// code and use_slb_for_reference_branch_new_code is off (#655).
+func collectSLBHints(store *common.DataStore) map[string]bool {
+	items, err := store.ReadAll("setNewCodePeriods")
+	if err != nil {
+		return nil
+	}
+	result := make(map[string]bool)
+	for _, item := range items {
+		if jsonBool(item, "slb_hint") {
+			result[jsonStr(item, "cloud_project_key")] = true
+		}
+	}
+	return result
+}
 
 // ncdTypeLabel maps the SonarQube Server new-code-definition enum
 // (REFERENCE_BRANCH, SPECIFIC_ANALYSIS, ...) to the human-readable
@@ -1736,17 +1754,17 @@ func collectNCDBranchOverrides(store *common.DataStore) map[string]bool {
 // custom NCD overrides on SonarQube Server from Succeeded into
 // Partial — those overrides have no SonarQube Cloud equivalent and
 // the branches will silently inherit the project-level NCD.
-func applyNCDBranchOverridePartials(succeeded, partial []EntityItem, overrides map[string]bool) ([]EntityItem, []EntityItem) {
+func applyNCDBranchOverridePartials(succeeded, partial []EntityItem, overrides, slbHints map[string]bool) ([]EntityItem, []EntityItem) {
 	if len(overrides) == 0 {
 		return succeeded, partial
 	}
-	const issue = "Per-branch new code period overrides do not exist on SonarQube Cloud; branches will inherit the project-level new code period. " + referenceBranchSLBHint
+	const issue = "Per-branch new code period overrides do not exist on SonarQube Cloud; branches will inherit the project-level new code period."
 	// First: tag matching projects already in Partial so they accumulate
 	// the explanatory Issue rather than appearing twice.
 	for i := range partial {
 		key := projectCloudKey(partial[i].Detail)
 		if overrides[key] {
-			partial[i].Issues = append(partial[i].Issues, issue)
+			partial[i].Issues = append(partial[i].Issues, withSLBHint(issue, slbHints[key]))
 			delete(overrides, key)
 		}
 	}
@@ -1759,10 +1777,18 @@ func applyNCDBranchOverridePartials(succeeded, partial []EntityItem, overrides m
 			continue
 		}
 		moved := item
-		moved.Issues = append(append([]string(nil), item.Issues...), issue)
+		moved.Issues = append(append([]string(nil), item.Issues...), withSLBHint(issue, slbHints[key]))
 		partial = append(partial, moved)
 	}
 	return keep, partial
+}
+
+// withSLBHint appends referenceBranchSLBHint to an issue line when asked to.
+func withSLBHint(issue string, hint bool) string {
+	if hint {
+		return issue + " " + referenceBranchSLBHint
+	}
+	return issue
 }
 
 // projectCloudKey strips trailing | markers (|scan:, |ncdFallback:) so

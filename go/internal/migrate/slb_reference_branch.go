@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	pb "github.com/sonar-solutions/sonar-migration-tool/internal/scanreport/proto"
 	"github.com/sonar-solutions/sq-api-go/types"
 )
 
@@ -187,4 +188,14 @@ func dropLongLivedBeforeShort(ctx context.Context, e *Executor, cloudKey string,
 		deleted = append(deleted, b.Name)
 	}
 	return deleted
+}
+
+// reportBranchTypeFor is the metadata branch_type of a branch's report. A real
+// scanner's short-lived branch report (#655) says PULL_REQUEST — with the branch
+// name and reference branch but no pull_request_key; BRANCH is read as long-lived.
+func reportBranchTypeFor(shortLived bool) pb.Metadata_BranchType {
+	if shortLived {
+		return pb.Metadata_PULL_REQUEST
+	}
+	return pb.Metadata_BRANCH
 }

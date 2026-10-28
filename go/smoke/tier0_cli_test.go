@@ -83,7 +83,7 @@ var commandFlags = map[string][]string{
 		"--target_token", "--target_url", "--timeout",
 		"--use_slb_for_reference_branch_new_code",
 	},
-	"predictive-report": {"--config", "--default_organization", "--export_directory"},
+	"predictive-report": {"--config", "--default_organization", "--export_directory", "--use_slb_for_reference_branch_new_code"},
 	"regtest":           {"--concurrency", "--config", "--format", "--project_key_regexp", "--verbose"},
 	"report":            {"--export_directory", "--filename", "--report_type"},
 	"reset": {

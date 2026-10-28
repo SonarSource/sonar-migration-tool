@@ -125,9 +125,7 @@ type SubmitConfig struct {
 	// the report. Mirrors CloudVoyager, which omits the characteristic for
 	// the main branch.
 	IsMain bool
-	// ShortLived submits the branch as short-lived (branchType=SHORT) instead of
-	// the default long-lived one. It must agree with the type the create-analysis
-	// handshake gave the branch, or the CE rejects the report (#655).
+	// ShortLived submits the branch as branchType=SHORT instead of LONG (#655).
 	ShortLived bool
 }
 
@@ -362,6 +360,9 @@ func buildMultipartForm(cfg SubmitConfig, reportZIP []byte) (*bytes.Buffer, stri
 		if err := w.WriteField("characteristic", "branch="+cfg.BranchName); err != nil {
 			return nil, "", err
 		}
+		// SonarQube Cloud only accepts LONG or SHORT here ("Unsupported branch
+		// type BRANCH"; a missing type is rejected too). A short-lived branch
+		// must agree with the type its create-analysis handshake registered (#655).
 		branchType := "LONG"
 		if cfg.ShortLived {
 			branchType = "SHORT"

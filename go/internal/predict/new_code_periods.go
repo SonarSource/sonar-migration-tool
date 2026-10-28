@@ -34,7 +34,7 @@ var ncdTypesNotOnSQCProjectScope = map[string]bool{
 // createProjects rows by (server_url, projectKey) so the
 // cloud_project_key matches what the rest of the predict pipeline
 // uses.
-func synthesizeSetNewCodePeriods(exportDir, runDir string, extractMapping structure.ExtractMapping) error {
+func synthesizeSetNewCodePeriods(exportDir, runDir string, extractMapping structure.ExtractMapping, useSLB bool) error {
 	ncdItems, err := structure.ReadExtractData(exportDir, extractMapping, "getNewCodePeriods")
 	if err != nil {
 		return fmt.Errorf("reading getNewCodePeriods extract: %w", err)
@@ -55,6 +55,16 @@ func synthesizeSetNewCodePeriods(exportDir, runDir string, extractMapping struct
 	w, err := store.Writer("setNewCodePeriods")
 	if err != nil {
 		return err
+	}
+
+	// Projects with reference-branch new code anywhere (project level or on a
+	// branch), decided up front: a project's override record is written once,
+	// possibly for a different branch than the reference-branch one (#655).
+	hasReference := make(map[string]bool)
+	for _, item := range ncdItems {
+		if jsonStringField(item.Data, "type") == "REFERENCE_BRANCH" {
+			hasReference[cloudByProject[projID{item.ServerURL, jsonStringField(item.Data, "projectKey")}]] = true
+		}
 	}
 
 	seenFallback := make(map[string]bool, len(ncdItems))
@@ -85,6 +95,7 @@ func synthesizeSetNewCodePeriods(exportDir, runDir string, extractMapping struct
 				"cloud_project_key": cloudKey,
 				"source_ncd_type":   ncdType,
 				"ncd_fallback":      true,
+				"slb_hint":          hasReference[cloudKey] && !useSLB,
 			}
 			b, _ := json.Marshal(rec)
 			if err := w.WriteOne(b); err != nil {
@@ -104,6 +115,7 @@ func synthesizeSetNewCodePeriods(exportDir, runDir string, extractMapping struct
 				"cloud_project_key":   cloudKey,
 				"ncd_branch_override": true,
 				"branch":              branchKey,
+				"slb_hint":            hasReference[cloudKey] && !useSLB,
 			}
 			b, _ := json.Marshal(rec)
 			if err := w.WriteOne(b); err != nil {
@@ -113,4 +125,3 @@ func synthesizeSetNewCodePeriods(exportDir, runDir string, extractMapping struct
 	}
 	return nil
 }
-
