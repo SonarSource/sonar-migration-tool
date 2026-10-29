@@ -108,7 +108,9 @@ func patternMatchesAny(pattern string, names []string) bool {
 // logged and yields a no-op restore: the branches then migrate with whatever
 // type the pattern gives them rather than failing the project.
 func shortLivedPatternGuard(ctx context.Context, e *Executor, cloudKey string, names []string) func() {
-	noop := func() {}
+	noop := func() {
+		// Nothing was changed, so there is nothing to restore.
+	}
 	if len(names) == 0 || e.Cloud == nil || e.Cloud.Settings == nil {
 		return noop
 	}

@@ -111,14 +111,14 @@ func TestSubmitReportNonMainBranchSendsCharacteristic(t *testing.T) {
 }
 
 func TestSubmitReportShortLivedBranchSendsShortType(t *testing.T) {
-	srv, cap := newSubmitServer(t)
+	srv, got := newSubmitServer(t)
 	defer srv.Close()
 	if _, err := SubmitReport(context.Background(), srv.Client(), SubmitConfig{
 		CloudURL: srv.URL, ProjectKey: "p", OrgKey: "o", BranchName: "release-3.x", ShortLived: true,
 	}, []byte("zip")); err != nil {
 		t.Fatal(err)
 	}
-	if got := cap.fields["characteristic"]; got != "branchType=SHORT" {
-		t.Errorf("short-lived branch must send branchType=SHORT, got %q", got)
+	if v := got.fields["characteristic"]; v != "branchType=SHORT" {
+		t.Errorf("short-lived branch must send branchType=SHORT, got %q", v)
 	}
 }

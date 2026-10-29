@@ -71,57 +71,53 @@ func synthesizeSetNewCodePeriods(exportDir, runDir string, extractMapping struct
 	seenBranchOverride := make(map[string]bool, len(ncdItems))
 
 	for _, item := range ncdItems {
-		sourceKey := jsonStringField(item.Data, "projectKey")
-		cloudKey := cloudByProject[projID{item.ServerURL, sourceKey}]
+		cloudKey := cloudByProject[projID{item.ServerURL, jsonStringField(item.Data, "projectKey")}]
 		if cloudKey == "" {
 			continue
 		}
-		branchKey := jsonStringField(item.Data, "branchKey")
-		ncdType := jsonStringField(item.Data, "type")
-		inherited := jsonBoolField(item.Data, "inherited")
-
-		switch {
-		case branchKey == "":
-			// Project-level record. Only flag fallback for SQC-
-			// unsupported NCD types.
-			if !ncdTypesNotOnSQCProjectScope[ncdType] {
-				continue
-			}
-			if seenFallback[cloudKey] {
-				continue
-			}
-			seenFallback[cloudKey] = true
-			rec := map[string]any{
-				"cloud_project_key": cloudKey,
-				"source_ncd_type":   ncdType,
-				"ncd_fallback":      true,
-				"slb_hint":          hasReference[cloudKey] && !useSLB,
-			}
-			b, _ := json.Marshal(rec)
-			if err := w.WriteOne(b); err != nil {
-				return err
-			}
-
-		case !inherited:
-			// Per-branch override that doesn't simply inherit the
-			// project-level NCD. SonarQube Cloud has no per-branch NCD
-			// concept, so the branch will silently inherit the
-			// project-level value. Flag the project as Partial once.
-			if seenBranchOverride[cloudKey] {
-				continue
-			}
-			seenBranchOverride[cloudKey] = true
-			rec := map[string]any{
-				"cloud_project_key":   cloudKey,
-				"ncd_branch_override": true,
-				"branch":              branchKey,
-				"slb_hint":            hasReference[cloudKey] && !useSLB,
-			}
-			b, _ := json.Marshal(rec)
-			if err := w.WriteOne(b); err != nil {
-				return err
-			}
+		rec := ncdOverrideRecord(item.Data, cloudKey, hasReference[cloudKey] && !useSLB, seenFallback, seenBranchOverride)
+		if rec == nil {
+			continue
+		}
+		b, _ := json.Marshal(rec)
+		if err := w.WriteOne(b); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// ncdOverrideRecord returns the setNewCodePeriods record for one extracted
+// new-code item, or nil when it needs none. seenFallback and seenBranchOverride
+// make each project produce at most one record of each kind.
+func ncdOverrideRecord(data json.RawMessage, cloudKey string, slbHint bool, seenFallback, seenBranchOverride map[string]bool) map[string]any {
+	branchKey := jsonStringField(data, "branchKey")
+	ncdType := jsonStringField(data, "type")
+
+	if branchKey == "" {
+		// Project-level record. Only flag fallback for SQC-unsupported NCD types.
+		if !ncdTypesNotOnSQCProjectScope[ncdType] || seenFallback[cloudKey] {
+			return nil
+		}
+		seenFallback[cloudKey] = true
+		return map[string]any{
+			"cloud_project_key": cloudKey,
+			"source_ncd_type":   ncdType,
+			"ncd_fallback":      true,
+			"slb_hint":          slbHint,
+		}
+	}
+	if jsonBoolField(data, "inherited") || seenBranchOverride[cloudKey] {
+		return nil
+	}
+	// Per-branch override that doesn't simply inherit the project-level NCD.
+	// SonarQube Cloud has no per-branch NCD concept, so the branch will silently
+	// inherit the project-level value. Flag the project as Partial once.
+	seenBranchOverride[cloudKey] = true
+	return map[string]any{
+		"cloud_project_key":   cloudKey,
+		"ncd_branch_override": true,
+		"branch":              branchKey,
+		"slb_hint":            slbHint,
+	}
 }
