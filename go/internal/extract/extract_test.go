@@ -857,17 +857,6 @@ func TestDaysAgo(t *testing.T) {
 	}
 }
 
-func TestChunkStrings(t *testing.T) {
-	items := []string{"a", "b", "c", "d", "e"}
-	chunks := chunkStrings(items, 2)
-	if len(chunks) != 3 {
-		t.Fatalf("expected 3 chunks, got %d", len(chunks))
-	}
-	if len(chunks[2]) != 1 {
-		t.Errorf("expected last chunk size 1, got %d", len(chunks[2]))
-	}
-}
-
 func TestBuildIssueCombos(t *testing.T) {
 	combos := buildIssueCombos(nil)
 	// 3 types × 5 severities = 15

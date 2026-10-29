@@ -192,9 +192,11 @@ func TestGetPluginIssuesIsNotRegistered(t *testing.T) {
 	}
 }
 
-// #536 regression: getProjectPluginIssues/getProjectTemplateIssues
-// (category "projects") declare getPluginRules/getTemplateRules
-// (category "quality_profiles") as dependencies. Against the REAL,
+// #536 regression: getProjectPluginIssues/getProjectTemplateIssues (removed
+// in #668)
+// (category "projects") declared getPluginRules/getTemplateRules
+// (category "quality_profiles") as dependencies. The test stays as a guard
+// for any future cross-category edge. Against the REAL,
 // full task registry, --objects=projects excludes quality_profiles —
 // including getPluginRules/getTemplateRules — while still selecting
 // getProjectPluginIssues/getProjectTemplateIssues. Without

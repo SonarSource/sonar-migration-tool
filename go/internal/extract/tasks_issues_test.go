@@ -143,8 +143,6 @@ func TestIssueTasksOnlyQueryTheSelectedProjects(t *testing.T) {
 		}
 	}
 	seed("getProjects", `{"key":"`+selected+`"}`)
-	seed("getPluginRules", `{"key":"plugin:R1"}`)
-	seed("getTemplateRules", `{"key":"tpl:R1"}`)
 
 	e := &Executor{
 		Raw:       NewRawClient(srv.Client(), srv.URL+"/"),
@@ -161,5 +159,17 @@ func TestIssueTasksOnlyQueryTheSelectedProjects(t *testing.T) {
 	}
 	if len(bad) > 0 {
 		t.Errorf("issue tasks queried outside the selected project: %v", bad)
+	}
+}
+
+// Issue #668: getProjectPluginIssues and getProjectTemplateIssues made one
+// api/issues/search call per 30 rules for every project and nothing read their
+// output, so they must not be in the plan.
+func TestIssueTasks_NoRuleJoinedIssueTasks(t *testing.T) {
+	removed := map[string]bool{"getProjectPluginIssues": true, "getProjectTemplateIssues": true}
+	for _, td := range RegisterAll() {
+		if removed[td.Name] {
+			t.Fatalf("task %s must not be registered: nothing consumes its output (#668)", td.Name)
+		}
 	}
 }

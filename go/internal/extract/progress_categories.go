@@ -53,8 +53,6 @@ var extractProjectConfigTasks = map[string]bool{
 	"getProjectFixedIssueTypes":   true,
 	"getProjectRecentIssueTypes":  true,
 	"getSafeHotspots":             true,
-	"getProjectPluginIssues":      true,
-	"getProjectTemplateIssues":    true,
 }
 
 // CategorizeTask buckets an extract task name into the same four stages

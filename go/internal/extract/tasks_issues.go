@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/url"
-	"strings"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
@@ -48,12 +47,6 @@ func issueTasks() []TaskDef {
 			Run: makeExpandedIssueTask("getProjectRecentIssueTypes", nil, url.Values{"createdInLast": {"30d"}})},
 		{Name: "getSafeHotspots", Editions: AllEditions, Dependencies: []string{"getProjects"},
 			Run: safeHotspotsTask()},
-		{Name: "getProjectPluginIssues", Editions: AllEditions,
-			Dependencies: []string{"getProjects", "getPluginRules"},
-			Run:          makeJoinedRuleIssueTask("getProjectPluginIssues", "getPluginRules")},
-		{Name: "getProjectTemplateIssues", Editions: AllEditions,
-			Dependencies: []string{"getProjects", "getTemplateRules"},
-			Run:          makeJoinedRuleIssueTask("getProjectTemplateIssues", "getTemplateRules")},
 	}
 }
 
@@ -115,59 +108,4 @@ func buildIssueCombos(resolutionValues []string) []map[string]string {
 		expansions = append([]Expansion{{Key: "resolutions", Values: resolutionValues}}, expansions...)
 	}
 	return expandCombinations(expansions)
-}
-
-// makeJoinedRuleIssueTask joins rule keys with commas and queries issues per project x chunked rules.
-func makeJoinedRuleIssueTask(taskName, ruleDepTask string) func(ctx context.Context, e *Executor) error {
-	return func(ctx context.Context, e *Executor) error {
-		ruleKeys, err := collectRuleKeys(e, ruleDepTask)
-		if err != nil {
-			return err
-		}
-		chunks := chunkStrings(ruleKeys, 30)
-		return forEachDep(ctx, e, taskName, "getProjects",
-			func(ctx context.Context, item json.RawMessage, w *ChunkWriter) error {
-				key := extractField(item, "key")
-				meta := map[string]any{"projectKey": key, "serverUrl": e.ServerURL}
-				return fetchChunkedRuleIssues(ctx, e, w, key, chunks, meta)
-			})
-	}
-}
-
-func collectRuleKeys(e *Executor, ruleDepTask string) ([]string, error) {
-	ruleItems, err := e.Store.ReadAll(ruleDepTask)
-	if err != nil {
-		return nil, err
-	}
-	var ruleKeys []string
-	for _, item := range ruleItems {
-		if k := extractField(item, "key"); k != "" {
-			ruleKeys = append(ruleKeys, k)
-		}
-	}
-	return ruleKeys, nil
-}
-
-func fetchChunkedRuleIssues(ctx context.Context, e *Executor, w *ChunkWriter,
-	projectKey string, chunks [][]string, meta map[string]any) error {
-	for _, chunk := range chunks {
-		raw, err := e.Raw.Get(ctx, issuesSearchAPI,
-			url.Values{"componentKeys": {projectKey}, "rules": {strings.Join(chunk, ",")}, "ps": {"1"}})
-		if err != nil {
-			return err
-		}
-		if err := w.WriteOne(EnrichRaw(raw, meta)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func chunkStrings(items []string, size int) [][]string {
-	var chunks [][]string
-	for i := 0; i < len(items); i += size {
-		end := min(i+size, len(items))
-		chunks = append(chunks, items[i:end])
-	}
-	return chunks
 }

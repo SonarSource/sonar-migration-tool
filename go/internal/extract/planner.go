@@ -88,8 +88,8 @@ func PlanPhases(tasks map[string]bool, reg map[string]*TaskDef) ([][]string, err
 // task name out of every TaskDef's Dependencies before computing
 // phases — see common.PlanPhasesExcludingGeneric's doc for why this is
 // needed (#536: a false "cycle detected" error otherwise, when a
-// selected task like getProjectPluginIssues declares an excluded one
-// like getPluginRules as a dependency). Confirmed by direct
+// selected task such as the since-removed getProjectPluginIssues declared
+// an excluded one like getPluginRules as a dependency). Confirmed by direct
 // reproduction that extract needs this exactly as much as migrate does.
 func PlanPhasesExcluding(tasks map[string]bool, reg map[string]*TaskDef, excluded map[string]bool) ([][]string, error) {
 	return common.PlanPhasesExcludingGeneric(tasks, reg, excluded)

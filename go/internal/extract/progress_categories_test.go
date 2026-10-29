@@ -28,7 +28,7 @@ func TestCategorizeTask(t *testing.T) {
 		{"getProjectDetails", common.CategoryProjectConfig},
 		{"getBranches", common.CategoryProjectConfig},
 		{"getProjectIssues", common.CategoryProjectConfig},
-		{"getProjectTemplateIssues", common.CategoryProjectConfig},
+		{"getProjectIssueTypes", common.CategoryProjectConfig},
 		// General: server/user/rule/profile/gate/etc. — not project-scoped.
 		{"getServerInfo", common.CategoryGeneral},
 		{"getPlugins", common.CategoryGeneral},
