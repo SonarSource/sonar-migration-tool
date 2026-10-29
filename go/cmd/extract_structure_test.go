@@ -5,6 +5,7 @@
 package cmd
 
 import (
+	"encoding/csv"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,5 +120,49 @@ func TestRunExtractStructure_ErrorNamesStep(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err.Error(), want)
 		}
+	}
+}
+
+// #664: a second run into the same export directory keeps the
+// sonarcloud_org_key values the operator filled in.
+func TestRunExtractStructure_CarriesOverOperatorOrgKey(t *testing.T) {
+	dir := writeMinimalExtract(t)
+	if err := runExtractStructure(dir, nil, "", extractStructureTestTime); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	path := filepath.Join(dir, "organizations.csv")
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := csv.NewReader(f).ReadAll()
+	f.Close()
+	if err != nil || len(rows) < 2 {
+		t.Fatalf("organizations.csv rows: %v, %v", len(rows), err)
+	}
+	col := -1
+	for i, h := range rows[0] {
+		if h == "sonarcloud_org_key" {
+			col = i
+		}
+	}
+	for _, r := range rows[1:] {
+		r[col] = "hand-edited-org"
+	}
+	out, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := csv.NewWriter(out).WriteAll(rows); err != nil {
+		t.Fatal(err)
+	}
+	out.Close()
+
+	if err := runExtractStructure(dir, nil, "", extractStructureTestTime.Add(time.Minute)); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), "hand-edited-org") {
+		t.Errorf("operator org key was not carried over:\n%s", data)
 	}
 }

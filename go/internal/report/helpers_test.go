@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 )
 
 const (
@@ -74,7 +76,7 @@ func TestBuildServerIDMapping(t *testing.T) {
 	os.WriteFile(filepath.Join(taskDir, "results.1.jsonl"), []byte(serverInfo+"\n"), 0o644)
 
 	// Build the mapping (uses GetUniqueExtracts internally).
-	mapping := map[string]string{testServerURL: extractID}
+	mapping := structure.ExtractMapping{testServerURL: {extractID}}
 	idMap := BuildServerIDMapping(dir, mapping)
 
 	if idMap[testServerURL] != testServerID {

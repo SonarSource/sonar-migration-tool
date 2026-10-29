@@ -374,6 +374,11 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 	meta := extractMeta{
 		Plan: plan, RunID: extractID, Version: version,
 		Edition: edition, URL: cfg.URL, Targets: targets, Registry: registry,
+		// A run limited to some objects or projects is a partial extract:
+		// readers merge it onto the latest full extract instead of
+		// replacing it (#664).
+		Partial:     cfg.Objects != nil || len(cfg.ProjectKeys) > 0,
+		ProjectKeys: cfg.ProjectKeys,
 	}
 	if err := writeMetadataFile(extractDir, meta); err != nil {
 		return nil, err
@@ -735,6 +740,10 @@ type extractMeta struct {
 	URL      string
 	Targets  []string
 	Registry map[string]*TaskDef
+	// Partial is true when the run was limited by --objects or a project
+	// filter. ProjectKeys lists the projects it was limited to (#664).
+	Partial     bool
+	ProjectKeys []string
 }
 
 func writeMetadataFile(dir string, m extractMeta) error {
@@ -752,6 +761,10 @@ func writeMetadataFile(dir string, m extractMeta) error {
 		"target_tasks":      m.Targets,
 		"available_configs": configs,
 		"run_id":            m.RunID,
+		"partial":           m.Partial,
+	}
+	if len(m.ProjectKeys) > 0 {
+		meta["project_keys"] = m.ProjectKeys
 	}
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {

@@ -307,15 +307,22 @@ type projectBindingEntry struct {
 // WARN says how many, so the gap is never silent.
 func failedProjectKeys(directory string, mapping ExtractMapping) map[string]bool {
 	failed := make(map[string]bool)
-	for serverURL, extractID := range mapping {
-		list, err := common.ReadFailedProjects(filepath.Join(directory, extractID))
-		if err != nil {
-			slog.Warn("could not read the extract's failed projects list; no project is left out",
-				"extract", extractID, "err", err)
-			continue
-		}
-		for _, fp := range list {
-			failed[serverURL+fp.Key] = true
+	for serverURL, ids := range mapping {
+		// Oldest first: a project a later extract re-extracted is judged
+		// by that extract alone, not by an earlier one that failed it.
+		for _, extractID := range ids {
+			for _, k := range readExtractMeta(directory, extractID).ProjectKeys {
+				delete(failed, serverURL+k)
+			}
+			list, err := common.ReadFailedProjects(filepath.Join(directory, extractID))
+			if err != nil {
+				slog.Warn("could not read the extract's failed projects list; no project is left out",
+					"extract", extractID, "err", err)
+				continue
+			}
+			for _, fp := range list {
+				failed[serverURL+fp.Key] = true
+			}
 		}
 	}
 	if len(failed) > 0 {

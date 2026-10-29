@@ -20,7 +20,9 @@ import (
 // Every extract in exportDir is aggregated, exactly as structure does, so
 // extracting a second server regenerates the CSVs for both. Before
 // organizations.csv and projects.csv are regenerated, the existing copies
-// are backed up, because those are the files the operator edits by hand.
+// are backed up, because those are the files the operator edits by hand,
+// and the sonarcloud_org_key values the operator entered are carried over
+// into the regenerated files (#664).
 //
 // An extract that left the projects category out (--objects) has nothing
 // to group, so both steps are skipped rather than failing in mappings.
@@ -33,17 +35,30 @@ func runExtractStructure(exportDir string, objects map[string]bool, orgKey strin
 		return nil
 	}
 
+	// Read the operator's sonarcloud_org_key values before anything is
+	// regenerated, so they can be written back into the new files (#664).
+	carry, err := structure.ReadCarriedKeys(exportDir)
+	if err != nil {
+		return extractStepError("structure", exportDir, err)
+	}
 	backups, err := structure.BackupEditableCSVs(exportDir, now)
 	if err != nil {
 		return extractStepError("structure", exportDir, err)
 	}
 	for _, path := range backups {
-		logger.Warn("regenerating a CSV that already existed: the previous copy is saved, re-apply any edits from it",
-			"backup", path)
+		logger.Info("regenerating a CSV that already existed: the previous copy is saved", "backup", path)
 	}
 
-	if err := structure.RunStructure(exportDir, orgKey); err != nil {
+	stats, err := structure.RunStructureCarryOver(exportDir, carry, orgKey)
+	if err != nil {
 		return extractStepError("structure", exportDir, err)
+	}
+	if len(backups) > 0 {
+		logger.Info("carried over sonarcloud_org_key values from the previous CSVs", "carried", stats.Carried)
+	}
+	if len(backups) > 0 && stats.NeedsReview() {
+		logger.Warn("some sonarcloud_org_key values could not be carried over: review organizations.csv and projects.csv (the previous copies are saved as .bak files)",
+			"not_carried", stats.Dropped, "organizations_without_key", stats.OrgsWithoutKey)
 	}
 	if err := structure.RunMappings(exportDir); err != nil {
 		return extractStepError("mappings", exportDir, err)

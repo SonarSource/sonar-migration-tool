@@ -73,3 +73,11 @@ func CategorizeTask(name string) common.TaskCategory {
 		return common.CategoryGeneral
 	}
 }
+
+// IsProjectScopedTask reports whether the task writes one record per project
+// (or per project component), as opposed to server-wide data such as gates,
+// profiles or groups. Readers merging a partial extract onto an earlier one
+// use it to let a re-extracted project replace its older records (#664).
+func IsProjectScopedTask(name string) bool {
+	return CategorizeTask(name) != common.CategoryGeneral
+}

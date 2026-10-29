@@ -299,7 +299,7 @@ func TestForEachExtractItem(t *testing.T) {
 	e := &Executor{
 		Store:              store,
 		ExportDir:          dir,
-		Mapping:            structure.ExtractMapping{testServerURL: "extract-01"},
+		Mapping:            structure.ExtractMapping{testServerURL: {"extract-01"}},
 		ConcurrencyLimiter: NewFixedConcurrencyLimiter(5),
 		Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 	}

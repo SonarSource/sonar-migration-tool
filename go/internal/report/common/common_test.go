@@ -48,7 +48,7 @@ func setupExtract(t *testing.T, tasks map[string][]map[string]any) (string, stru
 		writeJSONL(t, filepath.Join(taskDir, "results.1.jsonl"), entries)
 	}
 
-	mapping := structure.ExtractMapping{testServerURL: testExtractID}
+	mapping := structure.ExtractMapping{testServerURL: {testExtractID}}
 	return dir, mapping
 }
 
