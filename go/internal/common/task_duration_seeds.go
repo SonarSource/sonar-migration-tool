@@ -58,7 +58,6 @@ var SeedTaskDurations = map[string]time.Duration{
 	"getPluginRules":              41 * time.Second,
 	"getProjectFixedIssueTypes":   37 * time.Second,
 	"getProjectHotspotsFull":      37 * time.Second,
-	"getPluginIssues":             36 * time.Second,
 	"getProjectComponentTree":     31 * time.Second,
 	"getProjectVersions":          30 * time.Second,
 	"getProjectIssueTypes":        29 * time.Second,

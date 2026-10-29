@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/migrate"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 )
 
@@ -58,9 +59,21 @@ func synthesizeBranchSourcePurged(exportDir, runDir string, extractMapping struc
 		sourceRecords[bk]++
 	}
 
+	// Component records per branch, to predict the branches migrate will skip
+	// for having none (#565): a non-main branch with no extracted component
+	// lost its data to the source's housekeeping.
+	componentRecords := make(map[branchKey]int)
+	componentsByProject := make(map[projectKeyT]int)
+	for item := range structure.ExtractItems(exportDir, extractMapping, "getProjectComponentTree") {
+		pk := projectKeyT{item.ServerURL, jsonStringField(item.Data, "projectKey")}
+		componentRecords[branchKey{pk.serverURL, pk.projectKey, jsonStringField(item.Data, "branch")}]++
+		componentsByProject[pk]++
+	}
+
 	// Branches per project (LONG branches only). Projects with no recorded
 	// branches fall back to a lone "main" branch, matching migrate.
 	branchesByProject := make(map[projectKeyT][]string)
+	mainBranch := make(map[projectKeyT]string)
 	for item := range structure.ExtractItems(exportDir, extractMapping, "getBranches") {
 		if strings.ToUpper(jsonStringField(item.Data, "type")) == "SHORT" {
 			continue
@@ -71,6 +84,9 @@ func synthesizeBranchSourcePurged(exportDir, runDir string, extractMapping struc
 		}
 		pk := projectKeyT{item.ServerURL, jsonStringField(item.Data, "projectKey")}
 		branchesByProject[pk] = append(branchesByProject[pk], name)
+		if jsonBoolField(item.Data, "isMain") {
+			mainBranch[pk] = name
+		}
 	}
 
 	w, err := store.Writer("importProjectData")
@@ -92,6 +108,21 @@ func synthesizeBranchSourcePurged(exportDir, runDir string, extractMapping struc
 		}
 		for _, branch := range branches {
 			bk := branchKey{serverURL, sourceKey, branch}
+			// #565 — a non-main branch with no component is not migrated.
+			// Only when components were extracted for the project at all, so
+			// a missing component extract is not read as "everything purged".
+			if branch != mainBranch[pk] && componentsByProject[pk] > 0 && componentRecords[bk] == 0 {
+				rec := map[string]any{
+					"cloud_project_key": cloudKey,
+					"branch":            branch,
+					"status":            migrate.BranchStatusNoData,
+				}
+				b, _ := json.Marshal(rec)
+				if err := w.WriteOne(b); err != nil {
+					return err
+				}
+				continue
+			}
 			// A branch is migrated source-less when source extraction ran
 			// (records exist) but every record came back empty — matching
 			// migrate.buildBranchReport's sourcePurged test. Findings are not
