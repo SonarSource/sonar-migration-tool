@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
@@ -97,5 +98,68 @@ func TestHotspotsProjectParam(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("version %q: got %q, want %q", tc.version, got, tc.want)
 		}
+	}
+}
+
+// #654: with project_key_regexp, getProjects holds only the matching projects.
+// No issue-search task may then query issues outside them — in particular none
+// may send an api/issues/search request without componentKeys, which is
+// instance-wide (on a 4M-issue server that is what made extract crawl).
+func TestIssueTasksOnlyQueryTheSelectedProjects(t *testing.T) {
+	const selected = "matching-project"
+	var (
+		mu  sync.Mutex
+		bad []string
+	)
+	flag := func(q string) {
+		mu.Lock()
+		bad = append(bad, q)
+		mu.Unlock()
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/issues/search", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("componentKeys") != selected {
+			flag(r.URL.RawQuery)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"paging": map[string]any{"total": 0}, "issues": []any{}})
+	})
+	mux.HandleFunc("GET /api/hotspots/search", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("project") != selected {
+			flag(r.URL.RawQuery)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"paging": map[string]any{"total": 0}, "hotspots": []any{}})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	store := NewDataStore(t.TempDir())
+	seed := func(task, record string) {
+		ww, err := store.Writer(task)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ww.WriteOne(json.RawMessage(record)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("getProjects", `{"key":"`+selected+`"}`)
+	seed("getPluginRules", `{"key":"plugin:R1"}`)
+	seed("getTemplateRules", `{"key":"tpl:R1"}`)
+
+	e := &Executor{
+		Raw:       NewRawClient(srv.Client(), srv.URL+"/"),
+		Store:     store,
+		ServerURL: srv.URL,
+		Version:   common.ParseVersion("10.7"),
+		Sem:       make(chan struct{}, 2),
+		Logger:    slog.New(slog.NewTextHandler(&discardWriter{}, nil)),
+	}
+	for _, task := range issueTasks() {
+		if err := task.Run(context.Background(), e); err != nil {
+			t.Fatalf("%s: %v", task.Name, err)
+		}
+	}
+	if len(bad) > 0 {
+		t.Errorf("issue tasks queried outside the selected project: %v", bad)
 	}
 }
