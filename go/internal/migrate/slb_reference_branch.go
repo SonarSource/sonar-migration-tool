@@ -18,11 +18,11 @@ import (
 // much like one. With use_slb_for_reference_branch_new_code, every SonarQube
 // Server branch whose new code is a reference branch is migrated as an SLB.
 //
-// SonarQube Cloud decides a new branch's type from the project's long-lived
-// branch pattern when the analysis does not request a type explicitly. The
-// migration requests "long" for ordinary branches (see preCreateBranchAnalysis),
-// so for the SLB ones it leaves the type unset and instead makes sure the
-// pattern does not match them for the duration of the branch imports.
+// The migration registers an SLB explicitly as "short" in the create-analysis
+// handshake and submits it with branchType=SHORT (see preCreateBranchAnalysis).
+// As a secondary safeguard, in case the CE still consults the project's
+// long-lived branch pattern, the pattern is temporarily adjusted so that it
+// does not match the SLBs for the duration of the branch imports.
 
 // slbReferenceNCDType is the new-code-definition type that marks a branch.
 const slbReferenceNCDType = "REFERENCE_BRANCH"
@@ -161,9 +161,11 @@ func shortLivedPatternGuard(ctx context.Context, e *Executor, cloudKey string, n
 // short-lived but already exist as long-lived (typically from an earlier run
 // without the option): a branch's type cannot change, so the CE would reject
 // the report ("Invalid branch type 'SHORT'. Branch ... already exists with type
-// 'LONG'"). The branch is recreated as short-lived by its import. Returns the
-// names deleted; a failure is logged and leaves that branch to fail on import.
-func dropLongLivedBeforeShort(ctx context.Context, e *Executor, cloudKey string, existing []types.Branch, branches []branchInfo) []string {
+// 'LONG'"). The branch is recreated as short-lived by its import. A branch the
+// import will skip as already completed in this run is never deleted, since
+// nothing would recreate it. Returns the names deleted; a failure is logged and
+// leaves that branch to fail on import.
+func dropLongLivedBeforeShort(ctx context.Context, e *Executor, cloudKey string, existing []types.Branch, branches []branchInfo, completed map[string]bool) []string {
 	if e.Cloud == nil || e.Cloud.Branches == nil {
 		return nil
 	}
@@ -175,7 +177,7 @@ func dropLongLivedBeforeShort(ctx context.Context, e *Executor, cloudKey string,
 	}
 	var deleted []string
 	for _, b := range branches {
-		if !b.ShortLived || !longLived[b.Name] {
+		if !b.ShortLived || !longLived[b.Name] || shouldSkipBranch(completed, cloudKey, b.Name) {
 			continue
 		}
 		if err := e.Cloud.Branches.Delete(ctx, cloudKey, b.Name); err != nil {

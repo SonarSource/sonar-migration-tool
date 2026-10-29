@@ -198,12 +198,30 @@ func TestDropLongLivedBeforeShort(t *testing.T) {
 		{Name: "develop"},
 		{Name: "feature", ShortLived: true},
 	}
-	got := dropLongLivedBeforeShort(context.Background(), e, "proj", existing, branches)
+	got := dropLongLivedBeforeShort(context.Background(), e, "proj", existing, branches, nil)
 
 	mu.Lock()
 	defer mu.Unlock()
 	if len(got) != 1 || got[0] != "release-3.x" || len(deleted) != 1 || deleted[0] != "release-3.x" {
 		t.Errorf("want only release-3.x deleted, got returned=%v deleted=%v", got, deleted)
+	}
+}
+
+// A branch already completed in this run is skipped by its import, so deleting
+// it would lose it for good.
+func TestDropLongLivedBeforeShort_KeepsCompletedBranch(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/project_branches/delete", func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected delete: %s", r.URL.RawQuery)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	e := newCustomCloudTest(t, mux)
+
+	existing := []types.Branch{{Name: "release-3.x", Type: "LONG"}}
+	branches := []branchInfo{{Name: "release-3.x", ShortLived: true}}
+	completed := map[string]bool{"proj:release-3.x": true}
+	if got := dropLongLivedBeforeShort(context.Background(), e, "proj", existing, branches, completed); len(got) != 0 {
+		t.Errorf("want nothing deleted, got %v", got)
 	}
 }
 

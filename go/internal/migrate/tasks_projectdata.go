@@ -341,7 +341,7 @@ func importProjectBranches(ctx context.Context, e *Executor, proj json.RawMessag
 		}
 	}
 	defer shortLivedPatternGuard(ctx, e, cloudKey, slbNames)()
-	for _, name := range dropLongLivedBeforeShort(ctx, e, cloudKey, scBranches, nonMainBranches) {
+	for _, name := range dropLongLivedBeforeShort(ctx, e, cloudKey, scBranches, nonMainBranches, bctx.Completed) {
 		// Gone from the target: it must not look "up to date" any more.
 		delete(bctx.TargetAnalysisDates, name)
 	}
@@ -617,7 +617,7 @@ type importBranchInput struct {
 	TargetBranch    string // SC branch name — used in protobuf metadata and CE submit
 	ReferenceBranch string // reference/merge branch (metadata field 11); empty for main
 	IsMain          bool   // main/default branch — suppresses branch characteristics on submit
-	ShortLived      bool   // migrate as a short-lived branch (#655): leave the type to the project's long-lived branch pattern
+	ShortLived      bool   // migrate as a short-lived branch (#655): registered and submitted with the explicit short type
 	// LastAnalysisDate backdates the current-snapshot report to the source
 	// branch's real last analysis date instead of the migration run's own
 	// timestamp. Zero when the source branch was never analyzed, in which
