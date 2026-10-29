@@ -1371,6 +1371,9 @@ func TestImportBranchSkipsNoComponents(t *testing.T) {
 	if result.Status != "skipped" {
 		t.Errorf("expected skipped (no components), got %s", result.Status)
 	}
+	if result.Error != "" {
+		t.Errorf("expected empty error for never-analyzed branch, got %q", result.Error)
+	}
 }
 
 func TestRunImportProjectData(t *testing.T) {

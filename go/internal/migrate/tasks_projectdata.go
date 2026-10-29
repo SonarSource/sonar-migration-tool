@@ -859,7 +859,7 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 	if len(components) == 0 {
 		const reason = "no components in the extracted data (the source branch is empty or its data was purged)"
 		e.Logger.Warn("branch skipped: "+reason, "project", input.CloudKey, "branch", input.Branch)
-		return nil, branchReportMeta{}, &importResult{Status: "skipped", Error: "skipped: " + reason}, nil
+		return nil, branchReportMeta{}, &importResult{Status: "skipped"}, nil
 	}
 
 	// The source server returns no source TEXT for this branch even though line
