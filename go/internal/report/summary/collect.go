@@ -47,6 +47,7 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 	syncStatsMap := collectSyncStats(store)
 	branchSourcePurgedMap := collectBranchSourcePurged(store)
 	branchLimitSkippedMap := collectBranchLimitSkips(store)
+	branchNoDataMap := collectBranchNoData(store)
 	extractMapping, _ := structure.GetUniqueExtracts(exportDir)
 	// #353 — per-object dropped-user-permission counts: SonarQube Cloud
 	// has no API to grant permissions to individual users, so any user
@@ -107,6 +108,12 @@ func CollectSummary(runDir, exportDir string) (*MigrationSummary, error) {
 			attachBranchLimitSkips(section.Succeeded, branchLimitSkippedMap)
 			attachBranchLimitSkips(section.NearPerfect, branchLimitSkippedMap)
 			attachBranchLimitSkips(section.Partial, branchLimitSkippedMap)
+			// #565 — name the branches not migrated because their data was
+			// purged on the source. The project's bucket was already
+			// settled by applyProjectFailures (Near Full Migration at best).
+			attachBranchNoData(section.Succeeded, branchNoDataMap)
+			attachBranchNoData(section.NearPerfect, branchNoDataMap)
+			attachBranchNoData(section.Partial, branchNoDataMap)
 		}
 		// #353 — attach the dropped-user-permission count marker to
 		// every entity in every routed bucket so the per-row Details
@@ -1048,6 +1055,7 @@ const (
 	statusSuccess   = "success"
 	statusUpToDate  = migrate.BranchStatusUpToDate
 	statusCapped    = migrate.BranchStatusCapped
+	statusNoData    = migrate.BranchStatusNoData
 	statusFailed    = "failed"
 	statusSkipped   = "skipped"
 	fieldProjectKey = "cloud_project_key"
@@ -1170,6 +1178,14 @@ func collectProjectData(store *common.DataStore) map[string]projectDataOutcome {
 				Reason: "Every branch was dropped by the per-project branch limit, no project data migrated — " +
 					"this project has more long-lived branches than the migration's hard limit of " +
 					strconv.Itoa(migrate.MaxBranchesPerProject),
+			}
+		// Only branches whose data was purged (#565), none migrated: no data
+		// reached the target for the project.
+		case len(a.states[statusNoData]) > 0:
+			result[key] = projectDataOutcome{
+				State:         "skipped",
+				Reason:        "Source project was provisioned but never analyzed, project settings migrated anyway",
+				NeverAnalyzed: true,
 			}
 		default:
 			// State string we don't recognise — surface as skipped so
@@ -1613,6 +1629,30 @@ func collectBranchSourcePurged(store *common.DataStore) map[string][]string {
 // measures and issues.
 func attachBranchSourcePurged(projects []EntityItem, purgedMap map[string][]string) {
 	attachBranchMarker(projects, purgedMap, "srcPurged")
+}
+
+// collectBranchNoData returns, per cloud project key, the ordered list of
+// branches not migrated because their data was purged on the source (#565).
+func collectBranchNoData(store *common.DataStore) map[string][]string {
+	items := readProjectDataRows(store)
+	result := make(map[string][]string)
+	for _, item := range items {
+		key, branch := jsonStr(item, fieldProjectKey), jsonStr(item, fieldBranch)
+		if key == "" || branch == "" || jsonStr(item, "status") != statusNoData {
+			continue
+		}
+		result[key] = append(result[key], branch)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+// attachBranchNoData appends a "|noData:branchA,branchB" marker to each
+// affected project's Detail field (#565).
+func attachBranchNoData(projects []EntityItem, noDataMap map[string][]string) {
+	attachBranchMarker(projects, noDataMap, "noData")
 }
 
 // collectBranchLimitSkips reads importProjectData JSONL and returns, per
