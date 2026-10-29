@@ -80,6 +80,13 @@ type ExtractConfig struct {
 	// and are never filtered. Empty means every portfolio (#666).
 	PortfolioKeyRegexp  string
 	PortfolioNameRegexp string
+	// PermissionTemplateRegexp, when non-empty, limits extraction to the
+	// permission templates whose name matches (and so the group/user
+	// permissions of those templates only). Always compiled as a full-match
+	// regex implicitly anchored with ^ and $, like ProjectKey. Lets large
+	// instances migrate templates in slices. Empty means "extract every
+	// template" (#665).
+	PermissionTemplateRegexp string
 	// Objects, when non-nil, limits extraction to the selected object
 	// categories (settings, permission_templates, quality_profiles,
 	// quality_gates, projects, portfolios, groups, license_profiles —
@@ -146,6 +153,9 @@ type Executor struct {
 	// PortfolioFilter is the compiled form of ExtractConfig.PortfolioKeyRegexp
 	// / PortfolioNameRegexp. Nil (or inactive) means no portfolio filtering. #666.
 	PortfolioFilter *common.PortfolioFilter
+	// PermissionTemplateRe is the compiled form of
+	// ExtractConfig.PermissionTemplateRegexp, or nil when unset. #665.
+	PermissionTemplateRe *regexp.Regexp
 
 	// Truncation collects every truncated API response observed during
 	// the run, for the end-of-run console block and the
@@ -404,6 +414,13 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 			return nil, fmt.Errorf("invalid branch regexp pattern %q: %w", cfg.BranchRegexp, err)
 		}
 		executor.BranchRe = branchRe
+	}
+	if cfg.PermissionTemplateRegexp != "" {
+		ptRe, err := CompileProjectKeyPattern(cfg.PermissionTemplateRegexp)
+		if err != nil {
+			return nil, fmt.Errorf("invalid permission template regexp pattern %q: %w", cfg.PermissionTemplateRegexp, err)
+		}
+		executor.PermissionTemplateRe = ptRe
 	}
 	// Defensive re-validation (#583): cmd/extract.go already validates
 	// --branch_analyzed_after before calling RunExtract, but this entry

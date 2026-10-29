@@ -22,9 +22,30 @@ func searchTemplatesTask(name, resultKey string) TaskDef {
 	}
 }
 
+// getTemplatesTask is searchTemplatesTask for getTemplates, dropping the
+// templates whose name does not match e.PermissionTemplateRe. Every other
+// template task fans out from getTemplates, so filtering here scopes them
+// all. #665.
+func getTemplatesTask() TaskDef {
+	return TaskDef{
+		Name:     "getTemplates",
+		Editions: AllEditions,
+		Run: func(ctx context.Context, e *Executor) error {
+			return fetchAndWriteArrayFiltered(ctx, e, "getTemplates", "api/permissions/search_templates", "permissionTemplates",
+				map[string]any{"serverUrl": e.ServerURL}, keepTemplateByRegexp)
+		},
+	}
+}
+
+// keepTemplateByRegexp keeps a template when no filter is configured or its
+// name matches e.PermissionTemplateRe. #665.
+func keepTemplateByRegexp(e *Executor, item json.RawMessage) bool {
+	return e.PermissionTemplateRe == nil || e.PermissionTemplateRe.MatchString(extractField(item, "name"))
+}
+
 func templateTasks() []TaskDef {
 	return []TaskDef{
-		searchTemplatesTask("getTemplates", "permissionTemplates"),
+		getTemplatesTask(),
 		searchTemplatesTask("getDefaultTemplates", "defaultTemplates"),
 		{
 			Name:         "getTemplateGroupsScanners",

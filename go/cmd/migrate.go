@@ -92,6 +92,7 @@ func init() {
 	f.String("objects", "", "Comma-separated list of object categories to migrate: "+strings.Join(common.AllObjects, ", ")+" (aliases: qp, qg, pt, lp). Omit to migrate everything (default). #536")
 	registerProjectKeyFlags(f, "Regexp pattern of source project keys to migrate (only applies when the projects category is selected via --objects). Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"BANKING_.+\" matches every key starting with BANKING_, not just a key containing that substring. A plain key like \"my-project\" matches only itself. #536, #592")
 	f.Int(flagMaxIssueComments, 0, fmt.Sprintf("Max most-recent source comments replayed onto each migrated issue/hotspot (default %d, max %d) — reduces SonarQube Cloud API pressure on long comment threads (#571).", migrate.DefaultMaxIssueComments, migrate.MaxAllowedIssueComments))
+	registerPermissionTemplateFlags(f, "Regexp pattern of permission template names to migrate (only applies when the permission_templates category is selected), to migrate templates in slices. Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"Team-A.*\" matches every template whose name starts with Team-A. Empty means every extracted template is migrated (default). #665.")
 	f.String(flagBranchAnalyzedAfter, "", "Only select branches analyzed on or after this date (YYYY-MM-DD) during migrate. The project's main branch is always selected, even when it doesn't meet this date. Omit to select all branches (default). #583")
 }
 
@@ -173,6 +174,13 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 	overrideString(cmd, flagPortfolioNameRegexp, &cfg.PortfolioNameRegexp)
 	if _, err := common.NewPortfolioFilter(cfg.PortfolioKeyRegexp, cfg.PortfolioNameRegexp); err != nil {
 		return cfg, err
+	}
+	resolvePermissionTemplateFlagsInto(cmd, &cfg.PermissionTemplateRegexp)
+	// #665 — reject an invalid permission template pattern up front.
+	if cfg.PermissionTemplateRegexp != "" {
+		if _, err := extract.CompileProjectKeyPattern(cfg.PermissionTemplateRegexp); err != nil {
+			return cfg, fmt.Errorf("invalid permission template regexp pattern %q: %w", cfg.PermissionTemplateRegexp, err)
+		}
 	}
 	applyFlagBool(cmd, flagFastSync, &cfg.FastSync)
 	// --migrate_history is one-way, same as extract and transfer:

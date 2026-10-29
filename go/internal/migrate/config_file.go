@@ -104,6 +104,12 @@ type configFileShape struct {
 	// migrate processes (#666). See MigrateConfig.PortfolioKeyRegexp.
 	PortfolioKeyRegexp  string `json:"portfolio_key_regexp"`
 	PortfolioNameRegexp string `json:"portfolio_name_regexp"`
+	// PermissionTemplateRegexp is the top-level "permission_template_regexp"
+	// value (alias "pt_regexp"): only permission templates whose name
+	// matches are migrated. In the unified shape,
+	// target.permission_template_regexp wins when both are set. #665.
+	PermissionTemplateRegexp string `json:"permission_template_regexp"`
+	PTRegexp                 string `json:"pt_regexp"`
 
 	// Shape 2 (command-sectioned).
 	Migrate *configFileShape `json:"migrate"`
@@ -173,6 +179,10 @@ type unifiedTargetBlock struct {
 	// PortfolioKeyRegexp / PortfolioNameRegexp — see MigrateConfig (#666).
 	PortfolioKeyRegexp  string `json:"portfolio_key_regexp"`
 	PortfolioNameRegexp string `json:"portfolio_name_regexp"`
+	// PermissionTemplateRegexp (alias PTRegexp) — see
+	// configFileShape.PermissionTemplateRegexp (#665).
+	PermissionTemplateRegexp string `json:"permission_template_regexp"`
+	PTRegexp                 string `json:"pt_regexp"`
 	// BranchAnalyzedAfter — see configFileShape.BranchAnalyzedAfter (#583).
 	// Pointer (not a plain string) so an explicit "" here can override a
 	// non-empty top-level value, distinguishing "target didn't set this"
@@ -253,6 +263,12 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		// #666 — same target-wins-else-top-level resolution, per option.
 		cfg.PortfolioKeyRegexp = common.FirstNonEmpty(cfg.PortfolioKeyRegexp, s.PortfolioKeyRegexp)
 		cfg.PortfolioNameRegexp = common.FirstNonEmpty(cfg.PortfolioNameRegexp, s.PortfolioNameRegexp)
+		// #665 — target.permission_template_regexp wins, else the top-level field.
+		var targetPT string
+		if s.Target != nil {
+			targetPT = common.FirstNonEmpty(s.Target.PermissionTemplateRegexp, s.Target.PTRegexp)
+		}
+		cfg.PermissionTemplateRegexp = common.FirstNonEmpty(targetPT, s.ptRegexp())
 		// #527 — target.fast_sync wins, else the top-level field, else false.
 		var targetFastSync *FlexibleBool
 		if s.Target != nil {
@@ -315,6 +331,7 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		cfg.BranchRegexp = common.FirstNonEmpty(cfg.BranchRegexp, s.BranchRegexp)
 		cfg.PortfolioKeyRegexp = common.FirstNonEmpty(cfg.PortfolioKeyRegexp, s.PortfolioKeyRegexp)
 		cfg.PortfolioNameRegexp = common.FirstNonEmpty(cfg.PortfolioNameRegexp, s.PortfolioNameRegexp)
+		cfg.PermissionTemplateRegexp = s.ptRegexp()
 		if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
 			cfg.SkipIssueSync = s.SkipIssueSync.Value
 		}
@@ -372,6 +389,10 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		if s.PortfolioNameRegexp != "" {
 			cfg.PortfolioNameRegexp = s.PortfolioNameRegexp
 		}
+		// #665: same outer-wins-else-nested semantics for permission_template_regexp.
+		if pt := s.ptRegexp(); pt != "" {
+			cfg.PermissionTemplateRegexp = pt
+		}
 		// Same outer-wins-else-inner semantics for branch_analyzed_after (#583).
 		if s.BranchAnalyzedAfter != "" {
 			cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
@@ -400,6 +421,8 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			// #666 — flat shape reads the fields directly.
 			PortfolioKeyRegexp:  s.PortfolioKeyRegexp,
 			PortfolioNameRegexp: s.PortfolioNameRegexp,
+			// #665 — flat shape reads the field directly.
+			PermissionTemplateRegexp: s.ptRegexp(),
 			// #583 — flat shape reads the field directly.
 			BranchAnalyzedAfter: s.BranchAnalyzedAfter,
 		}
@@ -419,6 +442,12 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		cfg.ProjectKeyFilter = common.ResolveDeprecatedProjectKey(s.ProjectKey, s.ProjectKeyRegexp)
 		return cfg
 	}
+}
+
+// ptRegexp returns the permission_template_regexp value, falling back to its
+// pt_regexp alias. #665.
+func (s configFileShape) ptRegexp() string {
+	return common.FirstNonEmpty(s.PermissionTemplateRegexp, s.PTRegexp)
 }
 
 func (sc sonarCloudBlock) toMigrateConfig(settings *settingsBlock) MigrateConfig {
