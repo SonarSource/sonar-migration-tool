@@ -151,11 +151,12 @@ type ExtractItem struct {
 // No error is yielded because none can escape: every failure mode above is
 // absorbed by design. Consumers stop early with break.
 //
-// A server whose merged set holds several extracts (#664) yields the
-// records of every one, oldest first. For project-scoped tasks a record is
-// dropped when a later extract of the set re-extracted its project; global
-// tasks are unioned as they are. A single-extract set takes the fast path
-// with no extra parsing.
+// A server whose merged set holds several extracts (#664) yields project-
+// scoped records from every one, oldest first, dropping a record when a later
+// extract of the set re-extracted its project. Portfolio-scoped records are
+// merged the same way per portfolio (#666). Server-wide tasks are read from
+// the newest extract that finished them (newestFinished). A single-extract
+// set takes the fast path with no extra parsing.
 //
 // Ordering matches ReadExtractData exactly — mapping iteration is Go map
 // order (nondeterministic across servers) and chunk files are visited in
@@ -163,10 +164,16 @@ type ExtractItem struct {
 func ExtractItems(directory string, mapping ExtractMapping, key string) func(yield func(ExtractItem) bool) {
 	return func(yield func(ExtractItem) bool) {
 		projectScoped := extract.IsProjectScopedTask(key)
+		portfolioScoped := extract.IsPortfolioScopedTask(key)
 		for serverURL, ids := range mapping {
 			var superseded []supersession
-			if projectScoped && len(ids) > 1 {
+			switch {
+			case projectScoped && len(ids) > 1:
 				superseded = supersessions(directory, ids, key)
+			case portfolioScoped && len(ids) > 1:
+				superseded = portfolioSupersessions(directory, ids, key)
+			case !projectScoped && !portfolioScoped && len(ids) > 1:
+				ids = newestFinished(directory, ids, key)
 			}
 			for i, extractID := range ids {
 				taskDir := filepath.Join(directory, extractID, key)
@@ -199,6 +206,9 @@ func ExtractItems(directory string, mapping ExtractMapping, key string) func(yie
 type supersession struct {
 	all  bool
 	keys map[string]bool
+	// portfolios is true when keys are portfolio keys (#666), matched against
+	// the portfolio a record belongs to rather than its project.
+	portfolios bool
 }
 
 func (s supersession) any() bool { return s.all || len(s.keys) > 0 }
@@ -208,6 +218,9 @@ func (s supersession) any() bool { return s.all || len(s.keys) > 0 }
 func (s supersession) covers(record json.RawMessage) bool {
 	if s.all {
 		return true
+	}
+	if s.portfolios {
+		return s.keys[recordPortfolioKey(record)]
 	}
 	return s.keys[recordProjectKey(record)]
 }
@@ -239,6 +252,60 @@ func supersessions(directory string, ids []string, key string) []supersession {
 		for _, k := range meta.ProjectKeys {
 			later.keys[k] = true
 		}
+	}
+	return result
+}
+
+// newestFinished narrows the extracts to read a server-wide task from (gates,
+// profiles, groups, users...) to the newest one that finished the task. Such a
+// task fetches the whole server each time it runs, so a later run replaces an
+// earlier one; reading both would repeat every record, which consumers that
+// append (groups, users) would count twice. When no extract finished the task
+// the set is returned unchanged, so nothing readable is dropped.
+func newestFinished(directory string, ids []string, key string) []string {
+	for i := len(ids) - 1; i >= 0; i-- {
+		if taskFinished(directory, ids[i], key) {
+			return ids[i : i+1]
+		}
+	}
+	return ids
+}
+
+// taskFinished reports whether the extract has the task's output and, when it
+// records finished tasks in .done, that it was marked finished. An extract
+// made before .done existed has no such directory, so its task output is
+// taken as finished.
+func taskFinished(directory, id, key string) bool {
+	if _, err := os.Stat(filepath.Join(directory, id, key)); err != nil {
+		return false
+	}
+	doneDir := filepath.Join(directory, id, ".done")
+	if _, err := os.Stat(doneDir); err != nil {
+		return true
+	}
+	_, err := os.Stat(filepath.Join(doneDir, key))
+	return err == nil
+}
+
+// portfolioSupersessions computes, for each extract of ids, the portfolios a
+// later extract of the set re-extracted for the task (#666). Unlike projects,
+// the portfolio keys are read from the later extract's own output for the
+// task: a slice is defined by a regexp, so extract.json cannot list them. A
+// later extract with no output for the task superseded nothing.
+func portfolioSupersessions(directory string, ids []string, key string) []supersession {
+	result := make([]supersession, len(ids))
+	var later map[string]bool
+	for i := len(ids) - 1; i >= 0; i-- {
+		result[i] = supersession{keys: copyKeys(later), portfolios: true}
+		_, _ = eachTaskDirRecord(filepath.Join(directory, ids[i], key), func(r json.RawMessage) bool {
+			if k := recordPortfolioKey(r); k != "" {
+				if later == nil {
+					later = make(map[string]bool)
+				}
+				later[k] = true
+			}
+			return true
+		})
 	}
 	return result
 }
@@ -281,6 +348,23 @@ func recordProjectKey(record json.RawMessage) string {
 		}
 	}
 	return ""
+}
+
+// recordPortfolioKey returns the portfolio a portfolio-scoped record belongs
+// to: portfolioKey (getPortfolioProjects) or key (getPortfolios,
+// getPortfolioDetails).
+func recordPortfolioKey(record json.RawMessage) string {
+	var obj struct {
+		PortfolioKey string `json:"portfolioKey"`
+		Key          string `json:"key"`
+	}
+	if err := json.Unmarshal(record, &obj); err != nil {
+		return ""
+	}
+	if obj.PortfolioKey != "" {
+		return obj.PortfolioKey
+	}
+	return obj.Key
 }
 
 // ReadExtractData reads all JSONL items for a given task key across all extracts.

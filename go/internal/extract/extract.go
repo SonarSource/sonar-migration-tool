@@ -374,10 +374,10 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 	meta := extractMeta{
 		Plan: plan, RunID: extractID, Version: version,
 		Edition: edition, URL: cfg.URL, Targets: targets, Registry: registry,
-		// A run limited to some objects or projects is a partial extract:
-		// readers merge it onto the latest full extract instead of
-		// replacing it (#664).
-		Partial:     cfg.Objects != nil || len(cfg.ProjectKeys) > 0,
+		// A run limited to some objects, projects or portfolios is a partial
+		// extract: readers merge it onto the latest full extract instead of
+		// replacing it (#664, #666).
+		Partial:     isPartialExtract(cfg),
 		ProjectKeys: cfg.ProjectKeys,
 	}
 	if err := writeMetadataFile(extractDir, meta); err != nil {
@@ -850,4 +850,11 @@ func tasksToRun(phase []string, store *DataStore) (run, discarded []string, err 
 		run = append(run, task)
 	}
 	return run, discarded, nil
+}
+
+// isPartialExtract reports whether cfg limits the run to some objects,
+// projects or portfolios (#664, #666).
+func isPartialExtract(cfg ExtractConfig) bool {
+	return cfg.Objects != nil || len(cfg.ProjectKeys) > 0 ||
+		cfg.PortfolioKeyRegexp != "" || cfg.PortfolioNameRegexp != ""
 }

@@ -81,3 +81,16 @@ func CategorizeTask(name string) common.TaskCategory {
 func IsProjectScopedTask(name string) bool {
 	return CategorizeTask(name) != common.CategoryGeneral
 }
+
+// IsPortfolioScopedTask reports whether the task writes one record (or set of
+// records) per portfolio. These tasks are server-wide, not project-scoped, but
+// a portfolio slice (--portfolio_key_regexp / --portfolio_name_regexp) only
+// extracts some portfolios, so readers merging slices let a re-extracted
+// portfolio replace its older records (#666).
+func IsPortfolioScopedTask(name string) bool {
+	switch name {
+	case "getPortfolios", "getPortfolioDetails", "getPortfolioProjects":
+		return true
+	}
+	return false
+}

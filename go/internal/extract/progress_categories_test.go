@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
@@ -125,5 +126,44 @@ func TestWriteMetadataFile_PartialFlag(t *testing.T) {
 	keys, _ := part["project_keys"].([]any)
 	if len(keys) != 2 || keys[0] != "a" || keys[1] != "b" {
 		t.Errorf("project_keys = %v, want [a b]", part["project_keys"])
+	}
+}
+
+// #666: a portfolio slice is a partial extract, so readers merge it onto the
+// earlier slices instead of replacing them.
+func TestIsPartialExtract(t *testing.T) {
+	for name, tc := range map[string]struct {
+		cfg  ExtractConfig
+		want bool
+	}{
+		"full":           {ExtractConfig{}, false},
+		"objects":        {ExtractConfig{Objects: map[string]bool{"projects": true}}, true},
+		"project keys":   {ExtractConfig{ProjectKeys: []string{"a"}}, true},
+		"portfolio key":  {ExtractConfig{PortfolioKeyRegexp: "a.*"}, true},
+		"portfolio name": {ExtractConfig{PortfolioNameRegexp: "A.*"}, true},
+	} {
+		if got := isPartialExtract(tc.cfg); got != tc.want {
+			t.Errorf("%s: isPartialExtract = %v, want %v", name, got, tc.want)
+		}
+	}
+}
+
+func TestIsPortfolioScopedTask(t *testing.T) {
+	for _, name := range []string{"getPortfolios", "getPortfolioDetails", "getPortfolioProjects"} {
+		if !IsPortfolioScopedTask(name) {
+			t.Errorf("%s must be portfolio-scoped", name)
+		}
+	}
+	for _, name := range []string{"getProjects", "getApplications", "getGates"} {
+		if IsPortfolioScopedTask(name) {
+			t.Errorf("%s must not be portfolio-scoped", name)
+		}
+	}
+	// Every registered portfolio task must be covered, so a new one cannot
+	// silently be unioned with duplicates across slices.
+	for _, def := range RegisterAll() {
+		if strings.HasPrefix(def.Name, "getPortfolio") && !IsPortfolioScopedTask(def.Name) {
+			t.Errorf("%s is a portfolio task but not portfolio-scoped", def.Name)
+		}
 	}
 }
