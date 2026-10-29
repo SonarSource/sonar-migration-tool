@@ -303,7 +303,7 @@ func TestBuildPlanDropsIssueCountTasks(t *testing.T) {
 		}
 		return set
 	}
-	counts := []string{"getProjectIssues", "getAcceptedIssues", "getProjectFixedIssueTypes",
+	counts := []string{"getProjectIssues", "getAcceptedIssues",
 		"getSafeHotspots", "getProjectPluginIssues", "getProjectTemplateIssues"}
 
 	full := scheduled(ExtractConfig{IncludeProjectData: true})

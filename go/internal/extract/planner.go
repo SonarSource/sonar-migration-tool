@@ -134,12 +134,11 @@ var projectDataTaskNames = map[string]bool{
 // (--skip_issue_sync), #365. getProjectIssueTypes and getProjectRecentIssueTypes
 // are kept: the maturity report reads them.
 var issueCountTaskNames = map[string]bool{
-	"getProjectIssues":          true,
-	"getAcceptedIssues":         true,
-	"getProjectFixedIssueTypes": true,
-	"getSafeHotspots":           true,
-	"getProjectPluginIssues":    true,
-	"getProjectTemplateIssues":  true,
+	"getProjectIssues":         true,
+	"getAcceptedIssues":        true,
+	"getSafeHotspots":          true,
+	"getProjectPluginIssues":   true,
+	"getProjectTemplateIssues": true,
 }
 
 // DropIssueCountTasks returns targets without the issue-count tasks (#365).

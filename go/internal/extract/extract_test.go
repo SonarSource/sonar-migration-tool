@@ -503,7 +503,7 @@ func TestRunExtractFull(t *testing.T) {
 
 	// This run does not include project data, so the issue-count queries
 	// migrate never reads are not extracted either (#365).
-	for _, task := range []string{"getProjectIssues", "getAcceptedIssues", "getSafeHotspots", "getProjectFixedIssueTypes"} {
+	for _, task := range []string{"getProjectIssues", "getAcceptedIssues", "getSafeHotspots"} {
 		if _, err := os.Stat(filepath.Join(extractDir, task)); err == nil {
 			t.Errorf("%s must not be extracted when project data is skipped", task)
 		}
