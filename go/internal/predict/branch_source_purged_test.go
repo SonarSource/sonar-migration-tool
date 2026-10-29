@@ -78,3 +78,47 @@ func TestSynthesizeBranchSourcePurged(t *testing.T) {
 		t.Errorf("main carries source and must NOT be flagged as purged")
 	}
 }
+
+// #565 — a non-main branch with no extracted component is predicted as not
+// migrated (status no_data); branches that have components are not.
+func TestSynthesizeBranchNoData(t *testing.T) {
+	exportDir := t.TempDir()
+	writeFile(t, exportDir, "organizations.csv",
+		"sonarqube_org_key,sonarcloud_org_key,server_url\n"+
+			"default,target-org,"+testServerURL+"\n")
+	writeFile(t, exportDir, "projects.csv",
+		"name,key,server_url,sonarqube_org_key\n"+
+			"App,com.example:app,"+testServerURL+",default\n")
+	extractDir := filepath.Join(exportDir, "2026-08-20-0001")
+	writeFile(t, extractDir, "extract.json", `{"url":"`+testServerURL+`"}`)
+
+	writeJSONL(t, filepath.Join(extractDir, "getBranches", "b.jsonl"),
+		[]map[string]any{
+			{"projectKey": "com.example:app", "name": "main", "type": "LONG", "isMain": true},
+			{"projectKey": "com.example:app", "name": "release-1.0", "type": "LONG"},
+			{"projectKey": "com.example:app", "name": "develop", "type": "LONG"},
+		})
+	writeJSONL(t, filepath.Join(extractDir, "getProjectComponentTree", "c.jsonl"),
+		[]map[string]any{
+			{"projectKey": "com.example:app", "branch": "main", "key": "f1"},
+			{"projectKey": "com.example:app", "branch": "release-1.0", "key": "f1"},
+		})
+
+	runDir, err := BuildPredictiveRun(exportDir)
+	if err != nil {
+		t.Fatalf("BuildPredictiveRun: %v", err)
+	}
+	rows, err := common.NewDataStore(runDir).ReadAll("importProjectData")
+	if err != nil {
+		t.Fatalf("read importProjectData: %v", err)
+	}
+	got := map[string]bool{}
+	for _, r := range rows {
+		if common.ExtractField(r, "status") == "no_data" {
+			got[common.ExtractField(r, "branch")] = true
+		}
+	}
+	if len(got) != 1 || !got["develop"] {
+		t.Errorf("want only develop flagged no_data, got %v", got)
+	}
+}
