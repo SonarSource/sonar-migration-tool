@@ -289,3 +289,51 @@ func TestParseEdition(t *testing.T) {
 		}
 	}
 }
+
+// #365: the per-project issue-count queries are dropped when issues or their
+// sync are not migrated, while everything migrate and the maturity report read
+// stays. An explicit target_task is never filtered.
+func TestBuildPlanDropsIssueCountTasks(t *testing.T) {
+	scheduled := func(cfg ExtractConfig) map[string]bool {
+		_, _, targets, err := buildPlan(cfg, EditionEnterprise)
+		if err != nil {
+			t.Fatalf("buildPlan: %v", err)
+		}
+		set := map[string]bool{}
+		for _, n := range targets {
+			set[n] = true
+		}
+		return set
+	}
+	counts := []string{"getProjectIssues", "getAcceptedIssues",
+		"getSafeHotspots", "getProjectPluginIssues", "getProjectTemplateIssues"}
+
+	full := scheduled(ExtractConfig{IncludeProjectData: true})
+	for _, n := range counts {
+		if !full[n] {
+			t.Errorf("default run: %s must still be extracted", n)
+		}
+	}
+
+	for name, cfg := range map[string]ExtractConfig{
+		"skip_project_data_migration": {IncludeProjectData: false},
+		"skip_issue_sync":             {IncludeProjectData: true, SkipIssueSync: true},
+	} {
+		got := scheduled(cfg)
+		for _, n := range counts {
+			if got[n] {
+				t.Errorf("%s: %s must not be extracted", name, n)
+			}
+		}
+		for _, n := range []string{"getProjectIssueTypes", "getProjectRecentIssueTypes", "getProjects", "getBranches", "getRuleDetails"} {
+			if !got[n] {
+				t.Errorf("%s: %s must still be extracted", name, n)
+			}
+		}
+	}
+
+	explicit := scheduled(ExtractConfig{SkipIssueSync: true, TargetTask: "getAcceptedIssues"})
+	if !explicit["getAcceptedIssues"] {
+		t.Error("an explicit target_task must win over the skip flags")
+	}
+}

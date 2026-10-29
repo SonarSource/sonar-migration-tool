@@ -127,6 +127,31 @@ var projectDataTaskNames = map[string]bool{
 	"getProjectAnalysisHistory": true, // #554 — PoC project-history migration.
 }
 
+// issueCountTaskNames lists the per-project issue and hotspot COUNT queries:
+// many cheap api/issues/search calls per project (types x severities x
+// resolutions...) that migrate never reads. They are dropped when the run does
+// not migrate issues (--skip_project_data_migration) or their sync
+// (--skip_issue_sync), #365. getProjectIssueTypes and getProjectRecentIssueTypes
+// are kept: the maturity report reads them.
+var issueCountTaskNames = map[string]bool{
+	"getProjectIssues":         true,
+	"getAcceptedIssues":        true,
+	"getSafeHotspots":          true,
+	"getProjectPluginIssues":   true,
+	"getProjectTemplateIssues": true,
+}
+
+// DropIssueCountTasks returns targets without the issue-count tasks (#365).
+func DropIssueCountTasks(targets []string) []string {
+	kept := make([]string, 0, len(targets))
+	for _, name := range targets {
+		if !issueCountTaskNames[name] {
+			kept = append(kept, name)
+		}
+	}
+	return kept
+}
+
 // TargetTasks determines which tasks to extract based on config. objects,
 // when non-nil, additionally drops any default task whose category isn't
 // selected (#536); pass nil for "everything" (no objects filter).

@@ -472,8 +472,7 @@ func TestRunExtractFull(t *testing.T) {
 		"getProjectMeasures", "getProjectWebhooks", "getProjectBindings",
 		"getProjectGroupsPermissions", "getProjectUsersScanners", "getProjectUsersViewers",
 		"getBranches", "getProjectPullRequests",
-		"getProjectIssues", "getAcceptedIssues", "getSafeHotspots",
-		"getProjectIssueTypes", "getProjectFixedIssueTypes", "getProjectRecentIssueTypes",
+		"getProjectIssueTypes", "getProjectRecentIssueTypes",
 		"getNewCodePeriods", "getGlobalNewCodePeriod", "getProjectAnalyses", "getProjectTasks",
 		// Per-profile tasks
 		"getProfileBackups", "getActiveProfileRules",
@@ -499,6 +498,14 @@ func TestRunExtractFull(t *testing.T) {
 	for _, task := range expectedTasks {
 		if _, err := os.Stat(filepath.Join(extractDir, task)); os.IsNotExist(err) {
 			t.Errorf("missing expected task output: %s", task)
+		}
+	}
+
+	// This run does not include project data, so the issue-count queries
+	// migrate never reads are not extracted either (#365).
+	for _, task := range []string{"getProjectIssues", "getAcceptedIssues", "getSafeHotspots"} {
+		if _, err := os.Stat(filepath.Join(extractDir, task)); err == nil {
+			t.Errorf("%s must not be extracted when project data is skipped", task)
 		}
 	}
 
@@ -864,10 +871,20 @@ func TestBuildIssueCombos(t *testing.T) {
 		t.Errorf("expected 15 combos, got %d", len(combos))
 	}
 
-	combosWithRes := buildIssueCombos(resolutions)
+	combosWithRes := buildIssueCombos([]string{"FALSE-POSITIVE", "WONTFIX", "FIXED", "REMOVED"})
 	// 4 resolutions × 3 types × 5 severities = 60
 	if len(combosWithRes) != 60 {
 		t.Errorf("expected 60 combos with resolutions, got %d", len(combosWithRes))
+	}
+}
+
+// Issue #661: getProjectFixedIssueTypes cost 60 api/issues/search calls per
+// project and nothing read its output, so it must not be in the plan.
+func TestIssueTasks_NoFixedIssueTypes(t *testing.T) {
+	for _, td := range issueTasks() {
+		if td.Name == "getProjectFixedIssueTypes" {
+			t.Fatalf("task %s must not be scheduled: nothing consumes its output", td.Name)
+		}
 	}
 }
 

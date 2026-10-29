@@ -793,7 +793,10 @@ func runTransferExtract(ctx context.Context, cfg transferConfig) ([]string, erro
 		// the operator opts out of project-data migration entirely
 		// via --skip_project_data_migration.
 		IncludeProjectData: !cfg.skipProjectDataMigration,
-		Debug:              cfg.debug,
+		// #365 — without this, transfer --skip_issue_sync still extracted
+		// the comments, changelog and hotspot detail it then never syncs.
+		SkipIssueSync: cfg.skipIssueSync,
+		Debug:         cfg.debug,
 		// #554 — PoC project-history migration; a no-op unless set.
 		MigrateHistory:         cfg.migrateHistory,
 		HistoryMaxPoints:       cfg.historyMaxPoints,

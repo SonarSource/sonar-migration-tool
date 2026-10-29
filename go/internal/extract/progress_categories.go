@@ -50,7 +50,6 @@ var extractProjectConfigTasks = map[string]bool{
 	"getProjectIssues":            true,
 	"getAcceptedIssues":           true,
 	"getProjectIssueTypes":        true,
-	"getProjectFixedIssueTypes":   true,
 	"getProjectRecentIssueTypes":  true,
 	"getSafeHotspots":             true,
 }

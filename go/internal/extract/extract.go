@@ -507,6 +507,12 @@ func buildPlan(cfg ExtractConfig, edition Edition) (map[string]*TaskDef, [][]str
 		targets = TargetTasks(registry, cfg.TargetTask, cfg.ExtractType, cfg.Objects)
 	}
 
+	// #365 — issue-count queries migrate never reads: skip them when issues
+	// or their sync are not migrated. An explicit target_task always wins.
+	if cfg.TargetTask == "" && (cfg.SkipIssueSync || !cfg.IncludeProjectData) {
+		targets = DropIssueCountTasks(targets)
+	}
+
 	var taskSet map[string]bool
 	var excluded map[string]bool
 	if cfg.Objects != nil {
