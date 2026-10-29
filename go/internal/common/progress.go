@@ -131,7 +131,6 @@ var ProgressLogInterval = map[string]int64{
 	"getProjectHotspotsFull":  50,
 	"getProjectComponentTree": 50,
 	"getProjectVersions":      50,
-	"getProjectPluginIssues":  50,
 	// <2 items/s.
 	"setProjectWebhooks":         10,
 	"configurePortfolios":        10,

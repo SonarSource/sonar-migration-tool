@@ -163,8 +163,8 @@ func allDepsCompleted[T TaskMeta](def T, completed map[string]bool) bool {
 // added, never walked) — so an entry with a cross-category dependency
 // on an excluded one (e.g. migrate's setGlobalSettings declares
 // createProjects as a dependency for its project-scope fallback path;
-// createProjects is excluded when --objects=settings; extract has the
-// analogous getProjectPluginIssues -> getPluginRules case) would
+// createProjects is excluded when --objects=settings; extract had the
+// analogous getProjectPluginIssues -> getPluginRules case until #668) would
 // otherwise wait forever for a dependency that will never run,
 // surfacing as a false "cycle detected in task dependency graph" error
 // instead of a valid plan (#536).
