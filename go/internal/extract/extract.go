@@ -870,8 +870,9 @@ func tasksToRun(phase []string, store *DataStore) (run, discarded []string, err 
 }
 
 // isPartialExtract reports whether cfg limits the run to some objects,
-// projects or portfolios (#664, #666).
+// projects, portfolios or permission templates (#664, #666, #665).
 func isPartialExtract(cfg ExtractConfig) bool {
 	return cfg.Objects != nil || len(cfg.ProjectKeys) > 0 ||
-		cfg.PortfolioKeyRegexp != "" || cfg.PortfolioNameRegexp != ""
+		cfg.PortfolioKeyRegexp != "" || cfg.PortfolioNameRegexp != "" ||
+		cfg.PermissionTemplateRegexp != ""
 }

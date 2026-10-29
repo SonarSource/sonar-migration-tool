@@ -36,6 +36,33 @@ func TestKeepTemplateByRegexp(t *testing.T) {
 	}
 }
 
+// #665: a permission template slice is a partial extract, so readers merge it
+// onto the earlier slices instead of replacing them.
+func TestIsPartialExtract_PermissionTemplateRegexp(t *testing.T) {
+	if !isPartialExtract(ExtractConfig{PermissionTemplateRegexp: "A.*"}) {
+		t.Error("a permission template slice must be a partial extract")
+	}
+}
+
+func TestIsTemplateScopedTask(t *testing.T) {
+	for _, name := range []string{"getTemplates", "getTemplateGroupsScanners", "getTemplateGroupsViewers",
+		"getTemplateUsersScanners", "getTemplateUsersViewers"} {
+		if !IsTemplateScopedTask(name) {
+			t.Errorf("%s must be template-scoped", name)
+		}
+	}
+	if IsTemplateScopedTask("getDefaultTemplates") {
+		t.Error("getDefaultTemplates is never filtered, so it must stay server-wide")
+	}
+	// Every registered template task fanning out from getTemplates must be
+	// covered, so a new one cannot silently be unioned with duplicates.
+	for _, def := range templateTasks() {
+		if def.Name != "getDefaultTemplates" && !IsTemplateScopedTask(def.Name) {
+			t.Errorf("%s is a template task but not template-scoped", def.Name)
+		}
+	}
+}
+
 func loadPTConfig(t *testing.T, body string) ExtractConfig {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "cfg.json")

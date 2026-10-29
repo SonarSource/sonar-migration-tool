@@ -165,6 +165,7 @@ func ExtractItems(directory string, mapping ExtractMapping, key string) func(yie
 	return func(yield func(ExtractItem) bool) {
 		projectScoped := extract.IsProjectScopedTask(key)
 		portfolioScoped := extract.IsPortfolioScopedTask(key)
+		templateScoped := extract.IsTemplateScopedTask(key)
 		for serverURL, ids := range mapping {
 			var superseded []supersession
 			switch {
@@ -172,7 +173,9 @@ func ExtractItems(directory string, mapping ExtractMapping, key string) func(yie
 				superseded = supersessions(directory, ids, key)
 			case portfolioScoped && len(ids) > 1:
 				superseded = portfolioSupersessions(directory, ids, key)
-			case !projectScoped && !portfolioScoped && len(ids) > 1:
+			case templateScoped && len(ids) > 1:
+				superseded = templateSupersessions(directory, ids, key)
+			case !projectScoped && !portfolioScoped && !templateScoped && len(ids) > 1:
 				ids = newestFinished(directory, ids, key)
 			}
 			for i, extractID := range ids {
@@ -209,6 +212,13 @@ type supersession struct {
 	// portfolios is true when keys are portfolio keys (#666), matched against
 	// the portfolio a record belongs to rather than its project.
 	portfolios bool
+	// templates is true when keys are permission template ids (#665),
+	// matched against the template a record belongs to.
+	templates bool
+	// templateField is the record field holding the template id: "id" for
+	// getTemplates itself, "templateId" for the permission tasks (their own
+	// "id" would be a group or user id).
+	templateField string
 }
 
 func (s supersession) any() bool { return s.all || len(s.keys) > 0 }
@@ -221,6 +231,9 @@ func (s supersession) covers(record json.RawMessage) bool {
 	}
 	if s.portfolios {
 		return s.keys[recordPortfolioKey(record)]
+	}
+	if s.templates {
+		return s.keys[recordStringField(record, s.templateField)]
 	}
 	return s.keys[recordProjectKey(record)]
 }
@@ -308,6 +321,49 @@ func portfolioSupersessions(directory string, ids []string, key string) []supers
 		})
 	}
 	return result
+}
+
+// templateSupersessions computes, for each extract of ids, the permission
+// templates a later extract of the set re-extracted (#665). The ids come from
+// the later extract's own getTemplates output, not from the task being read:
+// a re-extracted template with no group or user permissions writes no record
+// to getTemplateGroups* / getTemplateUsers*, yet must still replace the older,
+// stale ones. A later extract that did not finish getTemplates (e.g. one
+// limited by --objects) superseded nothing.
+func templateSupersessions(directory string, ids []string, key string) []supersession {
+	field := "templateId"
+	if key == "getTemplates" {
+		field = "id"
+	}
+	result := make([]supersession, len(ids))
+	var later map[string]bool
+	for i := len(ids) - 1; i >= 0; i-- {
+		result[i] = supersession{keys: copyKeys(later), templates: true, templateField: field}
+		if !taskFinished(directory, ids[i], "getTemplates") {
+			continue
+		}
+		_, _ = eachTaskDirRecord(filepath.Join(directory, ids[i], "getTemplates"), func(r json.RawMessage) bool {
+			if id := recordStringField(r, "id"); id != "" {
+				if later == nil {
+					later = make(map[string]bool)
+				}
+				later[id] = true
+			}
+			return true
+		})
+	}
+	return result
+}
+
+// recordStringField returns the string value of one top-level field of a
+// JSONL record, or "" when it is absent or the record does not parse.
+func recordStringField(record json.RawMessage, field string) string {
+	var obj map[string]any
+	if err := json.Unmarshal(record, &obj); err != nil {
+		return ""
+	}
+	s, _ := obj[field].(string)
+	return s
 }
 
 func copyKeys(m map[string]bool) map[string]bool {
