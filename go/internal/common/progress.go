@@ -112,7 +112,6 @@ var ProgressLogInterval = map[string]int64{
 	"getProjectLinks":             100,
 	"getProjectIssues":            100,
 	"getProjectGroupsPermissions": 100,
-	"getProjectFixedIssueTypes":   100,
 	// 5–10 items/s.
 	"createProjects":                       50,
 	"createGates":                          50,

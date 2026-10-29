@@ -21,7 +21,6 @@ var sqs10 = common.MustParseVersion("10")
 var (
 	issueTypes      = []string{"CODE_SMELL", "BUG", "VULNERABILITY"}
 	issueSeverities = []string{"INFO", "MINOR", "MAJOR", "CRITICAL", "BLOCKER"}
-	resolutions     = []string{"FALSE-POSITIVE", "WONTFIX", "FIXED", "REMOVED"}
 )
 
 // hotspotsProjectParam returns the parameter name /api/hotspots/search
@@ -42,8 +41,6 @@ func issueTasks() []TaskDef {
 			Run: perProjectIssueCount("getAcceptedIssues", url.Values{"issueStatuses": {"ACCEPTED,CONFIRMED"}})},
 		{Name: "getProjectIssueTypes", Editions: AllEditions, Dependencies: []string{"getProjects"},
 			Run: makeExpandedIssueTask("getProjectIssueTypes", nil, nil)},
-		{Name: "getProjectFixedIssueTypes", Editions: AllEditions, Dependencies: []string{"getProjects"},
-			Run: makeExpandedIssueTask("getProjectFixedIssueTypes", resolutions, nil)},
 		{Name: "getProjectRecentIssueTypes", Editions: AllEditions, Dependencies: []string{"getProjects"},
 			Run: makeExpandedIssueTask("getProjectRecentIssueTypes", nil, url.Values{"createdInLast": {"30d"}})},
 		{Name: "getSafeHotspots", Editions: AllEditions, Dependencies: []string{"getProjects"},
