@@ -64,7 +64,7 @@ var commandFlags = map[string][]string{
 	"extract": {
 		"--branch_analyzed_after", "--branch_regexp", "--cert_password",
 		"--concurrency", "--config", "--export_directory", "--extract_id",
-		"--extract_type", "--history_max_points", "--history_min_interval_days",
+		"--extract_type", "--group_name_regexp", "--history_max_points", "--history_min_interval_days",
 		"--insecure", "--key_file_path", "--migrate_history", "--objects",
 		"--pem_file_path", "--portfolio_key_regexp", "--portfolio_name_regexp",
 		"--project_key_regexp", "--skip_issue_sync",
@@ -77,7 +77,7 @@ var commandFlags = map[string][]string{
 		"--api_max_rate_per_min", "--branch_analyzed_after", "--branch_regexp",
 		"--concurrency", "--config", "--default_organization", "--edition",
 		"--enterprise_key", "--exclude_branches", "--export_directory",
-		"--fast_sync", "--migrate_history", "--objects",
+		"--fast_sync", "--group_name_regexp", "--migrate_history", "--objects",
 		"--portfolio_key_regexp", "--portfolio_name_regexp",
 		"--project_data_build_concurrency", "--project_key_regexp",
 		"--project_key_pattern", "--run_id", "--skip_issue_sync",
@@ -356,6 +356,18 @@ func TestTier0_ExitCodeMatrix(t *testing.T) {
 			args:         []string{"migrate", "--config", cfg, "--export_directory", exportDir, "--branch_regexp", "("},
 			wantExit:     1,
 			wantContains: `invalid branch regexp pattern "("`,
+		},
+		{
+			name:         "extract_with_unparseable_group_name_regexp",
+			args:         []string{"extract", "--config", cfg, "--export_directory", exportDir, "--group_name_regexp", "("},
+			wantExit:     1,
+			wantContains: `invalid group name regexp pattern "("`,
+		},
+		{
+			name:         "migrate_with_unparseable_group_name_regexp",
+			args:         []string{"migrate", "--config", cfg, "--export_directory", exportDir, "--group_name_regexp", "("},
+			wantExit:     1,
+			wantContains: `invalid group name regexp pattern "("`,
 		},
 		{
 			name:         "transfer_with_unparseable_branch_regexp",

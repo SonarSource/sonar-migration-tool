@@ -94,3 +94,16 @@ func IsPortfolioScopedTask(name string) bool {
 	}
 	return false
 }
+
+// IsGroupScopedTask reports whether the task writes records that belong to a
+// user group fetched by getGroups. Like the portfolio tasks they are
+// server-wide, but a group slice (--group_name_regexp) only extracts some
+// groups, so readers merging slices let a re-extracted group replace its
+// older records instead of keeping only the newest slice's (#669).
+func IsGroupScopedTask(name string) bool {
+	switch name {
+	case "getGroups", "getUserGroups":
+		return true
+	}
+	return false
+}

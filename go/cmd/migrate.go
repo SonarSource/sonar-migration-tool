@@ -88,6 +88,7 @@ func init() {
 	f.String("project_key_pattern", "", "Template for target project keys, built from <ORIGINAL_PROJECT_KEY> and <ORGANIZATION_KEY> (default: <ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>). #138")
 	f.StringSlice("exclude_branches", nil, "Glob patterns for non-main branches to skip during project data import (e.g. feature/*,bugfix/*)")
 	registerPortfolioFlags(migrateCmd, "migrate")
+	f.String(flagGroupNameRegexp, "", "Regexp pattern of user group names to migrate, applied on top of whatever the extract phase already limited getGroups to, to migrate groups in slices. Always compiled as a full-match regex implicitly anchored with ^ and $. Empty means every extracted group is migrated (default). #669.")
 	f.String(flagBranchRegexp, "", "Regexp pattern of branch names to migrate, applied on top of whatever the extract phase already limited getBranches to. Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"(main|master)\" matches only branches literally named main or master. The project's main branch is always migrated regardless of match. Empty means every extracted branch is migrated (default). #582.")
 	f.String("objects", "", "Comma-separated list of object categories to migrate: "+strings.Join(common.AllObjects, ", ")+" (aliases: qp, qg, pt, lp). Omit to migrate everything (default). #536")
 	registerProjectKeyFlags(f, "Regexp pattern of source project keys to migrate (only applies when the projects category is selected via --objects). Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"BANKING_.+\" matches every key starting with BANKING_, not just a key containing that substring. A plain key like \"my-project\" matches only itself. #536, #592")
@@ -147,6 +148,12 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 		cfg.ExcludeBranches, _ = cmd.Flags().GetStringSlice("exclude_branches")
 	}
 	overrideString(cmd, flagBranchRegexp, &cfg.BranchRegexp)
+	overrideString(cmd, flagGroupNameRegexp, &cfg.GroupNameRegexp)
+	if cfg.GroupNameRegexp != "" {
+		if _, err := extract.CompileProjectKeyPattern(cfg.GroupNameRegexp); err != nil {
+			return cfg, fmt.Errorf("invalid group name regexp pattern %q: %w", cfg.GroupNameRegexp, err)
+		}
+	}
 	// #582 — reject an invalid --branch_regexp pattern up front, mirroring
 	// applyMigrateProjectKeyFlag above and the equivalent checks already
 	// present in extract's RunE and transfer's validateTransferConfig.

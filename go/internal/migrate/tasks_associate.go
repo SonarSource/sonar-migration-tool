@@ -303,6 +303,9 @@ func runSetProjectGroupPermissions(ctx context.Context, e *Executor) error {
 
 func applyGroupPermissions(ctx context.Context, e *Executor, data json.RawMessage, pm projectMapping, w *common.ChunkWriter, counter *TaskCounter) {
 	name := extractField(data, "name")
+	if !e.groupSelected(name) {
+		return
+	}
 	// Issue #269: remap SQS built-in groups to their SQC equivalents
 	// (today: sonar-users → Members). The write to the task output is
 	// still done with the source name so downstream / report code can

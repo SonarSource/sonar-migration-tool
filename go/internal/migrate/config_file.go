@@ -104,6 +104,10 @@ type configFileShape struct {
 	// migrate processes (#666). See MigrateConfig.PortfolioKeyRegexp.
 	PortfolioKeyRegexp  string `json:"portfolio_key_regexp"`
 	PortfolioNameRegexp string `json:"portfolio_name_regexp"`
+	// GroupNameRegexp is the top-level regexp pattern restricting which
+	// groups extract/migrate/transfer process (#669). target.group_name_regexp
+	// wins in the unified shape.
+	GroupNameRegexp string `json:"group_name_regexp"`
 
 	// Shape 2 (command-sectioned).
 	Migrate *configFileShape `json:"migrate"`
@@ -173,6 +177,8 @@ type unifiedTargetBlock struct {
 	// PortfolioKeyRegexp / PortfolioNameRegexp — see MigrateConfig (#666).
 	PortfolioKeyRegexp  string `json:"portfolio_key_regexp"`
 	PortfolioNameRegexp string `json:"portfolio_name_regexp"`
+	// GroupNameRegexp — see MigrateConfig.GroupNameRegexp (#669).
+	GroupNameRegexp string `json:"group_name_regexp"`
 	// BranchAnalyzedAfter — see configFileShape.BranchAnalyzedAfter (#583).
 	// Pointer (not a plain string) so an explicit "" here can override a
 	// non-empty top-level value, distinguishing "target didn't set this"
@@ -244,6 +250,7 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			cfg.BranchRegexp = s.Target.BranchRegexp
 			cfg.PortfolioKeyRegexp = s.Target.PortfolioKeyRegexp
 			cfg.PortfolioNameRegexp = s.Target.PortfolioNameRegexp
+			cfg.GroupNameRegexp = s.Target.GroupNameRegexp
 		}
 		// #474 — target.unsupported_languages wins, else the top-level field.
 		cfg.UnsupportedLanguages = resolveUnsupportedLanguages(
@@ -253,6 +260,8 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		// #666 — same target-wins-else-top-level resolution, per option.
 		cfg.PortfolioKeyRegexp = common.FirstNonEmpty(cfg.PortfolioKeyRegexp, s.PortfolioKeyRegexp)
 		cfg.PortfolioNameRegexp = common.FirstNonEmpty(cfg.PortfolioNameRegexp, s.PortfolioNameRegexp)
+		// #669 — target.group_name_regexp wins, else the top-level field.
+		cfg.GroupNameRegexp = common.FirstNonEmpty(cfg.GroupNameRegexp, s.GroupNameRegexp)
 		// #527 — target.fast_sync wins, else the top-level field, else false.
 		var targetFastSync *FlexibleBool
 		if s.Target != nil {
@@ -315,6 +324,7 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		cfg.BranchRegexp = common.FirstNonEmpty(cfg.BranchRegexp, s.BranchRegexp)
 		cfg.PortfolioKeyRegexp = common.FirstNonEmpty(cfg.PortfolioKeyRegexp, s.PortfolioKeyRegexp)
 		cfg.PortfolioNameRegexp = common.FirstNonEmpty(cfg.PortfolioNameRegexp, s.PortfolioNameRegexp)
+		cfg.GroupNameRegexp = common.FirstNonEmpty(cfg.GroupNameRegexp, s.GroupNameRegexp)
 		if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
 			cfg.SkipIssueSync = s.SkipIssueSync.Value
 		}
@@ -372,6 +382,9 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		if s.PortfolioNameRegexp != "" {
 			cfg.PortfolioNameRegexp = s.PortfolioNameRegexp
 		}
+		if s.GroupNameRegexp != "" {
+			cfg.GroupNameRegexp = s.GroupNameRegexp
+		}
 		// Same outer-wins-else-inner semantics for branch_analyzed_after (#583).
 		if s.BranchAnalyzedAfter != "" {
 			cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
@@ -400,6 +413,7 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			// #666 — flat shape reads the fields directly.
 			PortfolioKeyRegexp:  s.PortfolioKeyRegexp,
 			PortfolioNameRegexp: s.PortfolioNameRegexp,
+			GroupNameRegexp:     s.GroupNameRegexp,
 			// #583 — flat shape reads the field directly.
 			BranchAnalyzedAfter: s.BranchAnalyzedAfter,
 		}

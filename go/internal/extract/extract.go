@@ -80,6 +80,13 @@ type ExtractConfig struct {
 	// and are never filtered. Empty means every portfolio (#666).
 	PortfolioKeyRegexp  string
 	PortfolioNameRegexp string
+	// GroupNameRegexp, when non-empty, limits which user groups get
+	// extracted: only groups whose name matches are written by getGroups, and
+	// getUserGroups follows since it fans out from getGroups. Always compiled
+	// as a full-match regex implicitly anchored with ^ and $ (same as
+	// BranchRegexp). The built-in "Anyone" pseudo-group is always kept.
+	// Empty means "extract every group" (#669).
+	GroupNameRegexp string
 	// Objects, when non-nil, limits extraction to the selected object
 	// categories (settings, permission_templates, quality_profiles,
 	// quality_gates, projects, portfolios, groups, license_profiles —
@@ -146,6 +153,9 @@ type Executor struct {
 	// PortfolioFilter is the compiled form of ExtractConfig.PortfolioKeyRegexp
 	// / PortfolioNameRegexp. Nil (or inactive) means no portfolio filtering. #666.
 	PortfolioFilter *common.PortfolioFilter
+	// GroupRe is the compiled form of ExtractConfig.GroupNameRegexp, or nil
+	// when unset (meaning "no group filtering"). #669.
+	GroupRe *regexp.Regexp
 
 	// Truncation collects every truncated API response observed during
 	// the run, for the end-of-run console block and the
@@ -404,6 +414,13 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 			return nil, fmt.Errorf("invalid branch regexp pattern %q: %w", cfg.BranchRegexp, err)
 		}
 		executor.BranchRe = branchRe
+	}
+	if cfg.GroupNameRegexp != "" {
+		groupRe, err := CompileProjectKeyPattern(cfg.GroupNameRegexp)
+		if err != nil {
+			return nil, fmt.Errorf("invalid group name regexp pattern %q: %w", cfg.GroupNameRegexp, err)
+		}
+		executor.GroupRe = groupRe
 	}
 	// Defensive re-validation (#583): cmd/extract.go already validates
 	// --branch_analyzed_after before calling RunExtract, but this entry
@@ -853,8 +870,9 @@ func tasksToRun(phase []string, store *DataStore) (run, discarded []string, err 
 }
 
 // isPartialExtract reports whether cfg limits the run to some objects,
-// projects or portfolios (#664, #666).
+// projects, portfolios or groups (#664, #666, #669).
 func isPartialExtract(cfg ExtractConfig) bool {
 	return cfg.Objects != nil || len(cfg.ProjectKeys) > 0 ||
-		cfg.PortfolioKeyRegexp != "" || cfg.PortfolioNameRegexp != ""
+		cfg.PortfolioKeyRegexp != "" || cfg.PortfolioNameRegexp != "" ||
+		cfg.GroupNameRegexp != ""
 }

@@ -406,19 +406,19 @@ func TestExtractItemsServerWideTaskNewestFinishedWins(t *testing.T) {
 	writeTestJSON(t, filepath.Join(root, runA, "extract.json"), map[string]any{"url": streamTestURL})
 	writeTestJSON(t, filepath.Join(root, runB, "extract.json"), map[string]any{"url": streamTestURL, "partial": true})
 	for _, id := range []string{runA, runB} {
-		writeChunks(t, filepath.Join(root, id, "getGroups"), [][]string{{`{"name":"` + id + `"}`}})
+		writeChunks(t, filepath.Join(root, id, "getUsers"), [][]string{{`{"name":"` + id + `"}`}})
 		markDone(t, filepath.Join(root, id, ".done", "getProjects"), "")
 	}
-	// Both extracts record finished tasks; only the older one finished getGroups.
-	markDone(t, filepath.Join(root, runA, ".done", "getGroups"), "")
+	// Both extracts record finished tasks; only the older one finished getUsers.
+	markDone(t, filepath.Join(root, runA, ".done", "getUsers"), "")
 	mapping, _ := GetUniqueExtracts(root)
-	got := collect(ExtractItems(root, mapping, "getGroups"))
+	got := collect(ExtractItems(root, mapping, "getUsers"))
 	if len(got) != 1 || string(got[0].Data) != `{"name":"`+runA+`"}` {
 		t.Errorf("got %v, want only the finished older extract's record", got)
 	}
 	// Once the newer run finishes it, it wins.
-	markDone(t, filepath.Join(root, runB, ".done", "getGroups"), "")
-	got = collect(ExtractItems(root, mapping, "getGroups"))
+	markDone(t, filepath.Join(root, runB, ".done", "getUsers"), "")
+	got = collect(ExtractItems(root, mapping, "getUsers"))
 	if len(got) != 1 || string(got[0].Data) != `{"name":"`+runB+`"}` {
 		t.Errorf("got %v, want only the newer extract's record", got)
 	}

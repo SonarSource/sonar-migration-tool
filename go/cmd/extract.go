@@ -58,6 +58,12 @@ existing organizations.csv or projects.csv is first saved as
 		if _, err := common.NewPortfolioFilter(cfg.PortfolioKeyRegexp, cfg.PortfolioNameRegexp); err != nil {
 			return err
 		}
+		// #669 — same up-front validation for --group_name_regexp.
+		if cfg.GroupNameRegexp != "" {
+			if _, err := extract.CompileProjectKeyPattern(cfg.GroupNameRegexp); err != nil {
+				return fmt.Errorf("invalid group name regexp pattern %q: %w", cfg.GroupNameRegexp, err)
+			}
+		}
 		// #536, #592: resolve --project_key_regexp (or the deprecated
 		// --project_key, or either one's config-file equivalent) into
 		// concrete ProjectKeys now that URL/Token are known to be set.
@@ -118,6 +124,7 @@ func init() {
 	f.Int(flagHistoryMinIntervalDays, extract.HistoryUnset, "Minimum spacing, in days, enforced between two selected historical snapshots of the same project+branch when --migrate_history is set (default 0 — no spacing rule, every analysis in the source history becomes a candidate).")
 	f.String("objects", "", "Comma-separated list of object categories to extract: "+strings.Join(common.AllObjects, ", ")+" (aliases: qp, qg, pt, lp). Omit to extract everything (default).")
 	registerProjectKeyFlags(f, "Regexp pattern of project keys to extract (only applies when the projects category is selected). A plain key matches only itself. #592.")
+	f.String(flagGroupNameRegexp, "", "Regexp pattern of user group names to extract, to extract groups in slices on instances with a large number of them. Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"team-a-.+\" matches every group named team-a-*, not just a name containing that substring. Empty means every group is extracted (default). #669.")
 	f.String(flagBranchRegexp, "", "Regexp pattern of branch names to extract, applied to each project's own branches (also filters the getBranches task's own written records, so downstream migrate runs only see what matched here). Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"(main|master)\" matches only branches literally named main or master. The project's main branch is always extracted regardless of match. Empty means every branch is extracted (default). #582.")
 	registerPortfolioFlags(extractCmd, "extract")
 	f.String(flagBranchAnalyzedAfter, "", "Only select branches analyzed on or after this date (YYYY-MM-DD) during extract. The project's main branch is always selected, even when it doesn't meet this date. Omit to select all branches (default). #583")
@@ -210,6 +217,7 @@ func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfi
 	resolveProjectKeyFlagsInto(cmd, &cfg.ProjectKey)
 	overrideString(cmd, flagBranchRegexp, &cfg.BranchRegexp)
 	overridePortfolioRegexps(cmd, &cfg.PortfolioKeyRegexp, &cfg.PortfolioNameRegexp)
+	overrideString(cmd, flagGroupNameRegexp, &cfg.GroupNameRegexp)
 	overrideString(cmd, flagBranchAnalyzedAfter, &cfg.BranchAnalyzedAfter)
 	if err := validateBranchAnalyzedAfter(cfg.BranchAnalyzedAfter); err != nil {
 		return cfg, fmt.Errorf("--%s: %w", flagBranchAnalyzedAfter, err)

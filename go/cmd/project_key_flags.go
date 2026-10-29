@@ -72,3 +72,9 @@ func resolveProjectKeyFlagsInto(cmd *cobra.Command, target *string) {
 		*target = v
 	}
 }
+
+// flagGroupNameRegexp — #669: regexp of user group names to extract/migrate,
+// so groups can be processed in slices on instances with a very large number
+// of them. Always compiled as a full-match regex implicitly anchored with ^
+// and $.
+const flagGroupNameRegexp = "group_name_regexp"

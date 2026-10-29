@@ -165,6 +165,7 @@ func ExtractItems(directory string, mapping ExtractMapping, key string) func(yie
 	return func(yield func(ExtractItem) bool) {
 		projectScoped := extract.IsProjectScopedTask(key)
 		portfolioScoped := extract.IsPortfolioScopedTask(key)
+		groupScoped := extract.IsGroupScopedTask(key)
 		for serverURL, ids := range mapping {
 			var superseded []supersession
 			switch {
@@ -172,6 +173,8 @@ func ExtractItems(directory string, mapping ExtractMapping, key string) func(yie
 				superseded = supersessions(directory, ids, key)
 			case portfolioScoped && len(ids) > 1:
 				superseded = portfolioSupersessions(directory, ids, key)
+			case groupScoped && len(ids) > 1:
+				superseded = groupSupersessions(directory, ids, key)
 			case !projectScoped && !portfolioScoped && len(ids) > 1:
 				ids = newestFinished(directory, ids, key)
 			}
@@ -209,6 +212,9 @@ type supersession struct {
 	// portfolios is true when keys are portfolio keys (#666), matched against
 	// the portfolio a record belongs to rather than its project.
 	portfolios bool
+	// groups is true when keys are group IDs (#669), matched against the
+	// group a record belongs to.
+	groups bool
 }
 
 func (s supersession) any() bool { return s.all || len(s.keys) > 0 }
@@ -221,6 +227,9 @@ func (s supersession) covers(record json.RawMessage) bool {
 	}
 	if s.portfolios {
 		return s.keys[recordPortfolioKey(record)]
+	}
+	if s.groups {
+		return s.keys[recordGroupKey(record)]
 	}
 	return s.keys[recordProjectKey(record)]
 }
@@ -310,6 +319,29 @@ func portfolioSupersessions(directory string, ids []string, key string) []supers
 	return result
 }
 
+// groupSupersessions computes, for each extract of ids, the groups a later
+// extract of the set re-extracted for the task (#669). Like portfolios, a
+// group slice is a regexp, so the group IDs are read from the later extract's
+// own output for the task. A later extract with no output for the task
+// superseded nothing.
+func groupSupersessions(directory string, ids []string, key string) []supersession {
+	result := make([]supersession, len(ids))
+	var later map[string]bool
+	for i := len(ids) - 1; i >= 0; i-- {
+		result[i] = supersession{keys: copyKeys(later), groups: true}
+		_, _ = eachTaskDirRecord(filepath.Join(directory, ids[i], key), func(r json.RawMessage) bool {
+			if k := recordGroupKey(r); k != "" {
+				if later == nil {
+					later = make(map[string]bool)
+				}
+				later[k] = true
+			}
+			return true
+		})
+	}
+	return result
+}
+
 func copyKeys(m map[string]bool) map[string]bool {
 	if len(m) == 0 {
 		return nil
@@ -348,6 +380,23 @@ func recordProjectKey(record json.RawMessage) string {
 		}
 	}
 	return ""
+}
+
+// recordGroupKey returns the group a group-scoped record belongs to: groupId
+// (getUserGroups, enriched from the group it was fetched for) or id
+// (getGroups).
+func recordGroupKey(record json.RawMessage) string {
+	var obj struct {
+		GroupID string `json:"groupId"`
+		ID      string `json:"id"`
+	}
+	if err := json.Unmarshal(record, &obj); err != nil {
+		return ""
+	}
+	if obj.GroupID != "" {
+		return obj.GroupID
+	}
+	return obj.ID
 }
 
 // recordPortfolioKey returns the portfolio a portfolio-scoped record belongs
