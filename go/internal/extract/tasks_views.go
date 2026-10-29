@@ -30,10 +30,17 @@ func viewTasks() []TaskDef {
 
 func getPortfoliosTask() func(ctx context.Context, e *Executor) error {
 	return func(ctx context.Context, e *Executor) error {
-		return fetchAndWritePaginated(ctx, e, "getPortfolios", PaginatedOpts{
+		return fetchAndWritePaginatedFiltered(ctx, e, "getPortfolios", PaginatedOpts{
 			Path: "api/views/search", ResultKey: "components",
-		}, map[string]any{"serverUrl": e.ServerURL})
+		}, map[string]any{"serverUrl": e.ServerURL}, keepPortfolioByFilter)
 	}
+}
+
+// keepPortfolioByFilter decides whether a raw "api/views/search" item
+// survives extraction: no filter configured, or its key/name matches
+// e.PortfolioFilter. #666.
+func keepPortfolioByFilter(e *Executor, item json.RawMessage) bool {
+	return e.PortfolioFilter.Match(extractField(item, "key"), extractField(item, "name"))
 }
 
 func getPortfolioDetailsTask() func(ctx context.Context, e *Executor) error {

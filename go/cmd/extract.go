@@ -53,6 +53,11 @@ existing organizations.csv or projects.csv is first saved as
 				return fmt.Errorf("invalid branch regexp pattern %q: %w", cfg.BranchRegexp, err)
 			}
 		}
+		// #666 — reject a conflicting or invalid portfolio regexp pair up
+		// front too (RunExtract re-validates for callers that skip this).
+		if _, err := common.NewPortfolioFilter(cfg.PortfolioKeyRegexp, cfg.PortfolioNameRegexp); err != nil {
+			return err
+		}
 		// #536, #592: resolve --project_key_regexp (or the deprecated
 		// --project_key, or either one's config-file equivalent) into
 		// concrete ProjectKeys now that URL/Token are known to be set.
@@ -114,7 +119,26 @@ func init() {
 	f.String("objects", "", "Comma-separated list of object categories to extract: "+strings.Join(common.AllObjects, ", ")+" (aliases: qp, qg, pt, lp). Omit to extract everything (default).")
 	registerProjectKeyFlags(f, "Regexp pattern of project keys to extract (only applies when the projects category is selected). A plain key matches only itself. #592.")
 	f.String(flagBranchRegexp, "", "Regexp pattern of branch names to extract, applied to each project's own branches (also filters the getBranches task's own written records, so downstream migrate runs only see what matched here). Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"(main|master)\" matches only branches literally named main or master. The project's main branch is always extracted regardless of match. Empty means every branch is extracted (default). #582.")
+	registerPortfolioFlags(extractCmd, "extract")
 	f.String(flagBranchAnalyzedAfter, "", "Only select branches analyzed on or after this date (YYYY-MM-DD) during extract. The project's main branch is always selected, even when it doesn't meet this date. Omit to select all branches (default). #583")
+}
+
+// overridePortfolioRegexps applies --portfolio_key_regexp / --portfolio_name_regexp
+// over the config-file values. The two are mutually exclusive, so when the CLI
+// sets only one of them it replaces the pair: the other (config-file) value is
+// cleared rather than left to falsely conflict. Passing both flags is left
+// as-is for the conflict check to reject. #666.
+func overridePortfolioRegexps(cmd *cobra.Command, key, name *string) {
+	keyChanged := cmd.Flags().Changed(flagPortfolioKeyRegexp)
+	nameChanged := cmd.Flags().Changed(flagPortfolioNameRegexp)
+	if keyChanged && !nameChanged {
+		*name = ""
+	}
+	if nameChanged && !keyChanged {
+		*key = ""
+	}
+	overrideString(cmd, flagPortfolioKeyRegexp, key)
+	overrideString(cmd, flagPortfolioNameRegexp, name)
 }
 
 func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfig, error) {
@@ -185,6 +209,7 @@ func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfi
 	// same precedence as every other flag (CLI overrides config file).
 	resolveProjectKeyFlagsInto(cmd, &cfg.ProjectKey)
 	overrideString(cmd, flagBranchRegexp, &cfg.BranchRegexp)
+	overridePortfolioRegexps(cmd, &cfg.PortfolioKeyRegexp, &cfg.PortfolioNameRegexp)
 	overrideString(cmd, flagBranchAnalyzedAfter, &cfg.BranchAnalyzedAfter)
 	if err := validateBranchAnalyzedAfter(cfg.BranchAnalyzedAfter); err != nil {
 		return cfg, fmt.Errorf("--%s: %w", flagBranchAnalyzedAfter, err)

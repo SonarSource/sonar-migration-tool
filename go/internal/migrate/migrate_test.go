@@ -767,3 +767,15 @@ func TestMigrateTargetTasksExplicitListHonorsSkipIssueSync(t *testing.T) {
 // go/internal/common/runid_test.go, deduplicated across the three
 // packages (migrate, extract, wizard) that used to each hand-maintain
 // an identical copy of this function and its test.
+
+// #666 — RunMigrate rejects a conflicting or invalid portfolio slice up front.
+func TestRunMigrateRejectsBadPortfolioRegexp(t *testing.T) {
+	_, err := RunMigrate(context.Background(), MigrateConfig{PortfolioKeyRegexp: "a", PortfolioNameRegexp: "b"})
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("expected a mutual-exclusion error, got: %v", err)
+	}
+	_, err = RunMigrate(context.Background(), MigrateConfig{PortfolioNameRegexp: "("})
+	if err == nil || !strings.Contains(err.Error(), "invalid portfolio name regexp") {
+		t.Errorf("expected an invalid-pattern error, got: %v", err)
+	}
+}

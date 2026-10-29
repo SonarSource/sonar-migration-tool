@@ -71,6 +71,15 @@ type ExtractConfig struct {
 	// #529/#536). The project's main branch is always kept regardless of
 	// whether it matches. Empty means "extract every branch" (#582).
 	BranchRegexp string
+	// PortfolioKeyRegexp / PortfolioNameRegexp, when non-empty, limit which
+	// portfolios get extracted: the getPortfolios task writes only matching
+	// portfolios, so getPortfolioDetails and getPortfolioProjects (which
+	// iterate its output) follow. Implicitly anchored (^...$) like
+	// ProjectKey. Mutually exclusive — RunExtract rejects setting both
+	// (common.ErrPortfolioRegexpConflict). Applications are not portfolios
+	// and are never filtered. Empty means every portfolio (#666).
+	PortfolioKeyRegexp  string
+	PortfolioNameRegexp string
 	// Objects, when non-nil, limits extraction to the selected object
 	// categories (settings, permission_templates, quality_profiles,
 	// quality_gates, projects, portfolios, groups, license_profiles —
@@ -133,6 +142,10 @@ type Executor struct {
 	// BranchRe is the compiled form of ExtractConfig.BranchRegexp, or nil
 	// when unset (meaning "no branch filtering"). #582.
 	BranchRe *regexp.Regexp
+
+	// PortfolioFilter is the compiled form of ExtractConfig.PortfolioKeyRegexp
+	// / PortfolioNameRegexp. Nil (or inactive) means no portfolio filtering. #666.
+	PortfolioFilter *common.PortfolioFilter
 
 	// Truncation collects every truncated API response observed during
 	// the run, for the end-of-run console block and the
@@ -330,6 +343,13 @@ func (e *Executor) SkippedProjectKeys() []string {
 func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 	cfg.applyDefaults()
 
+	// #666: reject a conflicting/invalid portfolio regexp pair before any
+	// network call.
+	portfolioFilter, err := common.NewPortfolioFilter(cfg.PortfolioKeyRegexp, cfg.PortfolioNameRegexp)
+	if err != nil {
+		return nil, err
+	}
+
 	cmdStart := time.Now()
 	// End-of-command timing line (#311) — defer so it fires on every
 	// exit path. Logger is slog.Default() so initClient failures
@@ -388,6 +408,7 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 		return nil, err
 	}
 	executor.BranchAnalyzedAfter = branchAnalyzedAfter
+	executor.PortfolioFilter = portfolioFilter
 
 	// Truncation tracking (#574). The observer is installed on the raw
 	// client — one installation covering all of its call sites,
