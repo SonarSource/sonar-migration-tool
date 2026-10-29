@@ -473,7 +473,7 @@ func TestRunExtractFull(t *testing.T) {
 		"getProjectGroupsPermissions", "getProjectUsersScanners", "getProjectUsersViewers",
 		"getBranches", "getProjectPullRequests",
 		"getProjectIssues", "getAcceptedIssues", "getSafeHotspots",
-		"getProjectIssueTypes", "getProjectFixedIssueTypes", "getProjectRecentIssueTypes",
+		"getProjectIssueTypes", "getProjectRecentIssueTypes",
 		"getNewCodePeriods", "getGlobalNewCodePeriod", "getProjectAnalyses", "getProjectTasks",
 		// Per-profile tasks
 		"getProfileBackups", "getActiveProfileRules",
@@ -875,10 +875,20 @@ func TestBuildIssueCombos(t *testing.T) {
 		t.Errorf("expected 15 combos, got %d", len(combos))
 	}
 
-	combosWithRes := buildIssueCombos(resolutions)
+	combosWithRes := buildIssueCombos([]string{"FALSE-POSITIVE", "WONTFIX", "FIXED", "REMOVED"})
 	// 4 resolutions × 3 types × 5 severities = 60
 	if len(combosWithRes) != 60 {
 		t.Errorf("expected 60 combos with resolutions, got %d", len(combosWithRes))
+	}
+}
+
+// Issue #661: getProjectFixedIssueTypes cost 60 api/issues/search calls per
+// project and nothing read its output, so it must not be in the plan.
+func TestIssueTasks_NoFixedIssueTypes(t *testing.T) {
+	for _, td := range issueTasks() {
+		if td.Name == "getProjectFixedIssueTypes" {
+			t.Fatalf("task %s must not be scheduled: nothing consumes its output", td.Name)
+		}
 	}
 }
 
