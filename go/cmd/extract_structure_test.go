@@ -5,6 +5,7 @@
 package cmd
 
 import (
+	"encoding/csv"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/extract"
 )
 
 var extractStructureTestTime = time.Date(2026, 10, 16, 14, 3, 12, 0, time.Local)
@@ -107,6 +109,32 @@ func TestRunExtractStructure_SkipsWithoutProjects(t *testing.T) {
 	}
 }
 
+// A resumed extract with --extract_id alone restores its object selection
+// before the structure step, so a project-free selection still skips CSVs.
+func TestRunExtractStructure_UsesRestoredObjects(t *testing.T) {
+	dir := writeMinimalExtract(t)
+	resumeID := "2026-10-16-02"
+	resumeDir := filepath.Join(dir, resumeID)
+	if err := os.MkdirAll(resumeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, resumeDir, "extract.json", `{"partial":true,"objects":["groups"]}`)
+
+	cfg := extract.ExtractConfig{ExportDirectory: dir, ExtractID: resumeID}
+	extract.RestoreResumeScope(&cfg)
+	if cfg.Objects[common.ObjectProjects] {
+		t.Fatal("restored groups-only scope unexpectedly includes projects")
+	}
+	if err := runExtractStructure(dir, cfg.Objects, "", extractStructureTestTime); err != nil {
+		t.Fatalf("runExtractStructure: %v", err)
+	}
+	for _, name := range structureCSVs {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			t.Errorf("%s should not be written for the restored groups-only scope", name)
+		}
+	}
+}
+
 // #503: a failing step names itself and says the extract data is intact.
 func TestRunExtractStructure_ErrorNamesStep(t *testing.T) {
 	dir := t.TempDir()
@@ -119,5 +147,49 @@ func TestRunExtractStructure_ErrorNamesStep(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err.Error(), want)
 		}
+	}
+}
+
+// #664: a second run into the same export directory keeps the
+// sonarcloud_org_key values the operator filled in.
+func TestRunExtractStructure_CarriesOverOperatorOrgKey(t *testing.T) {
+	dir := writeMinimalExtract(t)
+	if err := runExtractStructure(dir, nil, "", extractStructureTestTime); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	path := filepath.Join(dir, "organizations.csv")
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := csv.NewReader(f).ReadAll()
+	f.Close()
+	if err != nil || len(rows) < 2 {
+		t.Fatalf("organizations.csv rows: %v, %v", len(rows), err)
+	}
+	col := -1
+	for i, h := range rows[0] {
+		if h == "sonarcloud_org_key" {
+			col = i
+		}
+	}
+	for _, r := range rows[1:] {
+		r[col] = "hand-edited-org"
+	}
+	out, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := csv.NewWriter(out).WriteAll(rows); err != nil {
+		t.Fatal(err)
+	}
+	out.Close()
+
+	if err := runExtractStructure(dir, nil, "", extractStructureTestTime.Add(time.Minute)); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), "hand-edited-org") {
+		t.Errorf("operator org key was not carried over:\n%s", data)
 	}
 }

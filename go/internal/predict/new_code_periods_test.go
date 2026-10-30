@@ -57,7 +57,7 @@ func TestSynthesizeSetNewCodePeriods(t *testing.T) {
 		{"projectKey": "plain", "type": "NUMBER_OF_DAYS"},
 		{"projectKey": "unmapped", "type": "REFERENCE_BRANCH"},
 	})
-	mapping := structure.ExtractMapping{server: "ext1"}
+	mapping := structure.ExtractMapping{server: []string{"ext1"}}
 
 	// No createProjects rows yet: nothing to join, nothing written.
 	if err := synthesizeSetNewCodePeriods(exportDir, runDir, mapping, false); err != nil {

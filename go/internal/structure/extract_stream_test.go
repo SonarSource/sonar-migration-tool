@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -51,7 +53,7 @@ func oneExtract(t *testing.T, task string, chunks [][]string) (string, ExtractMa
 	t.Helper()
 	root := t.TempDir()
 	writeChunks(t, filepath.Join(root, extract01, task), chunks)
-	return root, ExtractMapping{streamTestURL: extract01}
+	return root, ExtractMapping{streamTestURL: {extract01}}
 }
 
 func collect(seq func(func(ExtractItem) bool)) []ExtractItem {
@@ -134,7 +136,7 @@ func TestExtractItemsSkipsUnreadableFile(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(bad, 0o600) })
 
-	got := collect(ExtractItems(root, ExtractMapping{streamTestURL: extract01}, "task"))
+	got := collect(ExtractItems(root, ExtractMapping{streamTestURL: {extract01}}, "task"))
 	if len(got) != 2 {
 		t.Errorf("got %d records, want 2 from the readable file", len(got))
 	}
@@ -152,8 +154,8 @@ func TestExtractItemsSkipsExtractMissingTaskDir(t *testing.T) {
 	}
 
 	mapping := ExtractMapping{
-		streamTestURL:  extract01,
-		streamTestURL2: extract02,
+		streamTestURL:  {extract01},
+		streamTestURL2: {extract02},
 	}
 	got := collect(ExtractItems(root, mapping, "task"))
 	if len(got) != 1 {
@@ -180,7 +182,7 @@ func TestExtractItemsStopsEarlyWithoutOpeningNextFile(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(bad, 0o600) })
 
 	var seen []string
-	for it := range ExtractItems(root, ExtractMapping{streamTestURL: extract01}, "task") {
+	for it := range ExtractItems(root, ExtractMapping{streamTestURL: {extract01}}, "task") {
 		seen = append(seen, string(it.Data))
 		break
 	}
@@ -198,8 +200,8 @@ func TestExtractItemsStopsEarlyAcrossExtracts(t *testing.T) {
 	writeChunks(t, filepath.Join(root, extract02, "task"), [][]string{{`{"n":3}`, `{"n":4}`}})
 
 	mapping := ExtractMapping{
-		streamTestURL:  extract01,
-		streamTestURL2: extract02,
+		streamTestURL:  {extract01},
+		streamTestURL2: {extract02},
 	}
 
 	count := 0
@@ -239,5 +241,253 @@ func TestExtractItemsYieldsParseableRecords(t *testing.T) {
 	}
 	if len(keys) != 2 || keys[0] != "a" || keys[1] != "b" {
 		t.Errorf("keys = %v, want [a b]", keys)
+	}
+}
+
+const (
+	runA = "2026-08-20-0001"
+	runB = "2026-08-20-0002"
+)
+
+func projectRecords(root, id string, lines ...string) {
+	dir := filepath.Join(root, id, "getProjectDetails")
+	_ = os.MkdirAll(dir, 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "results.1.jsonl"), []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+}
+
+// #664: a project re-extracted by a later extract replaces its older record;
+// a server-wide task is read from the newest extract that ran it.
+func TestExtractItemsSupersedesReExtractedProjects(t *testing.T) {
+	root := t.TempDir()
+	writeTestJSON(t, filepath.Join(root, runA, "extract.json"), map[string]any{"url": streamTestURL})
+	writeTestJSON(t, filepath.Join(root, runB, "extract.json"),
+		map[string]any{"url": streamTestURL, "partial": true, "project_keys": []string{"b"}})
+	projectRecords(root, runA, `{"key":"a","v":1}`, `{"key":"b","v":1}`)
+	projectRecords(root, runB, `{"key":"b","v":2}`)
+	writeChunks(t, filepath.Join(root, runA, "getGates"), [][]string{{`{"name":"g1"}`}})
+	writeChunks(t, filepath.Join(root, runB, "getGates"), [][]string{{`{"name":"g2"}`}})
+
+	mapping, err := GetUniqueExtracts(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for it := range ExtractItems(root, mapping, "getProjectDetails") {
+		got = append(got, string(it.Data))
+	}
+	want := []string{`{"key":"a","v":1}`, `{"key":"b","v":2}`}
+	if !slices.Equal(got, want) {
+		t.Errorf("projects = %v, want %v", got, want)
+	}
+	gates := collect(ExtractItems(root, mapping, "getGates"))
+	if len(gates) != 1 || string(gates[0].Data) != `{"name":"g2"}` {
+		t.Errorf("gates = %v, want only the newest extract's record", gates)
+	}
+}
+
+// On resume, completed output from the original project scope remains beside
+// output for the replacement scope. Both sets of records must supersede older
+// copies even though extract.json records only the replacement project keys.
+func TestExtractItemsResumeScopeChangeDoesNotDuplicateRetainedProjects(t *testing.T) {
+	root := t.TempDir()
+	writeTestJSON(t, filepath.Join(root, runA, "extract.json"), map[string]any{"url": streamTestURL})
+	writeTestJSON(t, filepath.Join(root, runB, "extract.json"),
+		map[string]any{"url": streamTestURL, "partial": true, "project_keys": []string{"b"}})
+	projectRecords(root, runA, `{"key":"a","v":1}`, `{"key":"b","v":1}`, `{"key":"c","v":1}`)
+	projectRecords(root, runB, `{"key":"a","v":2}`, `{"key":"b","v":2}`)
+	markDone(t, filepath.Join(root, runB, ".done", "getProjectDetails"), "")
+
+	mapping, err := GetUniqueExtracts(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := collect(ExtractItems(root, mapping, "getProjectDetails"))
+	want := []string{`{"key":"c","v":1}`, `{"key":"a","v":2}`, `{"key":"b","v":2}`}
+	var records []string
+	for _, item := range got {
+		records = append(records, string(item.Data))
+	}
+	if !slices.Equal(records, want) {
+		t.Errorf("projects = %v, want %v", records, want)
+	}
+}
+
+// A partial extract without a project list re-extracted every project.
+func TestExtractItemsPartialWithoutKeysSupersedesAll(t *testing.T) {
+	root := t.TempDir()
+	writeTestJSON(t, filepath.Join(root, runA, "extract.json"), map[string]any{"url": streamTestURL})
+	writeTestJSON(t, filepath.Join(root, runB, "extract.json"), map[string]any{"url": streamTestURL, "partial": true})
+	projectRecords(root, runA, `{"key":"a","v":1}`)
+	projectRecords(root, runB, `{"key":"a","v":2}`)
+	mapping, _ := GetUniqueExtracts(root)
+	got := collect(ExtractItems(root, mapping, "getProjectDetails"))
+	if len(got) != 1 || string(got[0].Data) != `{"key":"a","v":2}` {
+		t.Errorf("got %v, want only the newer record", got)
+	}
+}
+
+// A later partial that did not run the task supersedes nothing.
+func TestExtractItemsLaterExtractWithoutTaskSupersedesNothing(t *testing.T) {
+	root := t.TempDir()
+	writeTestJSON(t, filepath.Join(root, runA, "extract.json"), map[string]any{"url": streamTestURL})
+	writeTestJSON(t, filepath.Join(root, runB, "extract.json"),
+		map[string]any{"url": streamTestURL, "partial": true, "project_keys": []string{"a"}})
+	projectRecords(root, runA, `{"key":"a","v":1}`)
+	mapping, _ := GetUniqueExtracts(root)
+	if got := collect(ExtractItems(root, mapping, "getProjectDetails")); len(got) != 1 {
+		t.Errorf("got %d records, want 1", len(got))
+	}
+}
+
+func TestRecordProjectKeyPrecedence(t *testing.T) {
+	for raw, want := range map[string]string{
+		`{"projectKey":"p","project":"q","key":"r"}`: "p",
+		`{"project":"q","key":"r"}`:                  "q",
+		`{"key":"r"}`:                                "r",
+		`{"x":1}`:                                    "",
+	} {
+		if got := recordProjectKey([]byte(raw)); got != want {
+			t.Errorf("recordProjectKey(%s) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+func portfolioRecords(root, id, task string, lines ...string) {
+	dir := filepath.Join(root, id, task)
+	_ = os.MkdirAll(dir, 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "results.1.jsonl"), []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+}
+
+// #666: portfolio slices accumulate, and a portfolio re-extracted by a later
+// slice replaces its older records (getPortfolioProjects is keyed by
+// portfolioKey, the others by key).
+func TestExtractItemsMergesPortfolioSlices(t *testing.T) {
+	root := t.TempDir()
+	writeTestJSON(t, filepath.Join(root, runA, "extract.json"), map[string]any{"url": streamTestURL, "partial": true})
+	writeTestJSON(t, filepath.Join(root, runB, "extract.json"), map[string]any{"url": streamTestURL, "partial": true})
+	portfolioRecords(root, runA, "getPortfolios", `{"key":"p1","v":1}`, `{"key":"p2","v":1}`)
+	portfolioRecords(root, runB, "getPortfolios", `{"key":"p2","v":2}`, `{"key":"p3","v":2}`)
+	portfolioRecords(root, runA, "getPortfolioProjects", `{"portfolioKey":"p1","k":"x"}`, `{"portfolioKey":"p2","k":"old"}`)
+	portfolioRecords(root, runB, "getPortfolioProjects", `{"portfolioKey":"p2","k":"new"}`)
+
+	mapping, err := GetUniqueExtracts(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for it := range ExtractItems(root, mapping, "getPortfolios") {
+		got = append(got, string(it.Data))
+	}
+	want := []string{`{"key":"p1","v":1}`, `{"key":"p2","v":2}`, `{"key":"p3","v":2}`}
+	if !slices.Equal(got, want) {
+		t.Errorf("portfolios = %v, want %v", got, want)
+	}
+	got = nil
+	for it := range ExtractItems(root, mapping, "getPortfolioProjects") {
+		got = append(got, string(it.Data))
+	}
+	want = []string{`{"portfolioKey":"p1","k":"x"}`, `{"portfolioKey":"p2","k":"new"}`}
+	if !slices.Equal(got, want) {
+		t.Errorf("portfolio projects = %v, want %v", got, want)
+	}
+}
+
+// A later slice supersedes a portfolio even when it has no projects, so the
+// older project list cannot reappear in cumulative extracts.
+func TestExtractItemsEmptyPortfolioSliceRemovesOldProjects(t *testing.T) {
+	root := t.TempDir()
+	writeTestJSON(t, filepath.Join(root, runA, "extract.json"), map[string]any{"url": streamTestURL, "partial": true})
+	writeTestJSON(t, filepath.Join(root, runB, "extract.json"), map[string]any{"url": streamTestURL, "partial": true})
+	portfolioRecords(root, runA, "getPortfolios", `{"key":"p1"}`, `{"key":"p2"}`)
+	portfolioRecords(root, runB, "getPortfolios", `{"key":"p2"}`)
+	portfolioRecords(root, runA, "getPortfolioProjects", `{"portfolioKey":"p1","k":"keep"}`, `{"portfolioKey":"p2","k":"stale"}`)
+	markDone(t, filepath.Join(root, runB, ".done", "getPortfolioProjects"), "")
+
+	mapping, err := GetUniqueExtracts(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := collect(ExtractItems(root, mapping, "getPortfolioProjects"))
+	if len(got) != 1 || string(got[0].Data) != `{"portfolioKey":"p1","k":"keep"}` {
+		t.Errorf("portfolio projects = %v, want only p1's older project list", got)
+	}
+}
+
+// Merely finishing getPortfolios does not supersede records from a different
+// portfolio-scoped task that the later extract never ran.
+func TestExtractItemsPortfolioTaskSupersessionRequiresThatTaskToFinish(t *testing.T) {
+	root := t.TempDir()
+	writeTestJSON(t, filepath.Join(root, runA, "extract.json"), map[string]any{"url": streamTestURL, "partial": true})
+	writeTestJSON(t, filepath.Join(root, runB, "extract.json"), map[string]any{"url": streamTestURL, "partial": true})
+	portfolioRecords(root, runA, "getPortfolios", `{"key":"p1"}`)
+	portfolioRecords(root, runB, "getPortfolios", `{"key":"p1"}`)
+	portfolioRecords(root, runA, "getPortfolioProjects", `{"portfolioKey":"p1","k":"from-older-task"}`)
+
+	mapping, err := GetUniqueExtracts(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := collect(ExtractItems(root, mapping, "getPortfolioProjects"))
+	if len(got) != 1 || string(got[0].Data) != `{"portfolioKey":"p1","k":"from-older-task"}` {
+		t.Errorf("portfolio projects = %v, want the older task's record", got)
+	}
+}
+
+// A later extract that ran no portfolio task (for example --objects projects)
+// leaves the earlier portfolio records alone.
+func TestExtractItemsPortfoliosSurviveLaterExtractWithoutThem(t *testing.T) {
+	root := t.TempDir()
+	writeTestJSON(t, filepath.Join(root, runA, "extract.json"), map[string]any{"url": streamTestURL, "partial": true})
+	writeTestJSON(t, filepath.Join(root, runB, "extract.json"), map[string]any{"url": streamTestURL, "partial": true})
+	portfolioRecords(root, runA, "getPortfolios", `{"key":"p1"}`)
+	projectRecords(root, runB, `{"key":"a"}`)
+	mapping, _ := GetUniqueExtracts(root)
+	if got := collect(ExtractItems(root, mapping, "getPortfolios")); len(got) != 1 {
+		t.Errorf("got %d portfolio records, want 1", len(got))
+	}
+}
+
+func TestRecordPortfolioKeyPrecedence(t *testing.T) {
+	for raw, want := range map[string]string{
+		`{"portfolioKey":"p","key":"k"}`: "p",
+		`{"key":"k"}`:                    "k",
+		`{"x":1}`:                        "",
+	} {
+		if got := recordPortfolioKey(json.RawMessage(raw)); got != want {
+			t.Errorf("recordPortfolioKey(%s) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+func markDone(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, path, contents)
+}
+
+// #666: a server-wide task re-run by a later extract must not repeat its
+// records, and an unfinished newer run must not hide a finished older one.
+func TestExtractItemsServerWideTaskNewestFinishedWins(t *testing.T) {
+	root := t.TempDir()
+	writeTestJSON(t, filepath.Join(root, runA, "extract.json"), map[string]any{"url": streamTestURL})
+	writeTestJSON(t, filepath.Join(root, runB, "extract.json"), map[string]any{"url": streamTestURL, "partial": true})
+	for _, id := range []string{runA, runB} {
+		writeChunks(t, filepath.Join(root, id, "getGroups"), [][]string{{`{"name":"` + id + `"}`}})
+		markDone(t, filepath.Join(root, id, ".done", "getProjects"), "")
+	}
+	// Both extracts record finished tasks; only the older one finished getGroups.
+	markDone(t, filepath.Join(root, runA, ".done", "getGroups"), "")
+	mapping, _ := GetUniqueExtracts(root)
+	got := collect(ExtractItems(root, mapping, "getGroups"))
+	if len(got) != 1 || string(got[0].Data) != `{"name":"`+runA+`"}` {
+		t.Errorf("got %v, want only the finished older extract's record", got)
+	}
+	// Once the newer run finishes it, it wins.
+	markDone(t, filepath.Join(root, runB, ".done", "getGroups"), "")
+	got = collect(ExtractItems(root, mapping, "getGroups"))
+	if len(got) != 1 || string(got[0].Data) != `{"name":"`+runB+`"}` {
+		t.Errorf("got %v, want only the newer extract's record", got)
 	}
 }

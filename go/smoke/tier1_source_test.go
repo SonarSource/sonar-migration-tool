@@ -72,6 +72,7 @@ func TestTier1_SourcePipeline(t *testing.T) {
 		if !fileExists(filepath.Join(runDir, "extract.json")) {
 			t.Errorf("expected extract.json under %q", runDir)
 		}
+		assertPartialExtractMeta(t, runDir, projectKey)
 
 		foundResults := false
 		walkErr := filepath.WalkDir(runDir, func(path string, d fs.DirEntry, err error) error {
@@ -597,5 +598,31 @@ func assertExtractBookkeeping(t *testing.T, runDir string) {
 	if fileExists(filepath.Join(runDir, "failed_projects.json")) {
 		data, _ := os.ReadFile(filepath.Join(runDir, "failed_projects.json"))
 		t.Errorf("expected no failed_projects.json against a healthy server, got:\n%s", data)
+	}
+}
+
+// assertPartialExtractMeta checks that an extract limited by --project_key_regexp
+// records itself as partial and lists the project it was limited to, which is
+// what lets structure merge later slices onto earlier ones (#664, #666).
+func assertPartialExtractMeta(t *testing.T, runDir, projectKey string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(runDir, "extract.json"))
+	if err != nil {
+		t.Errorf("reading extract.json: %v", err)
+		return
+	}
+	var meta struct {
+		Partial     bool     `json:"partial"`
+		ProjectKeys []string `json:"project_keys"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Errorf("parsing extract.json: %v", err)
+		return
+	}
+	if !meta.Partial {
+		t.Errorf("extract.json: partial = false, want true for an extract limited by --project_key_regexp")
+	}
+	if !slices.Contains(meta.ProjectKeys, projectKey) {
+		t.Errorf("extract.json: project_keys = %v, want it to contain %q", meta.ProjectKeys, projectKey)
 	}
 }

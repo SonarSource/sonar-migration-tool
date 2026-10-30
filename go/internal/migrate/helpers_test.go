@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -298,7 +299,7 @@ func TestForEachExtractItem(t *testing.T) {
 	e := &Executor{
 		Store:              store,
 		ExportDir:          dir,
-		Mapping:            structure.ExtractMapping{testServerURL: "extract-01"},
+		Mapping:            structure.ExtractMapping{testServerURL: {"extract-01"}},
 		ConcurrencyLimiter: NewFixedConcurrencyLimiter(5),
 		Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 	}
@@ -713,4 +714,56 @@ func TestSortExtractItems(t *testing.T) {
 			t.Errorf("expected input order preserved for unregistered task")
 		}
 	})
+}
+
+// #666 — portfolios.csv is filtered to the slice when loaded; other CSVs and
+// an inactive filter are untouched. The CSV (a full extract) is larger than
+// the slice.
+func TestLoadCSVToJSONL_PortfolioFilter(t *testing.T) {
+	const csv = "source_portfolio_key,name,server_url\nteam-a,Alpha,https://s/\nteam-b,Beta,https://s/\nother,Alpha Two,https://s/\n"
+	run := func(t *testing.T, file, key, name string) []string {
+		t.Helper()
+		dir := t.TempDir()
+		for _, f := range []string{file, "organizations.csv"} {
+			if err := os.WriteFile(filepath.Join(dir, f), []byte(csv), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		runDir := filepath.Join(dir, "run-01")
+		os.MkdirAll(runDir, 0o755)
+		store := common.NewDataStore(runDir)
+		f, err := common.NewPortfolioFilter(key, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := &Executor{Store: store, ExportDir: dir, PortfolioFilter: f}
+		if err := loadCSVToJSONL(e, "task", file); err != nil {
+			t.Fatalf("loadCSVToJSONL: %v", err)
+		}
+		items, _ := store.ReadAll("task")
+		var keys []string
+		for _, raw := range items {
+			keys = append(keys, extractField(raw, "source_portfolio_key"))
+		}
+		return keys
+	}
+	cases := []struct {
+		name, file, key, nameRe string
+		want                    []string
+	}{
+		{"key mode anchored", "portfolios.csv", "team-.*", "", []string{"team-a", "team-b"}},
+		{"key exact", "portfolios.csv", "team-a", "", []string{"team-a"}},
+		{"name mode anchored", "portfolios.csv", "", "Alpha", []string{"team-a"}},
+		{"name mode alternation", "portfolios.csv", "", "Alpha.*", []string{"team-a", "other"}},
+		{"no filter", "portfolios.csv", "", "", []string{"team-a", "team-b", "other"}},
+		{"other csv untouched", "projects.csv", "team-a", "", []string{"team-a", "team-b", "other"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := run(t, tc.file, tc.key, tc.nameRe)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
