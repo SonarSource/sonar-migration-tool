@@ -93,6 +93,10 @@ type ExtractConfig struct {
 	// between the config-file loader and cmd/extract.go's CLI handling.
 	// Cleared once Objects is populated; not meant to be read afterward.
 	objectsRaw []string
+	// resumedPartial is set by restoreResumeScope when the run resumes an
+	// extract recorded as partial, so the resumed extract stays partial
+	// whatever flags it was resumed with (#666).
+	resumedPartial bool
 	// ProgressCallback, when set, is invoked with the same run-wide
 	// percent/ETA snapshot as the #520 log line, on every tick and once
 	// more at completion. Nil for CLI callers (go/cmd/extract.go); the
@@ -342,6 +346,7 @@ func (e *Executor) SkippedProjectKeys() []string {
 // It returns the list of project keys that were skipped due to insufficient privileges.
 func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 	cfg.applyDefaults()
+	restoreResumeScope(&cfg, slog.Default())
 
 	// #666: reject a conflicting/invalid portfolio regexp pair before any
 	// network call.
@@ -377,8 +382,11 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 		// A run limited to some objects, projects or portfolios is a partial
 		// extract: readers merge it onto the latest full extract instead of
 		// replacing it (#664, #666).
-		Partial:     isPartialExtract(cfg),
-		ProjectKeys: cfg.ProjectKeys,
+		Partial:             isPartialExtract(cfg),
+		ProjectKeys:         cfg.ProjectKeys,
+		Objects:             sortedObjects(cfg.Objects),
+		PortfolioKeyRegexp:  cfg.PortfolioKeyRegexp,
+		PortfolioNameRegexp: cfg.PortfolioNameRegexp,
 	}
 	if err := writeMetadataFile(extractDir, meta); err != nil {
 		return nil, err
@@ -744,6 +752,11 @@ type extractMeta struct {
 	// filter. ProjectKeys lists the projects it was limited to (#664).
 	Partial     bool
 	ProjectKeys []string
+	// Objects and the portfolio regexps record the rest of the run's scope,
+	// so resuming it with --extract_id alone extracts the same slice (#666).
+	Objects             []string
+	PortfolioKeyRegexp  string
+	PortfolioNameRegexp string
 }
 
 func writeMetadataFile(dir string, m extractMeta) error {
@@ -765,6 +778,15 @@ func writeMetadataFile(dir string, m extractMeta) error {
 	}
 	if len(m.ProjectKeys) > 0 {
 		meta["project_keys"] = m.ProjectKeys
+	}
+	if len(m.Objects) > 0 {
+		meta["objects"] = m.Objects
+	}
+	if m.PortfolioKeyRegexp != "" {
+		meta["portfolio_key_regexp"] = m.PortfolioKeyRegexp
+	}
+	if m.PortfolioNameRegexp != "" {
+		meta["portfolio_name_regexp"] = m.PortfolioNameRegexp
 	}
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
@@ -855,6 +877,11 @@ func tasksToRun(phase []string, store *DataStore) (run, discarded []string, err 
 // isPartialExtract reports whether cfg limits the run to some objects,
 // projects or portfolios (#664, #666).
 func isPartialExtract(cfg ExtractConfig) bool {
+	return cfg.resumedPartial || hasScope(cfg)
+}
+
+// hasScope reports whether cfg's own flags limit the run.
+func hasScope(cfg ExtractConfig) bool {
 	return cfg.Objects != nil || len(cfg.ProjectKeys) > 0 ||
 		cfg.PortfolioKeyRegexp != "" || cfg.PortfolioNameRegexp != ""
 }
