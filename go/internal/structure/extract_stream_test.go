@@ -285,6 +285,33 @@ func TestExtractItemsSupersedesReExtractedProjects(t *testing.T) {
 	}
 }
 
+// On resume, completed output from the original project scope remains beside
+// output for the replacement scope. Both sets of records must supersede older
+// copies even though extract.json records only the replacement project keys.
+func TestExtractItemsResumeScopeChangeDoesNotDuplicateRetainedProjects(t *testing.T) {
+	root := t.TempDir()
+	writeTestJSON(t, filepath.Join(root, runA, "extract.json"), map[string]any{"url": streamTestURL})
+	writeTestJSON(t, filepath.Join(root, runB, "extract.json"),
+		map[string]any{"url": streamTestURL, "partial": true, "project_keys": []string{"b"}})
+	projectRecords(root, runA, `{"key":"a","v":1}`, `{"key":"b","v":1}`, `{"key":"c","v":1}`)
+	projectRecords(root, runB, `{"key":"a","v":2}`, `{"key":"b","v":2}`)
+	markDone(t, filepath.Join(root, runB, ".done", "getProjectDetails"), "")
+
+	mapping, err := GetUniqueExtracts(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := collect(ExtractItems(root, mapping, "getProjectDetails"))
+	want := []string{`{"key":"c","v":1}`, `{"key":"a","v":2}`, `{"key":"b","v":2}`}
+	var records []string
+	for _, item := range got {
+		records = append(records, string(item.Data))
+	}
+	if !slices.Equal(records, want) {
+		t.Errorf("projects = %v, want %v", records, want)
+	}
+}
+
 // A partial extract without a project list re-extracted every project.
 func TestExtractItemsPartialWithoutKeysSupersedesAll(t *testing.T) {
 	root := t.TempDir()
@@ -374,6 +401,7 @@ func TestExtractItemsEmptyPortfolioSliceRemovesOldProjects(t *testing.T) {
 	portfolioRecords(root, runA, "getPortfolios", `{"key":"p1"}`, `{"key":"p2"}`)
 	portfolioRecords(root, runB, "getPortfolios", `{"key":"p2"}`)
 	portfolioRecords(root, runA, "getPortfolioProjects", `{"portfolioKey":"p1","k":"keep"}`, `{"portfolioKey":"p2","k":"stale"}`)
+	markDone(t, filepath.Join(root, runB, ".done", "getPortfolioProjects"), "")
 
 	mapping, err := GetUniqueExtracts(root)
 	if err != nil {
@@ -382,6 +410,26 @@ func TestExtractItemsEmptyPortfolioSliceRemovesOldProjects(t *testing.T) {
 	got := collect(ExtractItems(root, mapping, "getPortfolioProjects"))
 	if len(got) != 1 || string(got[0].Data) != `{"portfolioKey":"p1","k":"keep"}` {
 		t.Errorf("portfolio projects = %v, want only p1's older project list", got)
+	}
+}
+
+// Merely finishing getPortfolios does not supersede records from a different
+// portfolio-scoped task that the later extract never ran.
+func TestExtractItemsPortfolioTaskSupersessionRequiresThatTaskToFinish(t *testing.T) {
+	root := t.TempDir()
+	writeTestJSON(t, filepath.Join(root, runA, "extract.json"), map[string]any{"url": streamTestURL, "partial": true})
+	writeTestJSON(t, filepath.Join(root, runB, "extract.json"), map[string]any{"url": streamTestURL, "partial": true})
+	portfolioRecords(root, runA, "getPortfolios", `{"key":"p1"}`)
+	portfolioRecords(root, runB, "getPortfolios", `{"key":"p1"}`)
+	portfolioRecords(root, runA, "getPortfolioProjects", `{"portfolioKey":"p1","k":"from-older-task"}`)
+
+	mapping, err := GetUniqueExtracts(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := collect(ExtractItems(root, mapping, "getPortfolioProjects"))
+	if len(got) != 1 || string(got[0].Data) != `{"portfolioKey":"p1","k":"from-older-task"}` {
+		t.Errorf("portfolio projects = %v, want the older task's record", got)
 	}
 }
 

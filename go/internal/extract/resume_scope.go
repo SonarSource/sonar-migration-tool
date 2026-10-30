@@ -24,7 +24,7 @@ type recordedScope struct {
 	PortfolioNameRegexp string   `json:"portfolio_name_regexp"`
 }
 
-// restoreResumeScope keeps a resumed slice a slice (#666). extract.json is
+// RestoreResumeScope keeps a resumed slice a slice (#666). extract.json is
 // rewritten on every run, so resuming a partial extract with --extract_id
 // alone would otherwise record it as full, and structure would then let it
 // hide every earlier slice. When the resumed extract was recorded as partial:
@@ -33,9 +33,15 @@ type recordedScope struct {
 //   - a run with scope flags keeps them, with a warning, and stays partial.
 //
 // A new extract, a full one, or one with no readable extract.json is left as
-// it is.
+// it is. Callers that need the effective scope after RunExtract (for example,
+// to decide whether to run structure) can restore it before invoking RunExtract;
+// the operation is idempotent.
+func RestoreResumeScope(cfg *ExtractConfig) {
+	restoreResumeScope(cfg, slog.Default())
+}
+
 func restoreResumeScope(cfg *ExtractConfig, logger *slog.Logger) {
-	if cfg.ExtractID == "" {
+	if cfg.resumedPartial || cfg.ExtractID == "" {
 		return
 	}
 	data, err := os.ReadFile(filepath.Join(cfg.ExportDirectory, cfg.ExtractID, "extract.json"))
@@ -48,6 +54,13 @@ func restoreResumeScope(cfg *ExtractConfig, logger *slog.Logger) {
 	}
 	cfg.resumedPartial = true
 	if hasScope(*cfg) {
+		if cfg.ProjectKey != "" {
+			cfg.ProjectKeys = matchingProjectKeys(rec.ProjectKeys, cfg.ProjectKey)
+		} else if len(cfg.ProjectKeys) == 0 {
+			// Non-project scope changes (for example, --objects) still use
+			// the projects recorded by the original partial extract.
+			cfg.ProjectKeys = rec.ProjectKeys
+		}
 		logger.Warn("resuming a partial extract with scope flags of its own: they replace the original scope, and the extract stays partial",
 			"extract_id", cfg.ExtractID)
 		return
@@ -63,6 +76,20 @@ func restoreResumeScope(cfg *ExtractConfig, logger *slog.Logger) {
 	logger.Info("resuming a partial extract with the scope it was started with",
 		"extract_id", cfg.ExtractID, "projects", len(rec.ProjectKeys), "objects", rec.Objects,
 		"portfolio_key_regexp", rec.PortfolioKeyRegexp, "portfolio_name_regexp", rec.PortfolioNameRegexp)
+}
+
+func matchingProjectKeys(keys []string, pattern string) []string {
+	projectPattern, err := CompileProjectKeyPattern(pattern)
+	if err != nil {
+		return append([]string(nil), keys...)
+	}
+	matched := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if projectPattern.MatchString(key) {
+			matched = append(matched, key)
+		}
+	}
+	return matched
 }
 
 // sortedObjects returns the selected --objects categories, sorted, or nil.

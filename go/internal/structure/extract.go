@@ -185,7 +185,7 @@ func planServerReads(directory string, ids []string, key string) ([]string, []su
 	case extract.IsProjectScopedTask(key):
 		return ids, supersessions(directory, ids, key)
 	case extract.IsPortfolioScopedTask(key):
-		return ids, portfolioSupersessions(directory, ids)
+		return ids, portfolioSupersessions(directory, ids, key)
 	}
 	return newestFinished(directory, ids, key), nil
 }
@@ -243,15 +243,16 @@ func (s supersession) covers(record json.RawMessage) bool {
 
 // supersessions computes, for each extract of ids, the projects that a later
 // extract of the set re-extracted for the task. A later extract that has no
-// output for the task superseded nothing. A later extract limited to
-// specific projects lists them in extract.json; a partial one without a
-// project list (--objects only) covers every project.
+// finished output for the task superseded nothing. Its project keys come from
+// both extract.json and its records: a resumed task can retain completed output
+// for the original scope while extract.json records replacement scope flags.
+// A partial extract without a project list (--objects only) covers every project.
 func supersessions(directory string, ids []string, key string) []supersession {
 	result := make([]supersession, len(ids))
 	var later supersession
 	for i := len(ids) - 1; i >= 0; i-- {
 		result[i] = supersession{all: later.all, keys: copyKeys(later.keys)}
-		if _, err := os.Stat(filepath.Join(directory, ids[i], key)); err != nil {
+		if !taskFinished(directory, ids[i], key) {
 			continue
 		}
 		meta := readExtractMeta(directory, ids[i])
@@ -268,6 +269,12 @@ func supersessions(directory string, ids []string, key string) []supersession {
 		for _, k := range meta.ProjectKeys {
 			later.keys[k] = true
 		}
+		_, _ = eachTaskDirRecord(filepath.Join(directory, ids[i], key), func(r json.RawMessage) bool {
+			if k := recordProjectKey(r); k != "" {
+				later.keys[k] = true
+			}
+			return true
+		})
 	}
 	return result
 }
@@ -287,19 +294,16 @@ func newestFinished(directory string, ids []string, key string) []string {
 	return ids
 }
 
-// taskFinished reports whether the extract has the task's output and, when it
-// records finished tasks in .done, that it was marked finished. An extract
-// made before .done existed has no such directory, so its task output is
-// taken as finished.
+// taskFinished reports whether the extract marked the task finished in .done,
+// or has task output when it predates .done. The marker is authoritative even
+// when a completed task produced no records and therefore has no output dir.
 func taskFinished(directory, id, key string) bool {
-	if _, err := os.Stat(filepath.Join(directory, id, key)); err != nil {
-		return false
-	}
 	doneDir := filepath.Join(directory, id, ".done")
-	if _, err := os.Stat(doneDir); err != nil {
-		return true
+	if _, err := os.Stat(doneDir); err == nil {
+		_, err := os.Stat(filepath.Join(doneDir, key))
+		return err == nil
 	}
-	_, err := os.Stat(filepath.Join(doneDir, key))
+	_, err := os.Stat(filepath.Join(directory, id, key))
 	return err == nil
 }
 
@@ -307,12 +311,15 @@ func taskFinished(directory, id, key string) bool {
 // later extract of the set re-extracted (#666). The slice is defined by a
 // regexp, so its portfolio keys are read from getPortfolios rather than
 // extract.json or the task output (which may be empty for an empty portfolio).
-// A later extract with no getPortfolios output superseded nothing.
-func portfolioSupersessions(directory string, ids []string) []supersession {
+// A later extract supersedes nothing unless it finished the requested task.
+func portfolioSupersessions(directory string, ids []string, key string) []supersession {
 	result := make([]supersession, len(ids))
 	var later map[string]bool
 	for i := len(ids) - 1; i >= 0; i-- {
 		result[i] = supersession{keys: copyKeys(later), portfolios: true}
+		if !taskFinished(directory, ids[i], key) {
+			continue
+		}
 		_, _ = eachTaskDirRecord(filepath.Join(directory, ids[i], "getPortfolios"), func(r json.RawMessage) bool {
 			if k := recordPortfolioKey(r); k != "" {
 				if later == nil {
