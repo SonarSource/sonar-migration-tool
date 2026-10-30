@@ -46,6 +46,43 @@ func TestExtractItemsMergesGroupSlices(t *testing.T) {
 	}
 }
 
+func TestExtractItemsUserGroupsUseReExtractedGroups(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		taskRuns bool
+		want     []string
+	}{
+		{name: "empty output", taskRuns: true},
+		{name: "task did not run", want: []string{`{"login":"old","groupId":"g1"}`}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			for _, id := range []string{runA, runB} {
+				writeTestJSON(t, filepath.Join(root, id, "extract.json"),
+					map[string]any{"url": streamTestURL, "partial": true})
+			}
+			portfolioRecords(root, runA, "getGroups", `{"id":"g1"}`)
+			portfolioRecords(root, runB, "getGroups", `{"id":"g1"}`)
+			portfolioRecords(root, runA, "getUserGroups", `{"login":"old","groupId":"g1"}`)
+			if tc.taskRuns {
+				writeChunks(t, filepath.Join(root, runB, "getUserGroups"), nil)
+			}
+
+			mapping, err := GetUniqueExtracts(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for it := range ExtractItems(root, mapping, "getUserGroups") {
+				got = append(got, string(it.Data))
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("user groups = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // A later extract that ran no group task (for example --objects projects)
 // leaves the earlier group records alone.
 func TestExtractItemsGroupsSurviveLaterExtractWithoutThem(t *testing.T) {

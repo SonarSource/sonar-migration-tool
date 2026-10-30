@@ -365,6 +365,41 @@ func TestExtractItemsMergesPortfolioSlices(t *testing.T) {
 	}
 }
 
+func TestExtractItemsPortfolioProjectsUseReExtractedPortfolios(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		taskRuns bool
+		want     []string
+	}{
+		{name: "empty output", taskRuns: true},
+		{name: "task did not run", want: []string{`{"portfolioKey":"p1","k":"old"}`}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeTestJSON(t, filepath.Join(root, runA, "extract.json"), map[string]any{"url": streamTestURL, "partial": true})
+			writeTestJSON(t, filepath.Join(root, runB, "extract.json"), map[string]any{"url": streamTestURL, "partial": true})
+			portfolioRecords(root, runA, "getPortfolios", `{"key":"p1"}`)
+			portfolioRecords(root, runB, "getPortfolios", `{"key":"p1"}`)
+			portfolioRecords(root, runA, "getPortfolioProjects", `{"portfolioKey":"p1","k":"old"}`)
+			if tc.taskRuns {
+				writeChunks(t, filepath.Join(root, runB, "getPortfolioProjects"), nil)
+			}
+
+			mapping, err := GetUniqueExtracts(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for it := range ExtractItems(root, mapping, "getPortfolioProjects") {
+				got = append(got, string(it.Data))
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("portfolio projects = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // A later extract that ran no portfolio task (for example --objects projects)
 // leaves the earlier portfolio records alone.
 func TestExtractItemsPortfoliosSurviveLaterExtractWithoutThem(t *testing.T) {

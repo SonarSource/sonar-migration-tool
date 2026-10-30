@@ -312,16 +312,19 @@ func taskFinished(directory, id, key string) bool {
 }
 
 // portfolioSupersessions computes, for each extract of ids, the portfolios a
-// later extract of the set re-extracted for the task (#666). Unlike projects,
-// the portfolio keys are read from the later extract's own output for the
-// task: a slice is defined by a regexp, so extract.json cannot list them. A
-// later extract with no output for the task superseded nothing.
+// later extract of the set re-extracted for the task (#666). Portfolio keys
+// are read from getPortfolios, since a slice is defined by a regexp and
+// extract.json cannot list them. A later extract that did not run the task
+// superseded nothing.
 func portfolioSupersessions(directory string, ids []string, key string) []supersession {
 	result := make([]supersession, len(ids))
 	var later map[string]bool
 	for i := len(ids) - 1; i >= 0; i-- {
 		result[i] = supersession{keys: copyKeys(later), portfolios: true}
-		_, _ = eachTaskDirRecord(filepath.Join(directory, ids[i], key), func(r json.RawMessage) bool {
+		if _, err := os.Stat(filepath.Join(directory, ids[i], key)); err != nil {
+			continue // this slice did not run the task
+		}
+		_, _ = eachTaskDirRecord(filepath.Join(directory, ids[i], "getPortfolios"), func(r json.RawMessage) bool {
 			if k := recordPortfolioKey(r); k != "" {
 				if later == nil {
 					later = make(map[string]bool)
@@ -335,16 +338,19 @@ func portfolioSupersessions(directory string, ids []string, key string) []supers
 }
 
 // groupSupersessions computes, for each extract of ids, the groups a later
-// extract of the set re-extracted for the task (#669). Like portfolios, a
-// group slice is a regexp, so the group IDs are read from the later extract's
-// own output for the task. A later extract with no output for the task
-// superseded nothing.
+// extract of the set re-extracted for the task (#669). Group IDs are read
+// from getGroups, which lists groups even when they have no users. A later
+// extract that did not run the task superseded nothing.
 func groupSupersessions(directory string, ids []string, key string) []supersession {
 	result := make([]supersession, len(ids))
 	var later map[string]bool
 	for i := len(ids) - 1; i >= 0; i-- {
 		result[i] = supersession{keys: copyKeys(later), groups: true}
-		_, _ = eachTaskDirRecord(filepath.Join(directory, ids[i], key), func(r json.RawMessage) bool {
+		if _, err := os.Stat(filepath.Join(directory, ids[i], key)); err != nil {
+			continue // this slice did not run the task
+		}
+		// getGroups lists every group the slice fetched, members or not.
+		_, _ = eachTaskDirRecord(filepath.Join(directory, ids[i], "getGroups"), func(r json.RawMessage) bool {
 			if k := recordGroupKey(r); k != "" {
 				if later == nil {
 					later = make(map[string]bool)
