@@ -127,7 +127,7 @@ sonar-migration-tool extract --source_url <URL> --source_token <TOKEN> --export_
 
 When the extract succeeds, `extract` also groups the projects into organizations and writes every CSV that `migrate` needs: `organizations.csv`, `projects.csv`, `gates.csv`, `profiles.csv`, `groups.csv`, `templates.csv` and `portfolios.csv`. This is what the `structure` and `mappings` commands used to do (issue #503). With `--config`, a config file that names a single target organization pre-populates `sonarcloud_org_key`, as `structure --config` did.
 
-`extract` includes every extract in the export directory, so for multiple servers you run it once per server and the CSVs cover all of them. When `organizations.csv` or `projects.csv` already exists, `extract` first copies it to `<name>.csv.bak-<timestamp>` and logs a `WARN` naming the copy, so the edits you made are never lost. Re-apply them to the new file. When `--objects` leaves out the `projects` category, there is nothing to group, so the CSVs are not written.
+`extract` includes every extract in the export directory, so for multiple servers you run it once per server and the CSVs cover all of them. When `organizations.csv` or `projects.csv` already exists, `extract` first copies it to `<name>.csv.bak-<timestamp>` and logs a `WARN` naming the copy. The filled-in `sonarcloud_org_key` values are carried into the regenerated files automatically: organizations are matched by server URL, SonarQube organization key and binding key, and projects by server URL and project key. Values whose rows no longer exist remain in the backup and are not carried; a `WARN` also identifies new organization rows that still need a key. Review the regenerated CSVs after extracting. When `--objects` leaves out the `projects` category, there is nothing to group, so the CSVs are not written.
 
 ### Step 3 — Edit `organizations.csv`
 
@@ -178,7 +178,7 @@ sonar-migration-tool migrate --target_token <TOKEN> --enterprise_key <ENTERPRISE
 If you are migrating from multiple SonarQube Server instances:
 
 1. **Extract from each server separately**: run `extract` once per server, each time pointing to a different URL and token, with the same `--export_directory`. Each run rebuilds the CSVs from every extract in the directory.
-2. **Edit `organizations.csv`**: fill in the `sonarcloud_org_key` for each server row. Do this after the last extract, because each extract rewrites the file (it keeps a `.bak-<timestamp>` copy of the previous one).
+2. **Edit `organizations.csv`**: fill in the `sonarcloud_org_key` for each server row. You can do this after each extract: later extracts carry the values forward for matching rows and warn about values that need review. The previous CSV is also saved as a `.bak-<timestamp>` copy.
 3. **Run `migrate`** as described above. The tool handles all servers in one pass.
 
 ---

@@ -250,17 +250,19 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			cfg.UnsupportedLanguages = s.Target.UnsupportedLanguages
 			cfg.MaxIssueComments = s.Target.MaxIssueComments
 			cfg.BranchRegexp = s.Target.BranchRegexp
-			cfg.PortfolioKeyRegexp = s.Target.PortfolioKeyRegexp
-			cfg.PortfolioNameRegexp = s.Target.PortfolioNameRegexp
 		}
 		// #474 — target.unsupported_languages wins, else the top-level field.
 		cfg.UnsupportedLanguages = resolveUnsupportedLanguages(
 			cfg.UnsupportedLanguages, s.UnsupportedLanguages)
 		// #582 — target.branch_regexp wins, else the top-level field.
 		cfg.BranchRegexp = common.FirstNonEmpty(cfg.BranchRegexp, s.BranchRegexp)
-		// #666 — same target-wins-else-top-level resolution, per option.
-		cfg.PortfolioKeyRegexp = common.FirstNonEmpty(cfg.PortfolioKeyRegexp, s.PortfolioKeyRegexp)
-		cfg.PortfolioNameRegexp = common.FirstNonEmpty(cfg.PortfolioNameRegexp, s.PortfolioNameRegexp)
+		// #666 — resolve the pair as a whole so a target-level key does not
+		// conflict with a top-level name (or vice versa).
+		if s.Target != nil && (s.Target.PortfolioKeyRegexp != "" || s.Target.PortfolioNameRegexp != "") {
+			cfg.PortfolioKeyRegexp, cfg.PortfolioNameRegexp = s.Target.PortfolioKeyRegexp, s.Target.PortfolioNameRegexp
+		} else {
+			cfg.PortfolioKeyRegexp, cfg.PortfolioNameRegexp = s.PortfolioKeyRegexp, s.PortfolioNameRegexp
+		}
 		// #527 — target.fast_sync wins, else the top-level field, else false.
 		var targetFastSync *FlexibleBool
 		if s.Target != nil {
@@ -386,12 +388,9 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		if s.BranchRegexp != "" {
 			cfg.BranchRegexp = s.BranchRegexp
 		}
-		// #666: same outer-wins-else-nested semantics, per option.
-		if s.PortfolioKeyRegexp != "" {
-			cfg.PortfolioKeyRegexp = s.PortfolioKeyRegexp
-		}
-		if s.PortfolioNameRegexp != "" {
-			cfg.PortfolioNameRegexp = s.PortfolioNameRegexp
+		// #666: the outer portfolio regexp pair wins as a whole when set.
+		if s.PortfolioKeyRegexp != "" || s.PortfolioNameRegexp != "" {
+			cfg.PortfolioKeyRegexp, cfg.PortfolioNameRegexp = s.PortfolioKeyRegexp, s.PortfolioNameRegexp
 		}
 		// Same outer-wins-else-inner semantics for branch_analyzed_after (#583).
 		if s.BranchAnalyzedAfter != "" {
