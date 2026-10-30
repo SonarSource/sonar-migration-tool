@@ -98,3 +98,49 @@ func TestLoadExtractConfigFilePermissionTemplateRegexp(t *testing.T) {
 		})
 	}
 }
+
+// #665: resuming a template slice with --extract_id alone takes the recorded
+// slice, so it is not rewritten as a full extract that hides earlier slices.
+func TestRestoreResumeScope_PermissionTemplateRegexp(t *testing.T) {
+	dir := t.TempDir()
+	writeRecordedMeta(t, dir, map[string]any{"partial": true, "permission_template_regexp": "Team-A.*"})
+	cfg := ExtractConfig{ExportDirectory: dir, ExtractID: resumeTestID}
+	restoreResumeScope(&cfg, quietLogger)
+
+	if cfg.PermissionTemplateRegexp != "Team-A.*" {
+		t.Errorf("PermissionTemplateRegexp = %q, want Team-A.*", cfg.PermissionTemplateRegexp)
+	}
+	if !isPartialExtract(cfg) {
+		t.Error("a resumed template slice must stay partial")
+	}
+}
+
+func TestWriteMetadataFile_RecordsPermissionTemplateRegexp(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeMetadataFile(dir, extractMeta{URL: "http://x", Partial: true, PermissionTemplateRegexp: "Team-A.*"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFileScope(t, dir).PermissionTemplateRegexp; got != "Team-A.*" {
+		t.Errorf("recorded permission_template_regexp = %q, want Team-A.*", got)
+	}
+	dir = t.TempDir()
+	if err := writeMetadataFile(dir, extractMeta{URL: "http://x"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFileScope(t, dir).PermissionTemplateRegexp; got != "" {
+		t.Errorf("an unset permission_template_regexp must not be written, got %q", got)
+	}
+}
+
+func readFileScope(t *testing.T, dir string) recordedScope {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, "extract.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec recordedScope
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatal(err)
+	}
+	return rec
+}

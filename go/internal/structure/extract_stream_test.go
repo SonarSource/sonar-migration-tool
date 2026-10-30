@@ -365,6 +365,26 @@ func TestExtractItemsMergesPortfolioSlices(t *testing.T) {
 	}
 }
 
+// A later slice supersedes a portfolio even when it has no projects, so the
+// older project list cannot reappear in cumulative extracts.
+func TestExtractItemsEmptyPortfolioSliceRemovesOldProjects(t *testing.T) {
+	root := t.TempDir()
+	writeTestJSON(t, filepath.Join(root, runA, "extract.json"), map[string]any{"url": streamTestURL, "partial": true})
+	writeTestJSON(t, filepath.Join(root, runB, "extract.json"), map[string]any{"url": streamTestURL, "partial": true})
+	portfolioRecords(root, runA, "getPortfolios", `{"key":"p1"}`, `{"key":"p2"}`)
+	portfolioRecords(root, runB, "getPortfolios", `{"key":"p2"}`)
+	portfolioRecords(root, runA, "getPortfolioProjects", `{"portfolioKey":"p1","k":"keep"}`, `{"portfolioKey":"p2","k":"stale"}`)
+
+	mapping, err := GetUniqueExtracts(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := collect(ExtractItems(root, mapping, "getPortfolioProjects"))
+	if len(got) != 1 || string(got[0].Data) != `{"portfolioKey":"p1","k":"keep"}` {
+		t.Errorf("portfolio projects = %v, want only p1's older project list", got)
+	}
+}
+
 // A later extract that ran no portfolio task (for example --objects projects)
 // leaves the earlier portfolio records alone.
 func TestExtractItemsPortfoliosSurviveLaterExtractWithoutThem(t *testing.T) {

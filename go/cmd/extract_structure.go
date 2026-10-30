@@ -46,7 +46,7 @@ func runExtractStructure(exportDir string, objects map[string]bool, orgKey strin
 		return extractStepError("structure", exportDir, err)
 	}
 	for _, path := range backups {
-		logger.Info("regenerating a CSV that already existed: the previous copy is saved", "backup", path)
+		logger.Warn("regenerating a CSV that already existed: the previous copy is saved", "backup", path)
 	}
 
 	stats, err := structure.RunStructureCarryOver(exportDir, carry, orgKey)
