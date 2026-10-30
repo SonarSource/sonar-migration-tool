@@ -163,45 +163,60 @@ type ExtractItem struct {
 // os.ReadDir order within an extract.
 func ExtractItems(directory string, mapping ExtractMapping, key string) func(yield func(ExtractItem) bool) {
 	return func(yield func(ExtractItem) bool) {
-		projectScoped := extract.IsProjectScopedTask(key)
-		portfolioScoped := extract.IsPortfolioScopedTask(key)
-		groupScoped := extract.IsGroupScopedTask(key)
 		for serverURL, ids := range mapping {
-			var superseded []supersession
-			switch {
-			case projectScoped && len(ids) > 1:
-				superseded = supersessions(directory, ids, key)
-			case portfolioScoped && len(ids) > 1:
-				superseded = portfolioSupersessions(directory, ids, key)
-			case groupScoped && len(ids) > 1:
-				superseded = groupSupersessions(directory, ids, key)
-			case !projectScoped && !portfolioScoped && len(ids) > 1:
-				ids = newestFinished(directory, ids, key)
-			}
-			for i, extractID := range ids {
-				taskDir := filepath.Join(directory, extractID, key)
-				emit := func(r json.RawMessage) bool {
-					return yield(ExtractItem{ServerURL: serverURL, Data: r})
-				}
-				if superseded != nil && superseded[i].any() {
-					sup := superseded[i]
-					emit = func(r json.RawMessage) bool {
-						if sup.covers(r) {
-							return true
-						}
-						return yield(ExtractItem{ServerURL: serverURL, Data: r})
-					}
-				}
-				completed, err := eachTaskDirRecord(taskDir, emit)
-				if err != nil {
-					continue // task may not exist for this extract
-				}
-				if !completed {
-					return // consumer stopped early
-				}
+			ids, superseded := planServerReads(directory, ids, key)
+			if !readServerExtracts(directory, serverURL, key, ids, superseded, yield) {
+				return // consumer stopped early
 			}
 		}
 	}
+}
+
+// planServerReads decides which of a server's extracts to read the task from,
+// and what each one's records are superseded by. A single extract is read as
+// it is. Project- and portfolio-scoped tasks read every extract and drop what
+// a later one re-extracted; any other task is read from the newest extract
+// that finished it (newestFinished). superseded is nil, or parallel to ids.
+func planServerReads(directory string, ids []string, key string) ([]string, []supersession) {
+	if len(ids) < 2 {
+		return ids, nil
+	}
+	switch {
+	case extract.IsProjectScopedTask(key):
+		return ids, supersessions(directory, ids, key)
+	case extract.IsPortfolioScopedTask(key):
+		return ids, portfolioSupersessions(directory, ids, key)
+	case extract.IsGroupScopedTask(key):
+		return ids, groupSupersessions(directory, ids, key)
+	}
+	return newestFinished(directory, ids, key), nil
+}
+
+// readServerExtracts yields the task's records from each extract in order,
+// skipping those its supersession covers. It returns false when the consumer
+// stopped early.
+func readServerExtracts(directory, serverURL, key string, ids []string,
+	superseded []supersession, yield func(ExtractItem) bool) bool {
+	for i, extractID := range ids {
+		var sup supersession
+		if superseded != nil {
+			sup = superseded[i]
+		}
+		emit := func(r json.RawMessage) bool {
+			if sup.any() && sup.covers(r) {
+				return true
+			}
+			return yield(ExtractItem{ServerURL: serverURL, Data: r})
+		}
+		completed, err := eachTaskDirRecord(filepath.Join(directory, extractID, key), emit)
+		if err != nil {
+			continue // task may not exist for this extract
+		}
+		if !completed {
+			return false
+		}
+	}
+	return true
 }
 
 // supersession describes what later extracts of the merged set re-extracted:
