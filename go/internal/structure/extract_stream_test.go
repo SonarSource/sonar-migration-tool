@@ -365,38 +365,23 @@ func TestExtractItemsMergesPortfolioSlices(t *testing.T) {
 	}
 }
 
-func TestExtractItemsPortfolioProjectsUseReExtractedPortfolios(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		taskRuns bool
-		want     []string
-	}{
-		{name: "empty output", taskRuns: true},
-		{name: "task did not run", want: []string{`{"portfolioKey":"p1","k":"old"}`}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			root := t.TempDir()
-			writeTestJSON(t, filepath.Join(root, runA, "extract.json"), map[string]any{"url": streamTestURL, "partial": true})
-			writeTestJSON(t, filepath.Join(root, runB, "extract.json"), map[string]any{"url": streamTestURL, "partial": true})
-			portfolioRecords(root, runA, "getPortfolios", `{"key":"p1"}`)
-			portfolioRecords(root, runB, "getPortfolios", `{"key":"p1"}`)
-			portfolioRecords(root, runA, "getPortfolioProjects", `{"portfolioKey":"p1","k":"old"}`)
-			if tc.taskRuns {
-				writeChunks(t, filepath.Join(root, runB, "getPortfolioProjects"), nil)
-			}
+// A later slice supersedes a portfolio even when it has no projects, so the
+// older project list cannot reappear in cumulative extracts.
+func TestExtractItemsEmptyPortfolioSliceRemovesOldProjects(t *testing.T) {
+	root := t.TempDir()
+	writeTestJSON(t, filepath.Join(root, runA, "extract.json"), map[string]any{"url": streamTestURL, "partial": true})
+	writeTestJSON(t, filepath.Join(root, runB, "extract.json"), map[string]any{"url": streamTestURL, "partial": true})
+	portfolioRecords(root, runA, "getPortfolios", `{"key":"p1"}`, `{"key":"p2"}`)
+	portfolioRecords(root, runB, "getPortfolios", `{"key":"p2"}`)
+	portfolioRecords(root, runA, "getPortfolioProjects", `{"portfolioKey":"p1","k":"keep"}`, `{"portfolioKey":"p2","k":"stale"}`)
 
-			mapping, err := GetUniqueExtracts(root)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var got []string
-			for it := range ExtractItems(root, mapping, "getPortfolioProjects") {
-				got = append(got, string(it.Data))
-			}
-			if !slices.Equal(got, tc.want) {
-				t.Errorf("portfolio projects = %v, want %v", got, tc.want)
-			}
-		})
+	mapping, err := GetUniqueExtracts(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := collect(ExtractItems(root, mapping, "getPortfolioProjects"))
+	if len(got) != 1 || string(got[0].Data) != `{"portfolioKey":"p1","k":"keep"}` {
+		t.Errorf("portfolio projects = %v, want only p1's older project list", got)
 	}
 }
 

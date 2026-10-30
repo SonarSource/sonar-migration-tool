@@ -78,3 +78,18 @@ func TestIsPartialExtract_GroupNameRegexp(t *testing.T) {
 		t.Error("a group slice must be a partial extract")
 	}
 }
+
+// #669: a group slice resumed with --extract_id alone takes the recorded
+// group_name_regexp, so it stays the same slice and stays partial.
+func TestRestoreResumeScope_GroupNameRegexp(t *testing.T) {
+	dir := t.TempDir()
+	writeRecordedMeta(t, dir, map[string]any{"partial": true, "group_name_regexp": "team-a-.+"})
+	cfg := ExtractConfig{ExportDirectory: dir, ExtractID: resumeTestID}
+	restoreResumeScope(&cfg, quietLogger)
+	if cfg.GroupNameRegexp != "team-a-.+" {
+		t.Errorf("GroupNameRegexp = %q, want team-a-.+", cfg.GroupNameRegexp)
+	}
+	if !isPartialExtract(cfg) {
+		t.Error("resumed group slice must stay partial")
+	}
+}

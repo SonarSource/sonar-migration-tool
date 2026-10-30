@@ -1296,10 +1296,13 @@ func TestLoadMigrateConfigFile_PortfolioRegexpShapes(t *testing.T) {
 		name, body, wantKey, wantName string
 	}{
 		{"unified target wins", `{"portfolio_key_regexp":"top","target":{"url":"u","token":"t","portfolio_key_regexp":"tgt"}}`, "tgt", ""},
+		{"unified target key replaces top-level name", `{"portfolio_name_regexp":"top-name","target":{"url":"u","token":"t","portfolio_key_regexp":"target-key"}}`, "target-key", ""},
+		{"unified target name replaces top-level key", `{"portfolio_key_regexp":"top-key","target":{"url":"u","token":"t","portfolio_name_regexp":"target-name"}}`, "", "target-name"},
 		{"unified falls back to top-level", `{"portfolio_name_regexp":"N","target":{"url":"u","token":"t"}}`, "", "N"},
 		{"flat", `{"url":"u","token":"t","portfolio_key_regexp":"flat"}`, "flat", ""},
 		{"sonarcloud shape top-level", `{"portfolio_key_regexp":"sc","sonarcloud":{"url":"u","token":"t"}}`, "sc", ""},
 		{"command-sectioned outer wins", `{"portfolio_key_regexp":"outer","migrate":{"url":"u","token":"t","portfolio_key_regexp":"inner"}}`, "outer", ""},
+		{"command-sectioned outer name replaces inner key", `{"portfolio_name_regexp":"outer-name","migrate":{"url":"u","token":"t","portfolio_key_regexp":"inner-key"}}`, "", "outer-name"},
 		{"command-sectioned inner", `{"migrate":{"url":"u","token":"t","portfolio_name_regexp":"inner"}}`, "", "inner"},
 	}
 	for _, tc := range cases {

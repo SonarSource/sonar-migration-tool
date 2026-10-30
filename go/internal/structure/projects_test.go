@@ -170,6 +170,33 @@ func TestMapProjectStructure_LeavesOutFailedProjects(t *testing.T) {
 	}
 }
 
+// A project-wide partial extract supersedes an earlier failed-project list,
+// even when extract.json has no explicit project_keys list.
+func TestMapProjectStructure_ProjectWidePartialClearsFailedProjects(t *testing.T) {
+	dir := setupTestExtract(t)
+	if err := common.WriteFailedProjects(filepath.Join(dir, testExtractID), []common.FailedProject{
+		{Key: "proj2", Task: "getProjectIssues", Error: "HTTP 504"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	const laterID = "2026-08-21-0001"
+	writeTestJSON(t, filepath.Join(dir, laterID, "extract.json"),
+		map[string]any{"url": testSQURL, "partial": true})
+	writeTestJSONL(t, filepath.Join(dir, laterID, "getProjectDetails"), []map[string]any{
+		{"key": "proj2", "name": "Project 2", "projectKey": "proj2", "branch": "main", "serverUrl": testSQURL},
+	})
+
+	_, projects := MapProjectStructure(dir, ExtractMapping{testSQURL: {testExtractID, laterID}})
+	if len(projects) != 1 || projects[0].Key != "proj2" {
+		var keys []string
+		for _, p := range projects {
+			keys = append(keys, p.Key)
+		}
+		t.Fatalf("projects = %v, want only re-extracted proj2", keys)
+	}
+}
+
 // TestMapProjectStructure_SharedRepoBinding is the regression test for #622:
 // two source projects bound to the same repository without monorepo enabled
 // used to collide on the same internal map key and silently overwrite one

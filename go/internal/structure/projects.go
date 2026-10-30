@@ -7,6 +7,7 @@ package structure
 import (
 	"encoding/json"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -308,11 +309,18 @@ type projectBindingEntry struct {
 func failedProjectKeys(directory string, mapping ExtractMapping) map[string]bool {
 	failed := make(map[string]bool)
 	for serverURL, ids := range mapping {
+		serverFailed := make(map[string]bool)
 		// Oldest first: a project a later extract re-extracted is judged
 		// by that extract alone, not by an earlier one that failed it.
 		for _, extractID := range ids {
-			for _, k := range readExtractMeta(directory, extractID).ProjectKeys {
-				delete(failed, serverURL+k)
+			meta := readExtractMeta(directory, extractID)
+			if meta.Partial && len(meta.ProjectKeys) == 0 {
+				if _, err := os.Stat(filepath.Join(directory, extractID, "getProjectDetails")); err == nil {
+					clear(serverFailed)
+				}
+			}
+			for _, k := range meta.ProjectKeys {
+				delete(serverFailed, k)
 			}
 			list, err := common.ReadFailedProjects(filepath.Join(directory, extractID))
 			if err != nil {
@@ -321,8 +329,11 @@ func failedProjectKeys(directory string, mapping ExtractMapping) map[string]bool
 				continue
 			}
 			for _, fp := range list {
-				failed[serverURL+fp.Key] = true
+				serverFailed[fp.Key] = true
 			}
+		}
+		for projectKey := range serverFailed {
+			failed[serverURL+projectKey] = true
 		}
 	}
 	if len(failed) > 0 {

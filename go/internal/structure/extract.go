@@ -185,7 +185,7 @@ func planServerReads(directory string, ids []string, key string) ([]string, []su
 	case extract.IsProjectScopedTask(key):
 		return ids, supersessions(directory, ids, key)
 	case extract.IsPortfolioScopedTask(key):
-		return ids, portfolioSupersessions(directory, ids, key)
+		return ids, portfolioSupersessions(directory, ids)
 	case extract.IsGroupScopedTask(key):
 		return ids, groupSupersessions(directory, ids, key)
 	}
@@ -312,18 +312,15 @@ func taskFinished(directory, id, key string) bool {
 }
 
 // portfolioSupersessions computes, for each extract of ids, the portfolios a
-// later extract of the set re-extracted for the task (#666). Portfolio keys
-// are read from getPortfolios, since a slice is defined by a regexp and
-// extract.json cannot list them. A later extract that did not run the task
-// superseded nothing.
-func portfolioSupersessions(directory string, ids []string, key string) []supersession {
+// later extract of the set re-extracted (#666). The slice is defined by a
+// regexp, so its portfolio keys are read from getPortfolios rather than
+// extract.json or the task output (which may be empty for an empty portfolio).
+// A later extract with no getPortfolios output superseded nothing.
+func portfolioSupersessions(directory string, ids []string) []supersession {
 	result := make([]supersession, len(ids))
 	var later map[string]bool
 	for i := len(ids) - 1; i >= 0; i-- {
 		result[i] = supersession{keys: copyKeys(later), portfolios: true}
-		if _, err := os.Stat(filepath.Join(directory, ids[i], key)); err != nil {
-			continue // this slice did not run the task
-		}
 		_, _ = eachTaskDirRecord(filepath.Join(directory, ids[i], "getPortfolios"), func(r json.RawMessage) bool {
 			if k := recordPortfolioKey(r); k != "" {
 				if later == nil {
