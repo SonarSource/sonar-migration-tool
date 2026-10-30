@@ -72,6 +72,10 @@
       "type": ["string", "null"],
       "description": "Regexp pattern of branch names to extract / migrate, implicitly anchored (^...$); a plain name with no regex metacharacters matches only itself. Applies to both source (extract) and target (migrate) unless overridden by source.branch_regexp / target.branch_regexp. If migrate does not set it, migrate implicitly operates on whatever branches were actually extracted. The project's main branch is always included regardless of match. Omit to process every branch (default). Issue #582."
     },
+    "group_name_regexp": {
+      "type": ["string", "null"],
+      "description": "Regexp pattern of user group names to extract / migrate, implicitly anchored (^...$); a plain name matches only itself. Lets groups be processed in slices on instances with a very large number of them. Applies to both source (extract) and target (migrate) unless overridden by source.group_name_regexp / target.group_name_regexp. The built-in Anyone pseudo-group is always extracted. Omit to process every group (default). Issue #669."
+    },
     "migrate_history": {
       "oneOf": [
         { "type": "boolean" },
@@ -183,6 +187,10 @@
           "type": ["string", "null"],
           "description": "Overrides the top-level branch_regexp for extract. Regexp pattern of branch names to extract, implicitly anchored (^...$). The project's main branch is always extracted regardless of match. Issue #582."
         },
+        "group_name_regexp": {
+          "type": ["string", "null"],
+          "description": "Overrides the top-level group_name_regexp for extract. Regexp pattern of user group names to extract, implicitly anchored (^...$). Issue #669."
+        },
         "project_key_regexp": {
           "type": ["string", "null"],
           "description": "Overrides the top-level project_key_regexp for extract. Regexp pattern of project keys to extract, implicitly anchored (^...$); a plain key matches only itself. Only applies when \"projects\" is selected via objects (or objects is unset). Issue #592."
@@ -259,6 +267,10 @@
         "branch_regexp": {
           "type": ["string", "null"],
           "description": "Overrides the top-level branch_regexp for migrate. Regexp pattern of branch names to migrate, implicitly anchored (^...$). Only branches that were actually extracted can be migrated; when unset, migrate implicitly operates on whatever branches were actually extracted. The project's main branch is always migrated regardless of match. Issue #582."
+        },
+        "group_name_regexp": {
+          "type": ["string", "null"],
+          "description": "Overrides the top-level group_name_regexp for migrate. Regexp pattern of user group names to migrate, implicitly anchored (^...$). Issue #669."
         },
         "project_key_regexp": {
           "type": ["string", "null"],

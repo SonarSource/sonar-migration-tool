@@ -61,3 +61,9 @@ func MapGroupNameToCloud(name string) (string, bool) {
 	}
 	return name, true
 }
+
+// groupSelected reports whether the named source group is in scope of
+// --group_name_regexp (#669): always true when no pattern is configured.
+func (e *Executor) groupSelected(name string) bool {
+	return e.GroupRe == nil || e.GroupRe.MatchString(name)
+}

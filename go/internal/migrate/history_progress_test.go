@@ -204,7 +204,7 @@ func newHistoryCountExecutor(t *testing.T) *Executor {
 	dir := t.TempDir()
 	e := newProjectDataExecutor(t, dir)
 	e.MigrateHistory = true
-	e.Mapping = structure.ExtractMapping{testServerURL: extractRun, histOtherServerURL: histOtherRun}
+	e.Mapping = structure.ExtractMapping{testServerURL: {extractRun}, histOtherServerURL: {histOtherRun}}
 	e.ExcludeBranches = []string{"feature/*"}
 	e.BranchRe = regexp.MustCompile(`^(release|develop|stale)`)
 	cutoff := time.Date(2024, time.January, 1, 0, 0, 0, 0, time.UTC)
@@ -406,7 +406,7 @@ func TestHistoryCountPointDateRule(t *testing.T) {
 func TestHistoryCountKeysByServerProjectBranch(t *testing.T) {
 	dir := t.TempDir()
 	e := newProjectDataExecutor(t, dir)
-	e.Mapping = structure.ExtractMapping{testServerURL: extractRun, histOtherServerURL: histOtherRun}
+	e.Mapping = structure.ExtractMapping{testServerURL: {extractRun}, histOtherServerURL: {histOtherRun}}
 	writeJSONL(filepath.Join(dir, extractRun, histTaskName), slices.Concat(
 		histCountDated(projMain, branchMain, 2),
 		histCountDated(projMain, branchDev, 1),
@@ -773,7 +773,7 @@ func newHistoryBenchCorpus(b *testing.B, projects, branches, points int) (*Execu
 		writeHistChunk(b, branchDir, p+1, branchRows...)
 	}
 	writeJSONL(filepath.Join(dir, extractRun, "getProjects"), projectRows)
-	return &Executor{ExportDir: dir, Mapping: structure.ExtractMapping{testServerURL: extractRun}, MigrateHistory: true}, file
+	return &Executor{ExportDir: dir, Mapping: structure.ExtractMapping{testServerURL: {extractRun}}, MigrateHistory: true}, file
 }
 
 // TestMigrateBranchHistoryIncrementsHistoryProgress covers #564's other

@@ -463,7 +463,7 @@ func newProjectDataExecutor(t *testing.T, dir string) *Executor {
 	return &Executor{
 		Store:              common.NewDataStore(runDir),
 		ExportDir:          dir,
-		Mapping:            structure.ExtractMapping{testServerURL: "extract-01"},
+		Mapping:            structure.ExtractMapping{testServerURL: {"extract-01"}},
 		ConcurrencyLimiter: NewFixedConcurrencyLimiter(5),
 		Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 1})),
 	}

@@ -548,8 +548,21 @@ func loadCSVToJSONL(e *Executor, taskName, csvFilename string) error {
 	// the organizations.csv join.
 	perProjectOrg := csvFilename == structure.ProjectsCSVFileName
 
+	// #666: portfolios.csv may list more portfolios than this run's slice.
+	// Filtering here, at the single place the CSV becomes the task input,
+	// means createPortfolios, configurePortfolios, deletePortfolios and the
+	// empty-portfolio set all see only the slice.
+	filterPortfolios := csvFilename == "portfolios.csv" && e.PortfolioFilter.Active()
+
 	items := make([]json.RawMessage, 0, len(rows))
 	for _, row := range rows {
+		if filterPortfolios {
+			key, _ := row["source_portfolio_key"].(string)
+			name, _ := row["name"].(string)
+			if !e.PortfolioFilter.Match(key, name) {
+				continue
+			}
+		}
 		e.resolveRowOrg(row, orgLookup, perProjectOrg)
 		// #381: in reset mode, rows whose cloud org wasn't confirmed
 		// by the operator get their sonarcloud_org_key rewritten to

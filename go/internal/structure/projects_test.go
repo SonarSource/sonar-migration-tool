@@ -120,7 +120,7 @@ func TestGenerateUniqueBindingKey(t *testing.T) {
 
 func TestMapProjectStructure(t *testing.T) {
 	dir := setupTestExtract(t)
-	mapping := ExtractMapping{testSQURL: testExtractID}
+	mapping := ExtractMapping{testSQURL: {testExtractID}}
 
 	bindings, projects := MapProjectStructure(dir, mapping)
 
@@ -159,7 +159,7 @@ func TestMapProjectStructure_LeavesOutFailedProjects(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, projects := MapProjectStructure(dir, ExtractMapping{testSQURL: testExtractID})
+	_, projects := MapProjectStructure(dir, ExtractMapping{testSQURL: {testExtractID}})
 
 	if len(projects) != 1 || projects[0].Key != "proj1" {
 		var keys []string
@@ -205,7 +205,7 @@ func TestMapProjectStructure_SharedRepoBinding(t *testing.T) {
 
 	writeTestJSONL(t, filepath.Join(extractDir, "getNewCodePeriods"), nil)
 
-	mapping := ExtractMapping{testSQURL: testExtractID}
+	mapping := ExtractMapping{testSQURL: {testExtractID}}
 	_, projects := MapProjectStructure(dir, mapping)
 
 	if len(projects) != 3 {
@@ -260,7 +260,7 @@ func TestMapProjectStructure_MonorepoNotFlagged(t *testing.T) {
 
 	writeTestJSONL(t, filepath.Join(extractDir, "getNewCodePeriods"), nil)
 
-	mapping := ExtractMapping{testSQURL: testExtractID}
+	mapping := ExtractMapping{testSQURL: {testExtractID}}
 	_, projects := MapProjectStructure(dir, mapping)
 
 	if len(projects) != 2 {
@@ -275,7 +275,7 @@ func TestMapProjectStructure_MonorepoNotFlagged(t *testing.T) {
 
 func TestMapNewCodeDefinitions(t *testing.T) {
 	dir := setupTestExtract(t)
-	mapping := ExtractMapping{testSQURL: testExtractID}
+	mapping := ExtractMapping{testSQURL: {testExtractID}}
 
 	defs := MapNewCodeDefinitions(dir, mapping)
 	if len(defs) == 0 {

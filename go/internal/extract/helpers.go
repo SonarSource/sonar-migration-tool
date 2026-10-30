@@ -156,6 +156,14 @@ func handleNonFatalErr(e *Executor, taskName string, item json.RawMessage, err e
 // fetchAndWritePaginated fetches a paginated endpoint and writes results as JSONL.
 func fetchAndWritePaginated(ctx context.Context, e *Executor, taskName string,
 	opts PaginatedOpts, metadata map[string]any) error {
+	return fetchAndWritePaginatedFiltered(ctx, e, taskName, opts, metadata, nil)
+}
+
+// fetchAndWritePaginatedFiltered is fetchAndWritePaginated with an optional
+// per-item keep predicate applied before the records are written (nil keeps
+// everything). #666.
+func fetchAndWritePaginatedFiltered(ctx context.Context, e *Executor, taskName string,
+	opts PaginatedOpts, metadata map[string]any, keep func(e *Executor, item json.RawMessage) bool) error {
 
 	if err := acquireSem(ctx, e.Sem); err != nil {
 		return fmt.Errorf(taskErrFmt, taskName, err)
@@ -165,6 +173,7 @@ func fetchAndWritePaginated(ctx context.Context, e *Executor, taskName string,
 	if err != nil {
 		return fmt.Errorf(taskErrFmt, taskName, err)
 	}
+	items = filterItems(e, items, keep)
 	if metadata != nil {
 		items = enrichAll(items, metadata)
 	}

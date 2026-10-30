@@ -234,6 +234,22 @@ type MigrateConfig struct {
 	// means "migrate every extracted branch" (#582).
 	BranchRegexp string
 
+	// PortfolioKeyRegexp / PortfolioNameRegexp, when non-empty, limit which
+	// portfolios migrate creates, configures and reports, so a large
+	// instance can be migrated in slices (#666). Both are compiled as
+	// full-match regexes implicitly anchored with ^ and $, and are mutually
+	// exclusive (RunMigrate rejects a config that sets both). The extract
+	// may hold more portfolios than the slice; migrate only acts on the
+	// matching ones. Empty means every portfolio is migrated.
+	PortfolioKeyRegexp  string
+	PortfolioNameRegexp string
+	// GroupNameRegexp, when non-empty, limits which user groups migrate
+	// processes (creation and every group permission grant), on top of
+	// whatever the extract phase already limited getGroups to. Always
+	// compiled as a full-match regex implicitly anchored with ^ and $. Empty
+	// means "migrate every extracted group" (#669).
+	GroupNameRegexp string
+
 	// ProgressCallback, when set, is invoked with the same run-wide
 	// percent/ETA snapshot as the #520 log line, on every tick and once
 	// more at completion. Nil for CLI callers (go/cmd/migrate.go); the
@@ -393,6 +409,14 @@ type Executor struct {
 	// BranchRe is the compiled form of MigrateConfig.BranchRegexp, or nil
 	// when unset. #582.
 	BranchRe *regexp.Regexp
+	// PortfolioFilter is the compiled form of MigrateConfig.PortfolioKeyRegexp
+	// / PortfolioNameRegexp (#666), or nil when neither is set. It is applied
+	// where portfolios.csv is loaded, so every portfolio task sees only the
+	// slice.
+	PortfolioFilter *common.PortfolioFilter
+	// GroupRe is the compiled form of MigrateConfig.GroupNameRegexp, or nil
+	// when unset. #669.
+	GroupRe *regexp.Regexp
 	// MigrateHistory — see MigrateConfig.MigrateHistory (#554).
 	MigrateHistory bool
 	// UseSLBForReferenceBranchNewCode — see MigrateConfig.UseSLBForReferenceBranchNewCode (#655).
@@ -462,6 +486,21 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 			return "", fmt.Errorf("invalid branch regexp pattern %q: %w", cfg.BranchRegexp, err)
 		}
 		branchRe = re
+	}
+	// #666: compile the portfolio slice defensively (conflict or invalid
+	// pattern -> error) for the same reason as --branch_regexp above.
+	portfolioFilter, err := common.NewPortfolioFilter(cfg.PortfolioKeyRegexp, cfg.PortfolioNameRegexp)
+	if err != nil {
+		return "", err
+	}
+	// #669: compile --group_name_regexp defensively, same as --branch_regexp.
+	var groupRe *regexp.Regexp
+	if cfg.GroupNameRegexp != "" {
+		re, err := extract.CompileProjectKeyPattern(cfg.GroupNameRegexp)
+		if err != nil {
+			return "", fmt.Errorf("invalid group name regexp pattern %q: %w", cfg.GroupNameRegexp, err)
+		}
+		groupRe = re
 	}
 	// #583: parse --branch_analyzed_after defensively even though
 	// cmd/migrate.go and cmd/transfer.go already validate it at
@@ -564,6 +603,8 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 		Objects:                         cfg.Objects,
 		ProjectKeyRe:                    projectKeyRe,
 		BranchRe:                        branchRe,
+		PortfolioFilter:                 portfolioFilter,
+		GroupRe:                         groupRe,
 		MigrateHistory:                  cfg.MigrateHistory,
 		UseSLBForReferenceBranchNewCode: cfg.UseSLBForReferenceBranchNewCode,
 		BranchAnalyzedAfter:             branchAnalyzedAfter,

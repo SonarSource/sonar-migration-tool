@@ -71,6 +71,22 @@ type ExtractConfig struct {
 	// #529/#536). The project's main branch is always kept regardless of
 	// whether it matches. Empty means "extract every branch" (#582).
 	BranchRegexp string
+	// PortfolioKeyRegexp / PortfolioNameRegexp, when non-empty, limit which
+	// portfolios get extracted: the getPortfolios task writes only matching
+	// portfolios, so getPortfolioDetails and getPortfolioProjects (which
+	// iterate its output) follow. Implicitly anchored (^...$) like
+	// ProjectKey. Mutually exclusive — RunExtract rejects setting both
+	// (common.ErrPortfolioRegexpConflict). Applications are not portfolios
+	// and are never filtered. Empty means every portfolio (#666).
+	PortfolioKeyRegexp  string
+	PortfolioNameRegexp string
+	// GroupNameRegexp, when non-empty, limits which user groups get
+	// extracted: only groups whose name matches are written by getGroups, and
+	// getUserGroups follows since it fans out from getGroups. Always compiled
+	// as a full-match regex implicitly anchored with ^ and $ (same as
+	// BranchRegexp). The built-in "Anyone" pseudo-group is always kept.
+	// Empty means "extract every group" (#669).
+	GroupNameRegexp string
 	// Objects, when non-nil, limits extraction to the selected object
 	// categories (settings, permission_templates, quality_profiles,
 	// quality_gates, projects, portfolios, groups, license_profiles —
@@ -133,6 +149,13 @@ type Executor struct {
 	// BranchRe is the compiled form of ExtractConfig.BranchRegexp, or nil
 	// when unset (meaning "no branch filtering"). #582.
 	BranchRe *regexp.Regexp
+
+	// PortfolioFilter is the compiled form of ExtractConfig.PortfolioKeyRegexp
+	// / PortfolioNameRegexp. Nil (or inactive) means no portfolio filtering. #666.
+	PortfolioFilter *common.PortfolioFilter
+	// GroupRe is the compiled form of ExtractConfig.GroupNameRegexp, or nil
+	// when unset (meaning "no group filtering"). #669.
+	GroupRe *regexp.Regexp
 
 	// Truncation collects every truncated API response observed during
 	// the run, for the end-of-run console block and the
@@ -330,6 +353,13 @@ func (e *Executor) SkippedProjectKeys() []string {
 func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 	cfg.applyDefaults()
 
+	// #666: reject a conflicting/invalid portfolio regexp pair before any
+	// network call.
+	portfolioFilter, err := common.NewPortfolioFilter(cfg.PortfolioKeyRegexp, cfg.PortfolioNameRegexp)
+	if err != nil {
+		return nil, err
+	}
+
 	cmdStart := time.Now()
 	// End-of-command timing line (#311) — defer so it fires on every
 	// exit path. Logger is slog.Default() so initClient failures
@@ -354,6 +384,11 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 	meta := extractMeta{
 		Plan: plan, RunID: extractID, Version: version,
 		Edition: edition, URL: cfg.URL, Targets: targets, Registry: registry,
+		// A run limited to some objects, projects or portfolios is a partial
+		// extract: readers merge it onto the latest full extract instead of
+		// replacing it (#664, #666).
+		Partial:     isPartialExtract(cfg),
+		ProjectKeys: cfg.ProjectKeys,
 	}
 	if err := writeMetadataFile(extractDir, meta); err != nil {
 		return nil, err
@@ -380,6 +415,13 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 		}
 		executor.BranchRe = branchRe
 	}
+	if cfg.GroupNameRegexp != "" {
+		groupRe, err := CompileProjectKeyPattern(cfg.GroupNameRegexp)
+		if err != nil {
+			return nil, fmt.Errorf("invalid group name regexp pattern %q: %w", cfg.GroupNameRegexp, err)
+		}
+		executor.GroupRe = groupRe
+	}
 	// Defensive re-validation (#583): cmd/extract.go already validates
 	// --branch_analyzed_after before calling RunExtract, but this entry
 	// point also serves direct callers (e.g. the GUI wizard) that may not.
@@ -388,6 +430,7 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 		return nil, err
 	}
 	executor.BranchAnalyzedAfter = branchAnalyzedAfter
+	executor.PortfolioFilter = portfolioFilter
 
 	// Truncation tracking (#574). The observer is installed on the raw
 	// client — one installation covering all of its call sites,
@@ -714,6 +757,10 @@ type extractMeta struct {
 	URL      string
 	Targets  []string
 	Registry map[string]*TaskDef
+	// Partial is true when the run was limited by --objects or a project
+	// filter. ProjectKeys lists the projects it was limited to (#664).
+	Partial     bool
+	ProjectKeys []string
 }
 
 func writeMetadataFile(dir string, m extractMeta) error {
@@ -731,6 +778,10 @@ func writeMetadataFile(dir string, m extractMeta) error {
 		"target_tasks":      m.Targets,
 		"available_configs": configs,
 		"run_id":            m.RunID,
+		"partial":           m.Partial,
+	}
+	if len(m.ProjectKeys) > 0 {
+		meta["project_keys"] = m.ProjectKeys
 	}
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
@@ -816,4 +867,12 @@ func tasksToRun(phase []string, store *DataStore) (run, discarded []string, err 
 		run = append(run, task)
 	}
 	return run, discarded, nil
+}
+
+// isPartialExtract reports whether cfg limits the run to some objects,
+// projects, portfolios or groups (#664, #666, #669).
+func isPartialExtract(cfg ExtractConfig) bool {
+	return cfg.Objects != nil || len(cfg.ProjectKeys) > 0 ||
+		cfg.PortfolioKeyRegexp != "" || cfg.PortfolioNameRegexp != "" ||
+		cfg.GroupNameRegexp != ""
 }

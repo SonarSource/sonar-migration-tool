@@ -63,6 +63,17 @@ type configFileShape struct {
 	// shape (4), source.branch_regexp wins when both are set — see
 	// unifiedSourceBlock. #582.
 	BranchRegexp string `json:"branch_regexp"`
+	// PortfolioKeyRegexp / PortfolioNameRegexp are the top-level
+	// "portfolio_key_regexp" / "portfolio_name_regexp" values. In the unified
+	// shape (4), the source.* equivalents win when set — see
+	// unifiedSourceBlock. Mutually exclusive on the final resolved pair
+	// (checked by the caller after CLI flags are applied). #666.
+	PortfolioKeyRegexp  string `json:"portfolio_key_regexp"`
+	PortfolioNameRegexp string `json:"portfolio_name_regexp"`
+	// GroupNameRegexp is the top-level "group_name_regexp" value. In the
+	// unified shape (4), source.group_name_regexp wins when both are set.
+	// #669.
+	GroupNameRegexp string `json:"group_name_regexp"`
 	// MigrateHistory / HistoryMaxPoints / HistoryMinIntervalDays — see
 	// ExtractConfig doc comments. #554. Top-level only: like
 	// skip_project_data_migration / skip_issue_sync, this is a plain bool
@@ -117,6 +128,15 @@ type unifiedSourceBlock struct {
 	// BranchRegexp, when set, overrides the top-level "branch_regexp" for
 	// this source. #582.
 	BranchRegexp string `json:"branch_regexp"`
+	// PortfolioKeyRegexp / PortfolioNameRegexp, when either is set, override
+	// the top-level pair for this source (the pair is taken from here as a
+	// whole, so a source key regexp is not falsely in conflict with a
+	// top-level name regexp). #666.
+	PortfolioKeyRegexp  string `json:"portfolio_key_regexp"`
+	PortfolioNameRegexp string `json:"portfolio_name_regexp"`
+	// GroupNameRegexp, when set, overrides the top-level
+	// "group_name_regexp" for this source. #669.
+	GroupNameRegexp string `json:"group_name_regexp"`
 	// ProjectKeyRegexp, when set, overrides the top-level
 	// "project_key_regexp" for this source. #592.
 	ProjectKeyRegexp string `json:"project_key_regexp"`
@@ -181,6 +201,17 @@ func resolveBranchAnalyzedAfter(phase *string, top string) string {
 		return *phase
 	}
 	return top
+}
+
+// resolvePortfolioRegexps returns the portfolio key/name regexp pair for the
+// unified shape: source.* when it sets either one, else the top-level pair.
+// Resolving the pair as a whole keeps a source-level key regexp from being
+// falsely in conflict with a top-level name regexp. #666.
+func (s configFileShape) resolvePortfolioRegexps() (key, name string) {
+	if s.Source != nil && (s.Source.PortfolioKeyRegexp != "" || s.Source.PortfolioNameRegexp != "") {
+		return s.Source.PortfolioKeyRegexp, s.Source.PortfolioNameRegexp
+	}
+	return s.PortfolioKeyRegexp, s.PortfolioNameRegexp
 }
 
 func (s configFileShape) toExtractConfig() ExtractConfig {
@@ -249,6 +280,14 @@ func (s configFileShape) applyUnifiedShapeTo(cfg *ExtractConfig) {
 		sourceBranchRegexp = s.Source.BranchRegexp
 	}
 	cfg.BranchRegexp = common.FirstNonEmpty(sourceBranchRegexp, s.BranchRegexp)
+	// #666: source.portfolio_*_regexp wins over the top-level pair.
+	cfg.PortfolioKeyRegexp, cfg.PortfolioNameRegexp = s.resolvePortfolioRegexps()
+	// #669: source.group_name_regexp wins, else the top-level field.
+	var sourceGroupNameRegexp string
+	if s.Source != nil {
+		sourceGroupNameRegexp = s.Source.GroupNameRegexp
+	}
+	cfg.GroupNameRegexp = common.FirstNonEmpty(sourceGroupNameRegexp, s.GroupNameRegexp)
 	var sourceBranchAnalyzedAfter *string
 	if s.Source != nil {
 		sourceBranchAnalyzedAfter = s.Source.BranchAnalyzedAfter
@@ -272,6 +311,9 @@ func (s configFileShape) applyLegacySonarQubeShapeTo(cfg *ExtractConfig) {
 	cfg.objectsRaw = s.Objects
 	cfg.ProjectKey = common.ResolveDeprecatedProjectKey(s.ProjectKey, s.ProjectKeyRegexp)
 	cfg.BranchRegexp = s.BranchRegexp
+	cfg.PortfolioKeyRegexp = s.PortfolioKeyRegexp
+	cfg.PortfolioNameRegexp = s.PortfolioNameRegexp
+	cfg.GroupNameRegexp = s.GroupNameRegexp
 	cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
 	s.applyHistoryTo(cfg)
 }
@@ -291,6 +333,14 @@ func (s configFileShape) applySectionedShapeTo(cfg *ExtractConfig) {
 	}
 	if s.BranchRegexp != "" {
 		cfg.BranchRegexp = s.BranchRegexp
+	}
+	// #666: an outer pair wins as a whole over the nested one.
+	if s.PortfolioKeyRegexp != "" || s.PortfolioNameRegexp != "" {
+		cfg.PortfolioKeyRegexp = s.PortfolioKeyRegexp
+		cfg.PortfolioNameRegexp = s.PortfolioNameRegexp
+	}
+	if s.GroupNameRegexp != "" {
+		cfg.GroupNameRegexp = s.GroupNameRegexp
 	}
 	if s.BranchAnalyzedAfter != "" {
 		cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
@@ -316,6 +366,9 @@ func (s configFileShape) applyFlatShapeTo(cfg *ExtractConfig) {
 	cfg.objectsRaw = s.Objects
 	cfg.ProjectKey = common.ResolveDeprecatedProjectKey(s.ProjectKey, s.ProjectKeyRegexp)
 	cfg.BranchRegexp = s.BranchRegexp
+	cfg.PortfolioKeyRegexp = s.PortfolioKeyRegexp
+	cfg.PortfolioNameRegexp = s.PortfolioNameRegexp
+	cfg.GroupNameRegexp = s.GroupNameRegexp
 	cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
 	s.applyHistoryTo(cfg)
 }

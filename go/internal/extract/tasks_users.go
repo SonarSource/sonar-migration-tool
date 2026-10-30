@@ -76,10 +76,21 @@ func userTasks() []TaskDef {
 			Name:     "getGroups",
 			Editions: AllEditions,
 			Run: func(ctx context.Context, e *Executor) error {
-				return fetchAndWritePaginated(ctx, e, "getGroups", PaginatedOpts{
+				return fetchAndWritePaginatedFiltered(ctx, e, "getGroups", PaginatedOpts{
 					Path: "api/permissions/groups", ResultKey: "groups", MaxPageSize: 100,
-				}, map[string]any{"serverUrl": e.ServerURL})
+				}, map[string]any{"serverUrl": e.ServerURL}, keepGroupByRegexp)
 			},
 		},
 	}
+}
+
+// keepGroupByRegexp decides whether a raw "api/permissions/groups" item
+// survives extraction: no filter configured, it's the "Anyone" pseudo-group
+// (never a real group, always kept), or its name matches e.GroupRe. #669.
+func keepGroupByRegexp(e *Executor, item json.RawMessage) bool {
+	if e.GroupRe == nil {
+		return true
+	}
+	name := extractField(item, "name")
+	return name == "Anyone" || e.GroupRe.MatchString(name)
 }
