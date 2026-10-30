@@ -83,8 +83,9 @@ var commandFlags = map[string][]string{
 		"--project_key_pattern", "--run_id", "--skip_issue_sync",
 		"--skip_profiles", "--skip_project_data_migration", "--target_task",
 		"--target_token", "--target_url", "--timeout",
+		"--use_slb_for_reference_branch_new_code",
 	},
-	"predictive-report": {"--config", "--default_organization", "--export_directory"},
+	"predictive-report": {"--config", "--default_organization", "--export_directory", "--use_slb_for_reference_branch_new_code"},
 	"regtest":           {"--concurrency", "--config", "--format", "--project_key_regexp", "--verbose"},
 	"report":            {"--export_directory", "--filename", "--report_type"},
 	"reset": {
@@ -110,6 +111,7 @@ var commandFlags = map[string][]string{
 		"--project_key_regexp", "--project_key_pattern", "--skip_issue_sync",
 		"--skip_project_data_migration", "--source_token", "--source_url",
 		"--target_token", "--target_url", "--timeout", "--unsupported_languages",
+		"--use_slb_for_reference_branch_new_code",
 	},
 	"wizard": {"--export_directory"},
 }

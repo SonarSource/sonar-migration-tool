@@ -164,6 +164,10 @@ func resolveProjectBranches(e *Executor, w *common.ChunkWriter, cloudKey, server
 	for _, d := range dropped {
 		recordBranchLimitSkip(w, cloudKey, d.Name)
 	}
+	if e.UseSLBForReferenceBranchNewCode {
+		// #655 — decided on the final branch list, after every filter and cap.
+		markShortLivedBranches(sqBranches, referenceBranchNCDBranches(e, serverURL, serverKey, sqBranches))
+	}
 	return sqBranches
 }
 
@@ -325,6 +329,21 @@ func importProjectBranches(ctx context.Context, e *Executor, proj json.RawMessag
 		// rename frees the old default name in case a non-main branch uses it
 		// (e.g. a source "master" branch when "develop" is the main branch).
 		renameSCMainBranchToSource(ctx, e, cloudKey, mainBranch.Name)
+	}
+
+	// #655 — keep the project's long-lived branch pattern from matching the
+	// branches that must migrate as short-lived, for the whole of Phase 2
+	// (importBranch waits for each branch's CE task), then put it back.
+	var slbNames []string
+	for _, b := range nonMainBranches {
+		if b.ShortLived {
+			slbNames = append(slbNames, b.Name)
+		}
+	}
+	defer shortLivedPatternGuard(ctx, e, cloudKey, slbNames)()
+	for _, name := range dropLongLivedBeforeShort(ctx, e, cloudKey, scBranches, nonMainBranches, bctx.Completed) {
+		// Gone from the target: it must not look "up to date" any more.
+		delete(bctx.TargetAnalysisDates, name)
 	}
 
 	// Phase 2: import non-main branches in parallel.
@@ -541,7 +560,10 @@ func importAndRecordBranch(ctx context.Context, e *Executor, bctx branchImportCo
 	// #554 (PoC) — replay bounded project history before the regular
 	// current-snapshot import below. See migrateBranchHistory for why this
 	// must run first and why its errors are non-fatal.
-	migrateBranchHistory(ctx, e, bctx, branch, targetBranch)
+	// #655 — never for a short-lived branch: it carries a single analysis.
+	if !branch.ShortLived {
+		migrateBranchHistory(ctx, e, bctx, branch, targetBranch)
+	}
 
 	// Non-main branches reference the main branch; the main branch references
 	// nothing (BuildMetadata falls back to its own name, preserving the working
@@ -549,6 +571,12 @@ func importAndRecordBranch(ctx context.Context, e *Executor, bctx branchImportCo
 	referenceBranch := ""
 	if !branch.IsMain {
 		referenceBranch = bctx.MainTargetName
+	}
+	// #655 — a short-lived branch is not backdated: Cloud purges inactive
+	// short-lived branches, so an old analysis date would delete it at once.
+	lastAnalysisDate := branch.LastAnalysisDate
+	if branch.ShortLived {
+		lastAnalysisDate = time.Time{}
 	}
 	result, err := importBranch(ctx, e, importBranchInput{
 		CloudKey:         bctx.CloudKey,
@@ -559,7 +587,8 @@ func importAndRecordBranch(ctx context.Context, e *Executor, bctx branchImportCo
 		TargetBranch:     targetBranch,
 		ReferenceBranch:  referenceBranch,
 		IsMain:           branch.IsMain,
-		LastAnalysisDate: branch.LastAnalysisDate,
+		ShortLived:       branch.ShortLived,
+		LastAnalysisDate: lastAnalysisDate,
 	})
 	if err != nil {
 		logAPIWarn(e.Logger, "project data import failed", err, "project", bctx.CloudKey, "branch", branch.Name)
@@ -596,6 +625,7 @@ type importBranchInput struct {
 	TargetBranch    string // SC branch name — used in protobuf metadata and CE submit
 	ReferenceBranch string // reference/merge branch (metadata field 11); empty for main
 	IsMain          bool   // main/default branch — suppresses branch characteristics on submit
+	ShortLived      bool   // migrate as a short-lived branch (#655): registered and submitted with the explicit short type
 	// LastAnalysisDate backdates the current-snapshot report to the source
 	// branch's real last analysis date instead of the migration run's own
 	// timestamp. Zero when the source branch was never analyzed, in which
@@ -676,6 +706,7 @@ func importBranch(ctx context.Context, e *Executor, input importBranchInput) (*i
 		BranchName:     targetBranch,
 		ProjectVersion: meta.ProjectVersion,
 		IsMain:         input.IsMain,
+		ShortLived:     input.ShortLived,
 	}
 
 	result, err := scanreport.SubmitReport(ctx, e.Raw.HTTPClient(), cfg, zipBytes)
@@ -780,6 +811,12 @@ func preCreateBranchAnalysis(ctx context.Context, e *Executor, input importBranc
 	if input.IsMain {
 		return "", nil
 	}
+	branchType := "long"
+	if input.ShortLived {
+		// #655 — registered explicitly, so the type does not depend on how the
+		// CE reads the project's long-lived branch pattern.
+		branchType = "short"
+	}
 	res, err := scanreport.PreCreateAnalysis(ctx, e.RawAPI.HTTPClient(), scanreport.AnalysisConfig{
 		APIURL:         e.APIURL,
 		OrgKey:         input.OrgKey,
@@ -792,7 +829,7 @@ func preCreateBranchAnalysis(ctx context.Context, e *Executor, input importBranc
 		// branches are long-lived). Without this, branches whose names don't
 		// match the target's long-lived-branch regex would be created as
 		// short-lived (PR-like, auto-deleted, no overall-code history).
-		BranchType: "long",
+		BranchType: branchType,
 	})
 	if err != nil {
 		return "", fmt.Errorf("create-analysis handshake (branch %s): %w", input.Branch, err)
@@ -982,13 +1019,18 @@ func buildBranchReport(ctx context.Context, e *Executor, input importBranchInput
 		return nil, branchReportMeta{}, nil, err
 	}
 
+	// #655 — a real scanner's report for a short-lived branch carries
+	// branch_type PULL_REQUEST (with the branch name and its reference branch,
+	// no pull_request_key); BRANCH makes the CE treat the branch as long-lived.
+	reportBranchType := reportBranchTypeFor(input.ShortLived)
+
 	reportData := &scanreport.ReportData{
 		Metadata: scanreport.BuildMetadata(scanreport.MetadataInput{
 			AnalysisDate:        analysisDate,
 			OrgKey:              input.OrgKey,
 			ProjectKey:          input.CloudKey,
 			BranchName:          targetBranch,
-			BranchType:          pb.Metadata_BRANCH,
+			BranchType:          reportBranchType,
 			ReferenceBranchName: input.ReferenceBranch,
 			ProjectVersion:      projectVersion,
 			QProfiles:           qprofiles,
@@ -1122,6 +1164,9 @@ type branchInfo struct {
 	// current-snapshot import instead of stamping it with the migration
 	// run's own timestamp. Zero when the source branch was never analyzed.
 	LastAnalysisDate time.Time
+	// ShortLived marks a branch to migrate as a SonarQube Cloud short-lived
+	// branch (#655): its source new code definition is a reference branch.
+	ShortLived bool
 }
 
 // collectBranchInfo reads extracted branch data for a project, returning

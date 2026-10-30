@@ -507,3 +507,43 @@ func TestRunSetTemplateGroupPermissionsSkipsAdminForSonarUsersAlias(t *testing.T
 		t.Errorf("expected user still granted to Members, got %v", adds)
 	}
 }
+
+// A group created in one org must be granted permissions in that org, not in
+// whichever org the per-server lookup happens to return.
+func TestRunSetOrgGroupPermissionsUsesGroupCreationOrg(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		calls []string // "<org>:<group>:<perm>"
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/permissions/add_group", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		mu.Lock()
+		calls = append(calls, r.FormValue("organization")+":"+r.FormValue("groupName")+":"+r.FormValue("permission"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	e := newCustomCloudTest(t, mux)
+
+	writeTaskJSONL(t, e, "generateOrganizationMappings", []map[string]any{
+		{"server_url": testServerURL, "sonarcloud_org_key": "other-org"},
+	})
+	writeTaskJSONL(t, e, "createGroups", []map[string]any{
+		{"server_url": testServerURL, "name": "ci-tools", "sonarcloud_org_key": "unbound-org"},
+	})
+	writeJSONL(extractPath(e, "getGroups"), []map[string]any{
+		{"id": "1", "name": "ci-tools", "permissions": []string{"scan"}, "serverUrl": testServerURL},
+	})
+
+	if err := runSetOrgGroupPermissions(context.Background(), e); err != nil {
+		t.Fatalf("runSetOrgGroupPermissions: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 1 || calls[0] != "unbound-org:ci-tools:scan" {
+		t.Errorf("want one grant in unbound-org, got %v", calls)
+	}
+}
