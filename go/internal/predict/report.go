@@ -44,11 +44,17 @@ func GeneratePredictiveReport(exportDir string, defaultOrg ...string) (string, e
 	if len(defaultOrg) > 0 {
 		org = defaultOrg[0]
 	}
+	return GeneratePredictiveReportWithOptions(exportDir, org, false)
+}
+
+// GeneratePredictiveReportWithOptions is GeneratePredictiveReport for a
+// migration run with use_slb_for_reference_branch_new_code set to useSLB (#655).
+func GeneratePredictiveReportWithOptions(exportDir, org string, useSLB bool) (string, error) {
 	if err := applyDefaultOrg(exportDir, org, slog.Default()); err != nil {
 		return "", err
 	}
 
-	runDir, err := BuildPredictiveRun(exportDir)
+	runDir, err := BuildPredictiveRunWithOptions(exportDir, useSLB)
 	if err != nil {
 		return "", fmt.Errorf("building predictive run: %w", err)
 	}

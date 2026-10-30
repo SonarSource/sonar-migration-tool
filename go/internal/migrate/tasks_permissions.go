@@ -294,6 +294,7 @@ func runAddMigrationGroupToTemplates(ctx context.Context, e *Executor) error {
 func runSetOrgGroupPermissions(ctx context.Context, e *Executor) error {
 	// Build org lookup.
 	orgKeys := buildServerOrgLookup(e)
+	createdIn := groupCreationOrgs(e)
 
 	counter := TaskCounterFromContext(ctx)
 	// #551: applyOrgPermissions' total-failure error must not be
@@ -311,14 +312,22 @@ func runSetOrgGroupPermissions(ctx context.Context, e *Executor) error {
 			if name == "Anyone" || !e.groupSelected(name) {
 				return nil
 			}
-			orgKey := orgKeys[item.ServerURL]
-			if shouldSkipOrg(orgKey) {
-				return nil
+			// Grant in the org(s) createGroups put the group in; the
+			// per-server lookup is only a fallback for groups it did not
+			// create (e.g. the sonar-users → Members alias).
+			targets := createdIn[groupOrgKey{item.ServerURL, name}]
+			if len(targets) == 0 {
+				targets = []string{orgKeys[item.ServerURL]}
 			}
-			if err := applyOrgPermissions(ctx, e, item.Data, name, orgKey, counter); err != nil {
-				failMu.Lock()
-				totalFailures = append(totalFailures, err.Error())
-				failMu.Unlock()
+			for _, orgKey := range targets {
+				if shouldSkipOrg(orgKey) {
+					continue
+				}
+				if err := applyOrgPermissions(ctx, e, item.Data, name, orgKey, counter); err != nil {
+					failMu.Lock()
+					totalFailures = append(totalFailures, err.Error())
+					failMu.Unlock()
+				}
 			}
 			_ = w.WriteOne(item.Data)
 			return nil
@@ -329,6 +338,26 @@ func runSetOrgGroupPermissions(ctx context.Context, e *Executor) error {
 			len(totalFailures), strings.Join(totalFailures, "; "))
 	}
 	return err
+}
+
+// groupOrgKey identifies a source group.
+type groupOrgKey struct{ serverURL, name string }
+
+// groupCreationOrgs maps each source group to the target org(s) createGroups
+// created or found it in. Org-level permissions must be granted there: a group
+// only exists in its own org, so granting in any other org 404s.
+func groupCreationOrgs(e *Executor) map[groupOrgKey][]string {
+	items, _ := e.Store.ReadAll("createGroups")
+	out := make(map[groupOrgKey][]string, len(items))
+	for _, it := range items {
+		org := extractField(it, "sonarcloud_org_key")
+		if org == "" {
+			continue
+		}
+		k := groupOrgKey{extractField(it, "server_url"), extractField(it, "name")}
+		out[k] = append(out[k], org)
+	}
+	return out
 }
 
 func applyOrgPermissions(ctx context.Context, e *Executor, data json.RawMessage, name, orgKey string, counter *TaskCounter) error {
