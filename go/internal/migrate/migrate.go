@@ -267,6 +267,14 @@ type MigrateConfig struct {
 	// data for a different run.
 	MigrateHistory bool
 
+	// UseSLBForReferenceBranchNewCode migrates SonarQube Server branches whose
+	// new code definition is a reference branch as short-lived branches on
+	// SonarQube Cloud, which has no reference-branch new code definition but
+	// compares a short-lived branch against its target branch (#655). The
+	// project's long-lived branch pattern is temporarily adjusted while those
+	// branches are migrated, then restored. Defaults to false.
+	UseSLBForReferenceBranchNewCode bool
+
 	// MaxIssueComments caps the number of source comments replayed onto a
 	// single Cloud issue/hotspot during metadata sync, keeping only the
 	// most recent ones (#571) — every comment is an extra
@@ -411,6 +419,8 @@ type Executor struct {
 	PermissionTemplateRe *regexp.Regexp
 	// MigrateHistory — see MigrateConfig.MigrateHistory (#554).
 	MigrateHistory bool
+	// UseSLBForReferenceBranchNewCode — see MigrateConfig.UseSLBForReferenceBranchNewCode (#655).
+	UseSLBForReferenceBranchNewCode bool
 	// HistoryProgress tracks project-history replay (#554) as its own
 	// unit of work for the overall ETA (#564): migrateBranchHistory
 	// increments it once per historical point it submits, fails on, or
@@ -569,35 +579,36 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 	phases := filterCompleted(mp.Plan, store)
 
 	executor := &Executor{
-		Cloud:                    clients.Cloud,
-		CloudAPI:                 clients.CloudAPI,
-		Raw:                      clients.Raw,
-		RawAPI:                   clients.RawAPI,
-		Extract:                  nil, // Will be set per-task based on extract mapping
-		Store:                    store,
-		CloudURL:                 clients.CloudURL,
-		APIURL:                   clients.APIURL,
-		EntKey:                   cfg.EnterpriseKey,
-		Edition:                  mp.Edition,
-		ExportDir:                cfg.ExportDirectory,
-		Mapping:                  mp.Mapping,
-		ConcurrencyLimiter:       clients.ConcurrencyLimiter,
-		CEPollConcurrencyLimiter: clients.CEPollConcurrencyLimiter,
-		BranchGate:               newBranchGate(clients.CEPollConcurrencyLimiter),
-		BuildSem:                 make(chan struct{}, cfg.BuildConcurrency),
-		ExcludeBranches:          cfg.ExcludeBranches,
-		UnsupportedLanguages:     cfg.UnsupportedLanguages,
-		FastSync:                 cfg.FastSync,
-		MaxIssueComments:         cfg.MaxIssueComments,
-		ProjectKeyPattern:        cfg.ProjectKeyPattern,
-		Objects:                  cfg.Objects,
-		ProjectKeyRe:             projectKeyRe,
-		BranchRe:                 branchRe,
-		PortfolioFilter:          portfolioFilter,
-		PermissionTemplateRe:     ptRe,
-		MigrateHistory:           cfg.MigrateHistory,
-		BranchAnalyzedAfter:      branchAnalyzedAfter,
-		Logger:                   logger,
+		Cloud:                           clients.Cloud,
+		CloudAPI:                        clients.CloudAPI,
+		Raw:                             clients.Raw,
+		RawAPI:                          clients.RawAPI,
+		Extract:                         nil, // Will be set per-task based on extract mapping
+		Store:                           store,
+		CloudURL:                        clients.CloudURL,
+		APIURL:                          clients.APIURL,
+		EntKey:                          cfg.EnterpriseKey,
+		Edition:                         mp.Edition,
+		ExportDir:                       cfg.ExportDirectory,
+		Mapping:                         mp.Mapping,
+		ConcurrencyLimiter:              clients.ConcurrencyLimiter,
+		CEPollConcurrencyLimiter:        clients.CEPollConcurrencyLimiter,
+		BranchGate:                      newBranchGate(clients.CEPollConcurrencyLimiter),
+		BuildSem:                        make(chan struct{}, cfg.BuildConcurrency),
+		ExcludeBranches:                 cfg.ExcludeBranches,
+		UnsupportedLanguages:            cfg.UnsupportedLanguages,
+		FastSync:                        cfg.FastSync,
+		MaxIssueComments:                cfg.MaxIssueComments,
+		ProjectKeyPattern:               cfg.ProjectKeyPattern,
+		Objects:                         cfg.Objects,
+		ProjectKeyRe:                    projectKeyRe,
+		BranchRe:                        branchRe,
+		PortfolioFilter:                 portfolioFilter,
+		PermissionTemplateRe:            ptRe,
+		MigrateHistory:                  cfg.MigrateHistory,
+		UseSLBForReferenceBranchNewCode: cfg.UseSLBForReferenceBranchNewCode,
+		BranchAnalyzedAfter:             branchAnalyzedAfter,
+		Logger:                          logger,
 	}
 
 	// Overall progress/ETA logging (#520) — every 10s for the duration of

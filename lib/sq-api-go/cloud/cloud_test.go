@@ -795,6 +795,30 @@ func TestBranchesRename(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestBranchesDelete(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/project_branches/delete", func(w http.ResponseWriter, r *http.Request) {
+		assertFormValue(t, r, "project", "proj1")
+		assertFormValue(t, r, "branch", "release-3.x")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	cc := newTestCloud(t, mux)
+
+	require.NoError(t, cc.Branches.Delete(context.Background(), "proj1", "release-3.x"))
+}
+
+func TestBranchesDeleteError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/project_branches/delete", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"errors":[{"msg":"Not found"}]}`, http.StatusNotFound)
+	})
+	cc := newTestCloud(t, mux)
+
+	err := cc.Branches.Delete(context.Background(), "proj1", "gone")
+	require.Error(t, err)
+	assert.True(t, sqapi.IsNotFound(err))
+}
+
 func TestBranchesRenameError(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/project_branches/rename", func(w http.ResponseWriter, r *http.Request) {

@@ -23,6 +23,14 @@ func (b *BranchesClient) Rename(ctx context.Context, projectKey, name string) er
 	return b.postForm(ctx, "api/project_branches/rename", form, nil)
 }
 
+// Delete deletes a non-main branch via /api/project_branches/delete.
+func (b *BranchesClient) Delete(ctx context.Context, projectKey, branch string) error {
+	form := url.Values{}
+	form.Set("project", projectKey)
+	form.Set("branch", branch)
+	return b.postForm(ctx, "api/project_branches/delete", form, nil)
+}
+
 // List returns all branches of the given project via
 // GET /api/project_branches/list.
 func (b *BranchesClient) List(ctx context.Context, projectKey string) ([]types.Branch, error) {

@@ -73,6 +73,13 @@ var createTasks = []createTaskDef{
 // No HTTP calls are made; this is purely a local file synthesis. The
 // caller hands the returned runDir to summary.GeneratePDFReport.
 func BuildPredictiveRun(exportDir string) (string, error) {
+	return BuildPredictiveRunWithOptions(exportDir, false)
+}
+
+// BuildPredictiveRunWithOptions is BuildPredictiveRun for a migration run with
+// use_slb_for_reference_branch_new_code set to useSLB (#655): when it is off, the
+// projects with reference-branch new code are tagged so the report suggests it.
+func BuildPredictiveRunWithOptions(exportDir string, useSLB bool) (string, error) {
 	if exportDir == "" {
 		return "", fmt.Errorf("export directory is required")
 	}
@@ -113,7 +120,7 @@ func BuildPredictiveRun(exportDir string) (string, error) {
 	// usable report on their own.
 	extractMapping, err := structure.GetUniqueExtracts(exportDir)
 	if err == nil && len(extractMapping) > 0 {
-		if err := synthesizeExtractDriven(exportDir, runDir, extractMapping, orgLookup); err != nil {
+		if err := synthesizeExtractDriven(exportDir, runDir, extractMapping, orgLookup, useSLB); err != nil {
 			return "", err
 		}
 	}
@@ -154,14 +161,14 @@ func synthesizeMappingTasks(exportDir string, store *common.DataStore, orgLookup
 
 // synthesizeExtractDriven runs the synthesizers that read the extract itself
 // rather than a mapping CSV. Order matters for the last one only.
-func synthesizeExtractDriven(exportDir, runDir string, extractMapping structure.ExtractMapping, orgLookup map[string]string) error {
+func synthesizeExtractDriven(exportDir, runDir string, extractMapping structure.ExtractMapping, orgLookup map[string]string, useSLB bool) error {
 	if err := synthesizeAddGateConditionsNotes(exportDir, runDir, extractMapping, orgLookup); err != nil {
 		return fmt.Errorf("synthesizing addGateConditions.notes: %w", err)
 	}
 	if err := synthesizeSetGlobalSettings(exportDir, runDir, extractMapping, orgLookup); err != nil {
 		return fmt.Errorf("synthesizing setGlobalSettings: %w", err)
 	}
-	if err := synthesizeSetNewCodePeriods(exportDir, runDir, extractMapping); err != nil {
+	if err := synthesizeSetNewCodePeriods(exportDir, runDir, extractMapping, useSLB); err != nil {
 		return fmt.Errorf("synthesizing setNewCodePeriods: %w", err)
 	}
 	if err := synthesizeAnalyzeProfileRulesNotes(exportDir, runDir, extractMapping); err != nil {
