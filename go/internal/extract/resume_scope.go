@@ -22,6 +22,8 @@ type recordedScope struct {
 	Objects             []string `json:"objects"`
 	PortfolioKeyRegexp  string   `json:"portfolio_key_regexp"`
 	PortfolioNameRegexp string   `json:"portfolio_name_regexp"`
+	// PermissionTemplateRegexp is the permission template slice (#665).
+	PermissionTemplateRegexp string `json:"permission_template_regexp"`
 }
 
 // restoreResumeScope keeps a resumed slice a slice (#666). extract.json is
@@ -55,6 +57,7 @@ func restoreResumeScope(cfg *ExtractConfig, logger *slog.Logger) {
 	cfg.ProjectKeys = rec.ProjectKeys
 	cfg.PortfolioKeyRegexp = rec.PortfolioKeyRegexp
 	cfg.PortfolioNameRegexp = rec.PortfolioNameRegexp
+	cfg.PermissionTemplateRegexp = rec.PermissionTemplateRegexp
 	if len(rec.Objects) > 0 {
 		if objects, err := common.ParseObjects(rec.Objects); err == nil {
 			cfg.Objects = objects
@@ -62,7 +65,8 @@ func restoreResumeScope(cfg *ExtractConfig, logger *slog.Logger) {
 	}
 	logger.Info("resuming a partial extract with the scope it was started with",
 		"extract_id", cfg.ExtractID, "projects", len(rec.ProjectKeys), "objects", rec.Objects,
-		"portfolio_key_regexp", rec.PortfolioKeyRegexp, "portfolio_name_regexp", rec.PortfolioNameRegexp)
+		"portfolio_key_regexp", rec.PortfolioKeyRegexp, "portfolio_name_regexp", rec.PortfolioNameRegexp,
+		"permission_template_regexp", rec.PermissionTemplateRegexp)
 }
 
 // sortedObjects returns the selected --objects categories, sorted, or nil.

@@ -94,3 +94,17 @@ func IsPortfolioScopedTask(name string) bool {
 	}
 	return false
 }
+
+// IsTemplateScopedTask reports whether the task writes records per permission
+// template and so is narrowed by --permission_template_regexp: getTemplates
+// itself and every permission task fanning out from it. getDefaultTemplates is
+// deliberately not listed — it is never filtered, so it is a server-wide task
+// (#665).
+func IsTemplateScopedTask(name string) bool {
+	switch name {
+	case "getTemplates", "getTemplateGroupsScanners", "getTemplateGroupsViewers",
+		"getTemplateUsersScanners", "getTemplateUsersViewers":
+		return true
+	}
+	return false
+}

@@ -80,6 +80,13 @@ type ExtractConfig struct {
 	// and are never filtered. Empty means every portfolio (#666).
 	PortfolioKeyRegexp  string
 	PortfolioNameRegexp string
+	// PermissionTemplateRegexp, when non-empty, limits extraction to the
+	// permission templates whose name matches (and so the group/user
+	// permissions of those templates only). Always compiled as a full-match
+	// regex implicitly anchored with ^ and $, like ProjectKey. Lets large
+	// instances migrate templates in slices. Empty means "extract every
+	// template" (#665).
+	PermissionTemplateRegexp string
 	// Objects, when non-nil, limits extraction to the selected object
 	// categories (settings, permission_templates, quality_profiles,
 	// quality_gates, projects, portfolios, groups, license_profiles —
@@ -150,6 +157,9 @@ type Executor struct {
 	// PortfolioFilter is the compiled form of ExtractConfig.PortfolioKeyRegexp
 	// / PortfolioNameRegexp. Nil (or inactive) means no portfolio filtering. #666.
 	PortfolioFilter *common.PortfolioFilter
+	// PermissionTemplateRe is the compiled form of
+	// ExtractConfig.PermissionTemplateRegexp, or nil when unset. #665.
+	PermissionTemplateRe *regexp.Regexp
 
 	// Truncation collects every truncated API response observed during
 	// the run, for the end-of-run console block and the
@@ -379,7 +389,7 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 	meta := extractMeta{
 		Plan: plan, RunID: extractID, Version: version,
 		Edition: edition, URL: cfg.URL, Targets: targets, Registry: registry,
-		// A run limited to some objects, projects or portfolios is a partial
+		// A run limited to some objects, projects portfolios or permission templates is a partial
 		// extract: readers merge it onto the latest full extract instead of
 		// replacing it (#664, #666).
 		Partial:             isPartialExtract(cfg),
@@ -387,6 +397,8 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 		Objects:             sortedObjects(cfg.Objects),
 		PortfolioKeyRegexp:  cfg.PortfolioKeyRegexp,
 		PortfolioNameRegexp: cfg.PortfolioNameRegexp,
+		// #665
+		PermissionTemplateRegexp: cfg.PermissionTemplateRegexp,
 	}
 	if err := writeMetadataFile(extractDir, meta); err != nil {
 		return nil, err
@@ -412,6 +424,13 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 			return nil, fmt.Errorf("invalid branch regexp pattern %q: %w", cfg.BranchRegexp, err)
 		}
 		executor.BranchRe = branchRe
+	}
+	if cfg.PermissionTemplateRegexp != "" {
+		ptRe, err := CompileProjectKeyPattern(cfg.PermissionTemplateRegexp)
+		if err != nil {
+			return nil, fmt.Errorf("invalid permission template regexp pattern %q: %w", cfg.PermissionTemplateRegexp, err)
+		}
+		executor.PermissionTemplateRe = ptRe
 	}
 	// Defensive re-validation (#583): cmd/extract.go already validates
 	// --branch_analyzed_after before calling RunExtract, but this entry
@@ -757,6 +776,8 @@ type extractMeta struct {
 	Objects             []string
 	PortfolioKeyRegexp  string
 	PortfolioNameRegexp string
+	// PermissionTemplateRegexp records the permission template slice (#665).
+	PermissionTemplateRegexp string
 }
 
 func writeMetadataFile(dir string, m extractMeta) error {
@@ -787,6 +808,9 @@ func writeMetadataFile(dir string, m extractMeta) error {
 	}
 	if m.PortfolioNameRegexp != "" {
 		meta["portfolio_name_regexp"] = m.PortfolioNameRegexp
+	}
+	if m.PermissionTemplateRegexp != "" {
+		meta["permission_template_regexp"] = m.PermissionTemplateRegexp
 	}
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
@@ -875,7 +899,7 @@ func tasksToRun(phase []string, store *DataStore) (run, discarded []string, err 
 }
 
 // isPartialExtract reports whether cfg limits the run to some objects,
-// projects or portfolios (#664, #666).
+// projects, portfolios or permission templates (#664, #666, #665).
 func isPartialExtract(cfg ExtractConfig) bool {
 	return cfg.resumedPartial || hasScope(cfg)
 }
@@ -883,5 +907,6 @@ func isPartialExtract(cfg ExtractConfig) bool {
 // hasScope reports whether cfg's own flags limit the run.
 func hasScope(cfg ExtractConfig) bool {
 	return cfg.Objects != nil || len(cfg.ProjectKeys) > 0 ||
-		cfg.PortfolioKeyRegexp != "" || cfg.PortfolioNameRegexp != ""
+		cfg.PortfolioKeyRegexp != "" || cfg.PortfolioNameRegexp != "" ||
+		cfg.PermissionTemplateRegexp != ""
 }
