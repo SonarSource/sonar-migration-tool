@@ -44,6 +44,7 @@ func init() {
 	f := predictiveReportCmd.Flags()
 	f.String("config", "", "Path to JSON configuration file (same shape as extract --config); export_directory and default_organization are read from it")
 	f.String("export_directory", "", "Root directory containing extract data and the mapping CSVs")
+	f.Bool(flagUseSLBForReferenceBranchNewCode, false, "Predict the migration with the use_slb_for_reference_branch_new_code option on, so the report no longer suggests it. Also read from the config file (maps to use_slb_for_reference_branch_new_code).")
 	f.String("default_organization", "", "SonarQube Cloud organization key assumed for every project when organizations.csv has no mapping defined; ignored (with a WARN) when any row already carries a sonarcloud_org_key")
 }
 
@@ -58,7 +59,11 @@ func runPredictiveReport(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	pdfPath, err := predict.GeneratePredictiveReport(exportDir, defaultOrg)
+	useSLB, err := resolvePredictiveReportUseSLB(cmd)
+	if err != nil {
+		return err
+	}
+	pdfPath, err := predict.GeneratePredictiveReportWithOptions(exportDir, defaultOrg, useSLB)
 	if err != nil {
 		return err
 	}
@@ -119,4 +124,22 @@ func resolvePredictiveReportDefaultOrg(cmd *cobra.Command) (string, error) {
 		return "", fmt.Errorf("loading config %s: %w", configFile, err)
 	}
 	return org, nil
+}
+
+// resolvePredictiveReportUseSLB reports whether the migration being predicted
+// uses use_slb_for_reference_branch_new_code (#655): the flag turns it on,
+// otherwise the config file's value (resolved as migrate does) applies.
+func resolvePredictiveReportUseSLB(cmd *cobra.Command) (bool, error) {
+	if v, _ := cmd.Flags().GetBool(flagUseSLBForReferenceBranchNewCode); v {
+		return true, nil
+	}
+	configFile, _ := cmd.Flags().GetString("config")
+	if configFile == "" {
+		return false, nil
+	}
+	cfg, err := migrate.LoadMigrateConfigFile(configFile)
+	if err != nil {
+		return false, fmt.Errorf("loading config %s: %w", configFile, err)
+	}
+	return cfg.UseSLBForReferenceBranchNewCode, nil
 }

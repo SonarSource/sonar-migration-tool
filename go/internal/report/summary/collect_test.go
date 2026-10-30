@@ -2292,3 +2292,27 @@ func TestCollectSummaryForcedMainBranch(t *testing.T) {
 		t.Errorf("projC ForcedMainBranch: cutoff logged as a full RFC3339 timestamp (the real *time.Time wire format) must still render as 2024-01-01, got %+v", got)
 	}
 }
+
+func TestApplyNCDPartialsReferenceBranchSLBHint(t *testing.T) {
+	items := func() []EntityItem { return []EntityItem{{Name: "p", Detail: "org_p"}} }
+	hasHint := func(p []EntityItem) bool {
+		return len(p) == 1 && len(p[0].Issues) == 1 && strings.Contains(p[0].Issues[0], "use_slb_for_reference_branch_new_code")
+	}
+
+	_, p := applyNCDFallbackPartials(items(), nil, map[string]string{"org_p": "REFERENCE_BRANCH"}, map[string]bool{"org_p": true})
+	if !hasHint(p) {
+		t.Errorf("fallback: want the SLB hint, got %v", p)
+	}
+	_, p = applyNCDFallbackPartials(items(), nil, map[string]string{"org_p": "REFERENCE_BRANCH"}, nil)
+	if len(p) != 1 || strings.Contains(p[0].Issues[0], "use_slb") {
+		t.Errorf("fallback without hint: want no SLB mention, got %v", p)
+	}
+	_, p = applyNCDBranchOverridePartials(items(), nil, map[string]bool{"org_p": true}, map[string]bool{"org_p": true})
+	if !hasHint(p) {
+		t.Errorf("branch override: want the SLB hint, got %v", p)
+	}
+	_, p = applyNCDBranchOverridePartials(items(), nil, map[string]bool{"org_p": true}, nil)
+	if len(p) != 1 || strings.Contains(p[0].Issues[0], "use_slb") {
+		t.Errorf("branch override without hint: want no SLB mention, got %v", p)
+	}
+}

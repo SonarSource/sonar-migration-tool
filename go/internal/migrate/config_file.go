@@ -59,6 +59,10 @@ type configFileShape struct {
 	// MigrateHistory opts into the project-history migration PoC (#554).
 	// Defaults to false. Same FlexibleBool semantics as skip_issue_sync.
 	MigrateHistory *FlexibleBool `json:"migrate_history"`
+	// UseSLBForReferenceBranchNewCode migrates SonarQube Server branches whose
+	// new code definition is a reference branch as short-lived branches on
+	// SonarQube Cloud (#655). Same FlexibleBool semantics as migrate_history.
+	UseSLBForReferenceBranchNewCode *FlexibleBool `json:"use_slb_for_reference_branch_new_code"`
 	// MaxIssueComments — see MigrateConfig.MaxIssueComments (#571).
 	MaxIssueComments int `json:"max_issue_comments"`
 	// BranchAnalyzedAfter — see MigrateConfig.BranchAnalyzedAfter (#583).
@@ -162,6 +166,10 @@ type unifiedTargetBlock struct {
 	FastSync *FlexibleBool `json:"fast_sync"`
 	// MigrateHistory — see configFileShape.MigrateHistory (#554).
 	MigrateHistory *FlexibleBool `json:"migrate_history"`
+	// UseSLBForReferenceBranchNewCode migrates SonarQube Server branches whose
+	// new code definition is a reference branch as short-lived branches on
+	// SonarQube Cloud (#655). Same FlexibleBool semantics as migrate_history.
+	UseSLBForReferenceBranchNewCode *FlexibleBool `json:"use_slb_for_reference_branch_new_code"`
 	// MaxIssueComments — see configFileShape.MaxIssueComments (#571).
 	MaxIssueComments int `json:"max_issue_comments"`
 	// BranchRegexp — see MigrateConfig.BranchRegexp (#582).
@@ -253,6 +261,13 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 			targetMigrateHistory = s.Target.MigrateHistory
 		}
 		cfg.MigrateHistory = resolveMigrateHistory(targetMigrateHistory, s.MigrateHistory)
+		// #655 — target.use_slb_for_reference_branch_new_code wins, else the
+		// top-level field, else false.
+		var targetUseSLB *FlexibleBool
+		if s.Target != nil {
+			targetUseSLB = s.Target.UseSLBForReferenceBranchNewCode
+		}
+		cfg.UseSLBForReferenceBranchNewCode = resolveUseSLBForReferenceBranchNewCode(targetUseSLB, s.UseSLBForReferenceBranchNewCode)
 		// #583 — target.branch_analyzed_after wins when explicitly present
 		// (even if empty, meaning "no filter for migrate"), else the
 		// top-level field, else "" (no filter).
@@ -313,6 +328,9 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		if s.MigrateHistory != nil && s.MigrateHistory.Set {
 			cfg.MigrateHistory = s.MigrateHistory.Value
 		}
+		if s.UseSLBForReferenceBranchNewCode != nil && s.UseSLBForReferenceBranchNewCode.Set {
+			cfg.UseSLBForReferenceBranchNewCode = s.UseSLBForReferenceBranchNewCode.Value
+		}
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKeyFilter = common.ResolveDeprecatedProjectKey(s.ProjectKey, s.ProjectKeyRegexp)
 		cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
@@ -336,6 +354,9 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		// Same outer-wins-else-inner semantics for migrate_history (#554).
 		if s.MigrateHistory != nil && s.MigrateHistory.Set {
 			cfg.MigrateHistory = s.MigrateHistory.Value
+		}
+		if s.UseSLBForReferenceBranchNewCode != nil && s.UseSLBForReferenceBranchNewCode.Set {
+			cfg.UseSLBForReferenceBranchNewCode = s.UseSLBForReferenceBranchNewCode.Value
 		}
 		// #536: outer-level "objects" / "project_key" win over the same
 		// fields nested inside "migrate" — but fall back to the nested
@@ -390,6 +411,9 @@ func (s configFileShape) toMigrateConfig() MigrateConfig {
 		}
 		if s.MigrateHistory != nil && s.MigrateHistory.Set {
 			cfg.MigrateHistory = s.MigrateHistory.Value
+		}
+		if s.UseSLBForReferenceBranchNewCode != nil && s.UseSLBForReferenceBranchNewCode.Set {
+			cfg.UseSLBForReferenceBranchNewCode = s.UseSLBForReferenceBranchNewCode.Value
 		}
 		cfg.objectsRaw = s.Objects
 		cfg.ProjectKeyFilter = common.ResolveDeprecatedProjectKey(s.ProjectKey, s.ProjectKeyRegexp)
