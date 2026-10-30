@@ -163,36 +163,14 @@ type ExtractItem struct {
 // os.ReadDir order within an extract.
 func ExtractItems(directory string, mapping ExtractMapping, key string) func(yield func(ExtractItem) bool) {
 	return func(yield func(ExtractItem) bool) {
-		projectScoped := extract.IsProjectScopedTask(key)
-		portfolioScoped := extract.IsPortfolioScopedTask(key)
-		templateScoped := extract.IsTemplateScopedTask(key)
 		for serverURL, ids := range mapping {
-			var superseded []supersession
-			switch {
-			case projectScoped && len(ids) > 1:
-				superseded = supersessions(directory, ids, key)
-			case portfolioScoped && len(ids) > 1:
-				superseded = portfolioSupersessions(directory, ids, key)
-			case templateScoped && len(ids) > 1:
-				superseded = templateSupersessions(directory, ids, key)
-			case !projectScoped && !portfolioScoped && !templateScoped && len(ids) > 1:
-				ids = newestFinished(directory, ids, key)
-			}
+			ids, superseded := mergePlan(directory, ids, key)
 			for i, extractID := range ids {
-				taskDir := filepath.Join(directory, extractID, key)
-				emit := func(r json.RawMessage) bool {
-					return yield(ExtractItem{ServerURL: serverURL, Data: r})
+				var sup supersession
+				if superseded != nil {
+					sup = superseded[i]
 				}
-				if superseded != nil && superseded[i].any() {
-					sup := superseded[i]
-					emit = func(r json.RawMessage) bool {
-						if sup.covers(r) {
-							return true
-						}
-						return yield(ExtractItem{ServerURL: serverURL, Data: r})
-					}
-				}
-				completed, err := eachTaskDirRecord(taskDir, emit)
+				completed, err := eachTaskDirRecord(filepath.Join(directory, extractID, key), recordEmitter(serverURL, sup, yield))
 				if err != nil {
 					continue // task may not exist for this extract
 				}
@@ -201,6 +179,38 @@ func ExtractItems(directory string, mapping ExtractMapping, key string) func(yie
 				}
 			}
 		}
+	}
+}
+
+// mergePlan decides how the extracts of one server's merged set are read for
+// the task: project, portfolio and template-scoped tasks read every extract
+// with the records a later extract re-extracted dropped (the returned
+// supersessions, one per extract); any other, server-wide task is read from
+// the newest extract that finished it. A single-extract set is returned as is.
+func mergePlan(directory string, ids []string, key string) ([]string, []supersession) {
+	if len(ids) < 2 {
+		return ids, nil
+	}
+	switch {
+	case extract.IsProjectScopedTask(key):
+		return ids, supersessions(directory, ids, key)
+	case extract.IsPortfolioScopedTask(key):
+		return ids, portfolioSupersessions(directory, ids, key)
+	case extract.IsTemplateScopedTask(key):
+		return ids, templateSupersessions(directory, ids, key)
+	}
+	return newestFinished(directory, ids, key), nil
+}
+
+// recordEmitter yields each record of an extract as an ExtractItem, skipping
+// those sup says a later extract re-extracted.
+func recordEmitter(serverURL string, sup supersession, yield func(ExtractItem) bool) func(json.RawMessage) bool {
+	covered := sup.any()
+	return func(r json.RawMessage) bool {
+		if covered && sup.covers(r) {
+			return true
+		}
+		return yield(ExtractItem{ServerURL: serverURL, Data: r})
 	}
 }
 
