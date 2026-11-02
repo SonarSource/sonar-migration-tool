@@ -206,6 +206,27 @@ func fetchAndWriteArray(ctx context.Context, e *Executor, taskName, path, result
 	return w.WriteChunk(items)
 }
 
+// fetchAndWriteArrayFiltered is fetchAndWriteArray that only writes the items
+// keep approves of (see filterItems).
+func fetchAndWriteArrayFiltered(ctx context.Context, e *Executor, taskName, path, resultKey string,
+	metadata map[string]any, keep func(e *Executor, item json.RawMessage) bool) error {
+
+	if err := acquireSem(ctx, e.Sem); err != nil {
+		return fmt.Errorf(taskErrFmt, taskName, err)
+	}
+	items, err := e.Raw.GetArray(ctx, path, resultKey, nil)
+	<-e.Sem
+	if err != nil {
+		return fmt.Errorf(taskErrFmt, taskName, err)
+	}
+	items = enrichAll(filterItems(e, items, keep), metadata)
+	w, err := e.Store.Writer(taskName)
+	if err != nil {
+		return err
+	}
+	return w.WriteChunk(items)
+}
+
 // fetchAndWriteSingle fetches a single JSON object and writes it as one JSONL line.
 // If resultKey is non-empty, extracts the value at that key first.
 func fetchAndWriteSingle(ctx context.Context, e *Executor, taskName, path string,

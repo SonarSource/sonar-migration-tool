@@ -243,6 +243,12 @@ type MigrateConfig struct {
 	// matching ones. Empty means every portfolio is migrated.
 	PortfolioKeyRegexp  string
 	PortfolioNameRegexp string
+	// PermissionTemplateRegexp, when non-empty, limits createPermissionTemplates
+	// (and so every template-scoped task downstream of it) to the permission
+	// templates whose name matches. Always compiled as a full-match regex
+	// implicitly anchored with ^ and $. Empty means "migrate every template"
+	// (#665).
+	PermissionTemplateRegexp string
 
 	// ProgressCallback, when set, is invoked with the same run-wide
 	// percent/ETA snapshot as the #520 log line, on every tick and once
@@ -408,6 +414,9 @@ type Executor struct {
 	// where portfolios.csv is loaded, so every portfolio task sees only the
 	// slice.
 	PortfolioFilter *common.PortfolioFilter
+	// PermissionTemplateRe is the compiled form of
+	// MigrateConfig.PermissionTemplateRegexp, or nil when unset. #665.
+	PermissionTemplateRe *regexp.Regexp
 	// MigrateHistory — see MigrateConfig.MigrateHistory (#554).
 	MigrateHistory bool
 	// UseSLBForReferenceBranchNewCode — see MigrateConfig.UseSLBForReferenceBranchNewCode (#655).
@@ -483,6 +492,15 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 	portfolioFilter, err := common.NewPortfolioFilter(cfg.PortfolioKeyRegexp, cfg.PortfolioNameRegexp)
 	if err != nil {
 		return "", err
+	}
+	// #665: compile the permission template filter defensively too.
+	var ptRe *regexp.Regexp
+	if cfg.PermissionTemplateRegexp != "" {
+		re, err := extract.CompileProjectKeyPattern(cfg.PermissionTemplateRegexp)
+		if err != nil {
+			return "", fmt.Errorf("invalid permission template regexp pattern %q: %w", cfg.PermissionTemplateRegexp, err)
+		}
+		ptRe = re
 	}
 	// #583: parse --branch_analyzed_after defensively even though
 	// cmd/migrate.go and cmd/transfer.go already validate it at
@@ -586,6 +604,7 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 		ProjectKeyRe:                    projectKeyRe,
 		BranchRe:                        branchRe,
 		PortfolioFilter:                 portfolioFilter,
+		PermissionTemplateRe:            ptRe,
 		MigrateHistory:                  cfg.MigrateHistory,
 		UseSLBForReferenceBranchNewCode: cfg.UseSLBForReferenceBranchNewCode,
 		BranchAnalyzedAfter:             branchAnalyzedAfter,
