@@ -34,6 +34,7 @@ existing organizations.csv or projects.csv is first saved as
 		if err != nil {
 			return err
 		}
+		extract.RestoreResumeScope(&cfg)
 		if cfg.URL == "" || cfg.Token == "" {
 			return fmt.Errorf("URL and TOKEN are required (--source_url/--source_token flags or in config file)")
 		}

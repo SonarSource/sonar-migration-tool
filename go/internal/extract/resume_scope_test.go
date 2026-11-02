@@ -75,15 +75,33 @@ func TestRestoreResumeScope_NoFlagsTakesRecordedScope(t *testing.T) {
 // A resumed slice given scope flags of its own keeps them, and stays partial.
 func TestRestoreResumeScope_OwnFlagsKeptAndStayPartial(t *testing.T) {
 	dir := t.TempDir()
-	writeRecordedMeta(t, dir, map[string]any{"partial": true, "portfolio_key_regexp": "BANK_.+"})
+	writeRecordedMeta(t, dir, map[string]any{
+		"partial": true, "project_keys": []string{"a", "b"}, "portfolio_key_regexp": "BANK_.+",
+	})
 	cfg := ExtractConfig{ExportDirectory: dir, ExtractID: resumeTestID, PortfolioNameRegexp: "Retail.*"}
 	restoreResumeScope(&cfg, quietLogger)
 
+	if !reflect.DeepEqual(cfg.ProjectKeys, []string{"a", "b"}) {
+		t.Errorf("ProjectKeys = %v, want the recorded project scope", cfg.ProjectKeys)
+	}
 	if cfg.PortfolioNameRegexp != "Retail.*" || cfg.PortfolioKeyRegexp != "" {
 		t.Errorf("portfolio regexps = %q / %q, want the run's own flags only", cfg.PortfolioKeyRegexp, cfg.PortfolioNameRegexp)
 	}
 	if !isPartialExtract(cfg) {
 		t.Error("resumed slice must stay partial")
+	}
+}
+
+func TestRestoreResumeScope_ProjectFilterRetainsMatchingRecordedKeys(t *testing.T) {
+	dir := t.TempDir()
+	writeRecordedMeta(t, dir, map[string]any{
+		"partial": true, "project_keys": []string{"alpha", "beta", "gamma"},
+	})
+	cfg := ExtractConfig{ExportDirectory: dir, ExtractID: resumeTestID, ProjectKey: "alpha|gamma|new"}
+	restoreResumeScope(&cfg, quietLogger)
+
+	if !reflect.DeepEqual(cfg.ProjectKeys, []string{"alpha", "gamma"}) {
+		t.Errorf("ProjectKeys = %v, want recorded keys matching the new project filter", cfg.ProjectKeys)
 	}
 }
 
