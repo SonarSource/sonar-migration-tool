@@ -135,6 +135,12 @@ func associateTasks() []TaskDef {
 func runSetProjectProfiles(ctx context.Context, e *Executor) error {
 	// Build profile lookup: orgKey+language+name -> true.
 	profiles, _ := e.Store.ReadAll("createProfiles")
+	// createProfiles output is absent when quality_profiles is not part of
+	// this invocation's --objects (migrating a large instance in tranches,
+	// #664). The profiles were then created by an earlier run, so resolve
+	// them by name in the target organization instead of dropping every
+	// binding.
+	resolver := newTargetEntityResolver(e, "setProjectProfiles", !e.Store.TaskDirExists("createProfiles"))
 	profileLookup := make(map[string]bool)
 	for _, p := range profiles {
 		orgKey := extractField(p, "sonarcloud_org_key")
@@ -182,7 +188,12 @@ func runSetProjectProfiles(ctx context.Context, e *Executor) error {
 				// to assign on SQC.
 				return nil
 			}
-			if !profileLookup[target.orgKey+lang+name] {
+			if resolver.byName {
+				if resolver.profileState(ctx, target.orgKey, lang, name) != entityFound {
+					counter.Fail()
+					return nil
+				}
+			} else if !profileLookup[target.orgKey+lang+name] {
 				// Profile wasn't migrated (built-in, or org skipped).
 				// SQC's own default applies; no AddProject needed.
 				return nil
@@ -203,6 +214,9 @@ func runSetProjectProfiles(ctx context.Context, e *Executor) error {
 func runSetProjectGates(ctx context.Context, e *Executor) error {
 	// Build gate lookup: orgKey+name -> gateID.
 	gates, _ := e.Store.ReadAll("createGates")
+	// Same tranche scenario as setProjectProfiles (#664): without createGates
+	// output, look the gate up by name in the target organization.
+	resolver := newTargetEntityResolver(e, "setProjectGates", !e.Store.TaskDirExists("createGates"))
 	gateLookup := make(map[string]int)
 	for _, g := range gates {
 		orgKey := extractField(g, "sonarcloud_org_key")
@@ -232,6 +246,15 @@ func runSetProjectGates(ctx context.Context, e *Executor) error {
 				return nil
 			}
 			gateID, ok := gateLookup[orgKey+gateName]
+			if resolver.byName {
+				var state entityState
+				gateID, state = resolver.gateID(ctx, orgKey, gateName)
+				if state != entityFound {
+					counter.Fail()
+					return nil
+				}
+				ok = true
+			}
 			if !ok {
 				// The project names a gate that createGates produced no
 				// record for, so it stays on the organization default and
