@@ -7,6 +7,7 @@ package migrate
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
 	"sync"
@@ -74,7 +75,10 @@ func runSetPortfolioProjects(_ context.Context, e *Executor) error {
 // match), the task falls back to every migrated org so the portfolio is
 // still scoped and the PATCH still goes out.
 func runConfigurePortfolios(ctx context.Context, e *Executor) error {
-	projectIndex := buildProjectCloudKeyIndex(e)
+	projectIndex, err := resolvePortfolioProjectIndex(ctx, e)
+	if err != nil {
+		return err
+	}
 	portfolioProjects := buildPortfolioProjectList(e, projectIndex)
 	portfolioOrgs := buildPortfolioOrgIndex(e, projectIndex)
 	allMigratedOrgs := collectAllMigratedOrgs(projectIndex)
@@ -92,7 +96,7 @@ func runConfigurePortfolios(ctx context.Context, e *Executor) error {
 	branchIDByCloudKey := map[string]string{}
 	var branchIDMu sync.Mutex
 	counter := TaskCounterFromContext(ctx)
-	err := forEachMigrateItem(ctx, e, "configurePortfolios", "createPortfolios",
+	err = forEachMigrateItem(ctx, e, "configurePortfolios", "createPortfolios",
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
 			selectionMode := strings.ToUpper(extractField(item, "selection_mode"))
 			portfolioID := extractField(item, "cloud_portfolio_id")
@@ -204,6 +208,79 @@ func buildProjectCloudKeyIndex(e *Executor) map[string]cloudProjectInfo {
 		out[serverURL+key] = cloudProjectInfo{
 			CloudKey: extractField(p, "cloud_project_key"),
 			OrgKey:   extractField(p, "sonarcloud_org_key"),
+		}
+	}
+	return out
+}
+
+// resolvePortfolioProjectIndex returns the source-project to cloud-project
+// index configurePortfolios resolves membership against. Normally that is
+// createProjects' own output. With --objects portfolios in a fresh run
+// (#664, a large instance migrated in tranches) createProjects never ran, so
+// the index is rebuilt the way createProjects derives it: every project in
+// generateProjectMappings gets RenderProjectKey(pattern, key, org). The
+// projects some portfolio actually references are then checked against the
+// target organization, and the ones not found there are dropped, so a
+// portfolio never points at a project that was not migrated. Checking only
+// the referenced projects keeps this to one call per portfolio member rather
+// than one per project on the instance.
+//
+// When the portfolios reference projects but none of them exists in the
+// target, the run fails fast: continuing would only produce one confusing
+// "no resolved cloud projects" failure per portfolio.
+func resolvePortfolioProjectIndex(ctx context.Context, e *Executor) (map[string]cloudProjectInfo, error) {
+	if index := buildProjectCloudKeyIndex(e); len(index) > 0 {
+		return index, nil
+	}
+	index := buildProjectIndexFromMappings(e)
+	refs, _ := readExtractItems(e, "getPortfolioProjects")
+	checked := map[string]bool{}
+	found := 0
+	for _, ref := range refs {
+		srcKey := ref.ServerURL + extractField(ref.Data, "refKey")
+		info, ok := index[srcKey]
+		if !ok || checked[srcKey] {
+			continue
+		}
+		checked[srcKey] = true
+		exists, err := e.Cloud.Projects.ExistsInOrg(ctx, info.CloudKey, info.OrgKey)
+		if err != nil {
+			return nil, fmt.Errorf("configurePortfolios: createProjects output is absent from this run, "+
+				"and checking that project %q exists in organization %q failed: %w", info.CloudKey, info.OrgKey, err)
+		}
+		if !exists {
+			delete(index, srcKey)
+			continue
+		}
+		found++
+	}
+	if len(checked) > 0 && found == 0 {
+		return nil, fmt.Errorf("configurePortfolios: none of the %d projects referenced by the portfolios exists in the "+
+			"target SonarQube Cloud organization, and this run has no createProjects output to resolve them from. "+
+			"Migrate the projects first (--objects projects), or pass --run_id of the run that created them", len(checked))
+	}
+	e.Logger.Info("configurePortfolios: createProjects output is absent from this run; resolved portfolio projects by key in the target organization",
+		"referenced", len(checked), "found", found)
+	return index, nil
+}
+
+// buildProjectIndexFromMappings is buildProjectCloudKeyIndex for a run that
+// has no createProjects output: the cloud key is rendered from
+// generateProjectMappings exactly as runCreateProjects does, with no
+// existence check.
+func buildProjectIndexFromMappings(e *Executor) map[string]cloudProjectInfo {
+	mappings, _ := e.Store.ReadAll("generateProjectMappings")
+	out := make(map[string]cloudProjectInfo, len(mappings))
+	for _, m := range mappings {
+		orgKey := extractField(m, "sonarcloud_org_key")
+		key := extractField(m, "key")
+		serverURL := extractField(m, "server_url")
+		if serverURL == "" || key == "" || shouldSkipOrg(orgKey) {
+			continue
+		}
+		out[serverURL+key] = cloudProjectInfo{
+			CloudKey: RenderProjectKey(e.ProjectKeyPattern, key, orgKey),
+			OrgKey:   orgKey,
 		}
 	}
 	return out

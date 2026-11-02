@@ -7,6 +7,7 @@ DO_EXTRACT=false
 DO_MIGRATE=false
 HISTORY="--migrate_history"
 HISTORY=""
+TOOL="./sonar-migration-tool"
 
 EXTRA_ARGS=()
 
@@ -55,13 +56,13 @@ fi
 CONFIG_FILE="config-${CONFIG}.json"
 
 if [[ "${DO_EXTRACT}" = true ]]; then
-  sonar-migration-tool extract --config "${CONFIG_FILE}" ${HISTORY} "${EXTRA_ARGS[@]}"
-  sonar-migration-tool structure --config "${CONFIG_FILE}"
-  sonar-migration-tool mappings --config "${CONFIG_FILE}"
+  ${TOOL} extract --config "${CONFIG_FILE}" ${HISTORY} "${EXTRA_ARGS[@]}"
+  ${TOOL} structure --config "${CONFIG_FILE}"
+  ${TOOL} mappings --config "${CONFIG_FILE}"
 
   cp organizations-${CONFIG}.csv migration-files-${CONFIG}/organizations.csv
 fi
 
 if [[ "${DO_MIGRATE}" = true ]]; then
-  sonar-migration-tool migrate --config "${CONFIG_FILE}" ${HISTORY} "${EXTRA_ARGS[@]}"
+  ${TOOL} migrate --config "${CONFIG_FILE}" ${HISTORY} "${EXTRA_ARGS[@]}"
 fi
