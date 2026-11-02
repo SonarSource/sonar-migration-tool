@@ -35,6 +35,7 @@ func newMigrateTestCmd() *cobra.Command {
 	f.String("objects", "", "")
 	f.String(flagProjectKey, "", "")
 	f.String(flagProjectKeyRegexp, "", "")
+	registerPortfolioFlags(cmd, "migrate")
 	// Deprecated aliases — registered so tests can exercise back-compat (#406).
 	f.String("token", "", "")
 	f.String("url", "", "")
@@ -400,4 +401,48 @@ func TestBuildMigrateConfigProjectKeyFlag(t *testing.T) {
 			t.Errorf("expected deprecated --project_key to still resolve, got %q", cfg.ProjectKeyFilter)
 		}
 	})
+}
+
+// #666 — portfolio slice flags override the config file, and a CLI flag for
+// one of the exclusive pair clears the config-file value for the other.
+func TestBuildMigrateConfig_PortfolioRegexp(t *testing.T) {
+	const body = `{"target":{"url":"https://sonarcloud.io/","token":"t","enterprise_key":"ent"},%s}`
+	cases := []struct {
+		name, cfgExtra string
+		flags          map[string]string
+		wantKey        string
+		wantName       string
+		wantErr        string
+	}{
+		{"config only", `"portfolio_key_regexp":"a.*"`, nil, "a.*", "", ""},
+		{"flag overrides same option", `"portfolio_key_regexp":"a.*"`, map[string]string{flagPortfolioKeyRegexp: "b.*"}, "b.*", "", ""},
+		{"key flag clears config name", `"portfolio_name_regexp":"N.*"`, map[string]string{flagPortfolioKeyRegexp: "b.*"}, "b.*", "", ""},
+		{"name flag clears config key", `"portfolio_key_regexp":"a.*"`, map[string]string{flagPortfolioNameRegexp: "N.*"}, "", "N.*", ""},
+		{"both flags conflict", `"x":1`, map[string]string{flagPortfolioKeyRegexp: "a", flagPortfolioNameRegexp: "b"}, "", "", "mutually exclusive"},
+		{"both in config conflict", `"portfolio_key_regexp":"a","portfolio_name_regexp":"b"`, nil, "", "", "mutually exclusive"},
+		{"invalid flag", `"x":1`, map[string]string{flagPortfolioKeyRegexp: "("}, "", "", "invalid portfolio key regexp"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeMigrateConfig(t, strings.Replace(body, "%s", tc.cfgExtra, 1))
+			cmd := newMigrateTestCmd()
+			_ = cmd.Flags().Set("config", path)
+			for k, v := range tc.flags {
+				_ = cmd.Flags().Set(k, v)
+			}
+			cfg, err := buildMigrateConfig(cmd, nil)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("buildMigrateConfig: %v", err)
+			}
+			if cfg.PortfolioKeyRegexp != tc.wantKey || cfg.PortfolioNameRegexp != tc.wantName {
+				t.Errorf("got key=%q name=%q, want key=%q name=%q", cfg.PortfolioKeyRegexp, cfg.PortfolioNameRegexp, tc.wantKey, tc.wantName)
+			}
+		})
+	}
 }

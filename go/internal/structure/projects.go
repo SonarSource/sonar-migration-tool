@@ -7,6 +7,7 @@ package structure
 import (
 	"encoding/json"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -307,15 +308,32 @@ type projectBindingEntry struct {
 // WARN says how many, so the gap is never silent.
 func failedProjectKeys(directory string, mapping ExtractMapping) map[string]bool {
 	failed := make(map[string]bool)
-	for serverURL, extractID := range mapping {
-		list, err := common.ReadFailedProjects(filepath.Join(directory, extractID))
-		if err != nil {
-			slog.Warn("could not read the extract's failed projects list; no project is left out",
-				"extract", extractID, "err", err)
-			continue
+	for serverURL, ids := range mapping {
+		serverFailed := make(map[string]bool)
+		// Oldest first: a project a later extract re-extracted is judged
+		// by that extract alone, not by an earlier one that failed it.
+		for _, extractID := range ids {
+			meta := readExtractMeta(directory, extractID)
+			if meta.Partial && len(meta.ProjectKeys) == 0 {
+				if _, err := os.Stat(filepath.Join(directory, extractID, "getProjectDetails")); err == nil {
+					clear(serverFailed)
+				}
+			}
+			for _, k := range meta.ProjectKeys {
+				delete(serverFailed, k)
+			}
+			list, err := common.ReadFailedProjects(filepath.Join(directory, extractID))
+			if err != nil {
+				slog.Warn("could not read the extract's failed projects list; no project is left out",
+					"extract", extractID, "err", err)
+				continue
+			}
+			for _, fp := range list {
+				serverFailed[fp.Key] = true
+			}
 		}
-		for _, fp := range list {
-			failed[serverURL+fp.Key] = true
+		for projectKey := range serverFailed {
+			failed[serverURL+projectKey] = true
 		}
 	}
 	if len(failed) > 0 {

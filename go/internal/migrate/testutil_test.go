@@ -525,7 +525,7 @@ func newTestExecutor(cloudSrv, apiSrv *httptest.Server, exportDir string) *Execu
 		EntKey:             "test-enterprise",
 		Edition:            common.EditionEnterprise,
 		ExportDir:          exportDir,
-		Mapping:            structure.ExtractMapping{testServerURL: "extract-01"},
+		Mapping:            structure.ExtractMapping{testServerURL: {"extract-01"}},
 		ConcurrencyLimiter: NewFixedConcurrencyLimiter(5),
 		Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
 	}

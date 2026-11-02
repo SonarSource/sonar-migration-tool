@@ -21,7 +21,7 @@ func TestAddTemplateGroupsCoversEveryTemplateOrg(t *testing.T) {
 	writeTestJSONL(t, filepath.Join(extractDir, "getTemplateGroupsViewers"), []map[string]any{
 		{"templateId": "tpl1", "name": "viewers-only", "description": "Browse", "serverUrl": testSQURL},
 	})
-	mapping := ExtractMapping{testSQURL: testExtractID}
+	mapping := ExtractMapping{testSQURL: {testExtractID}}
 	projectOrgMapping := map[string]string{
 		testProjOrgKey:                 "org1",
 		"https://sq.example.com/proj2": "org2",

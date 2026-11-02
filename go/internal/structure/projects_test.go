@@ -120,7 +120,7 @@ func TestGenerateUniqueBindingKey(t *testing.T) {
 
 func TestMapProjectStructure(t *testing.T) {
 	dir := setupTestExtract(t)
-	mapping := ExtractMapping{testSQURL: testExtractID}
+	mapping := ExtractMapping{testSQURL: {testExtractID}}
 
 	bindings, projects := MapProjectStructure(dir, mapping)
 
@@ -159,7 +159,7 @@ func TestMapProjectStructure_LeavesOutFailedProjects(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, projects := MapProjectStructure(dir, ExtractMapping{testSQURL: testExtractID})
+	_, projects := MapProjectStructure(dir, ExtractMapping{testSQURL: {testExtractID}})
 
 	if len(projects) != 1 || projects[0].Key != "proj1" {
 		var keys []string
@@ -167,6 +167,33 @@ func TestMapProjectStructure_LeavesOutFailedProjects(t *testing.T) {
 			keys = append(keys, p.Key)
 		}
 		t.Fatalf("projects = %v, want only proj1", keys)
+	}
+}
+
+// A project-wide partial extract supersedes an earlier failed-project list,
+// even when extract.json has no explicit project_keys list.
+func TestMapProjectStructure_ProjectWidePartialClearsFailedProjects(t *testing.T) {
+	dir := setupTestExtract(t)
+	if err := common.WriteFailedProjects(filepath.Join(dir, testExtractID), []common.FailedProject{
+		{Key: "proj2", Task: "getProjectIssues", Error: "HTTP 504"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	const laterID = "2026-08-21-0001"
+	writeTestJSON(t, filepath.Join(dir, laterID, "extract.json"),
+		map[string]any{"url": testSQURL, "partial": true})
+	writeTestJSONL(t, filepath.Join(dir, laterID, "getProjectDetails"), []map[string]any{
+		{"key": "proj2", "name": "Project 2", "projectKey": "proj2", "branch": "main", "serverUrl": testSQURL},
+	})
+
+	_, projects := MapProjectStructure(dir, ExtractMapping{testSQURL: {testExtractID, laterID}})
+	if len(projects) != 1 || projects[0].Key != "proj2" {
+		var keys []string
+		for _, p := range projects {
+			keys = append(keys, p.Key)
+		}
+		t.Fatalf("projects = %v, want only re-extracted proj2", keys)
 	}
 }
 
@@ -205,7 +232,7 @@ func TestMapProjectStructure_SharedRepoBinding(t *testing.T) {
 
 	writeTestJSONL(t, filepath.Join(extractDir, "getNewCodePeriods"), nil)
 
-	mapping := ExtractMapping{testSQURL: testExtractID}
+	mapping := ExtractMapping{testSQURL: {testExtractID}}
 	_, projects := MapProjectStructure(dir, mapping)
 
 	if len(projects) != 3 {
@@ -260,7 +287,7 @@ func TestMapProjectStructure_MonorepoNotFlagged(t *testing.T) {
 
 	writeTestJSONL(t, filepath.Join(extractDir, "getNewCodePeriods"), nil)
 
-	mapping := ExtractMapping{testSQURL: testExtractID}
+	mapping := ExtractMapping{testSQURL: {testExtractID}}
 	_, projects := MapProjectStructure(dir, mapping)
 
 	if len(projects) != 2 {
@@ -275,7 +302,7 @@ func TestMapProjectStructure_MonorepoNotFlagged(t *testing.T) {
 
 func TestMapNewCodeDefinitions(t *testing.T) {
 	dir := setupTestExtract(t)
-	mapping := ExtractMapping{testSQURL: testExtractID}
+	mapping := ExtractMapping{testSQURL: {testExtractID}}
 
 	defs := MapNewCodeDefinitions(dir, mapping)
 	if len(defs) == 0 {

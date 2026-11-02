@@ -1346,7 +1346,7 @@ func TestLoadMatchableIssuesCarriesScorerFields(t *testing.T) {
 		},
 	})
 
-	e := &Executor{ExportDir: dir, Mapping: structure.ExtractMapping{testServerURL: "extract-01"}}
+	e := &Executor{ExportDir: dir, Mapping: structure.ExtractMapping{testServerURL: {"extract-01"}}}
 	got := loadMatchableIssues(e, testServerURL, "proj-a", loadRuleTagDefaults(e))
 	if len(got) != 1 {
 		t.Fatalf("loadMatchableIssues: got %d issues, want 1", len(got))

@@ -41,7 +41,7 @@ func collectTruncationLimitations(exportDir string, mapping structure.ExtractMap
 
 	groups := map[truncationGroupKey]*truncationGroup{}
 	var unreadable []string
-	for _, extractID := range mapping {
+	for _, extractID := range mapping.AllIDs() {
 		path := filepath.Join(exportDir, extractID, common.TruncationEventsFile)
 		state, err := common.ReadTruncationState(path)
 		if err != nil {

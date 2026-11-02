@@ -88,6 +88,7 @@ func init() {
 	f.String("default_organization", "", "SonarQube Cloud organization to migrate every project into when organizations.csv has no mapping defined. Ignored if any mapping is present.")
 	f.String("project_key_pattern", "", "Template for target project keys, built from <ORIGINAL_PROJECT_KEY> and <ORGANIZATION_KEY> (default: <ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>). #138")
 	f.StringSlice("exclude_branches", nil, "Glob patterns for non-main branches to skip during project data import (e.g. feature/*,bugfix/*)")
+	registerPortfolioFlags(migrateCmd, "migrate")
 	f.String(flagBranchRegexp, "", "Regexp pattern of branch names to migrate, applied on top of whatever the extract phase already limited getBranches to. Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"(main|master)\" matches only branches literally named main or master. The project's main branch is always migrated regardless of match. Empty means every extracted branch is migrated (default). #582.")
 	f.String("objects", "", "Comma-separated list of object categories to migrate: "+strings.Join(common.AllObjects, ", ")+" (aliases: qp, qg, pt, lp). Omit to migrate everything (default). #536")
 	registerProjectKeyFlags(f, "Regexp pattern of source project keys to migrate (only applies when the projects category is selected via --objects). Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"BANKING_.+\" matches every key starting with BANKING_, not just a key containing that substring. A plain key like \"my-project\" matches only itself. #536, #592")
@@ -158,6 +159,21 @@ func buildMigrateConfig(cmd *cobra.Command, args []string) (migrate.MigrateConfi
 		if _, err := extract.CompileProjectKeyPattern(cfg.BranchRegexp); err != nil {
 			return cfg, fmt.Errorf("invalid branch regexp pattern %q: %w", cfg.BranchRegexp, err)
 		}
+	}
+	// #666 — portfolio slice. A flag overrides the config file for the same
+	// option; when the CLI sets one of the mutually exclusive pair, the
+	// other (possibly from the config file) is cleared so a key flag over a
+	// config-file name regexp (or vice versa) is not a false conflict.
+	if cmd.Flags().Changed(flagPortfolioKeyRegexp) {
+		cfg.PortfolioNameRegexp = ""
+	}
+	if cmd.Flags().Changed(flagPortfolioNameRegexp) {
+		cfg.PortfolioKeyRegexp = ""
+	}
+	overrideString(cmd, flagPortfolioKeyRegexp, &cfg.PortfolioKeyRegexp)
+	overrideString(cmd, flagPortfolioNameRegexp, &cfg.PortfolioNameRegexp)
+	if _, err := common.NewPortfolioFilter(cfg.PortfolioKeyRegexp, cfg.PortfolioNameRegexp); err != nil {
+		return cfg, err
 	}
 	applyFlagBool(cmd, flagFastSync, &cfg.FastSync)
 	// --migrate_history is one-way, same as extract and transfer:

@@ -5,6 +5,7 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -257,4 +258,74 @@ func TestBuildExtractConfigInsecureFlag(t *testing.T) {
 			t.Error("expected --insecure=false to override config-file insecure:true")
 		}
 	})
+}
+
+// #666: the portfolio regexp flags override config-file values. Setting one
+// of the pair on the CLI replaces the pair, so a config-file value for the
+// other one cannot falsely conflict with it.
+func TestBuildExtractConfigPortfolioRegexpFlags(t *testing.T) {
+	writeCfg := func(t *testing.T, body string) string {
+		t.Helper()
+		p := filepath.Join(t.TempDir(), "cfg.json")
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	tests := []struct {
+		name, cfgBody string
+		flags         map[string]string
+		wantKey       string
+		wantName      string
+	}{
+		{"flag only", `{"url":"u","token":"t"}`,
+			map[string]string{flagPortfolioKeyRegexp: "k.*"}, "k.*", ""},
+		{"config only", `{"url":"u","token":"t","portfolio_key_regexp":"c.*"}`,
+			nil, "c.*", ""},
+		{"flag overrides same option", `{"url":"u","token":"t","portfolio_key_regexp":"c.*"}`,
+			map[string]string{flagPortfolioKeyRegexp: "k.*"}, "k.*", ""},
+		{"cli key clears config name", `{"url":"u","token":"t","portfolio_name_regexp":"n.*"}`,
+			map[string]string{flagPortfolioKeyRegexp: "k.*"}, "k.*", ""},
+		{"cli name clears config key", `{"url":"u","token":"t","portfolio_key_regexp":"c.*"}`,
+			map[string]string{flagPortfolioNameRegexp: "n.*"}, "", "n.*"},
+		{"both flags are kept for the conflict check", `{"url":"u","token":"t"}`,
+			map[string]string{flagPortfolioKeyRegexp: "k.*", flagPortfolioNameRegexp: "n.*"}, "k.*", "n.*"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := newExtractTestCmd()
+			registerPortfolioFlags(cmd, "extract")
+			if err := cmd.Flags().Set("config", writeCfg(t, tt.cfgBody)); err != nil {
+				t.Fatal(err)
+			}
+			for k, v := range tt.flags {
+				if err := cmd.Flags().Set(k, v); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg, err := buildExtractConfig(cmd, nil)
+			if err != nil {
+				t.Fatalf("buildExtractConfig: %v", err)
+			}
+			if cfg.PortfolioKeyRegexp != tt.wantKey || cfg.PortfolioNameRegexp != tt.wantName {
+				t.Errorf("got key=%q name=%q, want key=%q name=%q",
+					cfg.PortfolioKeyRegexp, cfg.PortfolioNameRegexp, tt.wantKey, tt.wantName)
+			}
+		})
+	}
+}
+
+// The RunE early validation rejects a conflicting pair before any network call.
+func TestExtractCmdRejectsPortfolioRegexpConflict(t *testing.T) {
+	cmd := newExtractTestCmd()
+	registerPortfolioFlags(cmd, "extract")
+	_ = cmd.Flags().Set(flagPortfolioKeyRegexp, "k")
+	_ = cmd.Flags().Set(flagPortfolioNameRegexp, "n")
+	cfg, err := buildExtractConfig(cmd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := common.NewPortfolioFilter(cfg.PortfolioKeyRegexp, cfg.PortfolioNameRegexp); !errors.Is(err, common.ErrPortfolioRegexpConflict) {
+		t.Errorf("expected conflict error, got %v", err)
+	}
 }

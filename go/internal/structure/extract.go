@@ -9,15 +9,46 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/extract"
 )
 
-// ExtractMapping maps server URLs to their latest extract IDs.
-type ExtractMapping map[string]string
+// ExtractMapping maps each server URL to the ordered (oldest to newest)
+// extract IDs that together form its merged view (#664): the latest full
+// extract plus every partial extract newer than it. When every extract of a
+// server is full, the set is exactly the latest one.
+type ExtractMapping map[string][]string
+
+// IDs returns the extract IDs of the merged set for serverURL, oldest first.
+func (m ExtractMapping) IDs(serverURL string) []string { return m[serverURL] }
+
+// AllIDs returns every extract ID of every server, ordered by server URL
+// and then oldest first, so callers get a deterministic order.
+func (m ExtractMapping) AllIDs() []string {
+	urls := make([]string, 0, len(m))
+	for url := range m {
+		urls = append(urls, url)
+	}
+	sort.Strings(urls)
+	var ids []string
+	for _, url := range urls {
+		ids = append(ids, m[url]...)
+	}
+	return ids
+}
+
+// extractMeta is the part of extract.json the structure package reads.
+type extractMeta struct {
+	URL         string   `json:"url"`
+	Partial     bool     `json:"partial"`
+	ProjectKeys []string `json:"project_keys"`
+}
 
 // GetUniqueExtracts scans the export directory for extract runs and returns
-// a mapping of server URL → latest extract ID.
+// a mapping of server URL to the extract IDs forming its merged view. A
+// legacy extract.json without a "partial" field is a full extract.
 func GetUniqueExtracts(directory string) (ExtractMapping, error) {
 	entries, err := os.ReadDir(directory)
 	if err != nil {
@@ -27,13 +58,14 @@ func GetUniqueExtracts(directory string) (ExtractMapping, error) {
 	urlMappings := buildURLMappings(directory, entries)
 
 	result := make(ExtractMapping, len(urlMappings))
-	for url, ids := range urlMappings {
-		result[url] = latestID(ids)
+	for url, extracts := range urlMappings {
+		result[url] = mergedSet(extracts)
 	}
 	return result, nil
 }
 
-// buildURLMappings scans extract directories and groups extract IDs by server URL.
+// buildURLMappings scans extract directories and groups extract IDs by
+// server URL, remembering whether each one is partial.
 func buildURLMappings(directory string, entries []os.DirEntry) map[string]map[string]bool {
 	urlMappings := make(map[string]map[string]bool)
 	for _, entry := range entries {
@@ -45,9 +77,7 @@ func buildURLMappings(directory string, entries []os.DirEntry) map[string]map[st
 		if err != nil {
 			continue
 		}
-		var meta struct {
-			URL string `json:"url"`
-		}
+		var meta extractMeta
 		if err := json.Unmarshal(data, &meta); err != nil || meta.URL == "" {
 			continue
 		}
@@ -67,23 +97,33 @@ func buildURLMappings(directory string, entries []os.DirEntry) map[string]map[st
 		if urlMappings[meta.URL] == nil {
 			urlMappings[meta.URL] = make(map[string]bool)
 		}
-		urlMappings[meta.URL][entry.Name()] = true
+		urlMappings[meta.URL][entry.Name()] = meta.Partial
 	}
 	return urlMappings
 }
 
-// latestID returns the most recent run ID from a set, ordering
-// numerically rather than lexicographically (#542) — see
-// common.RunIDAfter for why a plain string compare misorders once a
-// run's trailing counter grows past two digits.
-func latestID(ids map[string]bool) string {
-	var latest string
-	for id := range ids {
-		if common.RunIDAfter(id, latest) {
-			latest = id
+// mergedSet picks, from a server's extracts (ID to partial flag), the latest
+// full extract and every partial extract newer than it, oldest first. With
+// no full extract, all partial extracts form the set.
+//
+// Ordering is numeric rather than lexicographic (#542) — see
+// common.RunIDAfter for why a plain string compare misorders once a run's
+// trailing counter grows past two digits.
+func mergedSet(extracts map[string]bool) []string {
+	ids := make([]string, 0, len(extracts))
+	for id := range extracts {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return common.RunIDAfter(ids[j], ids[i]) })
+
+	start := 0
+	for i := len(ids) - 1; i >= 0; i-- {
+		if !extracts[ids[i]] {
+			start = i
+			break
 		}
 	}
-	return latest
+	return ids[start:]
 }
 
 // MultiExtractReader reads JSONL objects from the named task across all extract
@@ -111,24 +151,243 @@ type ExtractItem struct {
 // No error is yielded because none can escape: every failure mode above is
 // absorbed by design. Consumers stop early with break.
 //
+// A server whose merged set holds several extracts (#664) yields project-
+// scoped records from every one, oldest first, dropping a record when a later
+// extract of the set re-extracted its project. Portfolio-scoped records are
+// merged the same way per portfolio (#666). Server-wide tasks are read from
+// the newest extract that finished them (newestFinished). A single-extract
+// set takes the fast path with no extra parsing.
+//
 // Ordering matches ReadExtractData exactly — mapping iteration is Go map
 // order (nondeterministic across servers) and chunk files are visited in
 // os.ReadDir order within an extract.
 func ExtractItems(directory string, mapping ExtractMapping, key string) func(yield func(ExtractItem) bool) {
 	return func(yield func(ExtractItem) bool) {
-		for serverURL, extractID := range mapping {
-			taskDir := filepath.Join(directory, extractID, key)
-			completed, err := eachTaskDirRecord(taskDir, func(r json.RawMessage) bool {
-				return yield(ExtractItem{ServerURL: serverURL, Data: r})
-			})
-			if err != nil {
-				continue // task may not exist for this extract
-			}
-			if !completed {
+		for serverURL, ids := range mapping {
+			ids, superseded := planServerReads(directory, ids, key)
+			if !readServerExtracts(directory, serverURL, key, ids, superseded, yield) {
 				return // consumer stopped early
 			}
 		}
 	}
+}
+
+// planServerReads decides which of a server's extracts to read the task from,
+// and what each one's records are superseded by. A single extract is read as
+// it is. Project- and portfolio-scoped tasks read every extract and drop what
+// a later one re-extracted; any other task is read from the newest extract
+// that finished it (newestFinished). superseded is nil, or parallel to ids.
+func planServerReads(directory string, ids []string, key string) ([]string, []supersession) {
+	if len(ids) < 2 {
+		return ids, nil
+	}
+	switch {
+	case extract.IsProjectScopedTask(key):
+		return ids, supersessions(directory, ids, key)
+	case extract.IsPortfolioScopedTask(key):
+		return ids, portfolioSupersessions(directory, ids, key)
+	}
+	return newestFinished(directory, ids, key), nil
+}
+
+// readServerExtracts yields the task's records from each extract in order,
+// skipping those its supersession covers. It returns false when the consumer
+// stopped early.
+func readServerExtracts(directory, serverURL, key string, ids []string,
+	superseded []supersession, yield func(ExtractItem) bool) bool {
+	for i, extractID := range ids {
+		var sup supersession
+		if superseded != nil {
+			sup = superseded[i]
+		}
+		emit := func(r json.RawMessage) bool {
+			if sup.any() && sup.covers(r) {
+				return true
+			}
+			return yield(ExtractItem{ServerURL: serverURL, Data: r})
+		}
+		completed, err := eachTaskDirRecord(filepath.Join(directory, extractID, key), emit)
+		if err != nil {
+			continue // task may not exist for this extract
+		}
+		if !completed {
+			return false
+		}
+	}
+	return true
+}
+
+// supersession describes what later extracts of the merged set re-extracted:
+// every project (all) or a list of project keys.
+type supersession struct {
+	all  bool
+	keys map[string]bool
+	// portfolios is true when keys are portfolio keys (#666), matched against
+	// the portfolio a record belongs to rather than its project.
+	portfolios bool
+}
+
+func (s supersession) any() bool { return s.all || len(s.keys) > 0 }
+
+// covers reports whether record belongs to a project a later extract
+// re-extracted, so the older copy must be dropped.
+func (s supersession) covers(record json.RawMessage) bool {
+	if s.all {
+		return true
+	}
+	if s.portfolios {
+		return s.keys[recordPortfolioKey(record)]
+	}
+	return s.keys[recordProjectKey(record)]
+}
+
+// supersessions computes, for each extract of ids, the projects that a later
+// extract of the set re-extracted for the task. A later extract that has no
+// finished output for the task superseded nothing. Its project keys come from
+// both extract.json and its records: a resumed task can retain completed output
+// for the original scope while extract.json records replacement scope flags.
+// A partial extract without a project list (--objects only) covers every project.
+func supersessions(directory string, ids []string, key string) []supersession {
+	result := make([]supersession, len(ids))
+	var later supersession
+	for i := len(ids) - 1; i >= 0; i-- {
+		result[i] = supersession{all: later.all, keys: copyKeys(later.keys)}
+		if !taskFinished(directory, ids[i], key) {
+			continue
+		}
+		meta := readExtractMeta(directory, ids[i])
+		if !meta.Partial {
+			continue // a full extract is always first in the set
+		}
+		if len(meta.ProjectKeys) == 0 {
+			later.all = true
+			continue
+		}
+		if later.keys == nil {
+			later.keys = make(map[string]bool, len(meta.ProjectKeys))
+		}
+		for _, k := range meta.ProjectKeys {
+			later.keys[k] = true
+		}
+		_, _ = eachTaskDirRecord(filepath.Join(directory, ids[i], key), func(r json.RawMessage) bool {
+			if k := recordProjectKey(r); k != "" {
+				later.keys[k] = true
+			}
+			return true
+		})
+	}
+	return result
+}
+
+// newestFinished narrows the extracts to read a server-wide task from (gates,
+// profiles, groups, users...) to the newest one that finished the task. Such a
+// task fetches the whole server each time it runs, so a later run replaces an
+// earlier one; reading both would repeat every record, which consumers that
+// append (groups, users) would count twice. When no extract finished the task
+// the set is returned unchanged, so nothing readable is dropped.
+func newestFinished(directory string, ids []string, key string) []string {
+	for i := len(ids) - 1; i >= 0; i-- {
+		if taskFinished(directory, ids[i], key) {
+			return ids[i : i+1]
+		}
+	}
+	return ids
+}
+
+// taskFinished reports whether the extract marked the task finished in .done,
+// or has task output when it predates .done. The marker is authoritative even
+// when a completed task produced no records and therefore has no output dir.
+func taskFinished(directory, id, key string) bool {
+	doneDir := filepath.Join(directory, id, ".done")
+	if _, err := os.Stat(doneDir); err == nil {
+		_, err := os.Stat(filepath.Join(doneDir, key))
+		return err == nil
+	}
+	_, err := os.Stat(filepath.Join(directory, id, key))
+	return err == nil
+}
+
+// portfolioSupersessions computes, for each extract of ids, the portfolios a
+// later extract of the set re-extracted (#666). The slice is defined by a
+// regexp, so its portfolio keys are read from getPortfolios rather than
+// extract.json or the task output (which may be empty for an empty portfolio).
+// A later extract supersedes nothing unless it finished the requested task.
+func portfolioSupersessions(directory string, ids []string, key string) []supersession {
+	result := make([]supersession, len(ids))
+	var later map[string]bool
+	for i := len(ids) - 1; i >= 0; i-- {
+		result[i] = supersession{keys: copyKeys(later), portfolios: true}
+		if !taskFinished(directory, ids[i], key) {
+			continue
+		}
+		_, _ = eachTaskDirRecord(filepath.Join(directory, ids[i], "getPortfolios"), func(r json.RawMessage) bool {
+			if k := recordPortfolioKey(r); k != "" {
+				if later == nil {
+					later = make(map[string]bool)
+				}
+				later[k] = true
+			}
+			return true
+		})
+	}
+	return result
+}
+
+func copyKeys(m map[string]bool) map[string]bool {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(m))
+	for k := range m {
+		out[k] = true
+	}
+	return out
+}
+
+func readExtractMeta(directory, id string) extractMeta {
+	var meta extractMeta
+	data, err := os.ReadFile(filepath.Join(directory, id, "extract.json"))
+	if err == nil {
+		_ = json.Unmarshal(data, &meta)
+	}
+	return meta
+}
+
+// recordProjectKey returns the project a project-scoped record belongs to:
+// the first non-empty of projectKey, project and key (hotspot records use
+// "project"; getProjects and getProjectDetails use "key").
+func recordProjectKey(record json.RawMessage) string {
+	var obj struct {
+		ProjectKey string `json:"projectKey"`
+		Project    string `json:"project"`
+		Key        string `json:"key"`
+	}
+	if err := json.Unmarshal(record, &obj); err != nil {
+		return ""
+	}
+	for _, k := range []string{obj.ProjectKey, obj.Project, obj.Key} {
+		if k != "" {
+			return k
+		}
+	}
+	return ""
+}
+
+// recordPortfolioKey returns the portfolio a portfolio-scoped record belongs
+// to: portfolioKey (getPortfolioProjects) or key (getPortfolios,
+// getPortfolioDetails).
+func recordPortfolioKey(record json.RawMessage) string {
+	var obj struct {
+		PortfolioKey string `json:"portfolioKey"`
+		Key          string `json:"key"`
+	}
+	if err := json.Unmarshal(record, &obj); err != nil {
+		return ""
+	}
+	if obj.PortfolioKey != "" {
+		return obj.PortfolioKey
+	}
+	return obj.Key
 }
 
 // ReadExtractData reads all JSONL items for a given task key across all extracts.

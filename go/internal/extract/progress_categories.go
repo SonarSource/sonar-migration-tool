@@ -73,3 +73,24 @@ func CategorizeTask(name string) common.TaskCategory {
 		return common.CategoryGeneral
 	}
 }
+
+// IsProjectScopedTask reports whether the task writes one record per project
+// (or per project component), as opposed to server-wide data such as gates,
+// profiles or groups. Readers merging a partial extract onto an earlier one
+// use it to let a re-extracted project replace its older records (#664).
+func IsProjectScopedTask(name string) bool {
+	return CategorizeTask(name) != common.CategoryGeneral
+}
+
+// IsPortfolioScopedTask reports whether the task writes one record (or set of
+// records) per portfolio. These tasks are server-wide, not project-scoped, but
+// a portfolio slice (--portfolio_key_regexp / --portfolio_name_regexp) only
+// extracts some portfolios, so readers merging slices let a re-extracted
+// portfolio replace its older records (#666).
+func IsPortfolioScopedTask(name string) bool {
+	switch name {
+	case "getPortfolios", "getPortfolioDetails", "getPortfolioProjects":
+		return true
+	}
+	return false
+}

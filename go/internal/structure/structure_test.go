@@ -134,7 +134,7 @@ func TestMapOrganizationStructure_DefaultOrgKey(t *testing.T) {
 
 func TestMapProfiles(t *testing.T) {
 	dir := setupTestExtract(t)
-	mapping := ExtractMapping{testSQURL: testExtractID}
+	mapping := ExtractMapping{testSQURL: {testExtractID}}
 
 	// Build project org mapping from test data.
 	projectOrgMapping := map[string]string{
@@ -160,7 +160,7 @@ func TestMapProfiles(t *testing.T) {
 
 func TestMapGates(t *testing.T) {
 	dir := setupTestExtract(t)
-	mapping := ExtractMapping{testSQURL: testExtractID}
+	mapping := ExtractMapping{testSQURL: {testExtractID}}
 	projectOrgMapping := map[string]string{
 		testProjOrgKey:                 "org1",
 		"https://sq.example.com/proj2": "org1",
@@ -183,7 +183,7 @@ func TestMapGates(t *testing.T) {
 
 func TestMapTemplates(t *testing.T) {
 	dir := setupTestExtract(t)
-	mapping := ExtractMapping{testSQURL: testExtractID}
+	mapping := ExtractMapping{testSQURL: {testExtractID}}
 	projectOrgMapping := map[string]string{
 		testProjOrgKey: "org1",
 	}
@@ -199,7 +199,7 @@ func TestMapTemplates(t *testing.T) {
 
 func TestMapGroups(t *testing.T) {
 	dir := setupTestExtract(t)
-	mapping := ExtractMapping{testSQURL: testExtractID}
+	mapping := ExtractMapping{testSQURL: {testExtractID}}
 	projectOrgMapping := map[string]string{
 		testProjOrgKey: "org1",
 	}
@@ -222,7 +222,7 @@ func TestMapGroups(t *testing.T) {
 
 func TestMapPortfolios(t *testing.T) {
 	dir := setupTestExtract(t)
-	mapping := ExtractMapping{testSQURL: testExtractID}
+	mapping := ExtractMapping{testSQURL: {testExtractID}}
 
 	portfolios := MapPortfolios(dir, mapping)
 	// Test data has no portfolio projects, so should be empty.
@@ -265,8 +265,8 @@ func TestGetUniqueExtracts(t *testing.T) {
 	if len(mapping) != 1 {
 		t.Fatalf("expected 1 extract, got %d", len(mapping))
 	}
-	if mapping[testSQURL] != testExtractID {
-		t.Errorf("expected %q, got %q", testExtractID, mapping[testSQURL])
+	if ids := mapping[testSQURL]; len(ids) != 1 || ids[0] != testExtractID {
+		t.Errorf("expected [%q], got %q", testExtractID, ids)
 	}
 }
 

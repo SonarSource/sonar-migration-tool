@@ -71,6 +71,15 @@ type ExtractConfig struct {
 	// #529/#536). The project's main branch is always kept regardless of
 	// whether it matches. Empty means "extract every branch" (#582).
 	BranchRegexp string
+	// PortfolioKeyRegexp / PortfolioNameRegexp, when non-empty, limit which
+	// portfolios get extracted: the getPortfolios task writes only matching
+	// portfolios, so getPortfolioDetails and getPortfolioProjects (which
+	// iterate its output) follow. Implicitly anchored (^...$) like
+	// ProjectKey. Mutually exclusive — RunExtract rejects setting both
+	// (common.ErrPortfolioRegexpConflict). Applications are not portfolios
+	// and are never filtered. Empty means every portfolio (#666).
+	PortfolioKeyRegexp  string
+	PortfolioNameRegexp string
 	// Objects, when non-nil, limits extraction to the selected object
 	// categories (settings, permission_templates, quality_profiles,
 	// quality_gates, projects, portfolios, groups, license_profiles —
@@ -84,6 +93,10 @@ type ExtractConfig struct {
 	// between the config-file loader and cmd/extract.go's CLI handling.
 	// Cleared once Objects is populated; not meant to be read afterward.
 	objectsRaw []string
+	// resumedPartial is set by restoreResumeScope when the run resumes an
+	// extract recorded as partial, so the resumed extract stays partial
+	// whatever flags it was resumed with (#666).
+	resumedPartial bool
 	// ProgressCallback, when set, is invoked with the same run-wide
 	// percent/ETA snapshot as the #520 log line, on every tick and once
 	// more at completion. Nil for CLI callers (go/cmd/extract.go); the
@@ -133,6 +146,10 @@ type Executor struct {
 	// BranchRe is the compiled form of ExtractConfig.BranchRegexp, or nil
 	// when unset (meaning "no branch filtering"). #582.
 	BranchRe *regexp.Regexp
+
+	// PortfolioFilter is the compiled form of ExtractConfig.PortfolioKeyRegexp
+	// / PortfolioNameRegexp. Nil (or inactive) means no portfolio filtering. #666.
+	PortfolioFilter *common.PortfolioFilter
 
 	// Truncation collects every truncated API response observed during
 	// the run, for the end-of-run console block and the
@@ -329,6 +346,14 @@ func (e *Executor) SkippedProjectKeys() []string {
 // It returns the list of project keys that were skipped due to insufficient privileges.
 func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 	cfg.applyDefaults()
+	restoreResumeScope(&cfg, slog.Default())
+
+	// #666: reject a conflicting/invalid portfolio regexp pair before any
+	// network call.
+	portfolioFilter, err := common.NewPortfolioFilter(cfg.PortfolioKeyRegexp, cfg.PortfolioNameRegexp)
+	if err != nil {
+		return nil, err
+	}
 
 	cmdStart := time.Now()
 	// End-of-command timing line (#311) — defer so it fires on every
@@ -354,6 +379,14 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 	meta := extractMeta{
 		Plan: plan, RunID: extractID, Version: version,
 		Edition: edition, URL: cfg.URL, Targets: targets, Registry: registry,
+		// A run limited to some objects, projects or portfolios is a partial
+		// extract: readers merge it onto the latest full extract instead of
+		// replacing it (#664, #666).
+		Partial:             isPartialExtract(cfg),
+		ProjectKeys:         cfg.ProjectKeys,
+		Objects:             sortedObjects(cfg.Objects),
+		PortfolioKeyRegexp:  cfg.PortfolioKeyRegexp,
+		PortfolioNameRegexp: cfg.PortfolioNameRegexp,
 	}
 	if err := writeMetadataFile(extractDir, meta); err != nil {
 		return nil, err
@@ -388,6 +421,7 @@ func RunExtract(ctx context.Context, cfg ExtractConfig) ([]string, error) {
 		return nil, err
 	}
 	executor.BranchAnalyzedAfter = branchAnalyzedAfter
+	executor.PortfolioFilter = portfolioFilter
 
 	// Truncation tracking (#574). The observer is installed on the raw
 	// client — one installation covering all of its call sites,
@@ -714,6 +748,15 @@ type extractMeta struct {
 	URL      string
 	Targets  []string
 	Registry map[string]*TaskDef
+	// Partial is true when the run was limited by --objects or a project
+	// filter. ProjectKeys lists the projects it was limited to (#664).
+	Partial     bool
+	ProjectKeys []string
+	// Objects and the portfolio regexps record the rest of the run's scope,
+	// so resuming it with --extract_id alone extracts the same slice (#666).
+	Objects             []string
+	PortfolioKeyRegexp  string
+	PortfolioNameRegexp string
 }
 
 func writeMetadataFile(dir string, m extractMeta) error {
@@ -731,6 +774,19 @@ func writeMetadataFile(dir string, m extractMeta) error {
 		"target_tasks":      m.Targets,
 		"available_configs": configs,
 		"run_id":            m.RunID,
+		"partial":           m.Partial,
+	}
+	if len(m.ProjectKeys) > 0 {
+		meta["project_keys"] = m.ProjectKeys
+	}
+	if len(m.Objects) > 0 {
+		meta["objects"] = m.Objects
+	}
+	if m.PortfolioKeyRegexp != "" {
+		meta["portfolio_key_regexp"] = m.PortfolioKeyRegexp
+	}
+	if m.PortfolioNameRegexp != "" {
+		meta["portfolio_name_regexp"] = m.PortfolioNameRegexp
 	}
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
@@ -816,4 +872,16 @@ func tasksToRun(phase []string, store *DataStore) (run, discarded []string, err 
 		run = append(run, task)
 	}
 	return run, discarded, nil
+}
+
+// isPartialExtract reports whether cfg limits the run to some objects,
+// projects or portfolios (#664, #666).
+func isPartialExtract(cfg ExtractConfig) bool {
+	return cfg.resumedPartial || hasScope(cfg)
+}
+
+// hasScope reports whether cfg's own flags limit the run.
+func hasScope(cfg ExtractConfig) bool {
+	return cfg.Objects != nil || len(cfg.ProjectKeys) > 0 || cfg.ProjectKey != "" ||
+		cfg.PortfolioKeyRegexp != "" || cfg.PortfolioNameRegexp != ""
 }

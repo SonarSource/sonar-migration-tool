@@ -40,7 +40,7 @@ func setupExtract(t *testing.T, tasks map[string][]map[string]any) (string, stru
 		}
 		f.Close()
 	}
-	return dir, structure.ExtractMapping{testServerURL: testExtractID}
+	return dir, structure.ExtractMapping{testServerURL: {testExtractID}}
 }
 
 // emptyTaskMap returns the standard set of task names used by both migration

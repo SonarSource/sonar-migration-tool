@@ -4,29 +4,45 @@
 
 package structure
 
-import "fmt"
+import (
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"reflect"
+)
 
 // RunStructure groups projects into organizations based on DevOps Bindings
 // and Server URLs. Outputs organizations.csv and projects.csv.
 // When defaultOrgKey is non-empty and only one SonarCloud org is configured,
 // it pre-populates the sonarcloud_org_key column in organizations.csv.
 func RunStructure(exportDirectory string, defaultOrgKey ...string) error {
+	_, err := RunStructureCarryOver(exportDirectory, nil, defaultOrgKey...)
+	return err
+}
+
+// RunStructureCarryOver is RunStructure that first copies the operator's
+// sonarcloud_org_key values from carry (read with ReadCarriedKeys before the
+// CSVs are regenerated) into the new rows, and returns what that achieved.
+// A nil carry carries nothing.
+func RunStructureCarryOver(exportDirectory string, carry *CarriedKeys, defaultOrgKey ...string) (CarryStats, error) {
 	mapping, err := GetUniqueExtracts(exportDirectory)
 	if err != nil {
-		return fmt.Errorf("scanning extracts: %w", err)
+		return CarryStats{}, fmt.Errorf("scanning extracts: %w", err)
 	}
 	if len(mapping) == 0 {
-		return fmt.Errorf("no extracts found in %s", exportDirectory)
+		return CarryStats{}, fmt.Errorf("no extracts found in %s", exportDirectory)
 	}
 
 	bindings, projects := MapProjectStructure(exportDirectory, mapping)
 	organizations := MapOrganizationStructure(bindings, defaultOrgKey...)
+	stats := carry.Apply(organizations, projects)
 
 	if err := ExportCSV(exportDirectory, "organizations", organizations); err != nil {
-		return fmt.Errorf("exporting organizations.csv: %w", err)
+		return stats, fmt.Errorf("exporting organizations.csv: %w", err)
 	}
 	if err := ExportCSV(exportDirectory, "projects", projects); err != nil {
-		return fmt.Errorf("exporting projects.csv: %w", err)
+		return stats, fmt.Errorf("exporting projects.csv: %w", err)
 	}
 
 	shared := 0
@@ -42,7 +58,7 @@ func RunStructure(exportDirectory string, defaultOrgKey ...string) error {
 	} else {
 		fmt.Printf("Structure complete: %d organizations, %d projects\n", len(organizations), len(projects))
 	}
-	return nil
+	return stats, nil
 }
 
 // RunMappings maps groups, permission templates, quality profiles, quality gates,
@@ -90,6 +106,9 @@ func RunMappings(exportDirectory string) error {
 		"groups":     groups,
 	}
 	for name, data := range exports {
+		if keepExistingCSV(exportDirectory, name, data) {
+			continue
+		}
 		if err := ExportCSV(exportDirectory, name, data); err != nil {
 			return fmt.Errorf("exporting %s.csv: %w", name, err)
 		}
@@ -98,4 +117,21 @@ func RunMappings(exportDirectory string) error {
 	fmt.Printf("Mappings complete: %d templates, %d profiles, %d gates, %d portfolios, %d groups\n",
 		len(templates), len(profiles), len(gates), len(portfolios), len(groups))
 	return nil
+}
+
+// keepExistingCSV reports whether the CSV for name must be left alone: the
+// regenerated list is empty (the data lives in an earlier extract that is
+// not part of the merged set, e.g. after a projects-only extract) while the
+// file on disk already has content (#664). Overwriting it would erase it.
+func keepExistingCSV(dir, name string, data any) bool {
+	if rv := reflect.ValueOf(data); rv.Kind() != reflect.Slice || rv.Len() != 0 {
+		return false
+	}
+	path := filepath.Join(dir, name+".csv")
+	info, err := os.Stat(path)
+	if err != nil || info.Size() == 0 {
+		return false
+	}
+	slog.Info("nothing extracted for this mapping; keeping the existing CSV", "file", path)
+	return true
 }
