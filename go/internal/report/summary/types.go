@@ -37,6 +37,11 @@ type MigrationSummary struct {
 	OmitSections map[string]bool
 	Predictive   bool
 
+	// Runs lists, oldest first, the migrate runs a cumulative report folds
+	// together (#667): a large instance migrated in slices gets one report
+	// covering every slice. Empty for a report of a single run.
+	Runs []CoveredRun
+
 	// Runtime execution fields (issue #240+ migrate engine telemetry).
 	// These are populated only for real migration runs from the run
 	// directory's run_meta.json / run_events.jsonl. Under predictive

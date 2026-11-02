@@ -26,6 +26,7 @@ package smoke
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -303,6 +304,7 @@ func TestTier2_PathB_FullPipeline(t *testing.T) {
 		requireExit(t, res, 0, "migrate (idempotent re-run)")
 		assertNoPanics(t, res.combined())
 		runRegtest(t, cfg, "--project_key_regexp", projectKey, "--config", regtestConfigPath(t, cfg, exportDir))
+		assertCumulativeReport(t, filepath.Join(exportDir, "migration_summary.md"), 2)
 	})
 
 	t.Run("sync_issues", func(t *testing.T) {
@@ -396,6 +398,29 @@ func assertReportAccuracy(t *testing.T, mdPath string, observedWallClock time.Du
 	// section is present, it renders the exact heading the report package
 	// emits — never fails when the section is absent.
 	assertForcedMainBranchSectionWellFormed(t, string(raw))
+}
+
+// assertCumulativeReport checks that migration_summary.md is cumulative over
+// the wantRuns migrate runs since the reset (#667): it carries the "Migration
+// Runs" section and lists every one of those runs.
+func assertCumulativeReport(t *testing.T, mdPath string, wantRuns int) {
+	t.Helper()
+
+	raw, err := os.ReadFile(mdPath)
+	if err != nil {
+		t.Fatalf("reading %q: %v", mdPath, err)
+	}
+	md := string(raw)
+	if !strings.Contains(md, "## Migration Runs") {
+		t.Fatalf("migration_summary.md has no \"Migration Runs\" section after %d migrate runs — the report is not cumulative (#667)", wantRuns)
+	}
+	if want := fmt.Sprintf("cumulative over %d migration runs", wantRuns); !strings.Contains(md, want) {
+		t.Errorf("migration_summary.md does not say %q", want)
+	}
+	rowRE := regexp.MustCompile(`(?m)^\| \d{4}-\d{2}-\d{2}-\d+ \|`)
+	if got := len(rowRE.FindAllString(md, -1)); got != wantRuns {
+		t.Errorf("migration_summary.md lists %d runs in Migration Runs, want %d", got, wantRuns)
+	}
 }
 
 // assertForcedMainBranchSectionWellFormed implements Assertion D (#583): if
