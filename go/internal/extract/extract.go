@@ -906,7 +906,7 @@ func isPartialExtract(cfg ExtractConfig) bool {
 
 // hasScope reports whether cfg's own flags limit the run.
 func hasScope(cfg ExtractConfig) bool {
-	return cfg.Objects != nil || len(cfg.ProjectKeys) > 0 ||
+	return cfg.Objects != nil || len(cfg.ProjectKeys) > 0 || cfg.ProjectKey != "" ||
 		cfg.PortfolioKeyRegexp != "" || cfg.PortfolioNameRegexp != "" ||
 		cfg.PermissionTemplateRegexp != ""
 }

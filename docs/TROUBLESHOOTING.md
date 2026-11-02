@@ -168,7 +168,7 @@ Run `extract` again with `--extract_id <ID of the failed extract>` and the same 
 - Tasks that finished are kept and not run again, including tasks that finished in the same phase as the one that failed.
 - A task that was cut off part-way runs again from the start, after its partial output is deleted, so nothing it had not reached yet goes missing. A warning names these tasks.
 - Projects the earlier attempt skipped after a failed request (see the previous section) stay skipped. The tasks that finished before have none of their data, so trying them again would only give them part of it.
-- An extract limited to a slice (by `--objects`, `--project_key_regexp`, `--portfolio_key_regexp` or `--portfolio_name_regexp`) resumes as the same slice, even without those flags: `extract.json` records the slice, and the resumed run reuses it. Passing scope flags again replaces the recorded ones, with a warning. Either way the extract stays a slice, so it never hides the slices extracted before it.
+- An extract limited to a slice (by `--objects`, `--project_key_regexp`, `--portfolio_key_regexp` or `--portfolio_name_regexp`) resumes as the same slice, even without those flags: `extract.json` records the slice, and the resumed run reuses it. Passing scope flags again replaces the recorded ones, with a warning. Tasks that already finished keep their output from the original scope; structure accounts for those records as well as the replacement scope. The extract remains partial, so it does not hide unrelated earlier slices.
 
 An extract made by a version of the tool from before this behaviour has no record of which tasks finished, so all of its tasks run again: slower, but never silently incomplete.
 

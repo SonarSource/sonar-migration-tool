@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/extract"
 )
 
 var extractStructureTestTime = time.Date(2026, 10, 16, 14, 3, 12, 0, time.Local)
@@ -104,6 +105,32 @@ func TestRunExtractStructure_SkipsWithoutProjects(t *testing.T) {
 	for _, name := range structureCSVs {
 		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
 			t.Errorf("%s should not be written when projects were not extracted", name)
+		}
+	}
+}
+
+// A resumed extract with --extract_id alone restores its object selection
+// before the structure step, so a project-free selection still skips CSVs.
+func TestRunExtractStructure_UsesRestoredObjects(t *testing.T) {
+	dir := writeMinimalExtract(t)
+	resumeID := "2026-10-16-02"
+	resumeDir := filepath.Join(dir, resumeID)
+	if err := os.MkdirAll(resumeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, resumeDir, "extract.json", `{"partial":true,"objects":["groups"]}`)
+
+	cfg := extract.ExtractConfig{ExportDirectory: dir, ExtractID: resumeID}
+	extract.RestoreResumeScope(&cfg)
+	if cfg.Objects[common.ObjectProjects] {
+		t.Fatal("restored groups-only scope unexpectedly includes projects")
+	}
+	if err := runExtractStructure(dir, cfg.Objects, "", extractStructureTestTime); err != nil {
+		t.Fatalf("runExtractStructure: %v", err)
+	}
+	for _, name := range structureCSVs {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			t.Errorf("%s should not be written for the restored groups-only scope", name)
 		}
 	}
 }
