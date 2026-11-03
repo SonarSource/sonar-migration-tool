@@ -41,9 +41,10 @@ func (m ExtractMapping) AllIDs() []string {
 
 // extractMeta is the part of extract.json the structure package reads.
 type extractMeta struct {
-	URL         string   `json:"url"`
-	Partial     bool     `json:"partial"`
-	ProjectKeys []string `json:"project_keys"`
+	URL             string   `json:"url"`
+	Partial         bool     `json:"partial"`
+	ProjectKeys     []string `json:"project_keys"`
+	GroupNameRegexp string   `json:"group_name_regexp"`
 }
 
 // GetUniqueExtracts scans the export directory for extract runs and returns
@@ -343,8 +344,10 @@ func portfolioSupersessions(directory string, ids []string, key string) []supers
 
 // groupSupersessions computes, for each extract of ids, the groups a later
 // extract of the set re-extracted for the task (#669). Group IDs are read
-// from getGroups, which lists groups even when they have no users. A later
-// extract that did not run the task superseded nothing.
+// from getGroups, which lists groups even when they have no users. For
+// getUserGroups, sonar-users is re-extracted only when the slice's group
+// regexp includes it. A later extract that did not run the task superseded
+// nothing.
 func groupSupersessions(directory string, ids []string, key string) []supersession {
 	result := make([]supersession, len(ids))
 	var later map[string]bool
@@ -353,8 +356,21 @@ func groupSupersessions(directory string, ids []string, key string) []supersessi
 		if !taskFinished(directory, ids[i], key) {
 			continue // this slice did not finish the task
 		}
-		// getGroups lists every group the slice fetched, members or not.
+		supersedesSonarUsers := true
+		if key == "getUserGroups" {
+			pattern := readExtractMeta(directory, ids[i]).GroupNameRegexp
+			if pattern != "" {
+				groupRe, err := extract.CompileProjectKeyPattern(pattern)
+				supersedesSonarUsers = err == nil && groupRe.MatchString("sonar-users")
+			}
+		}
+		// getGroups lists every group the slice fetched, members or not. But a
+		// group slice may include sonar-users in getGroups without listing its
+		// members, so only supersede those memberships when the regexp matched.
 		_, _ = eachTaskDirRecord(filepath.Join(directory, ids[i], "getGroups"), func(r json.RawMessage) bool {
+			if key == "getUserGroups" && !supersedesSonarUsers && recordGroupName(r) == "sonar-users" {
+				return true
+			}
 			if k := recordGroupKey(r); k != "" {
 				if later == nil {
 					later = make(map[string]bool)
@@ -422,6 +438,16 @@ func recordGroupKey(record json.RawMessage) string {
 		return obj.GroupID
 	}
 	return obj.ID
+}
+
+func recordGroupName(record json.RawMessage) string {
+	var obj struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(record, &obj); err != nil {
+		return ""
+	}
+	return obj.Name
 }
 
 // recordPortfolioKey returns the portfolio a portfolio-scoped record belongs

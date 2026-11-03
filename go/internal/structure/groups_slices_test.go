@@ -46,6 +46,48 @@ func TestExtractItemsMergesGroupSlices(t *testing.T) {
 	}
 }
 
+func TestExtractItemsSonarUsersMembershipsOnlySupersededWhenInScope(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		groupNameRegexp string
+		want            []string
+	}{
+		{
+			name:            "later slice excludes sonar-users",
+			groupNameRegexp: "team-b-.+",
+			want:            []string{`{"login":"old","groupId":"users"}`},
+		},
+		{
+			name:            "later slice re-extracts empty sonar-users membership",
+			groupNameRegexp: "sonar-users",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeTestJSON(t, filepath.Join(root, runA, "extract.json"),
+				map[string]any{"url": streamTestURL, "partial": true})
+			writeTestJSON(t, filepath.Join(root, runB, "extract.json"),
+				map[string]any{"url": streamTestURL, "partial": true, "group_name_regexp": tc.groupNameRegexp})
+			portfolioRecords(root, runA, "getGroups", `{"id":"users","name":"sonar-users"}`)
+			portfolioRecords(root, runB, "getGroups", `{"id":"users","name":"sonar-users"}`)
+			portfolioRecords(root, runA, "getUserGroups", `{"login":"old","groupId":"users"}`)
+			writeChunks(t, filepath.Join(root, runB, "getUserGroups"), nil)
+
+			mapping, err := GetUniqueExtracts(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for it := range ExtractItems(root, mapping, "getUserGroups") {
+				got = append(got, string(it.Data))
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("user groups = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestExtractItemsUserGroupsUseReExtractedGroups(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
