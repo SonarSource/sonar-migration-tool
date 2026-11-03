@@ -74,7 +74,7 @@
     },
     "group_name_regexp": {
       "type": ["string", "null"],
-      "description": "Regexp pattern of user group names to extract / migrate, implicitly anchored (^...$); a plain name matches only itself. Lets groups be processed in slices on instances with a very large number of them. Applies to both source (extract) and target (migrate) unless overridden by source.group_name_regexp / target.group_name_regexp. The built-in Anyone pseudo-group is always extracted. Omit to process every group (default). Issue #669."
+      "description": "Regexp pattern of user group names to extract / migrate, implicitly anchored (^...$); a plain name matches only itself. Lets groups be processed in slices on instances with a very large number of them. Applies to both source (extract) and target (migrate) unless overridden by source.group_name_regexp / target.group_name_regexp. The built-in groups (the Anyone pseudo-group and sonar-users, granted as Members on SonarQube Cloud) are always in scope, so every slice keeps their permissions. Omit to process every group (default). Issue #669."
     },
     "migrate_history": {
       "oneOf": [

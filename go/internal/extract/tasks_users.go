@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/url"
+	"regexp"
 )
 
 func userTasks() []TaskDef {
@@ -37,7 +38,7 @@ func userTasks() []TaskDef {
 			Run: func(ctx context.Context, e *Executor) error {
 				return forEachDepFiltered(ctx, e, "getUserGroups", "getGroups",
 					func(item json.RawMessage) bool {
-						return extractField(item, "name") != "Anyone"
+						return keepGroupMembersByRegexp(e, item)
 					},
 					func(ctx context.Context, item json.RawMessage, w *ChunkWriter) error {
 						name := extractField(item, "name")
@@ -85,12 +86,34 @@ func userTasks() []TaskDef {
 }
 
 // keepGroupByRegexp decides whether a raw "api/permissions/groups" item
-// survives extraction: no filter configured, it's the "Anyone" pseudo-group
-// (never a real group, always kept), or its name matches e.GroupRe. #669.
+// survives extraction: see GroupInScope. #669.
 func keepGroupByRegexp(e *Executor, item json.RawMessage) bool {
-	if e.GroupRe == nil {
-		return true
-	}
+	return GroupInScope(e.GroupRe, extractField(item, "name"))
+}
+
+// GroupInScope reports whether the named source group is in scope of a
+// --group_name_regexp slice (#669): always when re is nil, always for the
+// built-in groups (the "Anyone" pseudo-group and sonar-users, granted as
+// Members on SonarQube Cloud), otherwise when its name matches re. The
+// built-ins are not groups a slice migrates but grantees every project,
+// template and profile may carry, so every slice keeps their permissions,
+// as an unsliced migration does. Extract and migrate share this rule.
+func GroupInScope(re *regexp.Regexp, name string) bool {
+	return re == nil || isBuiltInGroupName(name) || re.MatchString(name)
+}
+
+func isBuiltInGroupName(name string) bool {
+	return name == "Anyone" || name == "sonar-users"
+}
+
+// keepGroupMembersByRegexp decides whether getUserGroups lists the members
+// of a getGroups item. "Anyone" has none; sonar-users holds every user and
+// is never migrated as a group, so a slice lists it only when its pattern
+// names it, rather than once per slice.
+func keepGroupMembersByRegexp(e *Executor, item json.RawMessage) bool {
 	name := extractField(item, "name")
-	return name == "Anyone" || e.GroupRe.MatchString(name)
+	if name == "Anyone" {
+		return false
+	}
+	return e.GroupRe == nil || e.GroupRe.MatchString(name)
 }

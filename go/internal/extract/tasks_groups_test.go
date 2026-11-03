@@ -23,6 +23,7 @@ func TestKeepGroupByRegexp(t *testing.T) {
 		{"matching group kept", &Executor{GroupRe: re}, `{"name":"team-a-devs"}`, true},
 		{"non-matching group dropped", &Executor{GroupRe: re}, `{"name":"team-b-devs"}`, false},
 		{"Anyone always kept", &Executor{GroupRe: re}, `{"name":"Anyone"}`, true},
+		{"sonar-users always kept", &Executor{GroupRe: re}, `{"name":"sonar-users"}`, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -91,5 +92,31 @@ func TestRestoreResumeScope_GroupNameRegexp(t *testing.T) {
 	}
 	if !isPartialExtract(cfg) {
 		t.Error("resumed group slice must stay partial")
+	}
+}
+
+// getUserGroups lists the members of the groups a slice migrates. Anyone
+// has none, and sonar-users (every user, never migrated as a group) is
+// listed only when the slice's pattern names it.
+func TestKeepGroupMembersByRegexp(t *testing.T) {
+	re := regexp.MustCompile("^team-a-.+$")
+	tests := []struct {
+		name string
+		e    *Executor
+		item string
+		want bool
+	}{
+		{"no filter lists sonar-users", &Executor{}, `{"name":"sonar-users"}`, true},
+		{"no filter never lists Anyone", &Executor{}, `{"name":"Anyone"}`, false},
+		{"slice lists a matching group", &Executor{GroupRe: re}, `{"name":"team-a-devs"}`, true},
+		{"slice skips sonar-users members", &Executor{GroupRe: re}, `{"name":"sonar-users"}`, false},
+		{"slice naming sonar-users lists it", &Executor{GroupRe: regexp.MustCompile("^sonar-.+$")}, `{"name":"sonar-users"}`, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := keepGroupMembersByRegexp(tc.e, json.RawMessage(tc.item)); got != tc.want {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

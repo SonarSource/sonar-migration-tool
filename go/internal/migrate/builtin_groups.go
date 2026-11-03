@@ -4,6 +4,8 @@
 
 package migrate
 
+import "github.com/sonar-solutions/sonar-migration-tool/internal/extract"
+
 // builtInGroupSkipNotes lists SonarQube Server built-in groups that
 // have no SonarQube Cloud equivalent (or are managed by SQC itself),
 // keyed by group name. The value is the explanatory Detail string the
@@ -62,8 +64,12 @@ func MapGroupNameToCloud(name string) (string, bool) {
 	return name, true
 }
 
-// groupSelected reports whether the named source group is in scope of
-// --group_name_regexp (#669): always true when no pattern is configured.
+// groupSelected reports whether the named SOURCE group is in scope of
+// --group_name_regexp (#669), by the rule extract applies (see
+// extract.GroupInScope): always when no pattern is configured, always for
+// the built-in groups, so a slice keeps the grants of "Anyone" and of
+// sonar-users (remapped to Members by MapGroupNameToCloud), otherwise when
+// the name matches. Call it with the source name, before the remap.
 func (e *Executor) groupSelected(name string) bool {
-	return e.GroupRe == nil || e.GroupRe.MatchString(name)
+	return extract.GroupInScope(e.GroupRe, name)
 }
