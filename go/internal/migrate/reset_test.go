@@ -6,6 +6,7 @@ package migrate
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -139,16 +140,30 @@ func TestRunReset_DryRunSkipsExecution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading export dir: %v", err)
 	}
-	found := false
+	clearPath := ""
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
-		if _, statErr := os.Stat(filepath.Join(dir, e.Name(), "clear.json")); statErr == nil {
-			found = true
+		path := filepath.Join(dir, e.Name(), "clear.json")
+		if _, statErr := os.Stat(path); statErr == nil {
+			clearPath = path
 		}
 	}
-	if !found {
-		t.Error("expected clear.json to be written even in dry-run mode")
+	if clearPath == "" {
+		t.Fatal("expected clear.json to be written even in dry-run mode")
+	}
+	data, err := os.ReadFile(clearPath)
+	if err != nil {
+		t.Fatalf("reading clear.json: %v", err)
+	}
+	var meta struct {
+		DryRun bool `json:"dry_run"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("decoding clear.json: %v", err)
+	}
+	if !meta.DryRun {
+		t.Error("clear.json does not record dry_run: true")
 	}
 }

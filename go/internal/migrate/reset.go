@@ -133,6 +133,7 @@ func RunReset(ctx context.Context, cfg ResetConfig) error {
 		"edition":        string(edition),
 		"enterprise_key": cfg.EnterpriseKey,
 		"run_id":         runID,
+		"dry_run":        cfg.DryRun,
 	}
 	data, _ := json.MarshalIndent(meta, "", "  ")
 	_ = os.WriteFile(filepath.Join(runDir, "clear.json"), data, 0o644)

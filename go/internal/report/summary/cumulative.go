@@ -5,6 +5,7 @@
 package summary
 
 import (
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -58,6 +59,9 @@ func CollectCumulativeSummary(runDir, exportDir string) (*MigrationSummary, erro
 		}
 		summaries = append(summaries, s)
 	}
+	if len(summaries) == 1 {
+		return latest, nil
+	}
 	latest.Sections = mergeSections(summaries)
 	latest.Limitations = mergeLimitations(summaries)
 	for i := len(summaries) - 1; i >= 0; i-- {
@@ -93,8 +97,8 @@ func earlierRunDirs(runDir, exportDir string) []string {
 			continue
 		}
 		dir := filepath.Join(exportDir, id)
-		if fileExists(filepath.Join(dir, "clear.json")) {
-			if lastReset == "" || common.RunIDAfter(id, lastReset) {
+		if meta := filepath.Join(dir, "clear.json"); fileExists(meta) {
+			if !isDryRunReset(meta) && (lastReset == "" || common.RunIDAfter(id, lastReset)) {
 				lastReset = id
 			}
 			continue
@@ -119,6 +123,17 @@ func earlierRunDirs(runDir, exportDir string) []string {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func isDryRunReset(metaPath string) bool {
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		return false
+	}
+	var meta struct {
+		DryRun bool `json:"dry_run"`
+	}
+	return json.Unmarshal(data, &meta) == nil && meta.DryRun
 }
 
 // Bucket indexes of a Section, in the order sectionBuckets returns them.

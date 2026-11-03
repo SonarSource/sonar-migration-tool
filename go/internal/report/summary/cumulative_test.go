@@ -47,6 +47,17 @@ func writeResetRun(t *testing.T, exportDir, runID string) {
 	}
 }
 
+func writeDryRunResetRun(t *testing.T, exportDir, runID string) {
+	t.Helper()
+	runDir := filepath.Join(exportDir, runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "clear.json"), []byte(`{"dry_run":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func projectKeys(items []EntityItem) []string {
 	out := make([]string, 0, len(items))
 	for _, it := range items {
@@ -62,6 +73,30 @@ func runIDs(runs []CoveredRun) []string {
 		out = append(out, r.RunID)
 	}
 	return out
+}
+
+func TestCollectCumulativeSummary_UnreadableEarlierRunReturnsSingleRunSummary(t *testing.T) {
+	exportDir := t.TempDir()
+	broken := filepath.Join(exportDir, "2026-11-02-0003")
+	if err := os.MkdirAll(broken, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRunMeta(t, broken, map[string]any{"overall_status": "success"})
+	if err := os.Mkdir(filepath.Join(broken, "requests.log"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	latest := writeSliceRun(t, exportDir, "2026-11-02-0004", "LATEST")
+
+	sum, err := CollectCumulativeSummary(latest, exportDir)
+	if err != nil {
+		t.Fatalf("CollectCumulativeSummary: %v", err)
+	}
+	if len(sum.Runs) != 0 {
+		t.Errorf("Runs = %v, want no cumulative runs when the earlier run cannot be read", runIDs(sum.Runs))
+	}
+	if got := projectKeys(findSection(sum, "Projects").Succeeded); strings.Join(got, ",") != "LATEST" {
+		t.Errorf("succeeded projects = %v, want only the latest run", got)
+	}
 }
 
 func TestCollectCumulativeSummary_SlicesAddUp(t *testing.T) {
@@ -101,6 +136,22 @@ func TestCollectCumulativeSummary_StopsAtLatestReset(t *testing.T) {
 	got := projectKeys(findSection(sum, "Projects").Succeeded)
 	if strings.Join(got, ",") != "VERT0_PROJ0,VERT1_PROJ0" {
 		t.Errorf("succeeded projects = %v, want only the runs after the reset", got)
+	}
+}
+
+func TestCollectCumulativeSummary_DryRunResetDoesNotCutOffEarlierRuns(t *testing.T) {
+	exportDir := t.TempDir()
+	writeSliceRun(t, exportDir, "2026-11-02-0001", "BEFORE_DRY_RUN")
+	writeDryRunResetRun(t, exportDir, "2026-11-02-0002")
+	latest := writeSliceRun(t, exportDir, "2026-11-02-0003", "AFTER_DRY_RUN")
+
+	sum, err := CollectCumulativeSummary(latest, exportDir)
+	if err != nil {
+		t.Fatalf("CollectCumulativeSummary: %v", err)
+	}
+	got := projectKeys(findSection(sum, "Projects").Succeeded)
+	if strings.Join(got, ",") != "AFTER_DRY_RUN,BEFORE_DRY_RUN" {
+		t.Errorf("succeeded projects = %v, want runs on both sides of the dry-run reset", got)
 	}
 }
 
