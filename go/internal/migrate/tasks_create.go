@@ -328,6 +328,9 @@ func runCreateGroups(ctx context.Context, e *Executor) error {
 			if IsBuiltInGroup(name) {
 				return nil
 			}
+			if !e.groupSelected(name) {
+				return nil
+			}
 			desc := extractField(item, "description")
 
 			var groupID string
