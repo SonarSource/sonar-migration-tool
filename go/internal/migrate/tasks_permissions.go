@@ -309,7 +309,7 @@ func runSetOrgGroupPermissions(ctx context.Context, e *Executor) error {
 	err := forEachExtractItem(ctx, e, "setOrgGroupPermissions", "getGroups",
 		func(ctx context.Context, item structure.ExtractItem, w *common.ChunkWriter) error {
 			name := extractField(item.Data, "name")
-			if name == "Anyone" {
+			if name == "Anyone" || !e.groupSelected(name) {
 				return nil
 			}
 			// Grant in the org(s) createGroups put the group in; the
@@ -424,6 +424,9 @@ func runSetProfileGroupPermissions(ctx context.Context, e *Executor) error {
 		func(ctx context.Context, item structure.ExtractItem, w *common.ChunkWriter) error {
 			profileKey := extractField(item.Data, "profileKey")
 			groupName := extractField(item.Data, "name")
+			if !e.groupSelected(groupName) {
+				return nil
+			}
 			// Issue #269: remap SQS built-in groups (sonar-users → Members).
 			cloudGroup, ok := MapGroupNameToCloud(groupName)
 			if !ok {
@@ -563,7 +566,7 @@ func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 	apply := func(ctx context.Context, srvURL string, data json.RawMessage) error {
 		srcTemplateID := extractField(data, "templateId")
 		groupName := extractField(data, "name")
-		if srcTemplateID == "" || groupName == "" || skipGroups[groupName] {
+		if srcTemplateID == "" || groupName == "" || skipGroups[groupName] || !e.groupSelected(groupName) {
 			return nil
 		}
 		tmpl, ok := templateMap[srvURL+"\x00"+srcTemplateID]

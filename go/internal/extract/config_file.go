@@ -70,6 +70,10 @@ type configFileShape struct {
 	// (checked by the caller after CLI flags are applied). #666.
 	PortfolioKeyRegexp  string `json:"portfolio_key_regexp"`
 	PortfolioNameRegexp string `json:"portfolio_name_regexp"`
+	// GroupNameRegexp is the top-level "group_name_regexp" value. In the
+	// unified shape (4), source.group_name_regexp wins when both are set.
+	// #669.
+	GroupNameRegexp string `json:"group_name_regexp"`
 	// MigrateHistory / HistoryMaxPoints / HistoryMinIntervalDays — see
 	// ExtractConfig doc comments. #554. Top-level only: like
 	// skip_project_data_migration / skip_issue_sync, this is a plain bool
@@ -130,6 +134,9 @@ type unifiedSourceBlock struct {
 	// top-level name regexp). #666.
 	PortfolioKeyRegexp  string `json:"portfolio_key_regexp"`
 	PortfolioNameRegexp string `json:"portfolio_name_regexp"`
+	// GroupNameRegexp, when set, overrides the top-level
+	// "group_name_regexp" for this source. #669.
+	GroupNameRegexp string `json:"group_name_regexp"`
 	// ProjectKeyRegexp, when set, overrides the top-level
 	// "project_key_regexp" for this source. #592.
 	ProjectKeyRegexp string `json:"project_key_regexp"`
@@ -275,6 +282,12 @@ func (s configFileShape) applyUnifiedShapeTo(cfg *ExtractConfig) {
 	cfg.BranchRegexp = common.FirstNonEmpty(sourceBranchRegexp, s.BranchRegexp)
 	// #666: source.portfolio_*_regexp wins over the top-level pair.
 	cfg.PortfolioKeyRegexp, cfg.PortfolioNameRegexp = s.resolvePortfolioRegexps()
+	// #669: source.group_name_regexp wins, else the top-level field.
+	var sourceGroupNameRegexp string
+	if s.Source != nil {
+		sourceGroupNameRegexp = s.Source.GroupNameRegexp
+	}
+	cfg.GroupNameRegexp = common.FirstNonEmpty(sourceGroupNameRegexp, s.GroupNameRegexp)
 	var sourceBranchAnalyzedAfter *string
 	if s.Source != nil {
 		sourceBranchAnalyzedAfter = s.Source.BranchAnalyzedAfter
@@ -300,6 +313,7 @@ func (s configFileShape) applyLegacySonarQubeShapeTo(cfg *ExtractConfig) {
 	cfg.BranchRegexp = s.BranchRegexp
 	cfg.PortfolioKeyRegexp = s.PortfolioKeyRegexp
 	cfg.PortfolioNameRegexp = s.PortfolioNameRegexp
+	cfg.GroupNameRegexp = s.GroupNameRegexp
 	cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
 	s.applyHistoryTo(cfg)
 }
@@ -324,6 +338,9 @@ func (s configFileShape) applySectionedShapeTo(cfg *ExtractConfig) {
 	if s.PortfolioKeyRegexp != "" || s.PortfolioNameRegexp != "" {
 		cfg.PortfolioKeyRegexp = s.PortfolioKeyRegexp
 		cfg.PortfolioNameRegexp = s.PortfolioNameRegexp
+	}
+	if s.GroupNameRegexp != "" {
+		cfg.GroupNameRegexp = s.GroupNameRegexp
 	}
 	if s.BranchAnalyzedAfter != "" {
 		cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
@@ -351,6 +368,7 @@ func (s configFileShape) applyFlatShapeTo(cfg *ExtractConfig) {
 	cfg.BranchRegexp = s.BranchRegexp
 	cfg.PortfolioKeyRegexp = s.PortfolioKeyRegexp
 	cfg.PortfolioNameRegexp = s.PortfolioNameRegexp
+	cfg.GroupNameRegexp = s.GroupNameRegexp
 	cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
 	s.applyHistoryTo(cfg)
 }

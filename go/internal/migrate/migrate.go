@@ -243,6 +243,12 @@ type MigrateConfig struct {
 	// matching ones. Empty means every portfolio is migrated.
 	PortfolioKeyRegexp  string
 	PortfolioNameRegexp string
+	// GroupNameRegexp, when non-empty, limits which user groups migrate
+	// processes (creation and every group permission grant), on top of
+	// whatever the extract phase already limited getGroups to. Always
+	// compiled as a full-match regex implicitly anchored with ^ and $. Empty
+	// means "migrate every extracted group" (#669).
+	GroupNameRegexp string
 
 	// ProgressCallback, when set, is invoked with the same run-wide
 	// percent/ETA snapshot as the #520 log line, on every tick and once
@@ -408,6 +414,9 @@ type Executor struct {
 	// where portfolios.csv is loaded, so every portfolio task sees only the
 	// slice.
 	PortfolioFilter *common.PortfolioFilter
+	// GroupRe is the compiled form of MigrateConfig.GroupNameRegexp, or nil
+	// when unset. #669.
+	GroupRe *regexp.Regexp
 	// MigrateHistory — see MigrateConfig.MigrateHistory (#554).
 	MigrateHistory bool
 	// UseSLBForReferenceBranchNewCode — see MigrateConfig.UseSLBForReferenceBranchNewCode (#655).
@@ -483,6 +492,15 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 	portfolioFilter, err := common.NewPortfolioFilter(cfg.PortfolioKeyRegexp, cfg.PortfolioNameRegexp)
 	if err != nil {
 		return "", err
+	}
+	// #669: compile --group_name_regexp defensively, same as --branch_regexp.
+	var groupRe *regexp.Regexp
+	if cfg.GroupNameRegexp != "" {
+		re, err := extract.CompileProjectKeyPattern(cfg.GroupNameRegexp)
+		if err != nil {
+			return "", fmt.Errorf("invalid group name regexp pattern %q: %w", cfg.GroupNameRegexp, err)
+		}
+		groupRe = re
 	}
 	// #583: parse --branch_analyzed_after defensively even though
 	// cmd/migrate.go and cmd/transfer.go already validate it at
@@ -586,6 +604,7 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 		ProjectKeyRe:                    projectKeyRe,
 		BranchRe:                        branchRe,
 		PortfolioFilter:                 portfolioFilter,
+		GroupRe:                         groupRe,
 		MigrateHistory:                  cfg.MigrateHistory,
 		UseSLBForReferenceBranchNewCode: cfg.UseSLBForReferenceBranchNewCode,
 		BranchAnalyzedAfter:             branchAnalyzedAfter,

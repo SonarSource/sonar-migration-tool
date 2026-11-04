@@ -41,9 +41,10 @@ func (m ExtractMapping) AllIDs() []string {
 
 // extractMeta is the part of extract.json the structure package reads.
 type extractMeta struct {
-	URL         string   `json:"url"`
-	Partial     bool     `json:"partial"`
-	ProjectKeys []string `json:"project_keys"`
+	URL             string   `json:"url"`
+	Partial         bool     `json:"partial"`
+	ProjectKeys     []string `json:"project_keys"`
+	GroupNameRegexp string   `json:"group_name_regexp"`
 }
 
 // GetUniqueExtracts scans the export directory for extract runs and returns
@@ -186,6 +187,8 @@ func planServerReads(directory string, ids []string, key string) ([]string, []su
 		return ids, supersessions(directory, ids, key)
 	case extract.IsPortfolioScopedTask(key):
 		return ids, portfolioSupersessions(directory, ids, key)
+	case extract.IsGroupScopedTask(key):
+		return ids, groupSupersessions(directory, ids, key)
 	}
 	return newestFinished(directory, ids, key), nil
 }
@@ -225,6 +228,9 @@ type supersession struct {
 	// portfolios is true when keys are portfolio keys (#666), matched against
 	// the portfolio a record belongs to rather than its project.
 	portfolios bool
+	// groups is true when keys are group IDs (#669), matched against the
+	// group a record belongs to.
+	groups bool
 }
 
 func (s supersession) any() bool { return s.all || len(s.keys) > 0 }
@@ -237,6 +243,9 @@ func (s supersession) covers(record json.RawMessage) bool {
 	}
 	if s.portfolios {
 		return s.keys[recordPortfolioKey(record)]
+	}
+	if s.groups {
+		return s.keys[recordGroupKey(record)]
 	}
 	return s.keys[recordProjectKey(record)]
 }
@@ -333,6 +342,47 @@ func portfolioSupersessions(directory string, ids []string, key string) []supers
 	return result
 }
 
+// groupSupersessions computes, for each extract of ids, the groups a later
+// extract of the set re-extracted for the task (#669). Group IDs are read
+// from getGroups, which lists groups even when they have no users. For
+// getUserGroups, sonar-users is re-extracted only when the slice's group
+// regexp includes it. A later extract that did not run the task superseded
+// nothing.
+func groupSupersessions(directory string, ids []string, key string) []supersession {
+	result := make([]supersession, len(ids))
+	var later map[string]bool
+	for i := len(ids) - 1; i >= 0; i-- {
+		result[i] = supersession{keys: copyKeys(later), groups: true}
+		if !taskFinished(directory, ids[i], key) {
+			continue // this slice did not finish the task
+		}
+		supersedesSonarUsers := true
+		if key == "getUserGroups" {
+			pattern := readExtractMeta(directory, ids[i]).GroupNameRegexp
+			if pattern != "" {
+				groupRe, err := extract.CompileProjectKeyPattern(pattern)
+				supersedesSonarUsers = err == nil && groupRe.MatchString("sonar-users")
+			}
+		}
+		// getGroups lists every group the slice fetched, members or not. But a
+		// group slice may include sonar-users in getGroups without listing its
+		// members, so only supersede those memberships when the regexp matched.
+		_, _ = eachTaskDirRecord(filepath.Join(directory, ids[i], "getGroups"), func(r json.RawMessage) bool {
+			if key == "getUserGroups" && !supersedesSonarUsers && recordGroupName(r) == "sonar-users" {
+				return true
+			}
+			if k := recordGroupKey(r); k != "" {
+				if later == nil {
+					later = make(map[string]bool)
+				}
+				later[k] = true
+			}
+			return true
+		})
+	}
+	return result
+}
+
 func copyKeys(m map[string]bool) map[string]bool {
 	if len(m) == 0 {
 		return nil
@@ -371,6 +421,33 @@ func recordProjectKey(record json.RawMessage) string {
 		}
 	}
 	return ""
+}
+
+// recordGroupKey returns the group a group-scoped record belongs to: groupId
+// (getUserGroups, enriched from the group it was fetched for) or id
+// (getGroups).
+func recordGroupKey(record json.RawMessage) string {
+	var obj struct {
+		GroupID string `json:"groupId"`
+		ID      string `json:"id"`
+	}
+	if err := json.Unmarshal(record, &obj); err != nil {
+		return ""
+	}
+	if obj.GroupID != "" {
+		return obj.GroupID
+	}
+	return obj.ID
+}
+
+func recordGroupName(record json.RawMessage) string {
+	var obj struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(record, &obj); err != nil {
+		return ""
+	}
+	return obj.Name
 }
 
 // recordPortfolioKey returns the portfolio a portfolio-scoped record belongs
