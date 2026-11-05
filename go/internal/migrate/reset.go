@@ -126,7 +126,10 @@ func RunReset(ctx context.Context, cfg ResetConfig) error {
 		return err
 	}
 
-	// Write metadata.
+	// Write metadata. "organizations" and "completed" let the cumulative
+	// final report (#667) tell a finished reset, and which organizations
+	// it wiped, from a dry, failed or cancelled one: completed is only
+	// set once every phase has run.
 	meta := map[string]any{
 		"plan":           plan,
 		"version":        "cloud",
@@ -134,9 +137,10 @@ func RunReset(ctx context.Context, cfg ResetConfig) error {
 		"enterprise_key": cfg.EnterpriseKey,
 		"run_id":         runID,
 		"dry_run":        cfg.DryRun,
+		"organizations":  cfg.ConfirmedOrgs,
+		"completed":      false,
 	}
-	data, _ := json.MarshalIndent(meta, "", "  ")
-	_ = os.WriteFile(filepath.Join(runDir, "clear.json"), data, 0o644)
+	writeResetMeta(runDir, meta)
 
 	// #550 — dry run: the plan is already fully built and written to
 	// disk above; print it and return before the executor (and any
@@ -181,8 +185,17 @@ func RunReset(ctx context.Context, cfg ResetConfig) error {
 		}
 	}
 
+	meta["completed"] = true
+	writeResetMeta(runDir, meta)
+
 	fmt.Printf("%s %s - Reset Complete: %s\n", version.ToolName, version.Version, runID)
 	return nil
+}
+
+// writeResetMeta writes the reset run's clear.json.
+func writeResetMeta(runDir string, meta map[string]any) {
+	data, _ := json.MarshalIndent(meta, "", "  ")
+	_ = os.WriteFile(filepath.Join(runDir, "clear.json"), data, 0o644)
 }
 
 // resetTargets selects the delete* tasks plus the curated set of reset*

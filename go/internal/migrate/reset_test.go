@@ -56,6 +56,48 @@ func TestRunResetIntegration(t *testing.T) {
 	if err != nil {
 		t.Logf("RunReset returned error (expected for partial setup): %v", err)
 	}
+	// #667: clear.json says the reset completed only when every phase ran.
+	meta := readClearMeta(t, dir)
+	if meta.Completed != (err == nil) {
+		t.Errorf("clear.json completed = %v, want %v (RunReset error: %v)", meta.Completed, err == nil, err)
+	}
+}
+
+type clearMeta struct {
+	DryRun        bool     `json:"dry_run"`
+	Completed     bool     `json:"completed"`
+	Organizations []string `json:"organizations"`
+}
+
+// readClearMeta decodes the clear.json of the reset run under dir.
+func readClearMeta(t *testing.T, dir string) clearMeta {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading export dir: %v", err)
+	}
+	clearPath := ""
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		path := filepath.Join(dir, e.Name(), "clear.json")
+		if _, statErr := os.Stat(path); statErr == nil {
+			clearPath = path
+		}
+	}
+	if clearPath == "" {
+		t.Fatal("expected clear.json to be written")
+	}
+	data, err := os.ReadFile(clearPath)
+	if err != nil {
+		t.Fatalf("reading clear.json: %v", err)
+	}
+	var meta clearMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("decoding clear.json: %v", err)
+	}
+	return meta
 }
 
 func TestResetConfigDefaults(t *testing.T) {
@@ -136,34 +178,14 @@ func TestRunReset_DryRunSkipsExecution(t *testing.T) {
 
 	// The plan must still be written to disk so it's inspectable, even
 	// though execution was skipped.
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("reading export dir: %v", err)
-	}
-	clearPath := ""
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		path := filepath.Join(dir, e.Name(), "clear.json")
-		if _, statErr := os.Stat(path); statErr == nil {
-			clearPath = path
-		}
-	}
-	if clearPath == "" {
-		t.Fatal("expected clear.json to be written even in dry-run mode")
-	}
-	data, err := os.ReadFile(clearPath)
-	if err != nil {
-		t.Fatalf("reading clear.json: %v", err)
-	}
-	var meta struct {
-		DryRun bool `json:"dry_run"`
-	}
-	if err := json.Unmarshal(data, &meta); err != nil {
-		t.Fatalf("decoding clear.json: %v", err)
-	}
+	meta := readClearMeta(t, dir)
 	if !meta.DryRun {
 		t.Error("clear.json does not record dry_run: true")
+	}
+	if meta.Completed {
+		t.Error("clear.json records a dry run as a completed reset")
+	}
+	if strings.Join(meta.Organizations, ",") != testCloudOrg {
+		t.Errorf("clear.json organizations = %v, want [%s]", meta.Organizations, testCloudOrg)
 	}
 }

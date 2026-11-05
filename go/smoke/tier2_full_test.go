@@ -52,6 +52,33 @@ func tier2Setup(t *testing.T) smokeConfig {
 	return cfg
 }
 
+// assertClearMeta checks the clear.json a reset run writes: whether it was a
+// dry run, whether every phase completed, and the organizations it was
+// confirmed for. The cumulative final report (#667) relies on the last two
+// to decide which earlier migrate runs a reset wiped.
+func assertClearMeta(t *testing.T, runDir string, dryRun, completed bool, org string) {
+	t.Helper()
+	path := filepath.Join(runDir, "clear.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	var meta struct {
+		DryRun        bool     `json:"dry_run"`
+		Completed     bool     `json:"completed"`
+		Organizations []string `json:"organizations"`
+	}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		t.Fatalf("parsing %s: %v", path, err)
+	}
+	if meta.DryRun != dryRun || meta.Completed != completed {
+		t.Errorf("%s: dry_run=%v completed=%v, want dry_run=%v completed=%v", path, meta.DryRun, meta.Completed, dryRun, completed)
+	}
+	if strings.Join(meta.Organizations, ",") != org {
+		t.Errorf("%s: organizations=%v, want [%s]", path, meta.Organizations, org)
+	}
+}
+
 // regtestConfigPath copies the smoke config with target.export_directory
 // overridden to exportDir. Unlike extract/migrate/transfer, `regtest` has no
 // --export_directory (or --export_dir) flag at all (see cmd/regtest.go) — it
@@ -147,6 +174,7 @@ func TestTier2_PathA_Transfer(t *testing.T) {
 		if !strings.Contains(res.stdout, cfg.org) {
 			t.Errorf("reset --dry-run stdout does not mention the target organization %q:\n%s", cfg.org, res.stdout)
 		}
+		assertClearMeta(t, latestRunDir(t, exportDir), true, false, cfg.org)
 	})
 
 	t.Run("transfer", func(t *testing.T) {
@@ -263,6 +291,7 @@ func TestTier2_PathB_FullPipeline(t *testing.T) {
 			"--export_directory", exportDir,
 		)
 		requireExit(t, res, 0, "reset")
+		assertClearMeta(t, latestRunDir(t, exportDir), false, true, cfg.org)
 	})
 
 	t.Run("migrate", func(t *testing.T) {

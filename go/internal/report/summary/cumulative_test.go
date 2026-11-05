@@ -35,25 +35,25 @@ func writeSliceRun(t *testing.T, exportDir, runID string, keys ...string) string
 	return runDir
 }
 
-// writeResetRun writes a reset run dir, recognised by its clear.json.
+// writeResetRun writes a reset run dir, recognised by its clear.json, that
+// completed for every organization.
 func writeResetRun(t *testing.T, exportDir, runID string) {
 	t.Helper()
-	runDir := filepath.Join(exportDir, runID)
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(runDir, "clear.json"), []byte("{}"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeClearJSON(t, exportDir, runID, `{"dry_run":false,"completed":true}`)
 }
 
 func writeDryRunResetRun(t *testing.T, exportDir, runID string) {
 	t.Helper()
+	writeClearJSON(t, exportDir, runID, `{"dry_run":true,"completed":false}`)
+}
+
+func writeClearJSON(t *testing.T, exportDir, runID, meta string) {
+	t.Helper()
 	runDir := filepath.Join(exportDir, runID)
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(runDir, "clear.json"), []byte(`{"dry_run":true}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(runDir, "clear.json"), []byte(meta), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -155,6 +155,86 @@ func TestCollectCumulativeSummary_DryRunResetDoesNotCutOffEarlierRuns(t *testing
 	}
 }
 
+// Only a reset that ran every phase wiped anything: a failed or cancelled
+// one says nothing reliable about what was deleted.
+func TestCollectCumulativeSummary_IncompleteResetDoesNotCutOffEarlierRuns(t *testing.T) {
+	exportDir := t.TempDir()
+	writeSliceRun(t, exportDir, "2026-11-02-0001", "BEFORE_RESET")
+	writeClearJSON(t, exportDir, "2026-11-02-0002", `{"dry_run":false,"completed":false,"organizations":["org1"]}`)
+	latest := writeSliceRun(t, exportDir, "2026-11-02-0003", "AFTER_RESET")
+
+	sum, err := CollectCumulativeSummary(latest, exportDir)
+	if err != nil {
+		t.Fatalf("CollectCumulativeSummary: %v", err)
+	}
+	got := projectKeys(findSection(sum, "Projects").Succeeded)
+	if strings.Join(got, ",") != "AFTER_RESET,BEFORE_RESET" {
+		t.Errorf("succeeded projects = %v, want runs on both sides of the reset", got)
+	}
+}
+
+// A clear.json from before resets recorded their completion counts as a
+// completed reset of every organization.
+func TestCollectCumulativeSummary_LegacyResetCutsOffEarlierRuns(t *testing.T) {
+	exportDir := t.TempDir()
+	writeSliceRun(t, exportDir, "2026-11-02-0001", "BEFORE_RESET")
+	writeClearJSON(t, exportDir, "2026-11-02-0002", `{"run_id":"2026-11-02-0002"}`)
+	latest := writeSliceRun(t, exportDir, "2026-11-02-0003", "AFTER_RESET")
+
+	sum, err := CollectCumulativeSummary(latest, exportDir)
+	if err != nil {
+		t.Fatalf("CollectCumulativeSummary: %v", err)
+	}
+	if got := projectKeys(findSection(sum, "Projects").Succeeded); strings.Join(got, ",") != "AFTER_RESET" {
+		t.Errorf("succeeded projects = %v, want only the run after the legacy reset", got)
+	}
+}
+
+// A reset of some organizations wipes only their entities: the earlier
+// run's entities in the other organizations stay in the report.
+func TestCollectCumulativeSummary_OrgScopedResetKeepsOtherOrgs(t *testing.T) {
+	exportDir := t.TempDir()
+	first := filepath.Join(exportDir, "2026-11-02-0001")
+	writeTaskJSONL(t, first, "createProjects", []map[string]any{
+		{"key": "IN_ORG1", "name": "IN_ORG1", "sonarcloud_org_key": "org1", "cloud_project_key": "org1_IN_ORG1"},
+		{"key": "IN_ORG2", "name": "IN_ORG2", "sonarcloud_org_key": "org2", "cloud_project_key": "org2_IN_ORG2"},
+	})
+	writeRunMeta(t, first, map[string]any{"overall_status": "success"})
+	writeClearJSON(t, exportDir, "2026-11-02-0002", `{"dry_run":false,"completed":true,"organizations":["org1"]}`)
+	latest := writeSliceRun(t, exportDir, "2026-11-02-0003", "LATEST")
+
+	sum, err := CollectCumulativeSummary(latest, exportDir)
+	if err != nil {
+		t.Fatalf("CollectCumulativeSummary: %v", err)
+	}
+	got := projectKeys(findSection(sum, "Projects").Succeeded)
+	if strings.Join(got, ",") != "IN_ORG2,LATEST" {
+		t.Errorf("succeeded projects = %v, want the org2 project kept and the org1 one wiped", got)
+	}
+	if ids := runIDs(sum.Runs); strings.Join(ids, ",") != "2026-11-02-0001,2026-11-02-0003" {
+		t.Errorf("Runs = %v, want both runs", ids)
+	}
+}
+
+// A run whose every organization a later reset wiped is left out.
+func TestCollectCumulativeSummary_OrgScopedResetOfEveryOrgDropsRun(t *testing.T) {
+	exportDir := t.TempDir()
+	writeSliceRun(t, exportDir, "2026-11-02-0001", "BEFORE_RESET")
+	writeClearJSON(t, exportDir, "2026-11-02-0002", `{"dry_run":false,"completed":true,"organizations":["org1"]}`)
+	latest := writeSliceRun(t, exportDir, "2026-11-02-0003", "AFTER_RESET")
+
+	sum, err := CollectCumulativeSummary(latest, exportDir)
+	if err != nil {
+		t.Fatalf("CollectCumulativeSummary: %v", err)
+	}
+	if got := projectKeys(findSection(sum, "Projects").Succeeded); strings.Join(got, ",") != "AFTER_RESET" {
+		t.Errorf("succeeded projects = %v, want only AFTER_RESET", got)
+	}
+	if len(sum.Runs) != 0 {
+		t.Errorf("Runs = %v, want the wiped run left out", runIDs(sum.Runs))
+	}
+}
+
 // Regenerating the report of an older run leaves the newer runs out.
 func TestCollectCumulativeSummary_IgnoresNewerRuns(t *testing.T) {
 	exportDir := t.TempDir()
@@ -238,5 +318,59 @@ func TestRenderMarkdown_ListsCoveredRuns(t *testing.T) {
 	}
 	if _, err := RenderPDF(sum); err != nil {
 		t.Errorf("RenderPDF: %v", err)
+	}
+}
+
+// A later slice reports the gates no project of its own uses, with no
+// organization. A gate an earlier slice migrated is not unused.
+func TestMergeSections_UnusedRowDoesNotHideOrDuplicateEarlierSuccess(t *testing.T) {
+	unused := EntityItem{Name: "strict", Detail: "Not used by any migrated project", SkipReason: SkipReasonUnused}
+	neverUsed := EntityItem{Name: "legacy", Detail: "Not used by any migrated project", SkipReason: SkipReasonUnused}
+	newest := &MigrationSummary{Sections: []Section{{Name: "Quality Gates", Skipped: []EntityItem{unused, neverUsed}}}}
+	older := &MigrationSummary{Sections: []Section{{Name: "Quality Gates",
+		Succeeded: []EntityItem{{Name: "strict", Organization: "org1"}},
+		Skipped:   []EntityItem{neverUsed},
+	}}}
+
+	merged := mergeSections([]*MigrationSummary{newest, older})[0]
+	if len(merged.Succeeded) != 1 || merged.Succeeded[0].Name != "strict" {
+		t.Errorf("succeeded = %+v, want the earlier strict success", merged.Succeeded)
+	}
+	if len(merged.Skipped) != 1 || merged.Skipped[0].Name != "legacy" {
+		t.Errorf("skipped = %+v, want only legacy, once", merged.Skipped)
+	}
+}
+
+// A failure read from requests.log carries no language: a later slice's
+// "already exists" on a profile must still match the earlier success.
+func TestMergeSections_ProfileExpectedFailureWithoutLanguage(t *testing.T) {
+	alreadyThere := EntityItem{Name: "Corp way", Organization: "org1", Cause: string(migrate.FailureAlreadyDone)}
+	newest := &MigrationSummary{Sections: []Section{{Name: sectionQualityProfiles, Failed: []EntityItem{alreadyThere}}}}
+	older := &MigrationSummary{Sections: []Section{{Name: sectionQualityProfiles,
+		Succeeded: []EntityItem{{Name: "Corp way", Language: "java", Organization: "org1"}},
+	}}}
+
+	merged := mergeSections([]*MigrationSummary{newest, older})[0]
+	if len(merged.Succeeded) != 1 || merged.Succeeded[0].Language != "java" {
+		t.Errorf("succeeded = %+v, want the earlier java success", merged.Succeeded)
+	}
+	if len(merged.Failed) != 0 {
+		t.Errorf("failed = %+v, want the expected failure dropped", merged.Failed)
+	}
+}
+
+// A real profile failure without a language is the profile of that name
+// the runs report, so a later success replaces it.
+func TestMergeSections_ProfileFailureWithoutLanguageSupersededByLaterSuccess(t *testing.T) {
+	newest := &MigrationSummary{Sections: []Section{{Name: sectionQualityProfiles,
+		Succeeded: []EntityItem{{Name: "Corp way", Language: "java", Organization: "org1"}},
+	}}}
+	older := &MigrationSummary{Sections: []Section{{Name: sectionQualityProfiles,
+		Failed: []EntityItem{{Name: "Corp way", Organization: "org1", Cause: string(migrate.FailureBug)}},
+	}}}
+
+	merged := mergeSections([]*MigrationSummary{newest, older})[0]
+	if len(merged.Succeeded) != 1 || len(merged.Failed) != 0 {
+		t.Errorf("succeeded = %+v, failed = %+v, want only the later success", merged.Succeeded, merged.Failed)
 	}
 }
