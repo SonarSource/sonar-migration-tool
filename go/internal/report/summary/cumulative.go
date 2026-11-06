@@ -29,7 +29,7 @@ type CoveredRun struct {
 // regexps) gets one report covering every slice so far, not only the last.
 //
 // The runs covered are the migrate runs (a run_meta.json) older than runDir
-// whose entities a completed reset (see readResetRuns) has not wiped since:
+// whose entities a reset (see readReset) has not wiped since:
 // a run older than a reset of every organization is left out, and a run
 // older than a reset of some organizations keeps only its entities in the
 // other ones. Each run is collected on its own, exactly as a single-run
@@ -93,15 +93,15 @@ type earlierRun struct {
 	resetOrgs map[string]bool
 }
 
-// resetRun is a completed reset run: the organizations it wiped, or nil
-// for every organization.
+// resetRun is a reset run that may have deleted entities: the organizations
+// it wiped, or nil for every organization.
 type resetRun struct {
 	id   string
 	orgs []string
 }
 
 // earlierRuns returns the migrate runs of exportDir older than runDir that
-// a completed reset older than runDir has not wiped entirely, newest first.
+// a reset older than runDir has not wiped entirely, newest first.
 func earlierRuns(runDir, exportDir string) []earlierRun {
 	entries, err := os.ReadDir(exportDir)
 	if err != nil {
@@ -116,8 +116,8 @@ func earlierRuns(runDir, exportDir string) []earlierRun {
 			continue
 		}
 		dir := filepath.Join(exportDir, id)
-		if meta := filepath.Join(dir, "clear.json"); fileExists(meta) {
-			if orgs, ok := readCompletedReset(meta); ok {
+		if fileExists(filepath.Join(dir, "clear.json")) {
+			if orgs, ok := readReset(dir); ok {
 				resets = append(resets, resetRun{id: id, orgs: orgs})
 			}
 			continue
@@ -158,27 +158,46 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-// readCompletedReset reads a reset run's clear.json. It reports ok only for
-// a reset that ran every phase: a dry run and a failed or cancelled reset
-// say nothing reliable about what was deleted, so the runs before them stay
-// in the report. A clear.json written before resets recorded their
-// completion (#667) has no "completed" field and counts as a completed
-// reset of every organization. orgs are the organizations the reset was
-// confirmed for.
-func readCompletedReset(metaPath string) (orgs []string, ok bool) {
-	data, err := os.ReadFile(metaPath)
+// readReset reads the clear.json of the reset run in dir. It reports ok
+// for a reset that may have deleted something: one that ran every phase,
+// and also one that failed or was cancelled after its first phase, since
+// the runs before it can no longer be trusted as migrated. A dry run
+// deletes nothing. A clear.json written before resets recorded dry_run and
+// completed (#667) is told apart by the task output a reset leaves next to
+// it and a dry run never does. orgs are the organizations the reset was
+// confirmed for, nil for every organization.
+func readReset(dir string) (orgs []string, ok bool) {
+	data, err := os.ReadFile(filepath.Join(dir, "clear.json"))
 	if err != nil {
 		return nil, false
 	}
 	var meta struct {
 		DryRun        bool     `json:"dry_run"`
-		Completed     *bool    `json:"completed"`
+		Completed     bool     `json:"completed"`
 		Organizations []string `json:"organizations"`
 	}
-	if json.Unmarshal(data, &meta) != nil || meta.DryRun || (meta.Completed != nil && !*meta.Completed) {
+	if json.Unmarshal(data, &meta) != nil || meta.DryRun {
+		return nil, false
+	}
+	if !meta.Completed && !ranTasks(dir) {
 		return nil, false
 	}
 	return meta.Organizations, true
+}
+
+// ranTasks reports whether dir holds the output folder of a task, which a
+// reset writes from its first phase on.
+func ranTasks(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 // dropOrganizations removes from s every entity of one of orgs, which a

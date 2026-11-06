@@ -126,10 +126,11 @@ func RunReset(ctx context.Context, cfg ResetConfig) error {
 		return err
 	}
 
-	// Write metadata. "organizations" and "completed" let the cumulative
-	// final report (#667) tell a finished reset, and which organizations
-	// it wiped, from a dry, failed or cancelled one: completed is only
-	// set once every phase has run.
+	// Write metadata. "dry_run", "organizations" and "completed" let the
+	// cumulative final report (#667) tell which organizations a reset may
+	// have wiped: completed is only set once every phase has run, and a
+	// reset that fails or is cancelled after its first phase still counts
+	// as a reset there, since it may have deleted entities.
 	meta := map[string]any{
 		"plan":           plan,
 		"version":        "cloud",

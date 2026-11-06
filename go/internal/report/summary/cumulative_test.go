@@ -155,9 +155,27 @@ func TestCollectCumulativeSummary_DryRunResetDoesNotCutOffEarlierRuns(t *testing
 	}
 }
 
-// Only a reset that ran every phase wiped anything: a failed or cancelled
-// one says nothing reliable about what was deleted.
-func TestCollectCumulativeSummary_IncompleteResetDoesNotCutOffEarlierRuns(t *testing.T) {
+// A reset that failed or was cancelled after its first phase may have
+// deleted entities of its organizations, so the runs before it are no
+// longer reported as migrated there.
+func TestCollectCumulativeSummary_IncompleteResetCutsOffEarlierRuns(t *testing.T) {
+	exportDir := t.TempDir()
+	writeSliceRun(t, exportDir, "2026-11-02-0001", "BEFORE_RESET")
+	writeClearJSON(t, exportDir, "2026-11-02-0002", `{"dry_run":false,"completed":false,"organizations":["org1"]}`)
+	writeTaskJSONL(t, filepath.Join(exportDir, "2026-11-02-0002"), "deleteProjects", []map[string]any{{"key": "org1_BEFORE_RESET"}})
+	latest := writeSliceRun(t, exportDir, "2026-11-02-0003", "AFTER_RESET")
+
+	sum, err := CollectCumulativeSummary(latest, exportDir)
+	if err != nil {
+		t.Fatalf("CollectCumulativeSummary: %v", err)
+	}
+	if got := projectKeys(findSection(sum, "Projects").Succeeded); strings.Join(got, ",") != "AFTER_RESET" {
+		t.Errorf("succeeded projects = %v, want only the run after the partial reset", got)
+	}
+}
+
+// A reset that failed before any phase ran deleted nothing.
+func TestCollectCumulativeSummary_ResetFailedBeforeFirstPhaseKeepsEarlierRuns(t *testing.T) {
 	exportDir := t.TempDir()
 	writeSliceRun(t, exportDir, "2026-11-02-0001", "BEFORE_RESET")
 	writeClearJSON(t, exportDir, "2026-11-02-0002", `{"dry_run":false,"completed":false,"organizations":["org1"]}`)
@@ -173,9 +191,27 @@ func TestCollectCumulativeSummary_IncompleteResetDoesNotCutOffEarlierRuns(t *tes
 	}
 }
 
-// A clear.json from before resets recorded their completion counts as a
-// completed reset of every organization.
+// A clear.json from before resets recorded dry_run and completed counts as
+// a reset of every organization when task output sits next to it.
 func TestCollectCumulativeSummary_LegacyResetCutsOffEarlierRuns(t *testing.T) {
+	exportDir := t.TempDir()
+	writeSliceRun(t, exportDir, "2026-11-02-0001", "BEFORE_RESET")
+	writeClearJSON(t, exportDir, "2026-11-02-0002", `{"run_id":"2026-11-02-0002"}`)
+	writeTaskJSONL(t, filepath.Join(exportDir, "2026-11-02-0002"), "deleteProjects", []map[string]any{{"key": "org1_BEFORE_RESET"}})
+	latest := writeSliceRun(t, exportDir, "2026-11-02-0003", "AFTER_RESET")
+
+	sum, err := CollectCumulativeSummary(latest, exportDir)
+	if err != nil {
+		t.Fatalf("CollectCumulativeSummary: %v", err)
+	}
+	if got := projectKeys(findSection(sum, "Projects").Succeeded); strings.Join(got, ",") != "AFTER_RESET" {
+		t.Errorf("succeeded projects = %v, want only the run after the legacy reset", got)
+	}
+}
+
+// A legacy clear.json alone, as an old build's dry run left it, wiped
+// nothing.
+func TestCollectCumulativeSummary_LegacyDryRunResetKeepsEarlierRuns(t *testing.T) {
 	exportDir := t.TempDir()
 	writeSliceRun(t, exportDir, "2026-11-02-0001", "BEFORE_RESET")
 	writeClearJSON(t, exportDir, "2026-11-02-0002", `{"run_id":"2026-11-02-0002"}`)
@@ -185,8 +221,9 @@ func TestCollectCumulativeSummary_LegacyResetCutsOffEarlierRuns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CollectCumulativeSummary: %v", err)
 	}
-	if got := projectKeys(findSection(sum, "Projects").Succeeded); strings.Join(got, ",") != "AFTER_RESET" {
-		t.Errorf("succeeded projects = %v, want only the run after the legacy reset", got)
+	got := projectKeys(findSection(sum, "Projects").Succeeded)
+	if strings.Join(got, ",") != "AFTER_RESET,BEFORE_RESET" {
+		t.Errorf("succeeded projects = %v, want runs on both sides of the legacy dry run", got)
 	}
 }
 
