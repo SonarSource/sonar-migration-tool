@@ -10,6 +10,6 @@ package version
 // "-SNAPSHOT" suffix this source tree carries between releases (#615).
 // A plain `go build` with no ldflags (local dev builds, go/smoke, the
 // non-release CI build) keeps reporting this literal, SNAPSHOT included.
-var Version = "v1.2.1-SNAPSHOT"
+var Version = "v1.2.2-SNAPSHOT"
 
 const ToolName = "sonar-migration-tool"
