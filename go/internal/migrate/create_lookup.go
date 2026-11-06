@@ -7,12 +7,18 @@ package migrate
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
+
+// errLookupNotFound is returned (wrapped) by the lookupExisting* helpers when
+// the target answered but holds no entity of that name, as opposed to a
+// transport or HTTP failure.
+var errLookupNotFound = errors.New("not found")
 
 // lookupExistingProject returns the cloud project key for a project that
 // already exists. The key is deterministic (orgKey + "_" + sourceKey) so no
@@ -115,5 +121,5 @@ func findByFieldImpl(body json.RawMessage, arrayKey, matchField, matchValue, ret
 			}
 		}
 	}
-	return "", fmt.Errorf("not found")
+	return "", errLookupNotFound
 }
