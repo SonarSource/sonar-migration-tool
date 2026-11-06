@@ -101,6 +101,24 @@ func renderMarkdownTitle(sb *strings.Builder, summary *MigrationSummary) {
 		fmt.Fprintf(sb, "- Overall status: %s\n", summary.OverallStatus)
 	}
 	sb.WriteString("\n")
+	renderMarkdownRuns(sb, summary)
+}
+
+// renderMarkdownRuns writes the "## Migration Runs" table of a cumulative
+// report (#667). No-op for a report of a single run.
+func renderMarkdownRuns(sb *strings.Builder, summary *MigrationSummary) {
+	if len(summary.Runs) == 0 {
+		return
+	}
+	sb.WriteString("## Migration Runs\n")
+	fmt.Fprintf(sb, "This report is cumulative over %d migration runs. The timings, failure ledger and warnings are those of run %s.\n\n",
+		len(summary.Runs), summary.RunID)
+	sb.WriteString("| Run ID | Started | Completed | Overall Status |\n")
+	sb.WriteString("|:---|:---|:---|:---|\n")
+	for _, r := range summary.Runs {
+		fmt.Fprintf(sb, "| %s | %s | %s | %s |\n", r.RunID, r.StartedAt, r.CompletedAt, r.OverallStatus)
+	}
+	sb.WriteString("\n")
 }
 
 // renderMarkdownExecutiveSummary writes the "## Executive Summary" table: one

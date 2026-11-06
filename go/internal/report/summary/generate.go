@@ -12,7 +12,8 @@ import (
 
 // GenerateReports collects migration data from runDir once and renders BOTH a
 // PDF and a Markdown summary report into outputDir. exportDir is the root
-// export directory used to locate extract data.
+// export directory used to locate extract data. The report is cumulated over
+// the earlier migrate runs of exportDir (see CollectCumulativeSummary, #667).
 //
 // outputDir and exportDir each default to filepath.Dir(runDir) when empty.
 //
@@ -25,7 +26,7 @@ func GenerateReports(runDir, outputDir, exportDir string) (pdfPath, mdPath strin
 		exportDir = filepath.Dir(runDir)
 	}
 
-	summary, err := CollectSummary(runDir, exportDir)
+	summary, err := CollectCumulativeSummary(runDir, exportDir)
 	if err != nil {
 		return "", "", fmt.Errorf("collecting summary: %w", err)
 	}

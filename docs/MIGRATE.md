@@ -292,8 +292,8 @@ sonar-migration-tool reset <TOKEN> <ENTERPRISE_KEY> --export_directory ./files/
 | `templates.csv` | Permission Template mappings |
 | `portfolios.csv` | Portfolio mappings |
 | `predictive_migration_summary.pdf` | Output of the `predictive-report` command — [sample](../examples/predictive_migration_summary.pdf) |
-| `migration_summary.pdf` | Migration summary (PDF), written to the run directory on completion — [sample](../examples/migration_summary.pdf) |
-| `migration_summary.md` | Migration summary (Markdown), written alongside the PDF on completion — [sample](../examples/migration_summary.md) |
+| `migration_summary.pdf` | Migration summary (PDF), written to the export directory on completion and cumulative over every `migrate` run since the latest `reset` — [sample](../examples/migration_summary.pdf) |
+| `migration_summary.md` | Migration summary (Markdown), written alongside the PDF on completion, with the same cumulative scope — [sample](../examples/migration_summary.md) |
 | `run_meta.json` | Per-phase / per-task timing and `overall_status` (`success` \| `partial` \| `failed`); written on completion, including failed runs |
 | `run_events.jsonl` | JSON Lines stream of run events mirrored from the logger by the tee slog handler; parsed by the summary collector |
 | `<export_directory>/<run_id>/requests.log` | Per-run request log for migrations |
