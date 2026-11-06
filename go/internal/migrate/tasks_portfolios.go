@@ -245,8 +245,10 @@ func resolvePortfolioProjectIndex(ctx context.Context, e *Executor) (map[string]
 		checked[srcKey] = true
 		exists, err := e.Cloud.Projects.ExistsInOrg(ctx, info.CloudKey, info.OrgKey)
 		if err != nil {
-			return nil, fmt.Errorf("configurePortfolios: createProjects output is absent from this run, "+
-				"and checking that project %q exists in organization %q failed: %w", info.CloudKey, info.OrgKey, err)
+			e.Logger.Warn("configurePortfolios: could not verify project in target, dropping it",
+				"project", info.CloudKey, "org", info.OrgKey, "error", err)
+			delete(index, srcKey)
+			continue
 		}
 		if !exists {
 			delete(index, srcKey)
