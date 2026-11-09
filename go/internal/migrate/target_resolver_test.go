@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -333,4 +334,142 @@ func TestResolvePortfolioProjectIndexUsesCreateProjectsWhenPresent(t *testing.T)
 		t.Errorf("normal path must use createProjects output with no API calls, idx=%v lookups=%d",
 			idx, tr.count("projects"))
 	}
+}
+
+// templateTranche is the #685 fixture: a cloud mock that counts group
+// lookups and records the template group grants.
+type templateTranche struct {
+	mu      sync.Mutex
+	lookups int
+	grants  []string // "group:perm"
+	groups  string   // body for /api/user_groups/search
+	e       *Executor
+	logs    *bytes.Buffer
+}
+
+func newTemplateTranche(t *testing.T) *templateTranche {
+	t.Helper()
+	tt := &templateTranche{groups: `{"groups":[]}`, logs: &bytes.Buffer{}}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/user_groups/search", func(w http.ResponseWriter, _ *http.Request) {
+		tt.mu.Lock()
+		tt.lookups++
+		tt.mu.Unlock()
+		_, _ = w.Write([]byte(tt.groups))
+	})
+	mux.HandleFunc("POST /api/permissions/add_group_to_template", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		tt.mu.Lock()
+		tt.grants = append(tt.grants, r.FormValue("groupName")+":"+r.FormValue("permission"))
+		tt.mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	addDefaultCloudHandler(mux)
+	tt.e = newCustomCloudTest(t, mux)
+	tt.e.Logger = slog.New(slog.NewTextHandler(tt.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	// A permission template created by this run; no createGroups output,
+	// as in `migrate --objects pt` after an earlier groups run.
+	writeTaskJSONL(t, tt.e, "createPermissionTemplates", []map[string]any{
+		{"server_url": testServerURL, "source_template_key": "tpl-src-1",
+			"cloud_template_id": "tpl-cloud-1", "sonarcloud_org_key": "cloud-org"},
+	})
+	return tt
+}
+
+// seedFeeds writes the same group, with the given permissions, in both
+// template-group feeds.
+func (tt *templateTranche) seedFeeds(t *testing.T, group string, perms ...string) {
+	t.Helper()
+	for _, feed := range []string{"getTemplateGroupsScanners", "getTemplateGroupsViewers"} {
+		writeJSONL(extractPath(tt.e, feed), []map[string]any{
+			{"templateId": "tpl-src-1", "name": group, "permissions": perms, "serverUrl": testServerURL},
+			{"templateId": "tpl-src-1", "name": "sonar-users", "permissions": []string{"user"}, "serverUrl": testServerURL},
+		})
+	}
+}
+
+func TestSetTemplateGroupPermissionsResolvesByNameWhenCreateGroupsAbsent(t *testing.T) {
+	tt := newTemplateTranche(t)
+	tt.groups = `{"groups":[{"id":42,"name":"developers"}]}`
+	tt.seedFeeds(t, "developers", "scan", "user")
+
+	if err := runSetTemplateGroupPermissions(context.Background(), tt.e); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(sortedCopy(tt.grants), ",")
+	if got != "Members:user,developers:scan,developers:user" {
+		t.Errorf("grants = %s, want the earlier run's group granted and sonar-users aliased", got)
+	}
+	if tt.lookups != 1 {
+		t.Errorf("the group must be looked up once and cached, got %d lookups", tt.lookups)
+	}
+}
+
+func TestSetTemplateGroupPermissionsWarnsOnceWhenGroupMissingInCloud(t *testing.T) {
+	tt := newTemplateTranche(t)
+	tt.seedFeeds(t, "ghost", "scan", "user")
+
+	counter := NewTaskCounter("setTemplateGroupPermissions")
+	ctx := context.WithValue(context.Background(), taskCounterCtxKey{}, counter)
+	if err := runSetTemplateGroupPermissions(ctx, tt.e); err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range tt.grants {
+		if strings.HasPrefix(g, "ghost:") {
+			t.Errorf("no grant may be sent for a group that does not exist, got %v", tt.grants)
+		}
+	}
+	if got := failedCount(counter); got != 1 {
+		t.Errorf("the ungranted (template, group) pair must count as one failure, got %d", got)
+	}
+	out := tt.logs.String()
+	if n := strings.Count(out, "does not exist in the target organization"); n != 1 {
+		t.Errorf("expected exactly one WARN for the missing group, got %d:\n%s", n, out)
+	}
+	if !strings.Contains(out, "ghost") {
+		t.Errorf("the WARN must name the group:\n%s", out)
+	}
+}
+
+func TestSetTemplateGroupPermissionsNoLookupWhenCreateGroupsPresent(t *testing.T) {
+	tt := newTemplateTranche(t)
+	writeTaskJSONL(t, tt.e, "createGroups", []map[string]any{
+		{"name": "developers", "sonarcloud_org_key": "cloud-org"},
+	})
+	tt.seedFeeds(t, "ghost", "user")
+
+	if err := runSetTemplateGroupPermissions(context.Background(), tt.e); err != nil {
+		t.Fatal(err)
+	}
+	if tt.lookups != 0 {
+		t.Errorf("the normal path must not call the cloud for lookups, got %d", tt.lookups)
+	}
+	if got := strings.Join(tt.grants, ","); got != "Members:user" {
+		t.Errorf("grants = %s, want only the aliased built-in group", got)
+	}
+}
+
+func TestSetTemplateGroupPermissionsLookupErrorCountsAsFailure(t *testing.T) {
+	tt := newTemplateTranche(t)
+	tt.groups = `not json`
+	tt.seedFeeds(t, "developers", "user")
+
+	counter := NewTaskCounter("setTemplateGroupPermissions")
+	ctx := context.WithValue(context.Background(), taskCounterCtxKey{}, counter)
+	if err := runSetTemplateGroupPermissions(ctx, tt.e); err != nil {
+		t.Fatal(err)
+	}
+	if failedCount(counter) != 1 {
+		t.Errorf("a failed lookup must count as one failure, got %d", failedCount(counter))
+	}
+	if !strings.Contains(tt.logs.String(), "could not look up the group") {
+		t.Errorf("expected a lookup-failure WARN:\n%s", tt.logs.String())
+	}
+}
+
+func sortedCopy(in []string) []string {
+	out := append([]string(nil), in...)
+	sort.Strings(out)
+	return out
 }

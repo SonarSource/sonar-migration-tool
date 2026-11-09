@@ -498,7 +498,10 @@ type profileRef struct {
 //
 // Groups that didn't make it into createGroups (e.g. failed creation,
 // org-skipped) are silently passed over — the missing group is
-// already surfaced in the Groups section.
+// already surfaced in the Groups section. When createGroups did not run
+// at all (groups left out of --objects, #685), the groups were migrated
+// by an earlier run, so they are resolved by name in the target
+// organization instead.
 func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 	// SQS templateId → (SQC templateId, sonarcloud_org_key) lookup.
 	// createPermissionTemplates writes the SQS-side id under
@@ -524,6 +527,7 @@ func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 	// Set of migrated SQS group names per cloud org so we know which
 	// (org, group) pairs are safe to reference.
 	createdGroups, _ := e.Store.ReadAll("createGroups")
+	resolver := newTargetEntityResolver(e, "setTemplateGroupPermissions", !e.Store.TaskDirExists("createGroups"))
 	groupExists := make(map[string]bool, len(createdGroups))
 	for _, g := range createdGroups {
 		name := extractField(g, "name")
@@ -559,6 +563,9 @@ func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 	type pairKey struct{ cloudTemplate, group string }
 	type pairStat struct{ attempted, succeeded int }
 	pairStats := make(map[pairKey]*pairStat)
+	// (template, group) pairs whose group the resolver did not find, so
+	// each counts as one failure rather than one per feed row.
+	unresolved := make(map[pairKey]bool)
 	var statsMu sync.Mutex
 
 	counter := TaskCounterFromContext(ctx)
@@ -583,7 +590,19 @@ func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 		}
 		aliased := cloudGroup != groupName
 		if !aliased && !groupExists[tmpl.org+"\x00"+groupName] {
-			return nil
+			if !resolver.byName {
+				return nil
+			}
+			if resolver.groupState(ctx, tmpl.org, groupName) != entityFound {
+				pk := pairKey{tmpl.cloudID, cloudGroup}
+				statsMu.Lock()
+				if !unresolved[pk] {
+					unresolved[pk] = true
+					counter.Fail()
+				}
+				statsMu.Unlock()
+				return nil
+			}
 		}
 		perms := extractStringArray(data, "permissions")
 		for _, perm := range perms {

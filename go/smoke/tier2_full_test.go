@@ -378,6 +378,27 @@ func TestTier2_PathB_FullPipeline(t *testing.T) {
 			t.Errorf("%q has fewer than 2 lines (want a header plus at least one data row): got %d", reportPath, len(lines))
 		}
 	})
+
+	t.Run("migrate_templates_tranche", func(t *testing.T) {
+		defer track(t, "2B", "migrate_templates_tranche")()
+
+		// #685 — a permission-template tranche run without the groups
+		// category: the groups were created by the earlier migrate runs,
+		// so every template group grant must resolve them in the target
+		// instead of dropping them. Kept last: analysis_report reads the
+		// latest run dir, which this run replaces.
+		res := runCLI(t, "migrate",
+			"--config", cfg.path,
+			"--export_directory", exportDir,
+			"--objects", "permission_templates",
+		)
+		requireExit(t, res, 0, "migrate --objects permission_templates")
+		assertNoPanics(t, res.combined())
+		if strings.Contains(res.combined(), "setTemplateGroupPermissions: the group does not exist in the target organization") {
+			t.Errorf("a template tranche could not resolve a group the earlier runs migrated (#685)\n--- output ---\n%s", res.combined())
+		}
+		assertCumulativeReport(t, filepath.Join(exportDir, "migration_summary.md"), 3)
+	})
 }
 
 // mdSeparatorCellRE matches one cell of a Markdown table's header-separator

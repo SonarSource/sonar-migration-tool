@@ -11,8 +11,8 @@ import (
 	"sync"
 )
 
-// entityState is the outcome of resolving a quality profile or gate by name
-// in the target organization.
+// entityState is the outcome of resolving a quality profile, gate or group
+// by name in the target organization.
 type entityState int
 
 const (
@@ -23,8 +23,8 @@ const (
 	entityError
 )
 
-// targetEntityResolver resolves quality profiles and gates by name directly
-// in the target SonarQube Cloud organization. The assignment tasks use it
+// targetEntityResolver resolves quality profiles, gates and groups by name
+// directly in the target SonarQube Cloud organization. The assignment tasks use it
 // when the create* output they normally read is absent from the run dir
 // because that category was not part of this invocation's --objects (#664:
 // a large instance migrated in several runs, each with its own run_id).
@@ -40,6 +40,7 @@ type targetEntityResolver struct {
 	mu       sync.Mutex
 	profiles map[string]entityState
 	gates    map[string]gateResolution
+	groups   map[string]entityState
 }
 
 type gateResolution struct {
@@ -52,6 +53,7 @@ func newTargetEntityResolver(e *Executor, task string, byName bool) *targetEntit
 		e: e, task: task, byName: byName,
 		profiles: map[string]entityState{},
 		gates:    map[string]gateResolution{},
+		groups:   map[string]entityState{},
 	}
 }
 
@@ -90,6 +92,21 @@ func (r *targetEntityResolver) gateID(ctx context.Context, orgKey, name string) 
 	}
 	r.gates[key] = g
 	return g.id, g.state
+}
+
+// groupState reports whether a group of that name exists in orgKey. A
+// missing group is logged once as a WARN.
+func (r *targetEntityResolver) groupState(ctx context.Context, orgKey, name string) entityState {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := orgKey + "\x00" + name
+	if st, ok := r.groups[key]; ok {
+		return st
+	}
+	_, err := lookupExistingGroup(ctx, r.e.Raw, name, orgKey)
+	st := r.classify(err, "group", name, orgKey)
+	r.groups[key] = st
+	return st
 }
 
 func (r *targetEntityResolver) classify(err error, kind, name, orgKey string, attrs ...any) entityState {
