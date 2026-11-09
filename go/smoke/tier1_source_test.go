@@ -13,7 +13,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -219,6 +221,61 @@ func TestTier1_SourcePipeline(t *testing.T) {
 		// tolerant existence + row-count check rather than assertCSV's
 		// hard failure on zero rows.
 		assertExtractMappingCSVs(t, exportDir)
+	})
+
+	t.Run("extract_permission_template_slice", func(t *testing.T) {
+		defer track(t, "1", "extract_permission_template_slice")()
+		if extractRunID == "" {
+			t.Skip("skipping: the extract subtest did not produce templates to slice")
+		}
+		names := extractedTemplateNames(t, filepath.Join(exportDir, extractRunID))
+		if len(names) == 0 {
+			t.Skip("skipping: the source instance has no permission templates to slice")
+		}
+
+		// #665: extract one template by name. Work on a copy so the report
+		// subtests below still read the single first extract.
+		sliceDir := copyExportDir(t, exportDir)
+		pattern := regexp.QuoteMeta(names[0])
+		res := runCLI(t, "extract",
+			"--config", cfg.path,
+			"--export_directory", sliceDir,
+			"--objects", "pt",
+			"--pt_regexp", pattern)
+		requireExit(t, res, 0, "extract_permission_template_slice")
+		assertNoPanics(t, res.combined())
+
+		runDir := latestRunDir(t, sliceDir)
+		if filepath.Base(runDir) == extractRunID {
+			t.Fatalf("the template slice wrote no new run directory under %q", sliceDir)
+		}
+		if got := extractedTemplateNames(t, runDir); !slices.Equal(got, names[:1]) {
+			t.Errorf("getTemplates of the slice = %v, want only %q", got, names[0])
+		}
+		data, err := os.ReadFile(filepath.Join(runDir, "extract.json"))
+		if err != nil {
+			t.Fatalf("reading extract.json: %v", err)
+		}
+		var meta struct {
+			Partial                  bool   `json:"partial"`
+			PermissionTemplateRegexp string `json:"permission_template_regexp"`
+		}
+		if err := json.Unmarshal(data, &meta); err != nil {
+			t.Fatalf("parsing extract.json: %v", err)
+		}
+		if !meta.Partial || meta.PermissionTemplateRegexp != pattern {
+			t.Errorf("extract.json: partial = %v, permission_template_regexp = %q; want true, %q",
+				meta.Partial, meta.PermissionTemplateRegexp, pattern)
+		}
+
+		// Slices are cumulative: mapping the merged extracts still lists the
+		// templates the slice left out.
+		before := templateCSVNames(t, exportDir)
+		res = runCLI(t, "mappings", "--config", cfg.path, "--export_directory", sliceDir)
+		requireExit(t, res, 0, "extract_permission_template_slice mappings")
+		if after := templateCSVNames(t, sliceDir); !slices.Equal(after, before) {
+			t.Errorf("templates.csv after merging the slice = %v, want the unsliced %v", after, before)
+		}
 	})
 
 	t.Run("report_migration", func(t *testing.T) {
@@ -524,6 +581,51 @@ func assertExtractMappingCSVs(t *testing.T, exportDir string) {
 		}
 		logf(t, "csv: %s has %d rows (may legitimately be empty)\n", name, len(rows))
 	}
+}
+
+// extractedTemplateNames returns the sorted names of the permission templates
+// an extract run wrote to getTemplates.
+func extractedTemplateNames(t *testing.T, runDir string) []string {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(runDir, "getTemplates", "results.*.jsonl"))
+	if err != nil {
+		t.Fatalf("listing getTemplates results: %v", err)
+	}
+	var names []string
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("reading %q: %v", f, err)
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			var rec struct {
+				Name string `json:"name"`
+			}
+			if line != "" && json.Unmarshal([]byte(line), &rec) == nil && rec.Name != "" {
+				names = append(names, rec.Name)
+			}
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// templateCSVNames returns the sorted, de-duplicated template names of
+// templates.csv (one row per template and organization).
+func templateCSVNames(t *testing.T, exportDir string) []string {
+	t.Helper()
+	rows, err := structure.LoadCSV(exportDir, "templates.csv")
+	if err != nil {
+		t.Fatalf("loading templates.csv under %q: %v", exportDir, err)
+	}
+	var names []string
+	for _, row := range rows {
+		if name, _ := row["name"].(string); name != "" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return slices.Compact(names)
 }
 
 // csvBackups lists the <name>.csv.bak-<timestamp> files extract writes
