@@ -411,7 +411,7 @@ func templateSupersessions(directory string, ids []string, key string) []superse
 	var later map[string]bool
 	for i := len(ids) - 1; i >= 0; i-- {
 		result[i] = supersession{keys: copyKeys(later), templates: true, templateField: field}
-		if !taskFinished(directory, ids[i], "getTemplates") {
+		if !taskFinished(directory, ids[i], "getTemplates") || !taskFinished(directory, ids[i], key) {
 			continue
 		}
 		_, _ = eachTaskDirRecord(filepath.Join(directory, ids[i], "getTemplates"), func(r json.RawMessage) bool {
