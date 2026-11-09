@@ -74,6 +74,11 @@ type configFileShape struct {
 	// unified shape (4), source.group_name_regexp wins when both are set.
 	// #669.
 	GroupNameRegexp string `json:"group_name_regexp"`
+	// PermissionTemplateRegexp is the top-level "permission_template_regexp"
+	// value (alias "pt_regexp"). In the unified shape,
+	// source.permission_template_regexp wins when both are set. #665.
+	PermissionTemplateRegexp string `json:"permission_template_regexp"`
+	PTRegexp                 string `json:"pt_regexp"`
 	// MigrateHistory / HistoryMaxPoints / HistoryMinIntervalDays — see
 	// ExtractConfig doc comments. #554. Top-level only: like
 	// skip_project_data_migration / skip_issue_sync, this is a plain bool
@@ -140,6 +145,10 @@ type unifiedSourceBlock struct {
 	// ProjectKeyRegexp, when set, overrides the top-level
 	// "project_key_regexp" for this source. #592.
 	ProjectKeyRegexp string `json:"project_key_regexp"`
+	// PermissionTemplateRegexp (alias PTRegexp), when set, overrides the
+	// top-level "permission_template_regexp" for this source. #665.
+	PermissionTemplateRegexp string `json:"permission_template_regexp"`
+	PTRegexp                 string `json:"pt_regexp"`
 	// BranchAnalyzedAfter, when present (even as an explicit empty string),
 	// overrides the top-level branch_analyzed_after for extract only
 	// (#583). nil means "not set here" — fall through to the top-level
@@ -288,6 +297,12 @@ func (s configFileShape) applyUnifiedShapeTo(cfg *ExtractConfig) {
 		sourceGroupNameRegexp = s.Source.GroupNameRegexp
 	}
 	cfg.GroupNameRegexp = common.FirstNonEmpty(sourceGroupNameRegexp, s.GroupNameRegexp)
+	// #665: source.permission_template_regexp wins, else the top-level field.
+	var sourcePT string
+	if s.Source != nil {
+		sourcePT = s.Source.ptRegexp()
+	}
+	cfg.PermissionTemplateRegexp = common.FirstNonEmpty(sourcePT, s.ptRegexp())
 	var sourceBranchAnalyzedAfter *string
 	if s.Source != nil {
 		sourceBranchAnalyzedAfter = s.Source.BranchAnalyzedAfter
@@ -314,8 +329,21 @@ func (s configFileShape) applyLegacySonarQubeShapeTo(cfg *ExtractConfig) {
 	cfg.PortfolioKeyRegexp = s.PortfolioKeyRegexp
 	cfg.PortfolioNameRegexp = s.PortfolioNameRegexp
 	cfg.GroupNameRegexp = s.GroupNameRegexp
+	cfg.PermissionTemplateRegexp = s.ptRegexp()
 	cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
 	s.applyHistoryTo(cfg)
+}
+
+// ptRegexp returns the source block's permission_template_regexp value,
+// falling back to its pt_regexp alias. #665.
+func (b unifiedSourceBlock) ptRegexp() string {
+	return common.FirstNonEmpty(b.PermissionTemplateRegexp, b.PTRegexp)
+}
+
+// ptRegexp returns the permission_template_regexp value, falling back to its
+// pt_regexp alias. #665.
+func (s configFileShape) ptRegexp() string {
+	return common.FirstNonEmpty(s.PermissionTemplateRegexp, s.PTRegexp)
 }
 
 // applySectionedShapeTo populates cfg from the command-sectioned "extract"
@@ -341,6 +369,9 @@ func (s configFileShape) applySectionedShapeTo(cfg *ExtractConfig) {
 	}
 	if s.GroupNameRegexp != "" {
 		cfg.GroupNameRegexp = s.GroupNameRegexp
+	}
+	if pt := s.ptRegexp(); pt != "" {
+		cfg.PermissionTemplateRegexp = pt
 	}
 	if s.BranchAnalyzedAfter != "" {
 		cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
@@ -369,6 +400,7 @@ func (s configFileShape) applyFlatShapeTo(cfg *ExtractConfig) {
 	cfg.PortfolioKeyRegexp = s.PortfolioKeyRegexp
 	cfg.PortfolioNameRegexp = s.PortfolioNameRegexp
 	cfg.GroupNameRegexp = s.GroupNameRegexp
+	cfg.PermissionTemplateRegexp = s.ptRegexp()
 	cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
 	s.applyHistoryTo(cfg)
 }

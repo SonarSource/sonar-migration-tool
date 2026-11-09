@@ -76,6 +76,14 @@
       "type": ["string", "null"],
       "description": "Regexp pattern of user group names to extract / migrate, implicitly anchored (^...$); a plain name matches only itself. Lets groups be processed in slices on instances with a very large number of them. Applies to both source (extract) and target (migrate) unless overridden by source.group_name_regexp / target.group_name_regexp. The built-in groups (the Anyone pseudo-group and sonar-users, granted as Members on SonarQube Cloud) are always in scope, so every slice keeps their permissions. Omit to process every group (default). Issue #669."
     },
+    "permission_template_regexp": {
+      "type": ["string", "null"],
+      "description": "Regexp pattern of permission template names to extract / migrate, implicitly anchored (^...$); only matching templates (and their group / user permissions) are processed, so templates can be migrated in slices. Applies to both source (extract) and target (migrate) unless overridden by source.permission_template_regexp / target.permission_template_regexp. Only applies when \"permission_templates\" is selected via objects (or objects is unset). Omit to process every template (default). Issue #665."
+    },
+    "pt_regexp": {
+      "type": ["string", "null"],
+      "description": "Alias of permission_template_regexp. Issue #665."
+    },
     "migrate_history": {
       "oneOf": [
         { "type": "boolean" },
@@ -191,6 +199,14 @@
           "type": ["string", "null"],
           "description": "Overrides the top-level group_name_regexp for extract. Regexp pattern of user group names to extract, implicitly anchored (^...$). Issue #669."
         },
+        "permission_template_regexp": {
+          "type": ["string", "null"],
+          "description": "Overrides the top-level permission_template_regexp for extract. Regexp pattern of permission template names to extract, implicitly anchored (^...$). Issue #665."
+        },
+        "pt_regexp": {
+          "type": ["string", "null"],
+          "description": "Alias of permission_template_regexp. Issue #665."
+        },
         "project_key_regexp": {
           "type": ["string", "null"],
           "description": "Overrides the top-level project_key_regexp for extract. Regexp pattern of project keys to extract, implicitly anchored (^...$); a plain key matches only itself. Only applies when \"projects\" is selected via objects (or objects is unset). Issue #592."
@@ -271,6 +287,14 @@
         "group_name_regexp": {
           "type": ["string", "null"],
           "description": "Overrides the top-level group_name_regexp for migrate. Regexp pattern of user group names to migrate, implicitly anchored (^...$). Issue #669."
+        },
+        "permission_template_regexp": {
+          "type": ["string", "null"],
+          "description": "Overrides the top-level permission_template_regexp for migrate. Regexp pattern of permission template names to migrate, implicitly anchored (^...$). Issue #665."
+        },
+        "pt_regexp": {
+          "type": ["string", "null"],
+          "description": "Alias of permission_template_regexp. Issue #665."
         },
         "project_key_regexp": {
           "type": ["string", "null"],
