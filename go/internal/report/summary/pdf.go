@@ -382,6 +382,9 @@ func renderTitlePage(pdf *fpdf.Fpdf, summary *MigrationSummary) {
 	pdf.SetFont(pdfFontFamilyBody, "", 11)
 	pdf.CellFormat(0, 7, "Run ID: "+summary.RunID, "", 1, "C", false, 0, "")
 	pdf.CellFormat(0, 7, "Generated: "+summary.GeneratedAt.Format(dateTimeLayout), "", 1, "C", false, 0, "")
+	if len(summary.Runs) > 0 {
+		pdf.CellFormat(0, 7, fmt.Sprintf("Cumulative over %d migration runs", len(summary.Runs)), "", 1, "C", false, 0, "")
+	}
 	pdf.Ln(8)
 
 	renderExecutiveSummary(pdf, summary.Sections, summary.OmitSections)
@@ -2067,6 +2070,21 @@ func renderRunMetadata(pdf *fpdf.Fpdf, summary *MigrationSummary) {
 	// No per-table sub-heading (the section heading already names it);
 	// pass an empty title so renderKVTable only draws the column header.
 	renderKVTable(pdf, "", []string{"Field", "Value"}, []float64{50, 130}, rows)
+	renderCoveredRuns(pdf, summary)
+}
+
+// renderCoveredRuns lists the migrate runs a cumulative report covers
+// (#667), under the latest run's own metadata. No-op for a single run.
+func renderCoveredRuns(pdf *fpdf.Fpdf, summary *MigrationSummary) {
+	if len(summary.Runs) == 0 {
+		return
+	}
+	rows := make([][]string, 0, len(summary.Runs))
+	for _, r := range summary.Runs {
+		rows = append(rows, []string{r.RunID, r.StartedAt, r.CompletedAt, r.OverallStatus})
+	}
+	renderKVTable(pdf, fmt.Sprintf("Cumulative over %d migration runs (timings above are of run %s)", len(summary.Runs), summary.RunID),
+		[]string{"Run ID", "Started", "Completed", "Overall Status"}, []float64{40, 50, 50, 40}, rows)
 }
 
 // renderBottlenecks renders the "Performance bottlenecks" section as three
