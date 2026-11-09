@@ -5,7 +5,7 @@ A single-shot `extract` + `migrate` of a large SonarQube Server instance (thousa
 The steps use two kinds of options:
 
 - **`--objects`** picks *what kind* of entity a run handles: `settings`, `quality_profiles` (`qp`), `quality_gates` (`qg`), `groups`, `permission_templates` (`pt`), `projects`, `portfolios`.
-- **Slicing regexps** pick *which* entities of that kind: `--project_key_regexp`, `--group_name_regexp`, `--portfolio_key_regexp` / `--portfolio_name_regexp`.
+- **Slicing regexps** pick *which* entities of that kind: `--project_key_regexp`, `--group_name_regexp`, `--permission_template_regexp` (alias `--pt_regexp`), `--portfolio_key_regexp` / `--portfolio_name_regexp`.
 
 For the full flag reference, see [MIGRATE.md](MIGRATE.md#step-2--extract) and [ADVANCED-CONFIG.md](ADVANCED-CONFIG.md#all-parameters-reference).
 
@@ -34,7 +34,7 @@ For the full flag reference, see [MIGRATE.md](MIGRATE.md#step-2--extract) and [A
 | 0 | Metadata of everything | `--skip_project_data_migration` | — | one run |
 | 1 | Groups | — | `--objects groups --group_name_regexp …` | ≤ 500 groups per tranche |
 | 2 | Settings, quality profiles, quality gates | — | `--objects settings,qp,qg` | one run |
-| 3 | Permission templates | — | `--objects pt,groups` | one run |
+| 3 | Permission templates | — | `--objects pt,groups --pt_regexp …` | one run, or tranches by template name |
 | 4 | Projects | `--objects projects --project_key_regexp …` | `--objects projects --project_key_regexp …` | ≤ 100 projects per tranche |
 | 5 | Portfolios | — | `--objects portfolios --portfolio_key_regexp …` | per portfolio family |
 | 6 | Issue triage re-sync (optional) | — | `sync-issues --project_key_regexp …` | per project tranche |
@@ -49,9 +49,9 @@ Only step 0 requires editing `organizations.csv` (and `projects.csv` if you [map
 
 A few properties of the tool make this plan work. Knowing them helps when you adapt it.
 
-- **Extracts accumulate.** `migrate` reads, per server, the latest *full* extract plus every *partial* extract newer than it. An extract is partial when it uses `--objects`, `--project_key_regexp`, `--group_name_regexp` or a portfolio regexp. In a newer partial extract, a project's records replace the older ones.
+- **Extracts accumulate.** `migrate` reads, per server, the latest *full* extract plus every *partial* extract newer than it. An extract is partial when it uses `--objects`, `--project_key_regexp`, `--group_name_regexp`, `--permission_template_regexp` or a portfolio regexp. In a newer partial extract, a project's records replace the older ones.
 - **Mapping CSVs are regenerated with carry-over.** Each extract that includes the `projects` category rebuilds `organizations.csv`, `projects.csv`, `groups.csv`, `templates.csv`, `profiles.csv`, `gates.csv` and `portfolios.csv` from the extracts merged so far. Before that it backs up `organizations.csv` and `projects.csv` to `<name>.csv.bak-<timestamp>` and writes your `sonarcloud_org_key` values back into the new files. An extract **without** `projects` in `--objects` does not touch the CSVs.
-- **`migrate` slices within what was extracted.** `migrate --project_key_regexp`, `--group_name_regexp` and the portfolio regexps narrow what was extracted; they never widen past it.
+- **`migrate` slices within what was extracted.** `migrate --project_key_regexp`, `--group_name_regexp`, `--permission_template_regexp` and the portfolio regexps narrow what was extracted; they never widen past it.
 - **A tranche can use what earlier tranches created.** A projects-only run binds each project to its quality profile and quality gate by looking them up by name in the target organization. A portfolios-only run attaches projects that earlier runs created. If something is missing, the run logs a `WARN` naming it and counts it as a failure.
 - **Reruns are safe.** `migrate` reuses entities that already exist in the target instead of duplicating them, so rerunning a tranche, or two tranches that overlap, is harmless.
 - **The final report is cumulative.** Every `migrate` run writes `migration_summary.pdf` / `.md` in the export directory covering every migrate run so far, with the newest result per entity, and listing the runs covered.
@@ -105,7 +105,7 @@ sonar-migration-tool migrate --config config.json --objects settings,qp,qg
 
 ## Step 3 — Permission templates
 
-Migrate the permission templates in one run, **with `groups` included**:
+Migrate the permission templates **with `groups` included**. If there are few templates, use one run:
 
 ```bash
 sonar-migration-tool migrate --config config.json --objects pt,groups
@@ -113,7 +113,17 @@ sonar-migration-tool migrate --config config.json --objects pt,groups
 
 `groups` is needed because a template only receives the group permissions of groups created or found in the *same* run. Including `groups` makes this run find every group step 1 created (they are reused, not duplicated), so no template loses its group permissions.
 
-> Slicing permission templates by name is not available yet. Until it is, templates migrate in a single run.
+If there are many templates, migrate them in tranches by template name with `--permission_template_regexp` (alias `--pt_regexp`), using patterns that together cover every name in `templates.csv`:
+
+```bash
+sonar-migration-tool migrate --config config.json --objects pt,groups --pt_regexp '[A-M].*'
+sonar-migration-tool migrate --config config.json --objects pt,groups --pt_regexp '[N-Z].*'
+# … until every template in templates.csv is covered (mind lower case, digits, other characters)
+```
+
+Step 0 already extracted every template, so this step needs no extract. Each tranche creates the matching templates and grants their group and user permissions. A template is made the default in the tranche that includes it, so once every template is covered, every default is set.
+
+Keep `groups` in every tranche, for the reason above. Each tranche then looks up the groups again; they are reused, not duplicated.
 
 ---
 
