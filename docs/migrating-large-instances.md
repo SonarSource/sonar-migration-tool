@@ -34,7 +34,7 @@ For the full flag reference, see [MIGRATE.md](MIGRATE.md#step-2--extract) and [A
 | 0 | Metadata of everything | `--skip_project_data_migration` | — | one run |
 | 1 | Groups | — | `--objects groups --group_name_regexp …` | ≤ 500 groups per tranche |
 | 2 | Settings, quality profiles, quality gates | — | `--objects settings,qp,qg` | one run |
-| 3 | Permission templates | — | `--objects pt,groups --pt_regexp …` | one run, or tranches by template name |
+| 3 | Permission templates | — | `--objects pt,groups --pt_regexp …` | ≤ 200 templates per tranche |
 | 4 | Projects | `--objects projects --project_key_regexp …` | `--objects projects --project_key_regexp …` | ≤ 100 projects per tranche |
 | 5 | Portfolios | — | `--objects portfolios --portfolio_key_regexp …` | per portfolio family |
 | 6 | Issue triage re-sync (optional) | — | `sync-issues --project_key_regexp …` | per project tranche |
@@ -105,7 +105,7 @@ sonar-migration-tool migrate --config config.json --objects settings,qp,qg
 
 ## Step 3 — Permission templates
 
-Migrate the permission templates **with `groups` included**. If there are few templates, use one run:
+Migrate the permission templates **with `groups` included**. With no more than **200 templates**, use one run:
 
 ```bash
 sonar-migration-tool migrate --config config.json --objects pt,groups
@@ -113,7 +113,7 @@ sonar-migration-tool migrate --config config.json --objects pt,groups
 
 `groups` is needed because a template only receives the group permissions of groups created or found in the *same* run. Including `groups` makes this run find every group step 1 created (they are reused, not duplicated), so no template loses its group permissions.
 
-If there are many templates, migrate them in tranches by template name with `--permission_template_regexp` (alias `--pt_regexp`), using patterns that together cover every name in `templates.csv`:
+With more, run one `migrate` per tranche of no more than **200 templates**, selected by template name with `--permission_template_regexp` (alias `--pt_regexp`), using patterns that together cover every name in `templates.csv`:
 
 ```bash
 sonar-migration-tool migrate --config config.json --objects pt,groups --pt_regexp '[A-M].*'
