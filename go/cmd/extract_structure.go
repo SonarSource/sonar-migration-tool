@@ -55,6 +55,15 @@ func runExtractStructure(exportDir, orgKey string, now time.Time) error {
 		logger.Warn("some sonarcloud_org_key values could not be carried over: review organizations.csv and projects.csv (the previous copies are saved as .bak files)",
 			"not_carried", stats.Dropped, "organizations_without_key", stats.OrgsWithoutKey)
 	}
+	// Mappings assigns entities to the organizations of their projects, so
+	// it has nothing to do when no project was found. That is not an extract
+	// failure: an extract of groups alone on a server without readable
+	// projects must still succeed (#688).
+	if rows, err := structure.LoadCSV(exportDir, "projects.csv"); err == nil && len(rows) == 0 {
+		logger.Warn("skipping mappings: no project was extracted, so no entity can be assigned to an organization (check the token can browse the projects)",
+			"export_directory", exportDir)
+		return nil
+	}
 	if err := structure.RunMappings(exportDir); err != nil {
 		return extractStepError("mappings", exportDir, err)
 	}

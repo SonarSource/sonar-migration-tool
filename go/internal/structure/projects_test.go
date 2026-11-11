@@ -271,6 +271,54 @@ func TestMapProjectStructure_NonProjectsPartialDoesNotFailOrSupersedeProjects(t 
 	}
 }
 
+// #688: the same holds for a non-projects extract sliced by project: its
+// project_keys name the projects whose DevOps bindings it re-extracted, not
+// projects whose data it read in full, so an earlier failure stands.
+func TestMapProjectStructure_SlicedNonProjectsPartialKeepsFailedProjects(t *testing.T) {
+	dir := setupTestExtract(t)
+	if err := common.WriteFailedProjects(filepath.Join(dir, testExtractID), []common.FailedProject{
+		{Key: "proj2", Task: "getProjectIssues", Error: "HTTP 504"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	const laterID = "2026-08-21-0001"
+	writeTestJSON(t, filepath.Join(dir, laterID, "extract.json"), map[string]any{
+		"url": testSQURL, "partial": true, "objects": []string{"groups"}, "project_keys": []string{"proj2"},
+	})
+	writeTestJSONL(t, filepath.Join(dir, laterID, "getProjectDetails"), []map[string]any{
+		{"key": "proj2", "name": "Project 2", "projectKey": "proj2", "branch": "main", "serverUrl": testSQURL},
+	})
+
+	_, projects := MapProjectStructure(dir, ExtractMapping{testSQURL: {testExtractID, laterID}})
+	for _, p := range projects {
+		if p.Key == "proj2" {
+			t.Fatal("proj2 is in projects.csv, want it still left out: the later extract re-read only its DevOps binding")
+		}
+	}
+}
+
+// #688: extractedProjects reads the recorded --objects names as --objects
+// itself does, so an alias or another casing is understood, and a list it
+// cannot read counts as covering projects, as every extract did before.
+func TestExtractMeta_ExtractedProjects(t *testing.T) {
+	for _, tc := range []struct {
+		objects []string
+		want    bool
+	}{
+		{nil, true},
+		{[]string{"projects"}, true},
+		{[]string{"Projects", "groups"}, true},
+		{[]string{"groups"}, false},
+		{[]string{"qp", "pt"}, false},
+		{[]string{"bogus"}, true},
+	} {
+		if got := (extractMeta{Objects: tc.objects}).extractedProjects(); got != tc.want {
+			t.Errorf("objects %v: extractedProjects() = %v, want %v", tc.objects, got, tc.want)
+		}
+	}
+}
+
 // TestMapProjectStructure_SharedRepoBinding is the regression test for #622:
 // two source projects bound to the same repository without monorepo enabled
 // used to collide on the same internal map key and silently overwrite one
