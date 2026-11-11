@@ -316,14 +316,10 @@ func failedProjectKeys(directory string, mapping ExtractMapping) map[string]bool
 			meta := readExtractMeta(directory, extractID)
 			// An extract that left the projects category out re-extracted
 			// only the projects' DevOps bindings (#688), not the data an
-			// earlier extract failed to read.
-			if meta.Partial && len(meta.ProjectKeys) == 0 && meta.extractedProjects() {
-				if _, err := os.Stat(filepath.Join(directory, extractID, "getProjectDetails")); err == nil {
-					clear(serverFailed)
-				}
-			}
-			for _, k := range meta.ProjectKeys {
-				delete(serverFailed, k)
+			// earlier extract failed to read, so it clears no failure,
+			// whether or not it was sliced by project.
+			if meta.extractedProjects() {
+				clearReextractedFailures(serverFailed, meta, filepath.Join(directory, extractID))
 			}
 			list, err := common.ReadFailedProjects(filepath.Join(directory, extractID))
 			if err != nil {
@@ -344,6 +340,20 @@ func failedProjectKeys(directory string, mapping ExtractMapping) map[string]bool
 			"projects", len(failed))
 	}
 	return failed
+}
+
+// clearReextractedFailures forgets the failures of the projects the extract
+// in extractDir re-extracted: every project for a partial extract without a
+// project list that has project details, else the projects it lists.
+func clearReextractedFailures(failed map[string]bool, meta extractMeta, extractDir string) {
+	if meta.Partial && len(meta.ProjectKeys) == 0 {
+		if _, err := os.Stat(filepath.Join(extractDir, "getProjectDetails")); err == nil {
+			clear(failed)
+		}
+	}
+	for _, k := range meta.ProjectKeys {
+		delete(failed, k)
+	}
 }
 
 // withoutFailedProjects drops the getProjectDetails items of failed

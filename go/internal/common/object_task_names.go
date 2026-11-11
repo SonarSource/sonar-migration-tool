@@ -55,6 +55,12 @@ package common
 // therefore never excluded by any --objects selection:
 //   - extract: getUsers, getUserPermissions, getUserTokens (user
 //     identity/token data has no dedicated --objects category).
+//   - extract, although categorized: the DevOps platform tasks
+//     organizations.csv is built from — getBindings (settings) and
+//     getProjects, getProjectDetails, getProjectBindings (projects).
+//     internal/extract/objects_categories.go's devOpsPlatformTasks
+//     removes them from every exclusion, so an extract of any category
+//     still yields a complete organizations.csv (#688).
 //   - migrate: the tool's own internal plumbing that every other write
 //     depends on to succeed at all — grantMigrationUserProjectPermissions,
 //     getMigrationUser, createMigrationGroups,
@@ -77,7 +83,7 @@ var objectCategoryTaskNames = map[string]struct {
 		Extract: []string{
 			"getServerInfo", "getServerSettings", "getServerSettingsDefinitions",
 			"getPlugins", "getUsage",
-			"getBindings", // ALM/DevOps platform bindings list
+			"getBindings", // ALM/DevOps platform bindings list; always extracted, see above (#688)
 			"getAiCodeFixConfig",
 			"getWebhooks",       // server-level webhooks
 			"getServerWebhooks", // server-level webhooks (alias endpoint)

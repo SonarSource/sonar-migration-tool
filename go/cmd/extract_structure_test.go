@@ -130,6 +130,31 @@ func TestRunExtractStructure_GroupsOnlyExtractWritesOrganizations(t *testing.T) 
 	}
 }
 
+// #688: an extract that found no project (e.g. groups only, on a server
+// whose projects the token cannot browse) still succeeds. organizations.csv
+// and projects.csv are written, and mappings, having nothing to assign, is
+// skipped instead of failing the extract.
+func TestRunExtractStructure_NoProjectSkipsMappings(t *testing.T) {
+	dir := t.TempDir()
+	extractDir := filepath.Join(dir, "2026-10-16-01")
+	if err := os.MkdirAll(extractDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, extractDir, "extract.json", `{"url":"http://localhost:10000/","partial":true,"objects":["groups"]}`)
+
+	if err := runExtractStructure(dir, "", extractStructureTestTime); err != nil {
+		t.Fatalf("runExtractStructure: %v", err)
+	}
+	for _, name := range []string{"organizations.csv", "projects.csv"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("expected %s: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "groups.csv")); err == nil {
+		t.Error("groups.csv was written, want mappings skipped when no project was extracted")
+	}
+}
+
 // #503: a failing step names itself and says the extract data is intact.
 func TestRunExtractStructure_ErrorNamesStep(t *testing.T) {
 	dir := t.TempDir()
