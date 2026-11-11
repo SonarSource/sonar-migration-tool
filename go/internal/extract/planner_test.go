@@ -258,20 +258,7 @@ func TestBuildPlanEveryObjectsCombinationProducesAValidPlan(t *testing.T) {
 // tasks of their categories.
 func TestBuildPlanEveryObjectsSelectionExtractsDevOpsPlatformTasks(t *testing.T) {
 	for _, cat := range common.AllObjects {
-		objects, err := common.ParseObjects([]string{cat})
-		if err != nil {
-			t.Fatalf("ParseObjects(%s): %v", cat, err)
-		}
-		_, plan, _, err := buildPlan(ExtractConfig{Objects: objects}, EditionEnterprise)
-		if err != nil {
-			t.Fatalf("objects=%s: buildPlan: %v", cat, err)
-		}
-		planned := make(map[string]bool)
-		for _, phase := range plan {
-			for _, name := range phase {
-				planned[name] = true
-			}
-		}
+		planned := plannedTasks(t, cat)
 		for _, name := range devOpsPlatformTasks {
 			if !planned[name] {
 				t.Errorf("objects=%s: %s is not extracted", cat, name)
@@ -284,6 +271,27 @@ func TestBuildPlanEveryObjectsSelectionExtractsDevOpsPlatformTasks(t *testing.T)
 			t.Errorf("objects=%s: getServerSettings is extracted, want only the DevOps platform settings tasks", cat)
 		}
 	}
+}
+
+// plannedTasks returns the set of tasks buildPlan plans for an --objects
+// selection of the single category cat.
+func plannedTasks(t *testing.T, cat string) map[string]bool {
+	t.Helper()
+	objects, err := common.ParseObjects([]string{cat})
+	if err != nil {
+		t.Fatalf("ParseObjects(%s): %v", cat, err)
+	}
+	_, plan, _, err := buildPlan(ExtractConfig{Objects: objects}, EditionEnterprise)
+	if err != nil {
+		t.Fatalf("objects=%s: buildPlan: %v", cat, err)
+	}
+	planned := make(map[string]bool)
+	for _, phase := range plan {
+		for _, name := range phase {
+			planned[name] = true
+		}
+	}
+	return planned
 }
 
 func TestRegisterAllCountsAndDependencies(t *testing.T) {
