@@ -233,8 +233,9 @@ func readServerExtracts(directory, serverURL, key string, ids []string,
 // supersession describes what later extracts of the merged set re-extracted:
 // every project (all) or a list of project keys.
 type supersession struct {
-	all  bool
-	keys map[string]bool
+	all                 bool
+	keys                map[string]bool
+	excludedProjectKeys map[string]bool
 	// portfolios is true when keys are portfolio keys (#666), matched against
 	// the portfolio a record belongs to rather than its project.
 	portfolios bool
@@ -249,7 +250,7 @@ func (s supersession) any() bool { return s.all || len(s.keys) > 0 }
 // re-extracted, so the older copy must be dropped.
 func (s supersession) covers(record json.RawMessage) bool {
 	if s.all {
-		return true
+		return !s.excludedProjectKeys[recordProjectKey(record)]
 	}
 	if s.portfolios {
 		return s.keys[recordPortfolioKey(record)]
@@ -265,12 +266,18 @@ func (s supersession) covers(record json.RawMessage) bool {
 // finished output for the task superseded nothing. Its project keys come from
 // both extract.json and its records: a resumed task can retain completed output
 // for the original scope while extract.json records replacement scope flags.
-// A partial extract without a project list (--objects only) covers every project.
+// A partial project extract without a project list covers every project. A
+// non-project extract never supersedes project records; its failed project
+// keys are excluded from all-project supersessions by still-later extracts.
 func supersessions(directory string, ids []string, key string) []supersession {
 	result := make([]supersession, len(ids))
 	var later supersession
 	for i := len(ids) - 1; i >= 0; i-- {
-		result[i] = supersession{all: later.all, keys: copyKeys(later.keys)}
+		result[i] = supersession{
+			all:                 later.all,
+			keys:                copyKeys(later.keys),
+			excludedProjectKeys: copyKeys(later.excludedProjectKeys),
+		}
 		if !taskFinished(directory, ids[i], key) {
 			continue
 		}
@@ -278,8 +285,24 @@ func supersessions(directory string, ids []string, key string) []supersession {
 		if !meta.Partial {
 			continue // a full extract is always first in the set
 		}
+		if !meta.extractedProjects() {
+			list, err := common.ReadFailedProjects(filepath.Join(directory, ids[i]))
+			if err != nil {
+				slog.Warn("could not read the extract's failed projects list; not superseding earlier project records",
+					"extract", ids[i], "err", err)
+				continue
+			}
+			for _, fp := range list {
+				if later.excludedProjectKeys == nil {
+					later.excludedProjectKeys = make(map[string]bool)
+				}
+				later.excludedProjectKeys[fp.Key] = true
+			}
+			continue
+		}
 		if len(meta.ProjectKeys) == 0 {
 			later.all = true
+			later.excludedProjectKeys = nil
 			continue
 		}
 		if later.keys == nil {
@@ -287,10 +310,12 @@ func supersessions(directory string, ids []string, key string) []supersession {
 		}
 		for _, k := range meta.ProjectKeys {
 			later.keys[k] = true
+			delete(later.excludedProjectKeys, k)
 		}
 		_, _ = eachTaskDirRecord(filepath.Join(directory, ids[i], key), func(r json.RawMessage) bool {
 			if k := recordProjectKey(r); k != "" {
 				later.keys[k] = true
+				delete(later.excludedProjectKeys, k)
 			}
 			return true
 		})

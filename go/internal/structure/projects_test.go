@@ -226,6 +226,51 @@ func TestMapProjectStructure_NonProjectsPartialKeepsFailedProjects(t *testing.T)
 	}
 }
 
+// A groups-only partial extract can fail while fetching project details, but
+// that failure must neither exclude the project nor supersede its earlier data.
+func TestMapProjectStructure_NonProjectsPartialDoesNotFailOrSupersedeProjects(t *testing.T) {
+	dir := setupTestExtract(t)
+	const laterID = "2026-08-21-0001"
+	laterDir := filepath.Join(dir, laterID)
+	writeTestJSON(t, filepath.Join(laterDir, "extract.json"), map[string]any{
+		"url": testSQURL, "partial": true, "objects": []string{"groups"},
+	})
+	writeTestJSONL(t, filepath.Join(laterDir, "getProjectDetails"), []map[string]any{
+		{"key": "proj1", "name": "Project 1", "projectKey": "proj1", "branch": "main", "serverUrl": testSQURL},
+	})
+	if err := common.WriteFailedProjects(laterDir, []common.FailedProject{
+		{Key: "proj2", Task: "getProjectDetails", Error: "HTTP 504"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	mapping := ExtractMapping{testSQURL: {testExtractID, laterID}}
+	if failed := failedProjectKeys(dir, mapping); len(failed) != 0 {
+		t.Fatalf("failedProjectKeys = %v, want no excluded projects for groups-only extract", failed)
+	}
+	coveredByLater := supersessions(dir, mapping[testSQURL], "getProjectDetails")[0]
+	for _, key := range []string{"proj1", "proj2"} {
+		if coveredByLater.covers(json.RawMessage(`{"key":"` + key + `"}`)) {
+			t.Errorf("groups-only extract unexpectedly superseded earlier project %s", key)
+		}
+	}
+
+	_, projects := MapProjectStructure(dir, mapping)
+	byKey := make(map[string]Project, len(projects))
+	for _, project := range projects {
+		byKey[project.Key] = project
+	}
+	if len(byKey) != 2 {
+		t.Fatalf("projects = %v, want both proj1 and proj2", byKey)
+	}
+	if got := byKey["proj1"].Name; got != "Project 1" {
+		t.Errorf("proj1 name = %q, want earlier project data preserved", got)
+	}
+	if got := byKey["proj2"].Name; got != "Project 2" {
+		t.Errorf("proj2 name = %q, want earlier project data preserved", got)
+	}
+}
+
 // TestMapProjectStructure_SharedRepoBinding is the regression test for #622:
 // two source projects bound to the same repository without monorepo enabled
 // used to collide on the same internal map key and silently overwrite one

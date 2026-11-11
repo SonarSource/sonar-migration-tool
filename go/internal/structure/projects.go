@@ -314,10 +314,12 @@ func failedProjectKeys(directory string, mapping ExtractMapping) map[string]bool
 		// by that extract alone, not by an earlier one that failed it.
 		for _, extractID := range ids {
 			meta := readExtractMeta(directory, extractID)
-			// An extract that left the projects category out re-extracted
-			// only the projects' DevOps bindings (#688), not the data an
-			// earlier extract failed to read.
-			if meta.Partial && len(meta.ProjectKeys) == 0 && meta.extractedProjects() {
+			if !meta.extractedProjects() {
+				continue
+			}
+			// A project-wide partial extract clears prior failures because
+			// its completed project details replace the earlier dataset.
+			if meta.Partial && len(meta.ProjectKeys) == 0 {
 				if _, err := os.Stat(filepath.Join(directory, extractID, "getProjectDetails")); err == nil {
 					clear(serverFailed)
 				}
