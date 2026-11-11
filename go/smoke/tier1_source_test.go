@@ -117,6 +117,33 @@ func TestTier1_SourcePipeline(t *testing.T) {
 		assertExtractBookkeeping(t, runDir)
 	})
 
+	// #688: an extract limited by --objects to a category that needs no
+	// DevOps platform data still extracts it, so even a first extract of
+	// groups alone writes an organizations.csv with every organization.
+	t.Run("extract_groups_only_writes_organizations", func(t *testing.T) {
+		defer track(t, "1", "extract_groups_only_writes_organizations")()
+
+		groupsDir := t.TempDir()
+		res := runCLI(t, "extract",
+			"--config", cfg.path,
+			"--export_directory", groupsDir,
+			"--objects", "groups")
+		requireExit(t, res, 0, "extract --objects groups")
+		assertNoPanics(t, res.combined())
+
+		runDir := latestRunDir(t, groupsDir)
+		for _, task := range []string{"getBindings", "getProjects", "getProjectDetails", "getProjectBindings"} {
+			if !fileExists(filepath.Join(runDir, ".done", task)) {
+				t.Errorf("expected a done marker for the DevOps platform task %s under %q", task, filepath.Join(runDir, ".done"))
+			}
+		}
+		if fileExists(filepath.Join(runDir, ".done", "getProjectSettings")) {
+			t.Errorf("a groups-only extract must not extract project settings (getProjectSettings ran under %q)", runDir)
+		}
+		assertCSVColumns(t, groupsDir, "organizations.csv", "sonarcloud_org_key")
+		assertCSV(t, groupsDir, "projects.csv")
+	})
+
 	t.Run("extract_resume", func(t *testing.T) {
 		defer track(t, "1", "extract_resume")()
 		if extractRunID == "" {

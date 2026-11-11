@@ -197,6 +197,35 @@ func TestMapProjectStructure_ProjectWidePartialClearsFailedProjects(t *testing.T
 	}
 }
 
+// #688: an extract limited by --objects to other categories re-extracts the
+// projects' DevOps bindings, not the data an earlier extract failed to read,
+// so the earlier failure still leaves the project out.
+func TestMapProjectStructure_NonProjectsPartialKeepsFailedProjects(t *testing.T) {
+	dir := setupTestExtract(t)
+	if err := common.WriteFailedProjects(filepath.Join(dir, testExtractID), []common.FailedProject{
+		{Key: "proj2", Task: "getProjectIssues", Error: "HTTP 504"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	const laterID = "2026-08-21-0001"
+	writeTestJSON(t, filepath.Join(dir, laterID, "extract.json"),
+		map[string]any{"url": testSQURL, "partial": true, "objects": []string{"groups"}})
+	writeTestJSONL(t, filepath.Join(dir, laterID, "getProjectDetails"), []map[string]any{
+		{"key": "proj1", "name": "Project 1", "projectKey": "proj1", "branch": "main", "serverUrl": testSQURL},
+		{"key": "proj2", "name": "Project 2", "projectKey": "proj2", "branch": "main", "serverUrl": testSQURL},
+	})
+
+	_, projects := MapProjectStructure(dir, ExtractMapping{testSQURL: {testExtractID, laterID}})
+	if len(projects) != 1 || projects[0].Key != "proj1" {
+		var keys []string
+		for _, p := range projects {
+			keys = append(keys, p.Key)
+		}
+		t.Fatalf("projects = %v, want only proj1", keys)
+	}
+}
+
 // TestMapProjectStructure_SharedRepoBinding is the regression test for #622:
 // two source projects bound to the same repository without monorepo enabled
 // used to collide on the same internal map key and silently overwrite one

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
@@ -45,6 +46,15 @@ type extractMeta struct {
 	Partial         bool     `json:"partial"`
 	ProjectKeys     []string `json:"project_keys"`
 	GroupNameRegexp string   `json:"group_name_regexp"`
+	Objects         []string `json:"objects"`
+}
+
+// extractedProjects reports whether the extract covered the projects
+// category. An extract limited by --objects to other categories still
+// extracts the projects and their DevOps bindings (#688), but none of their
+// other data.
+func (m extractMeta) extractedProjects() bool {
+	return len(m.Objects) == 0 || slices.Contains(m.Objects, common.ObjectProjects)
 }
 
 // GetUniqueExtracts scans the export directory for extract runs and returns

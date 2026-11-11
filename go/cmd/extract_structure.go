@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 )
 
@@ -24,16 +23,12 @@ import (
 // and the sonarcloud_org_key values the operator entered are carried over
 // into the regenerated files (#664).
 //
-// An extract that left the projects category out (--objects) has nothing
-// to group, so both steps are skipped rather than failing in mappings.
+// Both steps run whatever --objects selected: every extract extracts the
+// DevOps platform data organizations.csv is built from (#688), and mappings
+// keeps a CSV whose entities this extract left out.
 // orgKey pre-populates sonarcloud_org_key, as structure --config does.
-func runExtractStructure(exportDir string, objects map[string]bool, orgKey string, now time.Time) error {
+func runExtractStructure(exportDir, orgKey string, now time.Time) error {
 	logger := slog.Default()
-	if objects != nil && !objects[common.ObjectProjects] {
-		logger.Info("skipping structure and mappings: the projects category was not extracted",
-			"export_directory", exportDir)
-		return nil
-	}
 
 	// Read the operator's sonarcloud_org_key values before anything is
 	// regenerated, so they can be written back into the new files (#664).

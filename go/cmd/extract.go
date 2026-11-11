@@ -89,7 +89,7 @@ existing organizations.csv or projects.csv is first saved as
 				fmt.Fprintf(os.Stderr, "  - %s\n", key)
 			}
 		}
-		if err := runExtractStructure(cfg.ExportDirectory, cfg.Objects, orgKey, time.Now()); err != nil {
+		if err := runExtractStructure(cfg.ExportDirectory, orgKey, time.Now()); err != nil {
 			return err
 		}
 		printExportDirNotice(cfg.ExportDirectory)
