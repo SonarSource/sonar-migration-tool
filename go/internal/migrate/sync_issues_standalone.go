@@ -196,6 +196,7 @@ func RunSyncIssues(ctx context.Context, cfg SyncIssuesConfig) (SyncIssuesSummary
 		Raw:                raw,
 		ExportDir:          cfg.ExportDirectory,
 		Mapping:            mapping,
+		ExtractIndex:       structure.NewExtractIndex(cfg.ExportDirectory, mapping),
 		ConcurrencyLimiter: concurrencyLimiter,
 		ProjectKeyPattern:  cfg.ProjectKeyPattern,
 		FastSync:           cfg.FastSync,

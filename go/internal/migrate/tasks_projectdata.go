@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
@@ -1964,7 +1965,37 @@ func resolveProjectVersion(e *Executor, serverURL, serverKey, branch string) str
 	return ""
 }
 
+// activeRulesCache holds loadExtractedActiveRules' result per server for the
+// run. getActiveProfileRules is server-wide, so re-reading it for every
+// branch only repeated the same scan (#690).
+type activeRulesCache struct {
+	mu       sync.Mutex
+	byServer map[string][]scanreport.ActiveRuleInput
+}
+
+func newActiveRulesCache() *activeRulesCache {
+	return &activeRulesCache{byServer: make(map[string][]scanreport.ActiveRuleInput)}
+}
+
+// loadExtractedActiveRules returns a fresh slice on every call: callers
+// filter and remap it in place (filterRulesByLanguage,
+// remapActiveRuleProfiles), so the cached copy must never be handed out.
 func loadExtractedActiveRules(e *Executor, serverURL, serverKey string) []scanreport.ActiveRuleInput {
+	c := e.activeRules
+	if c == nil {
+		return readExtractedActiveRules(e, serverURL)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	rules, ok := c.byServer[serverURL]
+	if !ok {
+		rules = readExtractedActiveRules(e, serverURL)
+		c.byServer[serverURL] = rules
+	}
+	return slices.Clone(rules)
+}
+
+func readExtractedActiveRules(e *Executor, serverURL string) []scanreport.ActiveRuleInput {
 	var rules []scanreport.ActiveRuleInput
 	for item := range serverExtractItems(e, "getActiveProfileRules", serverURL) {
 		rule := extractField(item.Data, "key")

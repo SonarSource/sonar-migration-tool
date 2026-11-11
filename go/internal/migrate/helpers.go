@@ -182,10 +182,7 @@ func (h recordHeader) matches(scope extractScope) bool {
 // per-loader behaviour.
 func scopedExtractItems(e *Executor, extractKey string, scope extractScope) func(yield func(structure.ExtractItem, recordHeader) bool) {
 	return func(yield func(structure.ExtractItem, recordHeader) bool) {
-		for item := range structure.ExtractItems(e.ExportDir, e.Mapping, extractKey) {
-			if item.ServerURL != scope.ServerURL {
-				continue
-			}
+		for item := range projectExtractItems(e, extractKey, scope) {
 			var hdr recordHeader
 			if err := json.Unmarshal(item.Data, &hdr); err != nil {
 				continue
@@ -198,6 +195,17 @@ func scopedExtractItems(e *Executor, extractKey string, scope extractScope) func
 			}
 		}
 	}
+}
+
+// projectExtractItems streams the records of extractKey on scope's server
+// that may belong to scope's project, for the caller to filter further. With
+// an ExtractIndex only that project's chunk files are read (#690); without
+// one, every record of the server is.
+func projectExtractItems(e *Executor, extractKey string, scope extractScope) func(yield func(structure.ExtractItem) bool) {
+	if e.ExtractIndex == nil {
+		return serverExtractItems(e, extractKey, scope.ServerURL)
+	}
+	return e.ExtractIndex.ProjectItems(extractKey, scope.ServerURL, scope.ProjectKey)
 }
 
 // serverExtractItems streams the records of extractKey belonging to one
@@ -259,10 +267,7 @@ func (h hotspotHeader) matches(scope extractScope) bool {
 // scopedHotspotItems is scopedExtractItems for getProjectHotspotsFull.
 func scopedHotspotItems(e *Executor, scope extractScope) func(yield func(structure.ExtractItem, hotspotHeader) bool) {
 	return func(yield func(structure.ExtractItem, hotspotHeader) bool) {
-		for item := range structure.ExtractItems(e.ExportDir, e.Mapping, "getProjectHotspotsFull") {
-			if item.ServerURL != scope.ServerURL {
-				continue
-			}
+		for item := range projectExtractItems(e, "getProjectHotspotsFull", scope) {
 			var hdr hotspotHeader
 			if err := json.Unmarshal(item.Data, &hdr); err != nil {
 				continue
