@@ -310,26 +310,22 @@ func failedProjectKeys(directory string, mapping ExtractMapping) map[string]bool
 	failed := make(map[string]bool)
 	for serverURL, ids := range mapping {
 		serverFailed := make(map[string]bool)
+		earlierProjectDetails := make(map[string]bool)
 		// Oldest first: a project a later extract re-extracted is judged
 		// by that extract alone, not by an earlier one that failed it.
 		for _, extractID := range ids {
 			meta := readExtractMeta(directory, extractID)
-			// An extract that left the projects category out re-extracted
-			// only the projects' DevOps bindings (#688), not their project
-			// data, so it neither clears earlier failures nor adds its own.
-			if !meta.extractedProjects() {
-				continue
+			extractDir := filepath.Join(directory, extractID)
+			if meta.extractedProjects() {
+				clearReextractedFailures(serverFailed, meta, extractDir)
+				addExtractFailures(serverFailed, extractDir, nil)
+			} else {
+				// A projects-excluded extract only re-read DevOps bindings
+				// (#688). Its failure still leaves the project out unless
+				// an earlier extract has project details to keep.
+				addExtractFailures(serverFailed, extractDir, earlierProjectDetails)
 			}
-			clearReextractedFailures(serverFailed, meta, filepath.Join(directory, extractID))
-			list, err := common.ReadFailedProjects(filepath.Join(directory, extractID))
-			if err != nil {
-				slog.Warn("could not read the extract's failed projects list; no project is left out",
-					"extract", extractID, "err", err)
-				continue
-			}
-			for _, fp := range list {
-				serverFailed[fp.Key] = true
-			}
+			addProjectDetailsKeys(earlierProjectDetails, extractDir)
 		}
 		for projectKey := range serverFailed {
 			failed[serverURL+projectKey] = true
@@ -340,6 +336,29 @@ func failedProjectKeys(directory string, mapping ExtractMapping) map[string]bool
 			"projects", len(failed))
 	}
 	return failed
+}
+
+func addExtractFailures(failed map[string]bool, extractDir string, alreadyRead map[string]bool) {
+	list, err := common.ReadFailedProjects(extractDir)
+	if err != nil {
+		slog.Warn("could not read the extract's failed projects list; no project is left out",
+			"extract", filepath.Base(extractDir), "err", err)
+		return
+	}
+	for _, fp := range list {
+		if !alreadyRead[fp.Key] {
+			failed[fp.Key] = true
+		}
+	}
+}
+
+func addProjectDetailsKeys(keys map[string]bool, extractDir string) {
+	_, _ = eachTaskDirRecord(filepath.Join(extractDir, "getProjectDetails"), func(record json.RawMessage) bool {
+		if key := recordProjectKey(record); key != "" {
+			keys[key] = true
+		}
+		return true
+	})
 }
 
 // clearReextractedFailures forgets the failures of the projects the extract
