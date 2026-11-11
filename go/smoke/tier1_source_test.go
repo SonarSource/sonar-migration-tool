@@ -146,6 +146,29 @@ func TestTier1_SourcePipeline(t *testing.T) {
 		}
 		assertCSVColumns(t, groupsDir, "organizations.csv", "sonarcloud_org_key")
 		assertCSV(t, groupsDir, "projects.csv")
+
+		// #688: a later slice only extends organizations.csv. A mapped row
+		// that no extracted project uses is kept, with its mapping.
+		const keptOrg = "smoke-kept-organization"
+		appendLine(t, filepath.Join(groupsDir, "organizations.csv"),
+			keptOrg+",smoke-kept-cloud-org,smoke-binding,"+cfg.sourceURL+",github,https://api.github.com,true,1")
+		res = runCLI(t, "extract",
+			"--config", cfg.path,
+			"--export_directory", groupsDir,
+			"--objects", "groups",
+			"--project_key_regexp", projectKey)
+		requireExit(t, res, 0, "second extract --objects groups")
+		rows, err := structure.LoadCSV(groupsDir, "organizations.csv")
+		if err != nil {
+			t.Fatalf("loading organizations.csv: %v", err)
+		}
+		kept := slices.IndexFunc(rows, func(r map[string]any) bool { return r["sonarqube_org_key"] == keptOrg })
+		if kept < 0 {
+			t.Fatalf("organizations.csv lost the row %q after a later slice", keptOrg)
+		}
+		if got := rows[kept]["sonarcloud_org_key"]; got != "smoke-kept-cloud-org" {
+			t.Errorf("kept row sonarcloud_org_key = %v, want smoke-kept-cloud-org", got)
+		}
 	})
 
 	t.Run("extract_resume", func(t *testing.T) {
@@ -655,5 +678,22 @@ func assertPartialExtractMeta(t *testing.T, runDir, projectKey string) {
 	}
 	if !slices.Contains(meta.ProjectKeys, projectKey) {
 		t.Errorf("extract.json: project_keys = %v, want it to contain %q", meta.ProjectKeys, projectKey)
+	}
+}
+
+// appendLine appends one line to the file at path, adding the missing
+// trailing newline of its last line first.
+func appendLine(t *testing.T, path, line string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		data = append(data, '\n')
+	}
+	data = append(data, line+"\n"...)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
 	}
 }
