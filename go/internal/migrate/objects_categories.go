@@ -30,5 +30,34 @@ func buildMigrateObjectTasks() map[string][]string {
 // createProjects as a dependency must not force it to run when
 // "projects" is excluded.
 func excludedMigrateTasks(selected map[string]bool) map[string]bool {
-	return common.ExcludedTasks(migrateObjectTasks, selected)
+	excluded := common.ExcludedTasks(migrateObjectTasks, selected)
+	if needsReferencedGroups(selected) {
+		delete(excluded, "createGroups")
+	}
+	return excluded
+}
+
+// groupReferencingObjects are the --objects categories whose tasks grant
+// permissions to groups: setTemplateGroupPermissions,
+// setProjectGroupPermissions and setProfileGroupPermissions.
+var groupReferencingObjects = []string{
+	common.ObjectPermissionTemplates, common.ObjectProjects, common.ObjectQualityProfiles,
+}
+
+// needsReferencedGroups reports whether a run that does not select groups
+// must still run createGroups (#692). In a tranche migration groups.csv
+// gains the groups a later tranche's templates, projects or profiles
+// reference only once that tranche is extracted, after the groups tranche
+// ran, so nothing else would create them. In such a run createGroups only
+// creates the groups missing from the target (see runCreateGroups).
+func needsReferencedGroups(selected map[string]bool) bool {
+	if selected == nil || selected[common.ObjectGroups] {
+		return false
+	}
+	for _, category := range groupReferencingObjects {
+		if selected[category] {
+			return true
+		}
+	}
+	return false
 }

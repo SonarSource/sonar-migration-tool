@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"sync"
 	"sync/atomic"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
@@ -314,46 +315,25 @@ func runCreateGates(ctx context.Context, e *Executor) error {
 
 func runCreateGroups(ctx context.Context, e *Executor) error {
 	counter := TaskCounterFromContext(ctx)
+	// A run that does not select groups only runs createGroups for the
+	// groups its templates, projects or profiles reference (#692). Those
+	// an earlier tranche already created are left alone: no API write, and
+	// no output record, so this run's report does not claim them.
+	var existing *existingOrgGroups
+	if needsReferencedGroups(e.Objects) {
+		existing = newExistingOrgGroups(e)
+	}
 	err := forEachMigrateItem(ctx, e, "createGroups", "generateGroupMappings",
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
 			orgKey := extractField(item, "sonarcloud_org_key")
-			if shouldSkipOrg(orgKey) {
-				return nil
-			}
 			name := extractField(item, "name")
-			// "sonar-users" is the SonarQube Server built-in default
-			// group; the SonarQube Cloud equivalent is "Members" and
-			// is managed by SQC. The report's collectSection injects a
-			// Skipped row so operators see why it didn't migrate.
-			if IsBuiltInGroup(name) {
+			if !groupToCreate(ctx, e, existing, orgKey, name) {
 				return nil
 			}
-			if !e.groupSelected(name) {
+			groupID, ok := createOrFindGroup(ctx, e, counter, name, extractField(item, "description"), orgKey)
+			if !ok {
 				return nil
 			}
-			desc := extractField(item, "description")
-
-			var groupID string
-			group, err := e.Cloud.Groups.Create(ctx, cloud.CreateGroupParams{
-				Name: name, Description: desc, Organization: orgKey,
-			})
-			if err != nil {
-				if !sqapi.IsAlreadyExists(err) {
-					failAPI(counter, e.Logger, "createGroups: create failed", err, "name", name)
-					return nil
-				}
-				e.Logger.Info("createGroups: already exists, looking up", "name", name)
-				groupID, err = lookupExistingGroup(ctx, e.Raw, name, orgKey)
-				if err != nil {
-					failAPI(counter, e.Logger, "createGroups: lookup failed", err, "name", name)
-					return nil
-				}
-				counter.Success()
-			} else {
-				counter.Success()
-				groupID = strconv.Itoa(group.ID)
-			}
-
 			result := common.EnrichRaw(item, map[string]any{
 				"cloud_group_id":     groupID,
 				"sonarcloud_org_key": orgKey,
@@ -361,6 +341,50 @@ func runCreateGroups(ctx context.Context, e *Executor) error {
 			return w.WriteOne(result)
 		})
 	return err
+}
+
+// groupToCreate reports whether createGroups must create (or find) the
+// groups.csv row's group in orgKey.
+func groupToCreate(ctx context.Context, e *Executor, existing *existingOrgGroups, orgKey, name string) bool {
+	if shouldSkipOrg(orgKey) {
+		return false
+	}
+	// "sonar-users" is the SonarQube Server built-in default
+	// group; the SonarQube Cloud equivalent is "Members" and
+	// is managed by SQC. The report's collectSection injects a
+	// Skipped row so operators see why it didn't migrate.
+	if IsBuiltInGroup(name) {
+		return false
+	}
+	if !e.groupSelected(name) {
+		return false
+	}
+	return !existing.has(ctx, orgKey, name)
+}
+
+// createOrFindGroup creates the group, or looks up its ID when it already
+// exists, and returns that ID. ok is false when both failed; the failure is
+// already counted.
+func createOrFindGroup(ctx context.Context, e *Executor, counter *TaskCounter, name, desc, orgKey string) (groupID string, ok bool) {
+	group, err := e.Cloud.Groups.Create(ctx, cloud.CreateGroupParams{
+		Name: name, Description: desc, Organization: orgKey,
+	})
+	if err == nil {
+		counter.Success()
+		return strconv.Itoa(group.ID), true
+	}
+	if !sqapi.IsAlreadyExists(err) {
+		failAPI(counter, e.Logger, "createGroups: create failed", err, "name", name)
+		return "", false
+	}
+	e.Logger.Info("createGroups: already exists, looking up", "name", name)
+	groupID, err = lookupExistingGroup(ctx, e.Raw, name, orgKey)
+	if err != nil {
+		failAPI(counter, e.Logger, "createGroups: lookup failed", err, "name", name)
+		return "", false
+	}
+	counter.Success()
+	return groupID, true
 }
 
 func runCreatePermissionTemplates(ctx context.Context, e *Executor) error {
@@ -545,4 +569,50 @@ func extractAnyStr(raw json.RawMessage, key string) string {
 		return strconv.FormatFloat(n, 'f', -1, 64)
 	}
 	return ""
+}
+
+// existingOrgGroups lists, once per target organization, the groups that
+// already exist there (#692). A nil *existingOrgGroups knows of none.
+type existingOrgGroups struct {
+	e     *Executor
+	mu    sync.Mutex
+	byOrg map[string]*orgGroupNames
+}
+
+type orgGroupNames struct {
+	once  sync.Once
+	names map[string]bool
+}
+
+func newExistingOrgGroups(e *Executor) *existingOrgGroups {
+	return &existingOrgGroups{e: e, byOrg: make(map[string]*orgGroupNames)}
+}
+
+// has reports whether the group exists in the organization. When the
+// listing fails the group is reported missing, so createGroups falls back
+// to creating it, which already copes with a group that exists.
+func (x *existingOrgGroups) has(ctx context.Context, orgKey, name string) bool {
+	if x == nil {
+		return false
+	}
+	x.mu.Lock()
+	org, ok := x.byOrg[orgKey]
+	if !ok {
+		org = &orgGroupNames{}
+		x.byOrg[orgKey] = org
+	}
+	x.mu.Unlock()
+	org.once.Do(func() {
+		groups, err := x.e.Cloud.Groups.List(ctx, orgKey)
+		if err != nil {
+			logAPIWarn(x.e.Logger, "createGroups: listing the organization's groups failed; creating every referenced group", err, "org", orgKey)
+			return
+		}
+		org.names = make(map[string]bool, len(groups))
+		for _, g := range groups {
+			org.names[g.Name] = true
+		}
+		x.e.Logger.Info("createGroups: creating only the groups missing from the organization", "org", orgKey, "existing", len(groups))
+	})
+	return org.names[name]
 }
