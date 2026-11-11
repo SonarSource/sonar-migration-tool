@@ -120,6 +120,8 @@ func TestTier1_SourcePipeline(t *testing.T) {
 	// #688: an extract limited by --objects to a category that needs no
 	// DevOps platform data still extracts it, so even a first extract of
 	// groups alone writes an organizations.csv with every organization.
+	// --project_key_regexp narrows those project reads too, which keeps
+	// this case to one project like every other Tier 1 extract.
 	t.Run("extract_groups_only_writes_organizations", func(t *testing.T) {
 		defer track(t, "1", "extract_groups_only_writes_organizations")()
 
@@ -127,11 +129,13 @@ func TestTier1_SourcePipeline(t *testing.T) {
 		res := runCLI(t, "extract",
 			"--config", cfg.path,
 			"--export_directory", groupsDir,
-			"--objects", "groups")
+			"--objects", "groups",
+			"--project_key_regexp", projectKey)
 		requireExit(t, res, 0, "extract --objects groups")
 		assertNoPanics(t, res.combined())
 
 		runDir := latestRunDir(t, groupsDir)
+		assertPartialExtractMeta(t, runDir, projectKey)
 		for _, task := range []string{"getBindings", "getProjects", "getProjectDetails", "getProjectBindings"} {
 			if !fileExists(filepath.Join(runDir, ".done", task)) {
 				t.Errorf("expected a done marker for the DevOps platform task %s under %q", task, filepath.Join(runDir, ".done"))

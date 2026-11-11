@@ -234,9 +234,8 @@ func readServerExtracts(directory, serverURL, key string, ids []string,
 // supersession describes what later extracts of the merged set re-extracted:
 // every project (all) or a list of project keys.
 type supersession struct {
-	all                 bool
-	keys                map[string]bool
-	excludedProjectKeys map[string]bool
+	all  bool
+	keys map[string]bool
 	// portfolios is true when keys are portfolio keys (#666), matched against
 	// the portfolio a record belongs to rather than its project.
 	portfolios bool
@@ -251,7 +250,7 @@ func (s supersession) any() bool { return s.all || len(s.keys) > 0 }
 // re-extracted, so the older copy must be dropped.
 func (s supersession) covers(record json.RawMessage) bool {
 	if s.all {
-		return !s.excludedProjectKeys[recordProjectKey(record)]
+		return true
 	}
 	if s.portfolios {
 		return s.keys[recordPortfolioKey(record)]
@@ -268,60 +267,88 @@ func (s supersession) covers(record json.RawMessage) bool {
 // both extract.json and its records: a resumed task can retain completed output
 // for the original scope while extract.json records replacement scope flags.
 // A partial project extract without a project list covers every project. A
-// non-project extract never supersedes project records; its failed project
-// keys are excluded from all-project supersessions by still-later extracts.
+// non-project extract (#688) covers only the projects it read without error,
+// so a project it failed on keeps its earlier records.
 func supersessions(directory string, ids []string, key string) []supersession {
 	result := make([]supersession, len(ids))
 	var later supersession
 	for i := len(ids) - 1; i >= 0; i-- {
-		result[i] = supersession{
-			all:                 later.all,
-			keys:                copyKeys(later.keys),
-			excludedProjectKeys: copyKeys(later.excludedProjectKeys),
-		}
+		result[i] = supersession{all: later.all, keys: copyKeys(later.keys)}
 		if !taskFinished(directory, ids[i], key) {
 			continue
 		}
 		meta := readExtractMeta(directory, ids[i])
-		if !meta.Partial {
-			continue // a full extract is always first in the set
-		}
-		if !meta.extractedProjects() {
-			list, err := common.ReadFailedProjects(filepath.Join(directory, ids[i]))
-			if err != nil {
-				slog.Warn("could not read the extract's failed projects list; not superseding earlier project records",
-					"extract", ids[i], "err", err)
-				continue
-			}
-			for _, fp := range list {
-				if later.excludedProjectKeys == nil {
-					later.excludedProjectKeys = make(map[string]bool)
-				}
-				later.excludedProjectKeys[fp.Key] = true
-			}
-			continue
-		}
-		if len(meta.ProjectKeys) == 0 {
+		switch {
+		case !meta.Partial:
+			// A full extract is always first in the set: nothing older to cover.
+		case !meta.extractedProjects():
+			later.keys = addKeys(later.keys, devOpsReadProjects(directory, ids[i], key))
+		case len(meta.ProjectKeys) == 0:
 			later.all = true
-			later.excludedProjectKeys = nil
-			continue
+		default:
+			later.keys = addKeys(later.keys, slicedProjects(directory, ids[i], key, meta))
 		}
-		if later.keys == nil {
-			later.keys = make(map[string]bool, len(meta.ProjectKeys))
+	}
+	return result
+}
+
+// slicedProjects returns the projects a project extract sliced by project
+// re-extracted for the task: those extract.json lists and those it wrote
+// records for, since a resumed task can retain output for the original scope.
+func slicedProjects(directory, id, key string, meta extractMeta) map[string]bool {
+	keys := make(map[string]bool, len(meta.ProjectKeys))
+	for _, k := range meta.ProjectKeys {
+		keys[k] = true
+	}
+	_, _ = eachTaskDirRecord(filepath.Join(directory, id, key), func(r json.RawMessage) bool {
+		if k := recordProjectKey(r); k != "" {
+			keys[k] = true
 		}
-		for _, k := range meta.ProjectKeys {
-			later.keys[k] = true
-			delete(later.excludedProjectKeys, k)
-		}
-		_, _ = eachTaskDirRecord(filepath.Join(directory, ids[i], key), func(r json.RawMessage) bool {
+		return true
+	})
+	return keys
+}
+
+// devOpsReadProjects returns the projects a non-project extract (#688) read
+// without error for the task: those it listed in getProjects or wrote records
+// for, minus its failed projects. Listing them from getProjects too means a
+// project unbound since an earlier extract, which has no getProjectBindings
+// record, still drops its stale binding. An unreadable failed list makes the
+// extract cover nothing, so no project loses its earlier records.
+func devOpsReadProjects(directory, id, key string) map[string]bool {
+	failed, err := common.ReadFailedProjects(filepath.Join(directory, id))
+	if err != nil {
+		slog.Warn("could not read the extract's failed projects list; its project records supersede no earlier extract",
+			"extract", id, "err", err)
+		return nil
+	}
+	read := make(map[string]bool)
+	for _, task := range []string{"getProjects", key} {
+		_, _ = eachTaskDirRecord(filepath.Join(directory, id, task), func(r json.RawMessage) bool {
 			if k := recordProjectKey(r); k != "" {
-				later.keys[k] = true
-				delete(later.excludedProjectKeys, k)
+				read[k] = true
 			}
 			return true
 		})
 	}
-	return result
+	for _, fp := range failed {
+		delete(read, fp.Key)
+	}
+	return read
+}
+
+// addKeys adds every key of src to dst, allocating dst when needed.
+func addKeys(dst, src map[string]bool) map[string]bool {
+	if len(src) == 0 {
+		return dst
+	}
+	if dst == nil {
+		dst = make(map[string]bool, len(src))
+	}
+	for k := range src {
+		dst[k] = true
+	}
+	return dst
 }
 
 // newestFinished narrows the extracts to read a server-wide task from (gates,
