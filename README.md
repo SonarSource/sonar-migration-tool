@@ -36,6 +36,7 @@ See [what's new](WHATSNEW.md) in the latest release.
 - [Other scenarios](#other-scenarios)
   - [Migrating a single project (or just a few)](#migrating-a-single-project-or-just-a-few)
   - [Migrating many SonarQube Server instances into one SonarQube Cloud Enterprise](#migrating-many-sonarqube-server-instances-into-one-sonarqube-cloud-enterprise)
+  - [Migrating a large instance in tranches](#migrating-a-large-instance-in-tranches)
 - [Prefer a visual interface?](#prefer-a-visual-interface)
 - [Something went wrong?](#something-went-wrong)
 - [All commands](#all-commands)
@@ -227,6 +228,12 @@ Full reference, more examples, and the config-file format: 👉 **[Using `transf
 ./sonar-migration-tool migrate --enterprise_key <YOUR_SQC_ENTERPRISE_KEY> --target_url <SQC_URL> --target_token <SQC_TOKEN>
 ```
 
+### Migrating a large instance in tranches
+
+For a large SonarQube Server instance (thousands of projects, hundreds of groups, permission templates or portfolios), a single-shot migration is long, hard to predict and likely to need a rerun. Migrate it step by step instead: foundational objects first, then groups, projects and portfolios in tranches, using `--objects` and the slicing regexps (`--project_key_regexp`, `--group_name_regexp`, `--portfolio_key_regexp`).
+
+👉 **[Migrating large instances in tranches](docs/migrating-large-instances.md)**
+
 ---
 
 ## Prefer a visual interface?
@@ -282,6 +289,7 @@ For the complete list of **every configuration field and CLI flag** — its role
 ## Want to go deeper?
 
 - 📘 [Architecture overview](docs/ARCHITECTURE.md) — how the tool is built.
+- 🧱 [Migrating large instances in tranches](docs/migrating-large-instances.md) — a step-by-step strategy for large SonarQube Server instances.
 - ⚙️ [Advanced configuration reference](docs/ADVANCED-CONFIG.md) — every config field and CLI flag, plus legacy config shapes.
 - 🧪 [Regression testing protocol](docs/REGRESSION-TESTING-PLAN.md) — verify changes against live SonarQube + SonarQube Cloud. Automated by `make smoke-full`.
 - 💨 [Live smoke test suite](docs/SMOKE-TESTING.md) — end-to-end tests that run every command against real SonarQube Server + SonarQube Cloud instances. The local pre-PR gate.

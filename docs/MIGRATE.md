@@ -263,6 +263,8 @@ sonar-migration-tool reset <TOKEN> <ENTERPRISE_KEY> --export_directory ./files/
 
 ## Tips for larger instances
 
+For a step-by-step strategy that migrates a large instance in tranches (foundational objects first, then groups, projects and portfolios in slices), see [Migrating large instances in tranches](migrating-large-instances.md).
+
 - Create a dedicated migration user in SonarQube Cloud with enterprise admin permissions.
 - Test with a subset first using `--target_task` to migrate specific entities.
 - Review the CSV mappings before running `migrate`.
