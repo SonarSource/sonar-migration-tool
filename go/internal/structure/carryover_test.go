@@ -8,6 +8,7 @@ import (
 	"encoding/csv"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -154,5 +155,101 @@ func TestRunMappings_DoesNotClobberExistingCSVWithEmpty(t *testing.T) {
 	after, _ := os.ReadFile(filepath.Join(dir, "gates.csv"))
 	if string(after) != string(before) {
 		t.Error("gates.csv changed")
+	}
+}
+
+// #688: extracting slices one after another only extends organizations.csv.
+// A later slice rebinds every project of the server-wide organization to
+// GitHub: the GitHub organization is appended, and the server-wide row, which
+// no extracted project uses any more, keeps its place and its mapping.
+func TestRunStructureCarryOver_SliceNeverRemovesOrganizations(t *testing.T) {
+	dir := setupTestExtract(t)
+	if err := RunStructure(dir); err != nil {
+		t.Fatal(err)
+	}
+	setCSVColumn(t, dir, "organizations.csv", "sonarcloud_org_key", "server-org")
+
+	const sliceID = "2026-08-21-0001"
+	sliceDir := filepath.Join(dir, sliceID)
+	writeTestJSON(t, filepath.Join(sliceDir, "extract.json"), map[string]any{
+		"url": testSQURL, "partial": true, "project_keys": []string{"proj1", "proj2"},
+	})
+	writeTestJSONL(t, filepath.Join(sliceDir, "getBindings"), []map[string]any{
+		{"key": "gh", "alm": "github", "url": "https://api.github.com", "serverUrl": testSQURL},
+	})
+	writeTestJSONL(t, filepath.Join(sliceDir, "getProjectDetails"), []map[string]any{
+		{"key": "proj1", "name": "Project 1", "projectKey": "proj1", "branch": "main", "serverUrl": testSQURL},
+		{"key": "proj2", "name": "Project 2", "projectKey": "proj2", "branch": "main", "serverUrl": testSQURL},
+	})
+	writeTestJSONL(t, filepath.Join(sliceDir, "getProjectBindings"), []map[string]any{
+		{"key": "gh", "alm": "github", "repository": "acme/proj1", "projectKey": "proj1", "serverUrl": testSQURL},
+		{"key": "gh", "alm": "github", "repository": "acme/proj2", "projectKey": "proj2", "serverUrl": testSQURL},
+	})
+
+	carry, err := ReadCarriedKeys(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, err := RunStructureCarryOver(dir, carry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := LoadCSV(dir, "organizations.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("organizations.csv has %d rows, want 2 (the kept server-wide row and the new GitHub one): %v", len(rows), rows)
+	}
+	if got := str(rows[0], "sonarqube_org_key"); got != testSQURL {
+		t.Errorf("row 1 sonarqube_org_key = %q, want the server-wide row %q kept first", got, testSQURL)
+	}
+	if got := str(rows[0], "sonarcloud_org_key"); got != "server-org" {
+		t.Errorf("kept row sonarcloud_org_key = %q, want server-org", got)
+	}
+	if got, _ := rows[0]["project_count"].(float64); got != 0 {
+		t.Errorf("kept row project_count = %v, want 0", got)
+	}
+	if got := str(rows[1], "alm"); got != "github" {
+		t.Errorf("row 2 alm = %q, want the new GitHub organization appended", got)
+	}
+	if stats.Kept != 1 || stats.Dropped != 0 {
+		t.Errorf("stats Kept=%d Dropped=%d, want Kept=1 Dropped=0", stats.Kept, stats.Dropped)
+	}
+}
+
+// #688: regenerated rows replace their previous version in place, previous
+// rows not regenerated are kept with a project_count of 0, new rows follow in
+// a stable order, and a kept mapped row is not reported as dropped.
+func TestExtendOrganizations_KeepsOrderAndAppendsNewRows(t *testing.T) {
+	carry := &CarriedKeys{prevOrgs: []Organization{
+		{SonarQubeOrgKey: "b", ServerURL: "s", SonarCloudOrgKey: "org-b", ProjectCount: 3},
+		{SonarQubeOrgKey: "a", ServerURL: "s", ProjectCount: 1},
+		{SonarQubeOrgKey: "z", ServerURL: "s", SonarCloudOrgKey: "org-z", ProjectCount: 5},
+	}}
+	regenerated := []Organization{
+		{SonarQubeOrgKey: "d", ServerURL: "s", ProjectCount: 1},
+		{SonarQubeOrgKey: "a", ServerURL: "s", ProjectCount: 2},
+		{SonarQubeOrgKey: "c", ServerURL: "s", ProjectCount: 1},
+	}
+	stats := CarryStats{Dropped: 2}
+
+	got := carry.ExtendOrganizations(regenerated, &stats)
+
+	var order []string
+	for _, o := range got {
+		order = append(order, o.SonarQubeOrgKey)
+	}
+	if want := []string{"b", "a", "z", "c", "d"}; !slices.Equal(order, want) {
+		t.Fatalf("order = %v, want %v", order, want)
+	}
+	if got[0].SonarCloudOrgKey != "org-b" || got[0].ProjectCount != 0 {
+		t.Errorf("kept row b = %+v, want its mapping and a project_count of 0", got[0])
+	}
+	if got[1].ProjectCount != 2 {
+		t.Errorf("regenerated row a project_count = %d, want the new count 2", got[1].ProjectCount)
+	}
+	if stats.Kept != 2 || stats.Dropped != 0 {
+		t.Errorf("stats Kept=%d Dropped=%d, want Kept=2 Dropped=0", stats.Kept, stats.Dropped)
 	}
 }

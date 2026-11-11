@@ -2,7 +2,7 @@
 
 > **Deprecated.** Since issue [#503](https://github.com/SonarSource/sonar-migration-tool/issues/503), `extract` runs `structure` and `mappings` itself, right after a successful extract. A migration now takes two commands: `extract`, then `migrate`. Both commands below still work, and they log a deprecation `WARN` when they start and when they end. Use [`extract`](MIGRATE.md#step-2--extract) instead.
 
-You only need these commands to rebuild the CSVs from extracts already on disk, without extracting again. For example, after you deleted a CSV by mistake. They overwrite `organizations.csv` and `projects.csv` with no backup, so save any edits first. `extract` makes that backup for you: it copies each existing file to `<name>.csv.bak-<timestamp>` before it rewrites it.
+You only need these commands to rebuild the CSVs from extracts already on disk, without extracting again. For example, after you deleted a CSV by mistake. `structure` regenerates `organizations.csv` and `projects.csv` the way `extract` does: it first copies each existing file to `<name>.csv.bak-<timestamp>`, carries your `sonarcloud_org_key` values into the new files, and only extends `organizations.csv`, keeping every existing row (issue #688). `mappings` overwrites its CSVs, so save any edits to them first.
 
 ## `structure`
 
