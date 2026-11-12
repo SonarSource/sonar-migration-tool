@@ -286,7 +286,7 @@ For a step-by-step strategy that migrates a large instance in tranches (foundati
 | `requests.log` | Log of all API requests made during extraction |
 | `results.*.jsonl` | Raw extracted data in JSON Lines format (one file per entity) |
 | `organizations.csv` | Server-to-organization mapping (you edit this). Written by `extract`. |
-| `<name>.csv.bak-<timestamp>` | Copy of an existing `organizations.csv` or `projects.csv`, saved by `extract` before it rewrites the file (issue #503) |
+| `<name>.csv.bak-<timestamp>` | Copy of an existing `organizations.csv` or `projects.csv`, saved by `extract` before it rewrites the file (issue #503). The deprecated `structure` command rewrites the file the same way, and also saves the previous copy as `projects.csv.bak-<timestamp>`. |
 | `projects.csv` | List of all extracted projects. Its `sonarcloud_org_key` column is an optional per-project organization override you may edit — see [Mapping unbound SonarQube Server projects](MAPPING-UNBOUND-PROJECTS.md). Its `shared_repo_binding` column flags projects whose DevOps platform repository binding is shared with another project without `monorepo` enabled on SonarQube Server — SonarQube Cloud allows only one non-monorepo project per repository, so flagged projects will collide at migrate time unless you enable `monorepo` for them on SonarQube Server and re-run `extract`. (Issue #622.) |
 | `gates.csv` | Quality Gate mappings |
 | `profiles.csv` | Quality Profile mappings |

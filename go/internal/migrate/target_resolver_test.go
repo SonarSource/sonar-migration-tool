@@ -11,9 +11,11 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // tranche is the shared fixture for the #664 tests: a cloud mock that counts
@@ -333,4 +335,321 @@ func TestResolvePortfolioProjectIndexUsesCreateProjectsWhenPresent(t *testing.T)
 		t.Errorf("normal path must use createProjects output with no API calls, idx=%v lookups=%d",
 			idx, tr.count("projects"))
 	}
+}
+
+// templateTranche is the #685 fixture: a cloud mock that counts group
+// lookups and records the template group grants.
+type templateTranche struct {
+	mu      sync.Mutex
+	lookups int
+	grants  []string // "group:perm"
+	groups  string   // body for /api/user_groups/search
+	e       *Executor
+	logs    *bytes.Buffer
+}
+
+func newTemplateTranche(t *testing.T) *templateTranche {
+	t.Helper()
+	tt := &templateTranche{groups: `{"groups":[]}`, logs: &bytes.Buffer{}}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/user_groups/search", func(w http.ResponseWriter, _ *http.Request) {
+		tt.mu.Lock()
+		tt.lookups++
+		tt.mu.Unlock()
+		_, _ = w.Write([]byte(tt.groups))
+	})
+	mux.HandleFunc("POST /api/permissions/add_group_to_template", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		tt.mu.Lock()
+		tt.grants = append(tt.grants, r.FormValue("groupName")+":"+r.FormValue("permission"))
+		tt.mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	addDefaultCloudHandler(mux)
+	tt.e = newCustomCloudTest(t, mux)
+	tt.e.Logger = slog.New(slog.NewTextHandler(tt.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	// A permission template created by this run; no createGroups output,
+	// as in `migrate --objects pt` after an earlier groups run.
+	writeTaskJSONL(t, tt.e, "createPermissionTemplates", []map[string]any{
+		{"server_url": testServerURL, "source_template_key": "tpl-src-1",
+			"cloud_template_id": "tpl-cloud-1", "sonarcloud_org_key": "cloud-org"},
+	})
+	return tt
+}
+
+// seedFeeds writes the same group, with the given permissions, in both
+// template-group feeds.
+func (tt *templateTranche) seedFeeds(t *testing.T, group string, perms ...string) {
+	t.Helper()
+	for _, feed := range []string{"getTemplateGroupsScanners", "getTemplateGroupsViewers"} {
+		writeJSONL(extractPath(tt.e, feed), []map[string]any{
+			{"templateId": "tpl-src-1", "name": group, "permissions": perms, "serverUrl": testServerURL},
+			{"templateId": "tpl-src-1", "name": "sonar-users", "permissions": []string{"user"}, "serverUrl": testServerURL},
+		})
+	}
+}
+
+func TestSetTemplateGroupPermissionsResolvesByNameWhenCreateGroupsAbsent(t *testing.T) {
+	tt := newTemplateTranche(t)
+	tt.groups = `{"groups":[{"id":42,"name":"developers"}]}`
+	tt.seedFeeds(t, "developers", "scan", "user")
+
+	if err := runSetTemplateGroupPermissions(context.Background(), tt.e); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(sortedCopy(tt.grants), ",")
+	if got != "Members:user,developers:scan,developers:user" {
+		t.Errorf("grants = %s, want the earlier run's group granted and sonar-users aliased", got)
+	}
+	if tt.lookups != 1 {
+		t.Errorf("the group must be looked up once and cached, got %d lookups", tt.lookups)
+	}
+}
+
+func TestSetTemplateGroupPermissionsWarnsOnceWhenGroupMissingInCloud(t *testing.T) {
+	tt := newTemplateTranche(t)
+	tt.seedFeeds(t, "ghost", "scan", "user")
+
+	counter := NewTaskCounter("setTemplateGroupPermissions")
+	ctx := context.WithValue(context.Background(), taskCounterCtxKey{}, counter)
+	if err := runSetTemplateGroupPermissions(ctx, tt.e); err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range tt.grants {
+		if strings.HasPrefix(g, "ghost:") {
+			t.Errorf("no grant may be sent for a group that does not exist, got %v", tt.grants)
+		}
+	}
+	if got := failedCount(counter); got != 1 {
+		t.Errorf("the ungranted (template, group) pair must count as one failure, got %d", got)
+	}
+	out := tt.logs.String()
+	if n := strings.Count(out, "does not exist in the target organization"); n != 1 {
+		t.Errorf("expected exactly one WARN for the missing group, got %d:\n%s", n, out)
+	}
+	if !strings.Contains(out, "ghost") {
+		t.Errorf("the WARN must name the group:\n%s", out)
+	}
+}
+
+func TestSetTemplateGroupPermissionsNoLookupWhenCreateGroupsPresent(t *testing.T) {
+	tt := newTemplateTranche(t)
+	writeTaskJSONL(t, tt.e, "createGroups", []map[string]any{
+		{"name": "developers", "sonarcloud_org_key": "cloud-org"},
+	})
+	// "developers" is covered by this run's createGroups and must be
+	// granted from it; "ghost" is not, and on the normal path it is still
+	// passed over without any lookup.
+	tt.seedFeedRows(t,
+		feedRow{"developers", []string{"user"}},
+		feedRow{"ghost", []string{"user"}},
+		feedRow{"sonar-users", []string{"user"}},
+	)
+
+	if err := runSetTemplateGroupPermissions(context.Background(), tt.e); err != nil {
+		t.Fatal(err)
+	}
+	if tt.lookups != 0 {
+		t.Errorf("the normal path must not call the cloud for lookups, got %d", tt.lookups)
+	}
+	if got := strings.Join(sortedCopy(tt.grants), ","); got != "Members:user,developers:user" {
+		t.Errorf("grants = %s, want the createGroups group and the aliased built-in", got)
+	}
+	if recs, _ := tt.e.Store.ReadAll(templateGroupUnresolvedKey); len(recs) != 0 {
+		t.Errorf("the normal path records no unresolved group, got %d", len(recs))
+	}
+}
+
+// feedRow is one template-group feed row for tranche fixtures.
+type feedRow struct {
+	group string
+	perms []string
+}
+
+// seedFeedRows writes rows for tpl-src-1 in both template-group feeds.
+func (tt *templateTranche) seedFeedRows(t *testing.T, rows ...feedRow) {
+	t.Helper()
+	var items []map[string]any
+	for _, r := range rows {
+		items = append(items, map[string]any{
+			"templateId": "tpl-src-1", "name": r.group, "permissions": r.perms, "serverUrl": testServerURL,
+		})
+	}
+	for _, feed := range []string{"getTemplateGroupsScanners", "getTemplateGroupsViewers"} {
+		writeJSONL(extractPath(tt.e, feed), items)
+	}
+}
+
+// Anyone is SonarQube Server's pseudo-group and never exists on SonarQube
+// Cloud. A template tranche must skip it like the normal path does, not
+// look it up and report an unfixable "migrate it first" failure (live
+// repro: a 9.9 source granting Anyone on a template).
+func TestSetTemplateGroupPermissionsSkipsAnyoneWithoutLookup(t *testing.T) {
+	tt := newTemplateTranche(t)
+	tt.groups = `{"groups":[{"id":42,"name":"developers"}]}`
+	tt.seedFeedRows(t,
+		feedRow{"Anyone", []string{"user", "codeviewer"}},
+		feedRow{"developers", []string{"user"}},
+	)
+
+	counter := NewTaskCounter("setTemplateGroupPermissions")
+	ctx := context.WithValue(context.Background(), taskCounterCtxKey{}, counter)
+	if err := runSetTemplateGroupPermissions(ctx, tt.e); err != nil {
+		t.Fatal(err)
+	}
+	if tt.lookups != 1 {
+		t.Errorf("only developers may be looked up, got %d lookups", tt.lookups)
+	}
+	if got := failedCount(counter); got != 0 {
+		t.Errorf("Anyone must not count as a failure, got %d", got)
+	}
+	if got := strings.Join(sortedCopy(tt.grants), ","); got != "developers:user" {
+		t.Errorf("grants = %s, want developers only", got)
+	}
+	if strings.Contains(tt.logs.String(), "Anyone") {
+		t.Errorf("Anyone must not be warned about:\n%s", tt.logs.String())
+	}
+}
+
+// unresolvedRecords decodes the templateGroupUnresolvedKey records as
+// "template|org|group|reason" strings.
+func unresolvedRecords(t *testing.T, e *Executor) []string {
+	t.Helper()
+	recs, err := e.Store.ReadAll(templateGroupUnresolvedKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, r := range recs {
+		var m map[string]string
+		if err := json.Unmarshal(r, &m); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, m["cloud_template_id"]+"|"+m["sonarcloud_org_key"]+"|"+m["group"]+"|"+m["reason"])
+	}
+	sort.Strings(out)
+	return out
+}
+
+func TestSetTemplateGroupPermissionsRecordsUnresolvedGroupsForTheReport(t *testing.T) {
+	tt := newTemplateTranche(t)
+	tt.groups = `{"groups":[{"id":42,"name":"developers"}]}`
+	tt.seedFeedRows(t,
+		feedRow{"developers", []string{"user"}},
+		feedRow{"ghost", []string{"user", "scan"}},
+		feedRow{"phantom", []string{"admin"}},
+	)
+
+	if err := runSetTemplateGroupPermissions(context.Background(), tt.e); err != nil {
+		t.Fatal(err)
+	}
+	want := "tpl-cloud-1|cloud-org|ghost|missing,tpl-cloud-1|cloud-org|phantom|missing"
+	if got := strings.Join(unresolvedRecords(t, tt.e), ","); got != want {
+		t.Errorf("unresolved records = %s, want %s (one per pair, not per feed row)", got, want)
+	}
+	if recs, _ := tt.e.Store.ReadAll("setTemplateGroupPermissions"); len(recs) != 0 {
+		t.Errorf("the records must not create the task's own directory (resume treats it as completed), got %d", len(recs))
+	}
+	if tt.e.Store.TaskDirExists("setTemplateGroupPermissions") {
+		t.Error("the records must not create the task's own directory: a --run_id resume would then skip the task")
+	}
+}
+
+func TestSetTemplateGroupPermissionsRecordsLookupFailures(t *testing.T) {
+	tt := newTemplateTranche(t)
+	tt.groups = `not json`
+	tt.seedFeeds(t, "developers", "user")
+
+	if err := runSetTemplateGroupPermissions(context.Background(), tt.e); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(unresolvedRecords(t, tt.e), ","); got != "tpl-cloud-1|cloud-org|developers|lookup_failed" {
+		t.Errorf("unresolved records = %s, want the failed lookup recorded as lookup_failed", got)
+	}
+}
+
+// groupState must not hold the resolver lock across the HTTP call: two
+// different groups are looked up at the same time, and concurrent callers
+// for the same group share one lookup.
+func TestGroupStateLooksUpDistinctGroupsConcurrently(t *testing.T) {
+	var mu sync.Mutex
+	inFlight, maxInFlight, calls := 0, 0, map[string]int{}
+	bothArrived := make(chan struct{})
+	var once sync.Once
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/user_groups/search", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query().Get("q")
+		mu.Lock()
+		calls[q]++
+		inFlight++
+		if inFlight > maxInFlight {
+			maxInFlight = inFlight
+		}
+		if inFlight == 2 {
+			once.Do(func() { close(bothArrived) })
+		}
+		mu.Unlock()
+		// Hold the first answers until a second distinct lookup is in
+		// flight; a serialized resolver never gets there and times out.
+		select {
+		case <-bothArrived:
+		case <-time.After(3 * time.Second):
+		}
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"groups":[{"id":1,"name":"` + q + `"}]}`))
+	})
+	addDefaultCloudHandler(mux)
+	e := newCustomCloudTest(t, mux)
+	r := newTargetEntityResolver(e, "setTemplateGroupPermissions", true)
+
+	var wg sync.WaitGroup
+	states := make([]entityState, 6)
+	names := []string{"alpha", "beta", "alpha", "alpha", "beta", "alpha"}
+	for i, n := range names {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			states[i] = r.groupState(context.Background(), "cloud-org", n)
+		}()
+	}
+	wg.Wait()
+
+	for i, st := range states {
+		if st != entityFound {
+			t.Errorf("call %d (%s): state %v, want found", i, names[i], st)
+		}
+	}
+	if maxInFlight < 2 {
+		t.Error("lookups of two different groups never overlapped: groupState serializes them behind its lock")
+	}
+	if calls["alpha"] != 1 || calls["beta"] != 1 {
+		t.Errorf("each group must be looked up once however many callers ask, got %v", calls)
+	}
+}
+
+func TestSetTemplateGroupPermissionsLookupErrorCountsAsFailure(t *testing.T) {
+	tt := newTemplateTranche(t)
+	tt.groups = `not json`
+	tt.seedFeeds(t, "developers", "user")
+
+	counter := NewTaskCounter("setTemplateGroupPermissions")
+	ctx := context.WithValue(context.Background(), taskCounterCtxKey{}, counter)
+	if err := runSetTemplateGroupPermissions(ctx, tt.e); err != nil {
+		t.Fatal(err)
+	}
+	if failedCount(counter) != 1 {
+		t.Errorf("a failed lookup must count as one failure, got %d", failedCount(counter))
+	}
+	if !strings.Contains(tt.logs.String(), "could not look up the group") {
+		t.Errorf("expected a lookup-failure WARN:\n%s", tt.logs.String())
+	}
+}
+
+func sortedCopy(in []string) []string {
+	out := append([]string(nil), in...)
+	sort.Strings(out)
+	return out
 }
