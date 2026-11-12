@@ -307,73 +307,14 @@ func supersessionsWith(directory string, ids []string, key string, taskKeys task
 		case !meta.Partial:
 			// A full extract is always first in the set: nothing older to cover.
 		case !meta.extractedProjects():
-			later.keys = addKeys(later.keys, devOpsReadProjects(directory, ids[i], key))
+			later.keys = addKeys(later.keys, devOpsReadProjects(directory, ids[i], key, taskKeys))
 		case len(meta.ProjectKeys) == 0:
 			later.all = true
 		default:
-			later.keys = addKeys(later.keys, slicedProjects(directory, ids[i], key, meta))
+			later.keys = addKeys(later.keys, slicedProjects(ids[i], key, meta, taskKeys))
 		}
 	}
 	return result
-}
-
-// slicedProjects returns the projects a project extract sliced by project
-// re-extracted for the task: those extract.json lists and those it wrote
-// records for, since a resumed task can retain output for the original scope.
-func slicedProjects(directory, id, key string, meta extractMeta) map[string]bool {
-	keys := make(map[string]bool, len(meta.ProjectKeys))
-	for _, k := range meta.ProjectKeys {
-		keys[k] = true
-	}
-	_, _ = eachTaskDirRecord(filepath.Join(directory, id, key), func(r json.RawMessage) bool {
-		if k := recordProjectKey(r); k != "" {
-			keys[k] = true
-		}
-		return true
-	})
-	return keys
-}
-
-// devOpsReadProjects returns the projects a non-project extract (#688) read
-// without error for the task: those it listed in getProjects or wrote records
-// for, minus its failed projects. Listing them from getProjects too means a
-// project unbound since an earlier extract, which has no getProjectBindings
-// record, still drops its stale binding. An unreadable failed list makes the
-// extract cover nothing, so no project loses its earlier records.
-func devOpsReadProjects(directory, id, key string) map[string]bool {
-	failed, err := common.ReadFailedProjects(filepath.Join(directory, id))
-	if err != nil {
-		slog.Warn("could not read the extract's failed projects list; its project records supersede no earlier extract",
-			"extract", id, "err", err)
-		return nil
-	}
-	read := make(map[string]bool)
-	for _, task := range []string{"getProjects", key} {
-		_, _ = eachTaskDirRecord(filepath.Join(directory, id, task), func(r json.RawMessage) bool {
-			if k := recordProjectKey(r); k != "" {
-				read[k] = true
-			}
-			return true
-		})
-	}
-	for _, fp := range failed {
-		delete(read, fp.Key)
-	}
-	return read
-}
-
-// addKeys adds every key of src to dst, allocating dst when needed.
-func addKeys(dst, src map[string]bool) map[string]bool {
-	if len(src) == 0 {
-		return dst
-	}
-	if dst == nil {
-		dst = make(map[string]bool, len(src))
-	}
-	for k := range src {
-		dst[k] = true
-	}
-	return dst
 }
 
 // slicedProjects returns the projects a project extract sliced by project
