@@ -143,45 +143,43 @@ func TestTemplateGroupFailures_NoUnresolvedDirLeavesTemplatesUntouched(t *testin
 // because a re-run of createPermissionTemplates emits a row for an existing
 // template (the "already exists" lookup path), so the later run always
 // reports its own, non-weak, record of it.
-func TestTemplateGroupFailures_CumulativeLaterRunWins(t *testing.T) {
-	unresolved := []map[string]any{
-		{"cloud_template_id": "tplA", "sonarcloud_org_key": "org1", "group": "dev", "reason": "missing"},
+var cumulativeUnresolvedDev = []map[string]any{
+	{"cloud_template_id": "tplA", "sonarcloud_org_key": "org1", "group": "dev", "reason": "missing"},
+}
+
+// cumulativeTemplates writes two template runs, with the given unresolved
+// records, and returns the cumulative Permission Templates section.
+func cumulativeTemplates(t *testing.T, earlier, later []map[string]any) *Section {
+	t.Helper()
+	exportDir := t.TempDir()
+	writeTemplateRun(t, exportDir, "2026-11-02-0001", earlier)
+	latest := writeTemplateRun(t, exportDir, "2026-11-02-0002", later)
+	sum, err := CollectCumulativeSummary(latest, exportDir)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if len(sum.Runs) != 2 {
+		t.Fatalf("Runs = %v, want both runs", runIDs(sum.Runs))
+	}
+	return findSection(sum, "Permission Templates")
+}
 
-	t.Run("later run fixes it", func(t *testing.T) {
-		exportDir := t.TempDir()
-		writeTemplateRun(t, exportDir, "2026-11-02-0001", unresolved)
-		latest := writeTemplateRun(t, exportDir, "2026-11-02-0002", nil)
-		sum, err := CollectCumulativeSummary(latest, exportDir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(sum.Runs) != 2 {
-			t.Fatalf("Runs = %v, want both runs", runIDs(sum.Runs))
-		}
-		sec := findSection(sum, "Permission Templates")
-		if len(sec.Partial) != 0 {
-			t.Errorf("partial = %+v, want the earlier partial superseded", sec.Partial)
-		}
-		if got := templateRowNames(sec.Succeeded); !strings.Contains(got, "Smoke685 Alpha") || len(sec.Succeeded) != 2 {
-			t.Errorf("succeeded = %q, want Alpha and Beta", got)
-		}
-	})
+func TestTemplateGroupFailures_CumulativeLaterRunFixesIt(t *testing.T) {
+	sec := cumulativeTemplates(t, cumulativeUnresolvedDev, nil)
+	if len(sec.Partial) != 0 {
+		t.Errorf("partial = %+v, want the earlier partial superseded", sec.Partial)
+	}
+	if got := templateRowNames(sec.Succeeded); !strings.Contains(got, "Smoke685 Alpha") || len(sec.Succeeded) != 2 {
+		t.Errorf("succeeded = %q, want Alpha and Beta", got)
+	}
+}
 
-	t.Run("later run drops groups", func(t *testing.T) {
-		exportDir := t.TempDir()
-		writeTemplateRun(t, exportDir, "2026-11-02-0001", nil)
-		latest := writeTemplateRun(t, exportDir, "2026-11-02-0002", unresolved)
-		sum, err := CollectCumulativeSummary(latest, exportDir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		sec := findSection(sum, "Permission Templates")
-		if len(sec.Partial) != 1 || sec.Partial[0].Name != "Smoke685 Alpha" {
-			t.Errorf("partial = %+v, want Alpha", sec.Partial)
-		}
-		if got := templateRowNames(sec.Succeeded); got != "Smoke685 Beta" {
-			t.Errorf("succeeded = %q, want only Beta", got)
-		}
-	})
+func TestTemplateGroupFailures_CumulativeLaterRunDropsGroups(t *testing.T) {
+	sec := cumulativeTemplates(t, nil, cumulativeUnresolvedDev)
+	if len(sec.Partial) != 1 || sec.Partial[0].Name != "Smoke685 Alpha" {
+		t.Errorf("partial = %+v, want Alpha", sec.Partial)
+	}
+	if got := templateRowNames(sec.Succeeded); got != "Smoke685 Beta" {
+		t.Errorf("succeeded = %q, want only Beta", got)
+	}
 }
