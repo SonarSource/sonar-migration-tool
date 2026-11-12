@@ -25,15 +25,19 @@ package smoke
 // from tests.
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 )
 
 // tier2Setup performs the guardrails and reachability checks shared by both
@@ -378,6 +382,291 @@ func TestTier2_PathB_FullPipeline(t *testing.T) {
 			t.Errorf("%q has fewer than 2 lines (want a header plus at least one data row): got %d", reportPath, len(lines))
 		}
 	})
+
+	// #685 — groups and permission templates migrated in SEPARATE runs. The
+	// three subtests below must stay together and last: analysis_report
+	// above reads the latest run dir, which they replace.
+	//
+	// The reset comes first on purpose. The earlier migrate runs already
+	// created every template AND every template grant, so a tranche run
+	// against that target would pass whether or not it granted anything
+	// (the unfixed binary passes it too). Wiping the target forces the
+	// templates tranche to create the grants itself.
+	t.Run("reset_for_tranche", func(t *testing.T) {
+		defer track(t, "2B", "reset_for_tranche")()
+
+		res := runCLI(t, "reset",
+			"--config", cfg.path,
+			"--yes",
+			"--organization", cfg.org,
+			"--export_directory", exportDir,
+		)
+		requireExit(t, res, 0, "reset (before the tranche runs)")
+		assertClearMeta(t, latestRunDir(t, exportDir), false, true, cfg.org)
+	})
+
+	t.Run("migrate_groups_tranche", func(t *testing.T) {
+		defer track(t, "2B", "migrate_groups_tranche")()
+
+		res := runCLI(t, "migrate",
+			"--config", cfg.path,
+			"--export_directory", exportDir,
+			"--objects", "groups",
+		)
+		requireExit(t, res, 0, "migrate --objects groups")
+		assertNoPanics(t, res.combined())
+	})
+
+	t.Run("migrate_templates_tranche", func(t *testing.T) {
+		defer track(t, "2B", "migrate_templates_tranche")()
+
+		// This run has no createGroups output of its own (the groups were
+		// migrated by the previous run), so every template group grant must
+		// resolve its group by name in the target.
+		res := runCLI(t, "migrate",
+			"--config", cfg.path,
+			"--export_directory", exportDir,
+			"--objects", "permission_templates",
+		)
+		requireExit(t, res, 0, "migrate --objects permission_templates")
+		assertNoPanics(t, res.combined())
+		// The unfixed binary logged nothing when it dropped a grant, so
+		// these messages only prove the resolver did not give up; the real
+		// oracle is the grant check below.
+		for _, bad := range []string{
+			"setTemplateGroupPermissions: the group does not exist in the target organization",
+			"setTemplateGroupPermissions: could not look up the group",
+		} {
+			if strings.Contains(res.combined(), bad) {
+				t.Errorf("the templates tranche output contains %q (#685)\n--- output ---\n%s", bad, res.combined())
+			}
+		}
+
+		// The cumulative report: the reset above is organization-scoped and
+		// completed (clear.json: completed=true, organizations=[cfg.org]),
+		// so CollectCumulativeSummary (go/internal/report/summary/
+		// cumulative.go earlierRuns/readReset) treats every migrate run older
+		// than it as wiped for this org. dropOrganizations strips their
+		// entities and a run left with none is dropped, so the "migrate" and
+		// "migrate_idempotent" runs no longer count. Only the groups run and
+		// this templates run remain: 2, not the 4 a never-reset directory
+		// would list.
+		assertCumulativeReport(t, filepath.Join(exportDir, "migration_summary.md"), 2)
+
+		// The oracle. The harness holds no tokens and never calls
+		// SonarQube, so both sides come from files on disk: the grants the
+		// source extract says must exist, and the grant POSTs this run
+		// logged to requests.log.
+		runDir := latestRunDir(t, exportDir)
+		want, custom := expectedTemplateGrants(t, extractRunDir(t, exportDir), runDir)
+		if custom == 0 {
+			msg := fmt.Sprintf("the source has no permission-template grant for a custom group among the %d expected grant(s) (only built-in Members grants, or none): add a template that grants a custom group to the source server, otherwise this test proves nothing about #685", len(want))
+			logf(t, "SKIP migrate_templates_tranche: %s\n", msg)
+			t.Skip(msg)
+		}
+		got := loggedTemplateGrants(t, runDir)
+		var missing []string
+		for g, name := range want {
+			if !got[g] {
+				missing = append(missing, fmt.Sprintf("template %q (%s) group %q permission %q", name, g.cloudTemplateID, g.group, g.perm))
+			}
+		}
+		sort.Strings(missing)
+		logf(t, "template grants: %d expected (%d for custom groups), %d granted, %d missing\n", len(want), custom, len(want)-len(missing), len(missing))
+		if len(missing) > 0 {
+			t.Errorf("%d of %d expected template group grants were never POSTed successfully to /api/permissions/add_group_to_template by the templates tranche (#685):\n  %s",
+				len(missing), len(want), strings.Join(missing, "\n  "))
+		}
+	})
+}
+
+// templateGrant is one permission of one group on one SonarQube Cloud
+// permission template: the unit the #685 oracle compares.
+type templateGrant struct{ cloudTemplateID, group, perm string }
+
+// extractRunDir returns the newest run directory under exportDir holding an
+// extract.json. The directory also holds the reset and migrate run dirs
+// (run_meta.json / clear.json), whose feeds are not the source of truth.
+func extractRunDir(t *testing.T, exportDir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(exportDir)
+	if err != nil {
+		t.Fatalf("reading export dir %q: %v", exportDir, err)
+	}
+	var runs []string
+	for _, e := range entries {
+		if e.IsDir() && runDirRE.MatchString(e.Name()) && fileExists(filepath.Join(exportDir, e.Name(), "extract.json")) {
+			runs = append(runs, e.Name())
+		}
+	}
+	if len(runs) == 0 {
+		t.Fatalf("no extract run directory (one holding extract.json) found under %q", exportDir)
+	}
+	sort.Strings(runs)
+	return filepath.Join(exportDir, runs[len(runs)-1])
+}
+
+// expectedTemplateGrants derives, from files only, every template group
+// grant the templates tranche must have made. It joins:
+//   - the extract's getTemplateGroupsScanners / getTemplateGroupsViewers
+//     feeds (rows: templateId, name = group, permissions[], serverUrl), and
+//   - the templates run's createPermissionTemplates output, mapping each
+//     migrated source template (server_url + source_template_key) to its
+//     cloud_template_id.
+//
+// Only templates present in createPermissionTemplates are expected: a
+// template whose projectKeyPattern matches no extracted project is not
+// migrated by design (structure MapTemplates), which is the normal case when
+// the extract was scoped by --project_key_regexp. The group rules mirror
+// runSetTemplateGroupPermissions (go/internal/migrate/tasks_permissions.go)
+// and builtin_groups.go: the administrators group, the migration groups and
+// "Anyone" (reserved on the target, never granted) are skipped, sonar-users
+// becomes Members and is never granted admin, and (template, group, perm)
+// is deduplicated across both feeds. It returns the grants (value: template
+// name for failure messages) and how many are for a group other than Members.
+func expectedTemplateGrants(t *testing.T, extractDir, templatesRunDir string) (map[templateGrant]string, int) {
+	t.Helper()
+
+	type cloudTemplate struct{ id, name string }
+	migrated := map[string]cloudTemplate{} // server_url \x00 source_template_key
+	templates, err := common.NewDataStore(templatesRunDir).ReadAll("createPermissionTemplates")
+	if err != nil {
+		t.Fatalf("reading createPermissionTemplates from %s: %v", templatesRunDir, err)
+	}
+	for _, raw := range templates {
+		var row struct {
+			ServerURL   string `json:"server_url"`
+			SourceKey   string `json:"source_template_key"`
+			CloudID     string `json:"cloud_template_id"`
+			Name        string `json:"name"`
+			SonarCloudO string `json:"sonarcloud_org_key"`
+		}
+		if json.Unmarshal(raw, &row) != nil || row.ServerURL == "" || row.SourceKey == "" || row.CloudID == "" || row.SonarCloudO == "" {
+			continue
+		}
+		migrated[row.ServerURL+"\x00"+row.SourceKey] = cloudTemplate{row.CloudID, row.Name}
+	}
+
+	skip := map[string]bool{
+		"sonar-administrators": true, "Anyone": true,
+		"migration-scanners": true, "migration-viewers": true,
+	}
+	want := map[templateGrant]string{}
+	custom := 0
+	for _, feed := range []string{"getTemplateGroupsScanners", "getTemplateGroupsViewers"} {
+		rows, err := common.NewDataStore(extractDir).ReadAll(feed)
+		if err != nil {
+			t.Fatalf("reading %s from %s: %v", feed, extractDir, err)
+		}
+		for _, raw := range rows {
+			var row struct {
+				TemplateID  string   `json:"templateId"`
+				Name        string   `json:"name"`
+				Permissions []string `json:"permissions"`
+				ServerURL   string   `json:"serverUrl"`
+			}
+			if json.Unmarshal(raw, &row) != nil || row.TemplateID == "" || row.Name == "" || skip[row.Name] {
+				continue
+			}
+			tmpl, ok := migrated[row.ServerURL+"\x00"+row.TemplateID]
+			if !ok {
+				continue
+			}
+			group := row.Name
+			if group == "sonar-users" {
+				group = "Members"
+			}
+			for _, perm := range row.Permissions {
+				if perm == "" || (row.Name == "sonar-users" && perm == "admin") {
+					continue
+				}
+				g := templateGrant{tmpl.id, group, perm}
+				if _, dup := want[g]; dup {
+					continue
+				}
+				want[g] = tmpl.name
+				if group != "Members" {
+					custom++
+				}
+			}
+		}
+	}
+	return want, custom
+}
+
+// loggedTemplateGrants returns the template grants a run POSTed successfully
+// to /api/permissions/add_group_to_template, read from its requests.log.
+// Each line is one JSON object:
+//
+//	{"payload":{"data":{"groupName":"g","organization":"o","permission":"scan",
+//	 "templateId":"AaHN..."},"method":"POST","status":204,
+//	 "url":"/api/permissions/add_group_to_template"},
+//	 "process_type":"request_completed","status":"success"}
+//
+// The body sits under payload data, json or params (an object or a JSON
+// string), and a request failed when its numeric status is >= 400, or, with
+// no numeric status, when the line's status is "failure": the same rules as
+// parseConfigLogLine, configRequestBody and isFailure in
+// go/internal/report/summary (unexported there, hence reimplemented).
+func loggedTemplateGrants(t *testing.T, runDir string) map[templateGrant]bool {
+	t.Helper()
+	path := filepath.Join(runDir, "requests.log")
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("opening %s: %v", path, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	got := map[templateGrant]bool{}
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+	for sc.Scan() {
+		var entry map[string]any
+		if json.Unmarshal([]byte(strings.TrimSpace(sc.Text())), &entry) != nil {
+			continue
+		}
+		payload, _ := entry["payload"].(map[string]any)
+		if payload == nil || entry["process_type"] != "request_completed" || payload["method"] != "POST" {
+			continue
+		}
+		if u, _ := payload["url"].(string); !strings.HasSuffix(u, "/api/permissions/add_group_to_template") {
+			continue
+		}
+		if status, ok := payload["status"].(float64); ok {
+			if status >= 400 {
+				continue
+			}
+		} else if logStatus, _ := entry["status"].(string); logStatus == "failure" {
+			continue
+		}
+		body := requestLogBody(payload)
+		tid, _ := body["templateId"].(string)
+		group, _ := body["groupName"].(string)
+		perm, _ := body["permission"].(string)
+		if tid != "" && group != "" && perm != "" {
+			got[templateGrant{tid, group, perm}] = true
+		}
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	return got
+}
+
+// requestLogBody returns the request body of a requests.log payload.
+func requestLogBody(payload map[string]any) map[string]any {
+	for _, key := range []string{"data", "json", "params"} {
+		switch v := payload[key].(type) {
+		case map[string]any:
+			return v
+		case string:
+			var m map[string]any
+			if json.Unmarshal([]byte(v), &m) == nil {
+				return m
+			}
+		}
+	}
+	return map[string]any{}
 }
 
 // mdSeparatorCellRE matches one cell of a Markdown table's header-separator
