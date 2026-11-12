@@ -157,14 +157,15 @@ func TestTargetTasksWithObjectsFilter(t *testing.T) {
 		t.Fatalf("expected 3 tasks with no objects filter, got %d: %v", len(all), all)
 	}
 
-	// quality_gates only: getProjects (category "projects") must be
-	// dropped, quality-gate tasks kept.
+	// quality_gates only: quality-gate tasks kept, and getProjects too
+	// although its category is "projects": it is a DevOps platform task,
+	// always extracted (#688).
 	objects, err := common.ParseObjects([]string{"quality_gates"})
 	if err != nil {
 		t.Fatalf("ParseObjects: %v", err)
 	}
 	filtered := TargetTasks(reg, "", "all", objects)
-	want := map[string]bool{"getGates": true, "getGateConditions": true}
+	want := map[string]bool{"getProjects": true, "getGates": true, "getGateConditions": true}
 	if len(filtered) != len(want) {
 		t.Fatalf("expected %d tasks for quality_gates filter, got %d: %v", len(want), len(filtered), filtered)
 	}
@@ -250,6 +251,47 @@ func TestBuildPlanEveryObjectsCombinationProducesAValidPlan(t *testing.T) {
 			}
 		}
 	}
+}
+
+// #688: organizations.csv is built from the DevOps platform tasks, so every
+// --objects selection extracts them, while still leaving out the other
+// tasks of their categories.
+func TestBuildPlanEveryObjectsSelectionExtractsDevOpsPlatformTasks(t *testing.T) {
+	for _, cat := range common.AllObjects {
+		planned := plannedTasks(t, cat)
+		for _, name := range devOpsPlatformTasks {
+			if !planned[name] {
+				t.Errorf("objects=%s: %s is not extracted", cat, name)
+			}
+		}
+		if cat != common.ObjectProjects && planned["getProjectSettings"] {
+			t.Errorf("objects=%s: getProjectSettings is extracted, want only the DevOps platform project tasks", cat)
+		}
+		if cat != common.ObjectSettings && planned["getServerSettings"] {
+			t.Errorf("objects=%s: getServerSettings is extracted, want only the DevOps platform settings tasks", cat)
+		}
+	}
+}
+
+// plannedTasks returns the set of tasks buildPlan plans for an --objects
+// selection of the single category cat.
+func plannedTasks(t *testing.T, cat string) map[string]bool {
+	t.Helper()
+	objects, err := common.ParseObjects([]string{cat})
+	if err != nil {
+		t.Fatalf("ParseObjects(%s): %v", cat, err)
+	}
+	_, plan, _, err := buildPlan(ExtractConfig{Objects: objects}, EditionEnterprise)
+	if err != nil {
+		t.Fatalf("objects=%s: buildPlan: %v", cat, err)
+	}
+	planned := make(map[string]bool)
+	for _, phase := range plan {
+		for _, name := range phase {
+			planned[name] = true
+		}
+	}
+	return planned
 }
 
 func TestRegisterAllCountsAndDependencies(t *testing.T) {

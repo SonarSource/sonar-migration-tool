@@ -159,6 +159,30 @@ func TestRunExtractResumeKeepsSliceScopeInMetadata(t *testing.T) {
 	}
 }
 
+// #688: a resumed groups-only extract keeps "objects" in extract.json.
+// structure reads it to tell that the extract re-read only the projects'
+// DevOps bindings, so it must not forget earlier failed projects.
+func TestRunExtractResumeKeepsObjectsInMetadata(t *testing.T) {
+	srv := newMockServer()
+	defer srv.Close()
+
+	dir := t.TempDir()
+	writeRecordedMeta(t, dir, map[string]any{
+		"url": srv.URL, "partial": true, "objects": []string{"groups"},
+	})
+	cfg := ExtractConfig{
+		URL: srv.URL, Token: testToken, ExportDirectory: dir,
+		ExtractID: resumeTestID, TargetTask: "getProjects", Concurrency: 5,
+	}
+	if _, err := RunExtract(context.Background(), cfg); err != nil {
+		t.Fatalf("RunExtract failed: %v", err)
+	}
+
+	if rec := readRecordedMeta(t, dir); !reflect.DeepEqual(rec.Objects, []string{"groups"}) {
+		t.Errorf("extract.json: objects = %v after resume, want [groups]", rec.Objects)
+	}
+}
+
 func TestWriteMetadataFile_RecordsScope(t *testing.T) {
 	dir := t.TempDir()
 	m := extractMeta{

@@ -12,7 +12,6 @@ import (
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/extract"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/migrate"
-	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 	"github.com/spf13/cobra"
 )
 
@@ -46,8 +45,10 @@ pre-populated as sonarcloud_org_key (issue #566).`,
 		}
 
 		// An empty orgKey leaves sonarcloud_org_key blank, exactly as
-		// a run without --config does.
-		if err := structure.RunStructure(exportDir, orgKey); err != nil {
+		// a run without --config does. Like extract, structure carries the
+		// operator's sonarcloud_org_key values over and only extends
+		// organizations.csv (#688).
+		if err := regenerateStructure(exportDir, orgKey, time.Now()); err != nil {
 			return err
 		}
 		printExportDirNotice(exportDir)

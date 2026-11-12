@@ -6,9 +6,14 @@ package migrate
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
@@ -90,6 +95,77 @@ func TestLookupExistingGroup(t *testing.T) {
 	}
 	if id != "7" {
 		t.Errorf("got %q, want %q", id, "7")
+	}
+}
+
+// pagedGroupSearch serves api/user_groups/search the way SonarQube Cloud
+// does for q=dev in an org holding many "*dev*" groups: `fillers` groups
+// that sort first, then `tail`, paged by the request's ps/p. It records the
+// pages asked for.
+func pagedGroupSearch(t *testing.T, fillers int, tail ...string) (*httptest.Server, *[]string) {
+	t.Helper()
+	var all []string
+	for i := 1; i <= fillers; i++ {
+		all = append(all, fmt.Sprintf("a-dev-filler-%03d", i))
+	}
+	all = append(all, tail...)
+	var mu sync.Mutex
+	var pages []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/user_groups/search", func(w http.ResponseWriter, r *http.Request) {
+		ps, _ := strconv.Atoi(r.URL.Query().Get("ps"))
+		p, _ := strconv.Atoi(r.URL.Query().Get("p"))
+		if ps <= 0 {
+			ps = 100
+		}
+		if p <= 0 {
+			p = 1
+		}
+		mu.Lock()
+		pages = append(pages, r.URL.Query().Get("p")+"/"+r.URL.Query().Get("ps"))
+		mu.Unlock()
+		var groups []map[string]any
+		for i := (p - 1) * ps; i < p*ps && i < len(all); i++ {
+			groups = append(groups, map[string]any{"id": i + 1, "name": all[i]})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"paging": map[string]any{"pageIndex": p, "pageSize": ps, "total": len(all)},
+			"groups": groups,
+		})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv, &pages
+}
+
+// #685 live repro: with 120 "a-dev-filler-*" groups in the org, "dev" is on
+// page 2 of q=dev. Reading only page 1 reported an existing group missing.
+func TestLookupExistingGroupFindsExactMatchPastFirstPage(t *testing.T) {
+	srv, pages := pagedGroupSearch(t, 120, "dev", "developers")
+	raw := common.NewRawClient(srv.Client(), srv.URL+"/")
+
+	id, err := lookupExistingGroup(context.Background(), raw, "dev", "org")
+	if err != nil {
+		t.Fatalf("dev exists on page 2, got %v", err)
+	}
+	if id != "121" {
+		t.Errorf("id = %q, want 121 (the exact match, not a filler)", id)
+	}
+	if got := strings.Join(*pages, ","); got != "1/100,2/100" {
+		t.Errorf("pages requested = %s, want 1/100,2/100", got)
+	}
+}
+
+func TestLookupExistingGroupStopsAtLastPageWhenAbsent(t *testing.T) {
+	srv, pages := pagedGroupSearch(t, 150, "developers")
+	raw := common.NewRawClient(srv.Client(), srv.URL+"/")
+
+	_, err := lookupExistingGroup(context.Background(), raw, "dev", "org")
+	if !errors.Is(err, errLookupNotFound) {
+		t.Fatalf("err = %v, want errLookupNotFound", err)
+	}
+	if len(*pages) != 2 {
+		t.Errorf("pages requested = %v, want exactly 2 (151 results at 100 per page)", *pages)
 	}
 }
 

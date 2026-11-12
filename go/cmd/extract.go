@@ -5,6 +5,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -71,19 +72,13 @@ existing organizations.csv or projects.csv is first saved as
 				return fmt.Errorf("invalid permission template regexp pattern %q: %w", cfg.PermissionTemplateRegexp, err)
 			}
 		}
-		// #536, #592: resolve --project_key_regexp (or the deprecated
-		// --project_key, or either one's config-file equivalent) into
-		// concrete ProjectKeys now that URL/Token are known to be set.
-		// Skipped entirely when an active --objects filter excludes the
-		// "projects" category — the pattern is harmless but unused in
-		// that combination, matching the issue's checklist (no error,
-		// just a no-op).
-		if cfg.ProjectKey != "" && (cfg.Objects == nil || cfg.Objects[common.ObjectProjects]) {
-			keys, err := extract.ResolveProjectKeys(cmd.Context(), cfg, cfg.ProjectKey)
-			if err != nil {
-				return err
-			}
-			cfg.ProjectKeys = keys
+		// #536, #592, #688: resolve --project_key_regexp (or the deprecated
+		// --project_key, or either one's config-file equivalent) into concrete
+		// ProjectKeys now that URL/Token are known to be set. The DevOps
+		// platform project tasks run for every --objects selection, so this
+		// slice always applies.
+		if err := resolveExtractProjectKeys(cmd.Context(), &cfg); err != nil {
+			return err
 		}
 		skipped, err := extract.RunExtract(cmd.Context(), cfg)
 		if err != nil {
@@ -95,12 +90,24 @@ existing organizations.csv or projects.csv is first saved as
 				fmt.Fprintf(os.Stderr, "  - %s\n", key)
 			}
 		}
-		if err := runExtractStructure(cfg.ExportDirectory, cfg.Objects, orgKey, time.Now()); err != nil {
+		if err := runExtractStructure(cfg.ExportDirectory, orgKey, time.Now()); err != nil {
 			return err
 		}
 		printExportDirNotice(cfg.ExportDirectory)
 		return nil
 	},
+}
+
+func resolveExtractProjectKeys(ctx context.Context, cfg *extract.ExtractConfig) error {
+	if cfg.ProjectKey == "" {
+		return nil
+	}
+	keys, err := extract.ResolveProjectKeys(ctx, *cfg, cfg.ProjectKey)
+	if err != nil {
+		return err
+	}
+	cfg.ProjectKeys = keys
+	return nil
 }
 
 func init() {
@@ -130,7 +137,7 @@ func init() {
 	f.Int(flagHistoryMaxPoints, 0, "Max historical snapshots selected per project+branch when --migrate_history is set (default: no cap, every analysis is a candidate). Pass a positive number to bound it.")
 	f.Int(flagHistoryMinIntervalDays, extract.HistoryUnset, "Minimum spacing, in days, enforced between two selected historical snapshots of the same project+branch when --migrate_history is set (default 0 — no spacing rule, every analysis in the source history becomes a candidate).")
 	f.String("objects", "", "Comma-separated list of object categories to extract: "+strings.Join(common.AllObjects, ", ")+" (aliases: qp, qg, pt, lp). Omit to extract everything (default).")
-	registerProjectKeyFlags(f, "Regexp pattern of project keys to extract (only applies when the projects category is selected). A plain key matches only itself. #592.")
+	registerProjectKeyFlags(f, "Regexp pattern of project keys to extract. A plain key matches only itself. Applies even when --objects leaves out projects, because the DevOps-binding projects are always extracted for organizations.csv. #592, #688.")
 	f.String(flagGroupNameRegexp, "", "Regexp pattern of user group names to extract, to extract groups in slices on instances with a large number of them. Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"team-a-.+\" matches every group named team-a-*, not just a name containing that substring. Empty means every group is extracted (default). #669.")
 	f.String(flagBranchRegexp, "", "Regexp pattern of branch names to extract, applied to each project's own branches (also filters the getBranches task's own written records, so downstream migrate runs only see what matched here). Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"(main|master)\" matches only branches literally named main or master. The project's main branch is always extracted regardless of match. Empty means every branch is extracted (default). #582.")
 	registerPortfolioFlags(extractCmd, "extract")

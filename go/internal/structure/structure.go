@@ -37,6 +37,7 @@ func RunStructureCarryOver(exportDirectory string, carry *CarriedKeys, defaultOr
 	bindings, projects := MapProjectStructure(exportDirectory, mapping)
 	organizations := MapOrganizationStructure(bindings, defaultOrgKey...)
 	stats := carry.Apply(organizations, projects)
+	organizations = carry.ExtendOrganizations(organizations, &stats)
 
 	if err := ExportCSV(exportDirectory, "organizations", organizations); err != nil {
 		return stats, fmt.Errorf("exporting organizations.csv: %w", err)

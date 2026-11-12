@@ -11,9 +11,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
-	"github.com/sonar-solutions/sonar-migration-tool/internal/extract"
 )
 
 var extractStructureTestTime = time.Date(2026, 10, 16, 14, 3, 12, 0, time.Local)
@@ -43,7 +40,7 @@ func writeMinimalExtract(t *testing.T) string {
 func TestRunExtractStructure_WritesAllCSVs(t *testing.T) {
 	dir := writeMinimalExtract(t)
 
-	if err := runExtractStructure(dir, nil, "", extractStructureTestTime); err != nil {
+	if err := runExtractStructure(dir, "", extractStructureTestTime); err != nil {
 		t.Fatalf("runExtractStructure: %v", err)
 	}
 	for _, name := range structureCSVs {
@@ -58,7 +55,7 @@ func TestRunExtractStructure_WritesAllCSVs(t *testing.T) {
 func TestRunExtractStructure_PrePopulatesOrgKey(t *testing.T) {
 	dir := writeMinimalExtract(t)
 
-	if err := runExtractStructure(dir, nil, "my-cloud-org", extractStructureTestTime); err != nil {
+	if err := runExtractStructure(dir, "my-cloud-org", extractStructureTestTime); err != nil {
 		t.Fatalf("runExtractStructure: %v", err)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "organizations.csv"))
@@ -77,7 +74,7 @@ func TestRunExtractStructure_BacksUpEditedCSV(t *testing.T) {
 	edited := "server_url,sonarcloud_org_key\nhttp://localhost:10000/,hand-edited-org\n"
 	writeFile(t, dir, "organizations.csv", edited)
 
-	if err := runExtractStructure(dir, nil, "", extractStructureTestTime); err != nil {
+	if err := runExtractStructure(dir, "", extractStructureTestTime); err != nil {
 		t.Fatalf("runExtractStructure: %v", err)
 	}
 	backup, err := os.ReadFile(filepath.Join(dir, "organizations.csv.bak-20261016-140312"))
@@ -93,45 +90,68 @@ func TestRunExtractStructure_BacksUpEditedCSV(t *testing.T) {
 	}
 }
 
-// #503: --objects without the projects category skips both steps and
-// does not fail.
-func TestRunExtractStructure_SkipsWithoutProjects(t *testing.T) {
-	dir := writeMinimalExtract(t)
-	objects := map[string]bool{common.ObjectProjects: false, "gates": true}
+// #688: an extract limited by --objects to other categories still
+// regenerates every CSV, and organizations.csv lists the DevOps platform
+// organizations from the bindings that extract always pulls.
+func TestRunExtractStructure_GroupsOnlyExtractWritesOrganizations(t *testing.T) {
+	dir := t.TempDir()
+	extractDir := filepath.Join(dir, "2026-10-16-01")
+	srvURL := "http://localhost:10000/"
+	if err := os.MkdirAll(extractDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, extractDir, "extract.json", `{"url":"`+srvURL+`","partial":true,"objects":["groups"]}`)
+	for task, record := range map[string]string{
+		"getBindings":        `{"key":"gh","alm":"github","url":"https://api.github.com","serverUrl":"` + srvURL + `"}`,
+		"getProjectBindings": `{"key":"gh","alm":"github","repository":"acme/proj1","projectKey":"proj1","serverUrl":"` + srvURL + `"}`,
+		"getProjectDetails":  `{"key":"proj1","name":"Project 1","branch":"main","serverUrl":"` + srvURL + `"}`,
+		"getGroups":          `{"name":"devs","serverUrl":"` + srvURL + `"}`,
+	} {
+		if err := os.MkdirAll(filepath.Join(extractDir, task), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(extractDir, task), "results.1.jsonl", record+"\n")
+	}
 
-	if err := runExtractStructure(dir, objects, "", extractStructureTestTime); err != nil {
+	if err := runExtractStructure(dir, "", extractStructureTestTime); err != nil {
 		t.Fatalf("runExtractStructure: %v", err)
 	}
 	for _, name := range structureCSVs {
-		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
-			t.Errorf("%s should not be written when projects were not extracted", name)
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("expected %s: %v", name, err)
 		}
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "organizations.csv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "github") || !strings.Contains(string(data), "https://api.github.com") {
+		t.Errorf("organizations.csv does not list the GitHub organization:\n%s", data)
 	}
 }
 
-// A resumed extract with --extract_id alone restores its object selection
-// before the structure step, so a project-free selection still skips CSVs.
-func TestRunExtractStructure_UsesRestoredObjects(t *testing.T) {
-	dir := writeMinimalExtract(t)
-	resumeID := "2026-10-16-02"
-	resumeDir := filepath.Join(dir, resumeID)
-	if err := os.MkdirAll(resumeDir, 0o755); err != nil {
+// #688: an extract that found no project (e.g. groups only, on a server
+// whose projects the token cannot browse) still succeeds. organizations.csv
+// and projects.csv are written, and mappings, having nothing to assign, is
+// skipped instead of failing the extract.
+func TestRunExtractStructure_NoProjectSkipsMappings(t *testing.T) {
+	dir := t.TempDir()
+	extractDir := filepath.Join(dir, "2026-10-16-01")
+	if err := os.MkdirAll(extractDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, resumeDir, "extract.json", `{"partial":true,"objects":["groups"]}`)
+	writeFile(t, extractDir, "extract.json", `{"url":"http://localhost:10000/","partial":true,"objects":["groups"]}`)
 
-	cfg := extract.ExtractConfig{ExportDirectory: dir, ExtractID: resumeID}
-	extract.RestoreResumeScope(&cfg)
-	if cfg.Objects[common.ObjectProjects] {
-		t.Fatal("restored groups-only scope unexpectedly includes projects")
-	}
-	if err := runExtractStructure(dir, cfg.Objects, "", extractStructureTestTime); err != nil {
+	if err := runExtractStructure(dir, "", extractStructureTestTime); err != nil {
 		t.Fatalf("runExtractStructure: %v", err)
 	}
-	for _, name := range structureCSVs {
-		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
-			t.Errorf("%s should not be written for the restored groups-only scope", name)
+	for _, name := range []string{"organizations.csv", "projects.csv"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("expected %s: %v", name, err)
 		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "groups.csv")); err == nil {
+		t.Error("groups.csv was written, want mappings skipped when no project was extracted")
 	}
 }
 
@@ -139,7 +159,7 @@ func TestRunExtractStructure_UsesRestoredObjects(t *testing.T) {
 func TestRunExtractStructure_ErrorNamesStep(t *testing.T) {
 	dir := t.TempDir()
 
-	err := runExtractStructure(dir, nil, "", extractStructureTestTime)
+	err := runExtractStructure(dir, "", extractStructureTestTime)
 	if err == nil {
 		t.Fatal("expected an error with no extract in the directory")
 	}
@@ -154,7 +174,7 @@ func TestRunExtractStructure_ErrorNamesStep(t *testing.T) {
 // sonarcloud_org_key values the operator filled in.
 func TestRunExtractStructure_CarriesOverOperatorOrgKey(t *testing.T) {
 	dir := writeMinimalExtract(t)
-	if err := runExtractStructure(dir, nil, "", extractStructureTestTime); err != nil {
+	if err := runExtractStructure(dir, "", extractStructureTestTime); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
 	path := filepath.Join(dir, "organizations.csv")
@@ -185,7 +205,7 @@ func TestRunExtractStructure_CarriesOverOperatorOrgKey(t *testing.T) {
 	}
 	out.Close()
 
-	if err := runExtractStructure(dir, nil, "", extractStructureTestTime.Add(time.Minute)); err != nil {
+	if err := runExtractStructure(dir, "", extractStructureTestTime.Add(time.Minute)); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 	data, _ := os.ReadFile(path)
