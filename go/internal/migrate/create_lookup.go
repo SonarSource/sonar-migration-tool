@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
@@ -60,21 +61,57 @@ func lookupExistingGate(ctx context.Context, raw *common.RawClient, name, orgKey
 	return id, nil
 }
 
+// groupSearchPageSize is the page size lookupExistingGroup requests from
+// api/user_groups/search.
+const groupSearchPageSize = 100
+
+// groupSearchMaxPages bounds lookupExistingGroup's paging, so a server that
+// misreports its paging can never keep it looping.
+const groupSearchMaxPages = 1000
+
 // lookupExistingGroup searches Cloud for a user group by name, returning its ID.
+//
+// q= matches every group whose name CONTAINS name, so in an organization
+// with many groups the exact match can sit past the first page (a short
+// name like "dev" among hundreds of "*-dev-*" groups). It therefore pages
+// through the results until it finds the exact, case-sensitive match or
+// runs out of pages.
 func lookupExistingGroup(ctx context.Context, raw *common.RawClient, name, orgKey string) (string, error) {
-	params := url.Values{
-		"q":            {name},
-		"organization": {orgKey},
+	for page := 1; page <= groupSearchMaxPages; page++ {
+		params := url.Values{
+			"q":            {name},
+			"organization": {orgKey},
+			"ps":           {strconv.Itoa(groupSearchPageSize)},
+			"p":            {strconv.Itoa(page)},
+		}
+		body, err := raw.Get(ctx, "api/user_groups/search", params)
+		if err != nil {
+			return "", fmt.Errorf("lookupExistingGroup: %w", err)
+		}
+		id, err := findByField(body, "groups", "name", name, "id")
+		if err == nil {
+			return id, nil
+		}
+		if !errors.Is(err, errLookupNotFound) || isLastGroupSearchPage(body, page) {
+			return "", fmt.Errorf("lookupExistingGroup %q: %w", name, err)
+		}
 	}
-	body, err := raw.Get(ctx, "api/user_groups/search", params)
-	if err != nil {
-		return "", fmt.Errorf("lookupExistingGroup: %w", err)
+	return "", fmt.Errorf("lookupExistingGroup %q: gave up after %d pages: %w", name, groupSearchMaxPages, errLookupNotFound)
+}
+
+// isLastGroupSearchPage reports whether page is the last page of an
+// api/user_groups/search response: a short page, or paging.total reached.
+func isLastGroupSearchPage(body json.RawMessage, page int) bool {
+	var resp struct {
+		Paging struct {
+			Total int `json:"total"`
+		} `json:"paging"`
+		Groups []json.RawMessage `json:"groups"`
 	}
-	id, err := findByField(body, "groups", "name", name, "id")
-	if err != nil {
-		return "", fmt.Errorf("lookupExistingGroup %q: %w", name, err)
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return true
 	}
-	return id, nil
+	return len(resp.Groups) < groupSearchPageSize || page*groupSearchPageSize >= resp.Paging.Total
 }
 
 // lookupExistingTemplate searches Cloud for a permission template by name
