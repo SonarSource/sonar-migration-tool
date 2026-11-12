@@ -311,6 +311,15 @@ type Executor struct {
 	Edition   common.Edition
 	ExportDir string // Root export directory
 	Mapping   structure.ExtractMapping
+	// ExtractIndex serves the per-project and per-branch extract reads of
+	// project-data loaders from a run-scoped index instead of a full scan of
+	// the merged set on every call (#690). May be nil (test fixtures,
+	// reset.go); scopedExtractItems then falls back to the full scan.
+	ExtractIndex *structure.ExtractIndex
+	// activeRules memoizes loadExtractedActiveRules per server, a
+	// server-wide read buildBranchReport otherwise repeats for every branch
+	// (#690). May be nil; the rules are then read on every call.
+	activeRules *activeRulesCache
 	// ConcurrencyLimiter provides a live capacity figure, NOT a semaphore.
 	// Nothing in this package acquires or releases it; every reference
 	// reads ConcurrencyLimiter.Current() to size a per-task fan-out limit
@@ -609,6 +618,8 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 		Edition:                         mp.Edition,
 		ExportDir:                       cfg.ExportDirectory,
 		Mapping:                         mp.Mapping,
+		ExtractIndex:                    structure.NewExtractIndex(cfg.ExportDirectory, mp.Mapping),
+		activeRules:                     newActiveRulesCache(),
 		ConcurrencyLimiter:              clients.ConcurrencyLimiter,
 		CEPollConcurrencyLimiter:        clients.CEPollConcurrencyLimiter,
 		BranchGate:                      newBranchGate(clients.CEPollConcurrencyLimiter),

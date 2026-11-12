@@ -282,6 +282,31 @@ func (s supersession) covers(record json.RawMessage) bool {
 // non-project extract (#688) covers only the projects it read without error,
 // so a project it failed on keeps its earlier records.
 func supersessions(directory string, ids []string, key string) []supersession {
+	return supersessionsWith(directory, ids, key, scannedTaskKeys(directory))
+}
+
+// taskKeysFunc returns the non-empty recordProjectKey of every record one
+// extract wrote for a task. supersessions scans the task output for it;
+// ExtractIndex answers from its index (#690).
+type taskKeysFunc func(id, key string) map[string]bool
+
+// scannedTaskKeys collects the keys by reading every record.
+func scannedTaskKeys(directory string) taskKeysFunc {
+	return func(id, key string) map[string]bool {
+		keys := make(map[string]bool)
+		_, _ = eachTaskDirRecord(filepath.Join(directory, id, key), func(r json.RawMessage) bool {
+			if k := recordProjectKey(r); k != "" {
+				keys[k] = true
+			}
+			return true
+		})
+		return keys
+	}
+}
+
+// supersessionsWith is supersessions with the task-output keys supplied by
+// taskKeys.
+func supersessionsWith(directory string, ids []string, key string, taskKeys taskKeysFunc) []supersession {
 	result := make([]supersession, len(ids))
 	var later supersession
 	for i := len(ids) - 1; i >= 0; i-- {
@@ -294,11 +319,11 @@ func supersessions(directory string, ids []string, key string) []supersession {
 		case !meta.Partial:
 			// A full extract is always first in the set: nothing older to cover.
 		case !meta.extractedProjects():
-			later.keys = addKeys(later.keys, devOpsReadProjects(directory, ids[i], key))
+			later.keys = addKeys(later.keys, devOpsReadProjects(directory, ids[i], key, taskKeys))
 		case len(meta.ProjectKeys) == 0:
 			later.all = true
 		default:
-			later.keys = addKeys(later.keys, slicedProjects(directory, ids[i], key, meta))
+			later.keys = addKeys(later.keys, slicedProjects(ids[i], key, meta, taskKeys))
 		}
 	}
 	return result
@@ -307,18 +332,12 @@ func supersessions(directory string, ids []string, key string) []supersession {
 // slicedProjects returns the projects a project extract sliced by project
 // re-extracted for the task: those extract.json lists and those it wrote
 // records for, since a resumed task can retain output for the original scope.
-func slicedProjects(directory, id, key string, meta extractMeta) map[string]bool {
+func slicedProjects(id, key string, meta extractMeta, taskKeys taskKeysFunc) map[string]bool {
 	keys := make(map[string]bool, len(meta.ProjectKeys))
 	for _, k := range meta.ProjectKeys {
 		keys[k] = true
 	}
-	_, _ = eachTaskDirRecord(filepath.Join(directory, id, key), func(r json.RawMessage) bool {
-		if k := recordProjectKey(r); k != "" {
-			keys[k] = true
-		}
-		return true
-	})
-	return keys
+	return addKeys(keys, taskKeys(id, key))
 }
 
 // devOpsReadProjects returns the projects a non-project extract (#688) read
@@ -327,22 +346,15 @@ func slicedProjects(directory, id, key string, meta extractMeta) map[string]bool
 // project unbound since an earlier extract, which has no getProjectBindings
 // record, still drops its stale binding. An unreadable failed list makes the
 // extract cover nothing, so no project loses its earlier records.
-func devOpsReadProjects(directory, id, key string) map[string]bool {
+func devOpsReadProjects(directory, id, key string, taskKeys taskKeysFunc) map[string]bool {
 	failed, err := common.ReadFailedProjects(filepath.Join(directory, id))
 	if err != nil {
 		slog.Warn("could not read the extract's failed projects list; its project records supersede no earlier extract",
 			"extract", id, "err", err)
 		return nil
 	}
-	read := make(map[string]bool)
-	for _, task := range []string{"getProjects", key} {
-		_, _ = eachTaskDirRecord(filepath.Join(directory, id, task), func(r json.RawMessage) bool {
-			if k := recordProjectKey(r); k != "" {
-				read[k] = true
-			}
-			return true
-		})
-	}
+	read := addKeys(make(map[string]bool), taskKeys(id, "getProjects"))
+	read = addKeys(read, taskKeys(id, key))
 	for _, fp := range failed {
 		delete(read, fp.Key)
 	}
@@ -634,21 +646,27 @@ func eachTaskDirRecord(dir string, yield func(json.RawMessage) bool) (completed 
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".jsonl" {
 			continue
 		}
-		path := filepath.Join(dir, entry.Name())
-		items, err := common.ReadJSONLFile(path)
-		if err != nil {
-			slog.Warn("readTaskDir: skipping unreadable JSONL file (records from other files in this task are still loaded)",
-				"file", path, "err", err)
-			// Keep whatever the partial read returned before the
-			// error — ReadJSONLFile returns the records it parsed
-			// up to the failure point, which is better than nothing
-			// for callers that downstream process per-record.
-		}
-		for _, r := range items {
+		for _, r := range readChunkFile(filepath.Join(dir, entry.Name())) {
 			if !yield(r) {
 				return false, nil
 			}
 		}
 	}
 	return true, nil
+}
+
+// readChunkFile reads one JSONL chunk file under the error policy of
+// readTaskDir. It is shared with ExtractIndex so both read paths log and
+// recover from an unreadable file the same way.
+func readChunkFile(path string) []json.RawMessage {
+	items, err := common.ReadJSONLFile(path)
+	if err != nil {
+		slog.Warn("readTaskDir: skipping unreadable JSONL file (records from other files in this task are still loaded)",
+			"file", path, "err", err)
+		// Keep whatever the partial read returned before the
+		// error — ReadJSONLFile returns the records it parsed
+		// up to the failure point, which is better than nothing
+		// for callers that downstream process per-record.
+	}
+	return items
 }

@@ -514,7 +514,7 @@ func newTestExecutor(cloudSrv, apiSrv *httptest.Server, exportDir string) *Execu
 	cloudClient := sqapi.NewCloudClient(cloudSrv.URL+"/", "test-token")
 	apiClient := sqapi.NewCloudClient(apiSrv.URL+"/", "test-token")
 
-	return &Executor{
+	e := &Executor{
 		Cloud:              cloud.New(cloudClient),
 		CloudAPI:           cloud.New(apiClient),
 		Raw:                common.NewRawClient(cloudSrv.Client(), cloudSrv.URL+"/"),
@@ -529,6 +529,8 @@ func newTestExecutor(cloudSrv, apiSrv *httptest.Server, exportDir string) *Execu
 		ConcurrencyLimiter: NewFixedConcurrencyLimiter(5),
 		Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
 	}
+	e.ExtractIndex = structure.NewExtractIndex(exportDir, e.Mapping)
+	return e
 }
 
 // setupExtractData creates fake extract JSONL data that migrate tasks read.
