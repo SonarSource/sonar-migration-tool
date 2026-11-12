@@ -87,6 +87,52 @@ func permissionTasks() []TaskDef {
 // skipAdminForBuiltInAlias) compare against the same literal.
 const sonarUsersGroupName = "sonar-users"
 
+// anyoneGroupName is SonarQube Server's "Anyone" pseudo-group. It is never
+// created on SonarQube Cloud, so no group of that name exists there to
+// grant to or to resolve (#685).
+const anyoneGroupName = "Anyone"
+
+// templateGroupUnresolvedKey is the run-store key under which
+// setTemplateGroupPermissions records each (template, group) pair whose
+// group it could not resolve in the target organization (#685). The
+// migration report reads it to name the group on the template's row.
+// It is deliberately not a task name: a resumed run (--run_id) treats an
+// existing task directory as completed, and this record must not make a
+// resume skip setTemplateGroupPermissions.
+const templateGroupUnresolvedKey = "setTemplateGroupPermissions:unresolved"
+
+// unresolvedTemplateGroupRecord is one templateGroupUnresolvedKey record.
+// reason is "missing" when the target answered without the group and
+// "lookup_failed" when the lookup itself failed.
+func unresolvedTemplateGroupRecord(cloudTemplateID, orgKey, group string, st entityState) json.RawMessage {
+	reason := "missing"
+	if st == entityError {
+		reason = "lookup_failed"
+	}
+	b, _ := json.Marshal(map[string]string{
+		"cloud_template_id":  cloudTemplateID,
+		"sonarcloud_org_key": orgKey,
+		"group":              group,
+		"reason":             reason,
+	})
+	return b
+}
+
+// writeUnresolvedTemplateGroups writes recs under templateGroupUnresolvedKey,
+// sorted for a stable file. Nothing is written, and no directory created,
+// when every group resolved.
+func writeUnresolvedTemplateGroups(e *Executor, recs []json.RawMessage) error {
+	if len(recs) == 0 {
+		return nil
+	}
+	sort.Slice(recs, func(i, j int) bool { return string(recs[i]) < string(recs[j]) })
+	w, err := e.Store.Writer(templateGroupUnresolvedKey)
+	if err != nil {
+		return fmt.Errorf("writing %s: %w", templateGroupUnresolvedKey, err)
+	}
+	return w.WriteChunk(recs)
+}
+
 // skipAdminForBuiltInAlias reports whether granting perm to a group would
 // be an accidental privilege escalation introduced by the sonar-users →
 // Members built-in alias (MapGroupNameToCloud, issue #269). That alias
@@ -309,7 +355,7 @@ func runSetOrgGroupPermissions(ctx context.Context, e *Executor) error {
 	err := forEachExtractItem(ctx, e, "setOrgGroupPermissions", "getGroups",
 		func(ctx context.Context, item structure.ExtractItem, w *common.ChunkWriter) error {
 			name := extractField(item.Data, "name")
-			if name == "Anyone" || !e.groupSelected(name) {
+			if name == anyoneGroupName || !e.groupSelected(name) {
 				return nil
 			}
 			// Grant in the org(s) createGroups put the group in; the
@@ -495,10 +541,18 @@ type profileRef struct {
 //     accessible via API.
 //   - migration-scanners / migration-viewers are wired up by
 //     addMigrationGroupToTemplates and don't need a second pass.
+//   - Anyone is SonarQube Server's pseudo-group: it is never created on
+//     SonarQube Cloud, so it has no group to grant to or resolve.
 //
 // Groups that didn't make it into createGroups (e.g. failed creation,
 // org-skipped) are silently passed over — the missing group is
-// already surfaced in the Groups section.
+// already surfaced in the Groups section. When createGroups did not run
+// at all (groups left out of --objects, #685), the groups were migrated
+// by an earlier run, so they are resolved by name in the target
+// organization instead. A group that resolution cannot find counts as
+// one failure per (template, group) pair and is written to
+// templateGroupUnresolvedKey, so the report can name it on the
+// template's row.
 func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 	// SQS templateId → (SQC templateId, sonarcloud_org_key) lookup.
 	// createPermissionTemplates writes the SQS-side id under
@@ -524,6 +578,7 @@ func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 	// Set of migrated SQS group names per cloud org so we know which
 	// (org, group) pairs are safe to reference.
 	createdGroups, _ := e.Store.ReadAll("createGroups")
+	resolver := newTargetEntityResolver(e, "setTemplateGroupPermissions", !e.Store.TaskDirExists("createGroups"))
 	groupExists := make(map[string]bool, len(createdGroups))
 	for _, g := range createdGroups {
 		name := extractField(g, "name")
@@ -538,6 +593,7 @@ func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 	// MapGroupNameToCloud and grants the permission there.
 	skipGroups := map[string]bool{
 		"sonar-administrators": true,
+		anyoneGroupName:        true,
 		migrationScanners:      true,
 		migrationViewers:       true,
 	}
@@ -559,6 +615,11 @@ func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 	type pairKey struct{ cloudTemplate, group string }
 	type pairStat struct{ attempted, succeeded int }
 	pairStats := make(map[pairKey]*pairStat)
+	// (template, group) pairs whose group the resolver did not find, so
+	// each counts as one failure rather than one per feed row, and is
+	// written once to templateGroupUnresolvedKey.
+	unresolved := make(map[pairKey]bool)
+	var unresolvedRecs []json.RawMessage
 	var statsMu sync.Mutex
 
 	counter := TaskCounterFromContext(ctx)
@@ -583,7 +644,20 @@ func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 		}
 		aliased := cloudGroup != groupName
 		if !aliased && !groupExists[tmpl.org+"\x00"+groupName] {
-			return nil
+			if !resolver.byName {
+				return nil
+			}
+			if st := resolver.groupState(ctx, tmpl.org, groupName); st != entityFound {
+				pk := pairKey{tmpl.cloudID, cloudGroup}
+				statsMu.Lock()
+				if !unresolved[pk] {
+					unresolved[pk] = true
+					counter.Fail()
+					unresolvedRecs = append(unresolvedRecs, unresolvedTemplateGroupRecord(tmpl.cloudID, tmpl.org, groupName, st))
+				}
+				statsMu.Unlock()
+				return nil
+			}
 		}
 		perms := extractStringArray(data, "permissions")
 		for _, perm := range perms {
@@ -643,6 +717,9 @@ func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 			}); err != nil {
 			feedErrs = append(feedErrs, err.Error())
 		}
+	}
+	if err := writeUnresolvedTemplateGroups(e, unresolvedRecs); err != nil {
+		feedErrs = append(feedErrs, err.Error())
 	}
 	if len(feedErrs) > 0 {
 		return fmt.Errorf("setTemplateGroupPermissions: %s", strings.Join(feedErrs, "; "))

@@ -693,6 +693,9 @@ func collectSection(store *common.DataStore, def sectionDef,
 	if def.Name == "Permission Templates" {
 		runDir := store.BaseDir()
 		succeeded, nearPerfect = applyTemplateDefaultFailures(runDir, store, succeeded, nearPerfect)
+		// #685: group grants dropped because the group does not exist
+		// on the target (or its lookup failed) route to Partial (orange).
+		succeeded, nearPerfect, partial = applyTemplateGroupResolutionFailures(store, succeeded, nearPerfect, partial)
 	}
 
 	return Section{

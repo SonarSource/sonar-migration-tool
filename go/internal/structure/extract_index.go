@@ -95,20 +95,28 @@ func (x *ExtractIndex) ProjectItems(key, serverURL, projectKey string) func(yiel
 			if sup.all {
 				continue // a later extract re-extracted every project
 			}
-			idx := x.task(id, key)
-			for _, f := range idx.filesFor(projectKey, sup.keys[projectKey]) {
-				for _, r := range readChunkFile(f) {
-					h := decodeProjectSpellings(r)
-					if !h.has(projectKey) || sup.keys[h.primary()] {
-						continue
-					}
-					if !yield(ExtractItem{ServerURL: serverURL, Data: r}) {
-						return
-					}
-				}
+			if !yieldProjectRecords(x.task(id, key), serverURL, projectKey, sup, yield) {
+				return
 			}
 		}
 	}
+}
+
+// yieldProjectRecords yields the records of one task index that belong to
+// projectKey and are not superseded. It returns false once yield stops.
+func yieldProjectRecords(idx *taskIndex, serverURL, projectKey string, sup supersession, yield func(ExtractItem) bool) bool {
+	for _, f := range idx.filesFor(projectKey, sup.keys[projectKey]) {
+		for _, r := range readChunkFile(f) {
+			h := decodeProjectSpellings(r)
+			if !h.has(projectKey) || sup.keys[h.primary()] {
+				continue
+			}
+			if !yield(ExtractItem{ServerURL: serverURL, Data: r}) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // filteredItems is the unindexed equivalent of ProjectItems.
@@ -186,16 +194,22 @@ func (t *taskIndex) build(dir string) {
 		}
 		fi := len(t.files)
 		t.files = append(t.files, filepath.Join(dir, entry.Name()))
-		for _, r := range readChunkFile(t.files[fi]) {
-			h := decodeProjectSpellings(r)
-			primary := h.primary()
-			if primary != "" {
-				t.owned[primary] = appendFile(t.owned[primary], fi)
-			}
-			for _, k := range []string{h.ProjectKey, h.Project} {
-				if k != "" && k != primary {
-					t.alias[k] = appendFile(t.alias[k], fi)
-				}
+		t.indexFile(fi)
+	}
+}
+
+// indexFile records, for every record of chunk file number fi, the project
+// spellings that file holds.
+func (t *taskIndex) indexFile(fi int) {
+	for _, r := range readChunkFile(t.files[fi]) {
+		h := decodeProjectSpellings(r)
+		primary := h.primary()
+		if primary != "" {
+			t.owned[primary] = appendFile(t.owned[primary], fi)
+		}
+		for _, k := range []string{h.ProjectKey, h.Project} {
+			if k != "" && k != primary {
+				t.alias[k] = appendFile(t.alias[k], fi)
 			}
 		}
 	}
