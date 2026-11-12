@@ -343,6 +343,12 @@ func runCreateGroups(ctx context.Context, e *Executor) error {
 	return err
 }
 
+// keepTemplateByRegexp keeps a template mapping row when no filter is
+// configured or its name matches e.PermissionTemplateRe. #665.
+func keepTemplateByRegexp(e *Executor, item json.RawMessage) bool {
+	return e.PermissionTemplateRe == nil || e.PermissionTemplateRe.MatchString(extractField(item, "name"))
+}
+
 // groupToCreate reports whether createGroups must create (or find) the
 // groups.csv row's group in orgKey.
 func groupToCreate(ctx context.Context, e *Executor, existing *existingOrgGroups, orgKey, name string) bool {
@@ -389,7 +395,8 @@ func createOrFindGroup(ctx context.Context, e *Executor, counter *TaskCounter, n
 
 func runCreatePermissionTemplates(ctx context.Context, e *Executor) error {
 	counter := TaskCounterFromContext(ctx)
-	err := forEachMigrateItem(ctx, e, "createPermissionTemplates", "generateTemplateMappings",
+	err := forEachMigrateItemFiltered(ctx, e, "createPermissionTemplates", "generateTemplateMappings",
+		func(item json.RawMessage) bool { return keepTemplateByRegexp(e, item) },
 		func(ctx context.Context, item json.RawMessage, w *common.ChunkWriter) error {
 			orgKey := extractField(item, "sonarcloud_org_key")
 			if shouldSkipOrg(orgKey) {

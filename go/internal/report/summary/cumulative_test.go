@@ -334,6 +334,28 @@ func TestMergeSections_ExpectedFailureKeepsEarlierSuccess(t *testing.T) {
 	}
 }
 
+// Permission templates migrated in slices (--permission_template_regexp) add
+// up in the final report, and a template re-migrated by a later slice is
+// listed once (#665).
+func TestMergeSections_PermissionTemplateSlicesAddUp(t *testing.T) {
+	newest := &MigrationSummary{Sections: []Section{{Name: "Permission Templates", Succeeded: []EntityItem{
+		{Name: "Team B", Organization: "org1"}, {Name: "Team A", Organization: "org1"},
+	}}}}
+	older := &MigrationSummary{Sections: []Section{{Name: "Permission Templates", Succeeded: []EntityItem{
+		{Name: "Team A", Organization: "org1"}, {Name: "Default", Organization: "org1"},
+	}}}}
+
+	merged := mergeSections([]*MigrationSummary{newest, older})[0]
+	got := make([]string, 0, len(merged.Succeeded))
+	for _, item := range merged.Succeeded {
+		got = append(got, item.Name)
+	}
+	sort.Strings(got)
+	if strings.Join(got, ",") != "Default,Team A,Team B" {
+		t.Errorf("succeeded templates = %v, want Default, Team A, Team B", got)
+	}
+}
+
 func TestRenderMarkdown_ListsCoveredRuns(t *testing.T) {
 	exportDir := t.TempDir()
 	writeSliceRun(t, exportDir, "2026-11-02-0003", "VERT0_PROJ0")

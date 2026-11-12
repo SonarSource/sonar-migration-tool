@@ -23,6 +23,8 @@ type recordedScope struct {
 	PortfolioKeyRegexp  string   `json:"portfolio_key_regexp"`
 	PortfolioNameRegexp string   `json:"portfolio_name_regexp"`
 	GroupNameRegexp     string   `json:"group_name_regexp"`
+	// PermissionTemplateRegexp is the permission template slice (#665).
+	PermissionTemplateRegexp string `json:"permission_template_regexp"`
 }
 
 // RestoreResumeScope keeps a resumed slice a slice (#666). extract.json is
@@ -70,6 +72,7 @@ func restoreResumeScope(cfg *ExtractConfig, logger *slog.Logger) {
 	cfg.PortfolioKeyRegexp = rec.PortfolioKeyRegexp
 	cfg.PortfolioNameRegexp = rec.PortfolioNameRegexp
 	cfg.GroupNameRegexp = rec.GroupNameRegexp
+	cfg.PermissionTemplateRegexp = rec.PermissionTemplateRegexp
 	if len(rec.Objects) > 0 {
 		if objects, err := common.ParseObjects(rec.Objects); err == nil {
 			cfg.Objects = objects
@@ -78,7 +81,8 @@ func restoreResumeScope(cfg *ExtractConfig, logger *slog.Logger) {
 	logger.Info("resuming a partial extract with the scope it was started with",
 		"extract_id", cfg.ExtractID, "projects", len(rec.ProjectKeys), "objects", rec.Objects,
 		"portfolio_key_regexp", rec.PortfolioKeyRegexp, "portfolio_name_regexp", rec.PortfolioNameRegexp,
-		"group_name_regexp", rec.GroupNameRegexp)
+		"group_name_regexp", rec.GroupNameRegexp,
+		"permission_template_regexp", rec.PermissionTemplateRegexp)
 }
 
 func matchingProjectKeys(keys []string, pattern string) []string {

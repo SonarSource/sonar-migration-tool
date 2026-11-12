@@ -66,6 +66,12 @@ existing organizations.csv or projects.csv is first saved as
 				return fmt.Errorf("invalid group name regexp pattern %q: %w", cfg.GroupNameRegexp, err)
 			}
 		}
+		// #665 — reject an invalid permission template pattern up front too.
+		if cfg.PermissionTemplateRegexp != "" {
+			if _, err := extract.CompileProjectKeyPattern(cfg.PermissionTemplateRegexp); err != nil {
+				return fmt.Errorf("invalid permission template regexp pattern %q: %w", cfg.PermissionTemplateRegexp, err)
+			}
+		}
 		// #536, #592, #688: resolve --project_key_regexp (or the deprecated
 		// --project_key, or either one's config-file equivalent) into concrete
 		// ProjectKeys now that URL/Token are known to be set. The DevOps
@@ -135,6 +141,7 @@ func init() {
 	f.String(flagGroupNameRegexp, "", "Regexp pattern of user group names to extract, to extract groups in slices on instances with a large number of them. Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"team-a-.+\" matches every group named team-a-*, not just a name containing that substring. Empty means every group is extracted (default). #669.")
 	f.String(flagBranchRegexp, "", "Regexp pattern of branch names to extract, applied to each project's own branches (also filters the getBranches task's own written records, so downstream migrate runs only see what matched here). Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"(main|master)\" matches only branches literally named main or master. The project's main branch is always extracted regardless of match. Empty means every branch is extracted (default). #582.")
 	registerPortfolioFlags(extractCmd, "extract")
+	registerPermissionTemplateFlags(f, "Regexp pattern of permission template names to extract (only applies when the permission_templates category is selected), to extract templates in slices. Always compiled as a full-match regex implicitly anchored with ^ and $, e.g. \"Team-A.*\" matches every template whose name starts with Team-A. Empty means every template is extracted (default). #665.")
 	f.String(flagBranchAnalyzedAfter, "", "Only select branches analyzed on or after this date (YYYY-MM-DD) during extract. The project's main branch is always selected, even when it doesn't meet this date. Omit to select all branches (default). #583")
 }
 
@@ -226,6 +233,7 @@ func buildExtractConfig(cmd *cobra.Command, args []string) (extract.ExtractConfi
 	overrideString(cmd, flagBranchRegexp, &cfg.BranchRegexp)
 	overridePortfolioRegexps(cmd, &cfg.PortfolioKeyRegexp, &cfg.PortfolioNameRegexp)
 	overrideString(cmd, flagGroupNameRegexp, &cfg.GroupNameRegexp)
+	resolvePermissionTemplateFlagsInto(cmd, &cfg.PermissionTemplateRegexp)
 	overrideString(cmd, flagBranchAnalyzedAfter, &cfg.BranchAnalyzedAfter)
 	if err := validateBranchAnalyzedAfter(cfg.BranchAnalyzedAfter); err != nil {
 		return cfg, fmt.Errorf("--%s: %w", flagBranchAnalyzedAfter, err)
