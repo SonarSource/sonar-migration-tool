@@ -197,6 +197,252 @@ func TestMapProjectStructure_ProjectWidePartialClearsFailedProjects(t *testing.T
 	}
 }
 
+// #688: an extract limited by --objects to other categories re-extracts the
+// projects' DevOps bindings, not the data an earlier extract failed to read,
+// so the earlier failure still leaves the project out.
+func TestMapProjectStructure_NonProjectsPartialKeepsFailedProjects(t *testing.T) {
+	dir := setupTestExtract(t)
+	if err := common.WriteFailedProjects(filepath.Join(dir, testExtractID), []common.FailedProject{
+		{Key: "proj2", Task: "getProjectIssues", Error: "HTTP 504"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	const laterID = "2026-08-21-0001"
+	writeTestJSON(t, filepath.Join(dir, laterID, "extract.json"),
+		map[string]any{"url": testSQURL, "partial": true, "objects": []string{"groups"}})
+	writeTestJSONL(t, filepath.Join(dir, laterID, "getProjectDetails"), []map[string]any{
+		{"key": "proj1", "name": "Project 1", "projectKey": "proj1", "branch": "main", "serverUrl": testSQURL},
+		{"key": "proj2", "name": "Project 2", "projectKey": "proj2", "branch": "main", "serverUrl": testSQURL},
+	})
+
+	_, projects := MapProjectStructure(dir, ExtractMapping{testSQURL: {testExtractID, laterID}})
+	if len(projects) != 1 || projects[0].Key != "proj1" {
+		var keys []string
+		for _, p := range projects {
+			keys = append(keys, p.Key)
+		}
+		t.Fatalf("projects = %v, want only proj1", keys)
+	}
+}
+
+// #688: a groups-only partial extract also reads every project's details and
+// binding. A project it read replaces its earlier records, read once, so
+// nothing is counted twice. A project it failed on is neither left out nor
+// stripped of its earlier data.
+func TestMapProjectStructure_NonProjectsPartialSupersedesOnlyProjectsItRead(t *testing.T) {
+	dir := setupTestExtract(t)
+	const laterID = "2026-08-21-0001"
+	laterDir := filepath.Join(dir, laterID)
+	writeTestJSON(t, filepath.Join(laterDir, "extract.json"), map[string]any{
+		"url": testSQURL, "partial": true, "objects": []string{"groups"},
+	})
+	writeTestJSONL(t, filepath.Join(laterDir, "getProjects"), []map[string]any{
+		{"key": "proj1", "serverUrl": testSQURL},
+		{"key": "proj2", "serverUrl": testSQURL},
+	})
+	writeTestJSONL(t, filepath.Join(laterDir, "getProjectDetails"), []map[string]any{
+		{"key": "proj1", "name": "Project 1 renamed", "projectKey": "proj1", "branch": "main", "serverUrl": testSQURL},
+	})
+	if err := common.WriteFailedProjects(laterDir, []common.FailedProject{
+		{Key: "proj2", Task: "getProjectDetails", Error: "HTTP 504"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	mapping := ExtractMapping{testSQURL: {testExtractID, laterID}}
+	if failed := failedProjectKeys(dir, mapping); len(failed) != 0 {
+		t.Fatalf("failedProjectKeys = %v, want no excluded projects for groups-only extract", failed)
+	}
+	coveredByLater := supersessions(dir, mapping[testSQURL], "getProjectDetails")[0]
+	if !coveredByLater.covers(json.RawMessage(`{"key":"proj1"}`)) {
+		t.Error("groups-only extract read proj1 but did not supersede its earlier record")
+	}
+	if coveredByLater.covers(json.RawMessage(`{"key":"proj2"}`)) {
+		t.Error("groups-only extract failed on proj2 but superseded its earlier record")
+	}
+	if items, _ := ReadExtractData(dir, mapping, "getProjectDetails"); len(items) != 2 {
+		t.Errorf("getProjectDetails read %d records, want 2 (one per project, none twice)", len(items))
+	}
+
+	_, projects := MapProjectStructure(dir, mapping)
+	byKey := make(map[string]Project, len(projects))
+	for _, project := range projects {
+		byKey[project.Key] = project
+	}
+	if len(byKey) != 2 {
+		t.Fatalf("projects = %v, want both proj1 and proj2", byKey)
+	}
+	if got := byKey["proj1"].Name; got != "Project 1 renamed" {
+		t.Errorf("proj1 name = %q, want the groups-only extract's newer data", got)
+	}
+	if got := byKey["proj2"].Name; got != "Project 2" {
+		t.Errorf("proj2 name = %q, want earlier project data preserved", got)
+	}
+}
+
+// #688: a project unbound since an earlier extract has no getProjectBindings
+// record in a later groups-only extract. It is listed in that extract's
+// getProjects, so its stale binding is still superseded.
+func TestMapProjectStructure_NonProjectsPartialDropsStaleBinding(t *testing.T) {
+	dir := setupTestExtract(t)
+	writeTestJSONL(t, filepath.Join(dir, testExtractID, "getBindings"), []map[string]any{
+		{"key": "gh", "alm": "github", "url": "https://api.github.com", "serverUrl": testSQURL},
+	})
+	writeTestJSONL(t, filepath.Join(dir, testExtractID, "getProjectBindings"), []map[string]any{
+		{"key": "gh", "alm": "github", "repository": "acme/proj1", "projectKey": "proj1", "serverUrl": testSQURL},
+	})
+
+	const laterID = "2026-08-21-0001"
+	laterDir := filepath.Join(dir, laterID)
+	writeTestJSON(t, filepath.Join(laterDir, "extract.json"), map[string]any{
+		"url": testSQURL, "partial": true, "objects": []string{"groups"},
+	})
+	writeTestJSONL(t, filepath.Join(laterDir, "getProjects"), []map[string]any{
+		{"key": "proj1", "serverUrl": testSQURL},
+		{"key": "proj2", "serverUrl": testSQURL},
+	})
+	writeTestJSONL(t, filepath.Join(laterDir, "getProjectBindings"), nil)
+
+	_, projects := MapProjectStructure(dir, ExtractMapping{testSQURL: {testExtractID, laterID}})
+	for _, p := range projects {
+		if p.Key == "proj1" && p.ALM != "" {
+			t.Errorf("proj1 ALM = %q, want no binding: the later extract read proj1 and found it unbound", p.ALM)
+		}
+	}
+}
+
+// #688: the same holds for a non-projects extract sliced by project: its
+// project_keys name the projects whose DevOps bindings it re-extracted, not
+// projects whose data it read in full, so an earlier failure stands.
+func TestMapProjectStructure_SlicedNonProjectsPartialKeepsFailedProjects(t *testing.T) {
+	dir := setupTestExtract(t)
+	if err := common.WriteFailedProjects(filepath.Join(dir, testExtractID), []common.FailedProject{
+		{Key: "proj2", Task: "getProjectIssues", Error: "HTTP 504"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	const laterID = "2026-08-21-0001"
+	writeTestJSON(t, filepath.Join(dir, laterID, "extract.json"), map[string]any{
+		"url": testSQURL, "partial": true, "objects": []string{"groups"}, "project_keys": []string{"proj2"},
+	})
+	writeTestJSONL(t, filepath.Join(dir, laterID, "getProjectDetails"), []map[string]any{
+		{"key": "proj2", "name": "Project 2", "projectKey": "proj2", "branch": "main", "serverUrl": testSQURL},
+	})
+
+	_, projects := MapProjectStructure(dir, ExtractMapping{testSQURL: {testExtractID, laterID}})
+	for _, p := range projects {
+		if p.Key == "proj2" {
+			t.Fatal("proj2 is in projects.csv, want it still left out: the later extract re-read only its DevOps binding")
+		}
+	}
+}
+
+func TestMapProjectStructure_FirstNonProjectsExtractBindingFailureLeavesProjectOut(t *testing.T) {
+	dir := t.TempDir()
+	const extractID = "2026-08-20-0001"
+	extractDir := filepath.Join(dir, extractID)
+	writeTestJSON(t, filepath.Join(extractDir, "extract.json"), map[string]any{
+		"url": testSQURL, "partial": true, "objects": []string{"groups"},
+	})
+	writeTestJSONL(t, filepath.Join(extractDir, "getProjectDetails"), []map[string]any{
+		{"key": "proj1", "name": "Project 1", "projectKey": "proj1", "branch": "main", "serverUrl": testSQURL},
+	})
+	writeTestJSONL(t, filepath.Join(extractDir, "getProjectBindings"), nil)
+	if err := common.WriteFailedProjects(extractDir, []common.FailedProject{
+		{Key: "proj1", Task: "getProjectBindings", Error: "HTTP 504"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, projects := MapProjectStructure(dir, ExtractMapping{testSQURL: {extractID}})
+	if len(projects) != 0 {
+		t.Fatalf("projects = %v, want proj1 left out after its binding request failed", projects)
+	}
+}
+
+func TestMapProjectStructure_NonProjectsExtractFailureKeepsEarlierProjectData(t *testing.T) {
+	dir := setupTestExtract(t)
+	const laterID = "2026-08-21-0001"
+	laterDir := filepath.Join(dir, laterID)
+	writeTestJSON(t, filepath.Join(laterDir, "extract.json"), map[string]any{
+		"url": testSQURL, "partial": true, "objects": []string{"groups"},
+	})
+	writeTestJSONL(t, filepath.Join(laterDir, "getProjectBindings"), nil)
+	if err := common.WriteFailedProjects(laterDir, []common.FailedProject{
+		{Key: "proj1", Task: "getProjectBindings", Error: "HTTP 504"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	mapping := ExtractMapping{testSQURL: {testExtractID, laterID}}
+	if failed := failedProjectKeys(dir, mapping); failed[testSQURL+"proj1"] {
+		t.Fatal("proj1 was marked failed despite an earlier extract having its project details")
+	}
+	_, projects := MapProjectStructure(dir, mapping)
+	for _, project := range projects {
+		if project.Key == "proj1" {
+			if project.Name != "Project 1" {
+				t.Fatalf("proj1 name = %q, want earlier project data", project.Name)
+			}
+			return
+		}
+	}
+	t.Fatal("proj1 is missing from projects.csv, want its earlier data preserved")
+}
+
+func TestMapProjectStructure_NonProjectsExtractFailureNotCoveredBySlicedEarlierExtract(t *testing.T) {
+	dir := setupTestExtract(t)
+	writeTestJSON(t, filepath.Join(dir, testExtractID, "extract.json"), map[string]any{
+		"url": testSQURL, "partial": true, "project_keys": []string{"proj2"},
+	})
+	writeTestJSONL(t, filepath.Join(dir, testExtractID, "getProjectDetails"), []map[string]any{
+		{"key": "proj2", "name": "Project 2", "projectKey": "proj2", "branch": "main", "serverUrl": testSQURL},
+	})
+
+	const laterID = "2026-08-21-0001"
+	laterDir := filepath.Join(dir, laterID)
+	writeTestJSON(t, filepath.Join(laterDir, "extract.json"), map[string]any{
+		"url": testSQURL, "partial": true, "objects": []string{"groups"},
+	})
+	writeTestJSONL(t, filepath.Join(laterDir, "getProjectDetails"), []map[string]any{
+		{"key": "proj1", "name": "Project 1", "projectKey": "proj1", "branch": "main", "serverUrl": testSQURL},
+	})
+	writeTestJSONL(t, filepath.Join(laterDir, "getProjectBindings"), nil)
+	if err := common.WriteFailedProjects(laterDir, []common.FailedProject{
+		{Key: "proj1", Task: "getProjectBindings", Error: "HTTP 504"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, projects := MapProjectStructure(dir, ExtractMapping{testSQURL: {testExtractID, laterID}})
+	if len(projects) != 1 || projects[0].Key != "proj2" {
+		t.Fatalf("projects = %v, want only earlier sliced project proj2", projects)
+	}
+}
+
+// #688: extractedProjects reads the recorded --objects names as --objects
+// itself does, so an alias or another casing is understood, and a list it
+// cannot read counts as covering projects, as every extract did before.
+func TestExtractMeta_ExtractedProjects(t *testing.T) {
+	for _, tc := range []struct {
+		objects []string
+		want    bool
+	}{
+		{nil, true},
+		{[]string{"projects"}, true},
+		{[]string{"Projects", "groups"}, true},
+		{[]string{"groups"}, false},
+		{[]string{"qp", "pt"}, false},
+		{[]string{"bogus"}, true},
+	} {
+		if got := (extractMeta{Objects: tc.objects}).extractedProjects(); got != tc.want {
+			t.Errorf("objects %v: extractedProjects() = %v, want %v", tc.objects, got, tc.want)
+		}
+	}
+}
+
 // TestMapProjectStructure_SharedRepoBinding is the regression test for #622:
 // two source projects bound to the same repository without monorepo enabled
 // used to collide on the same internal map key and silently overwrite one

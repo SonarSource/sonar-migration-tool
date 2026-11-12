@@ -50,10 +50,25 @@ func projectObjectCategoryTasks() []string {
 	return out
 }
 
+// devOpsPlatformTasks are the tasks organizations.csv is built from: the
+// DevOps platform settings, and the projects with their bindings, which
+// give each platform organization its projects (#688). They run on every
+// extract whatever --objects selects, so an extract of only groups, say,
+// still yields a correct organizations.csv. A --project_key_regexp slice
+// still narrows the project ones, as it does every project task.
+var devOpsPlatformTasks = []string{
+	"getBindings", "getProjects", "getProjectDetails", "getProjectBindings",
+}
+
 // excludedExtractTasks returns every task name belonging to a category
 // NOT present in selected (nil selected == everything selected == no
-// exclusions). Used both to prune the default "get"-prefixed task set
-// and to exclude cross-category dependency edges (#536).
+// exclusions), except devOpsPlatformTasks, which are never excluded. Used
+// both to prune the default "get"-prefixed task set and to exclude
+// cross-category dependency edges (#536).
 func excludedExtractTasks(selected map[string]bool) map[string]bool {
-	return common.ExcludedTasks(extractObjectTasks, selected)
+	excluded := common.ExcludedTasks(extractObjectTasks, selected)
+	for _, name := range devOpsPlatformTasks {
+		delete(excluded, name)
+	}
+	return excluded
 }

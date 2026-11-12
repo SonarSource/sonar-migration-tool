@@ -5,6 +5,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -40,7 +41,7 @@ func newExtractTestCmd() *cobra.Command {
 	f.Bool(flagSkipProjectDataMigration, false, "")
 	f.Bool(flagSkipIssueSync, false, "")
 	f.String("objects", "", "")
-	f.String("project_key", "", "")
+	registerProjectKeyFlags(f, "")
 	return cmd
 }
 
@@ -189,6 +190,35 @@ func TestBuildExtractConfigProjectKeyFlag(t *testing.T) {
 			t.Errorf("expected CLI project_key to win, got %q", cfg.ProjectKey)
 		}
 	})
+}
+
+func TestResolveExtractProjectKeysWithGroupsOnly(t *testing.T) {
+	srv := newProjectListingMockServer(t, []string{
+		"BANKING_core", "BANKING_payments", "other-project",
+	})
+	cmd := newExtractTestCmd()
+	for name, value := range map[string]string{
+		flagSourceURL: srv.URL, flagSourceToken: "tok",
+		"objects": "groups", flagProjectKeyRegexp: "BANKING_.+",
+	} {
+		if err := cmd.Flags().Set(name, value); err != nil {
+			t.Fatalf("set --%s: %v", name, err)
+		}
+	}
+	cfg, err := buildExtractConfig(cmd, nil)
+	if err != nil {
+		t.Fatalf("buildExtractConfig: %v", err)
+	}
+	if cfg.Objects[common.ObjectProjects] || !cfg.Objects[common.ObjectGroups] {
+		t.Fatalf("expected groups-only Objects selection, got %+v", cfg.Objects)
+	}
+
+	if err := resolveExtractProjectKeys(context.Background(), &cfg); err != nil {
+		t.Fatalf("resolveExtractProjectKeys: %v", err)
+	}
+	if len(cfg.ProjectKeys) != 2 || cfg.ProjectKeys[0] != "BANKING_core" || cfg.ProjectKeys[1] != "BANKING_payments" {
+		t.Errorf("ProjectKeys = %v, want [BANKING_core BANKING_payments]", cfg.ProjectKeys)
+	}
 }
 
 // #586 — --insecure is a plain two-way override, unlike the one-way
