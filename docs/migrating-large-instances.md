@@ -91,6 +91,8 @@ sonar-migration-tool migrate --config config.json --objects groups --group_name_
 
 Each tranche also sets the organization-level permissions of the groups it creates. The built-in `Anyone` and `sonar-users` groups are always in scope.
 
+If a later step's extract makes `groups.csv` reference a group in an organization where step 1 did not create it (for example when you skipped step 0's full extract), that step creates it: a `pt`, `projects` or `quality_profiles` run creates the `groups.csv` groups missing from the target organization before granting their permissions, and leaves the existing ones untouched.
+
 ---
 
 ## Step 2 — Settings, quality profiles and quality gates
