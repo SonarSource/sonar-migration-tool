@@ -1599,6 +1599,48 @@ func TestSyncProjectIssuesSkipsIndexingWaitWhenNothingWasSubmitted(t *testing.T)
 	}
 }
 
+// #700: the standalone sync-issues command runs after a finished migrate, so
+// the indexing wait is pure waste. With SkipIndexingWait set, syncProjectIssues
+// must not enter the backoff even though the index is the zero value (which
+// otherwise means "always wait") and the project-wide count probe reports 0.
+func TestSyncProjectIssuesSkipsIndexingWaitWhenSkipIndexingWaitSet(t *testing.T) {
+	dir := t.TempDir()
+	setupIssueTagExtract(t, dir)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/issues/search", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"issues": []map[string]any{},
+			"paging": map[string]any{"pageIndex": 1, "pageSize": 1, "total": 0},
+		})
+	})
+	mux.HandleFunc("POST /api/issues/set_tags", func(w http.ResponseWriter, _ *http.Request) {})
+	mux.HandleFunc("POST /api/issues/add_comment", func(w http.ResponseWriter, _ *http.Request) {})
+	cloudSrv := httptest.NewServer(mux)
+	t.Cleanup(cloudSrv.Close)
+	apiSrv := newMockAPIServer()
+	t.Cleanup(apiSrv.Close)
+	e := newTestExecutor(cloudSrv, apiSrv, dir)
+	e.SkipIndexingWait = true
+
+	var logBuf bytes.Buffer
+	e.Logger = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	stats := syncProjectIssues(ctx, e, syncIssuesInput{
+		CloudKey: "cloud-proj", OrgKey: "cloud-org", ServerURL: testServerURL, ServerKey: "demo-rules",
+		Counter: NewTaskCounter("test"), RuleDefaults: loadRuleTagDefaults(e), Submitted: submittedIssueIndex{},
+	})
+	if stats.Actionable == 0 {
+		t.Fatal("setup fixture produced no actionable issues; the wait would never have been reached")
+	}
+	if strings.Contains(logBuf.String(), "waiting for Cloud indexing to catch up") {
+		t.Errorf("must not have entered the backoff, got: %s", logBuf.String())
+	}
+}
+
 func writeImportRecord(t *testing.T, w *common.ChunkWriter, cloudKey, branch string, submitted int) {
 	t.Helper()
 	rec, _ := json.Marshal(map[string]any{
@@ -1607,5 +1649,33 @@ func writeImportRecord(t *testing.T, w *common.ChunkWriter, cloudKey, branch str
 	})
 	if err := w.WriteOne(rec); err != nil {
 		t.Fatalf("seed importProjectData record: %v", err)
+	}
+}
+
+// The per-reason breakdown logged before each project's issue sync splits the
+// status reason into accepted / false-positive / won't-fix.
+func TestClassifyActionableReasonsDetailsStatus(t *testing.T) {
+	b := classifyActionableReasons([]matchableIssue{
+		{IssueStatus: "ACCEPTED"},
+		{IssueStatus: "FALSE_POSITIVE", Tags: []string{"x"}},
+		{Resolution: "WONTFIX", Comments: []issueComment{{}}},
+	})
+	if b.acceptedOrFP != 3 || b.accepted != 1 || b.falsePositive != 1 || b.wontFix != 1 {
+		t.Errorf("status split wrong: %+v", b)
+	}
+	if b.customTags != 1 || b.comments != 1 {
+		t.Errorf("tags/comments wrong: %+v", b)
+	}
+}
+
+func TestClassifyHotspotTriageReasons(t *testing.T) {
+	r := classifyHotspotTriageReasons([]matchableHotspot{
+		{Status: "REVIEWED", Resolution: "SAFE"},
+		{Status: "REVIEWED", Resolution: "ACKNOWLEDGED", Comments: []hotspotComment{{Login: "a"}}},
+		{Status: "TO_REVIEW", Comments: []hotspotComment{{Login: "b"}}},
+		{Status: "REVIEWED", Resolution: "FIXED"},
+	})
+	if r.reviewed != 3 || r.safe != 1 || r.acknowledged != 1 || r.fixed != 1 || r.comments != 2 {
+		t.Errorf("hotspot reasons wrong: %+v", r)
 	}
 }

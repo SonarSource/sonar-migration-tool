@@ -455,6 +455,35 @@ type hotspotCategoryCounts struct {
 	eligible, ack, excluded, triaged int
 }
 
+// hotspotTriageReasons counts source hotspots by the signal that makes them
+// worth syncing. A hotspot is counted under every reason it matches.
+type hotspotTriageReasons struct {
+	reviewed, safe, acknowledged, fixed, comments int
+}
+
+func classifyHotspotTriageReasons(all []matchableHotspot) hotspotTriageReasons {
+	var r hotspotTriageReasons
+	for _, h := range all {
+		if strings.EqualFold(h.Status, "REVIEWED") {
+			switch strings.ToUpper(h.Resolution) {
+			case "SAFE":
+				r.safe++
+				r.reviewed++
+			case "ACKNOWLEDGED":
+				r.acknowledged++
+				r.reviewed++
+			case "FIXED":
+				r.fixed++
+				r.reviewed++
+			}
+		}
+		if len(h.Comments) > 0 {
+			r.comments++
+		}
+	}
+	return r
+}
+
 // classifyAndCountHotspots classifies every hotspot for dispatch and
 // tallies the category counts, in one pass. Split out of
 // syncProjectHotspots to keep that function's cognitive complexity low.
@@ -563,12 +592,37 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 		return result
 	}
 
+	// Logged before the indexing wait so the operator sees what the sync will
+	// do (and why) even while the wait is running.
+	reasons := classifyHotspotTriageReasons(all)
+	e.Logger.Info(fmt.Sprintf("syncHotspotMetadata: %d of %d source hotspots eligible for sync "+
+		"(status: %d reviewed [safe %d, acknowledged %d, fixed %d], comments: %d; "+
+		"a hotspot is counted under every reason it matches); "+
+		"%d more are only tagged sqs-hotspot",
+		counts.eligible+counts.ack, len(sourceHotspots), reasons.reviewed, reasons.safe, reasons.acknowledged,
+		reasons.fixed, reasons.comments, counts.excluded),
+		"project", input.CloudKey,
+		"source_total", len(sourceHotspots),
+		"after_dedup", len(all),
+		"eligible", counts.eligible,
+		"acknowledged", counts.ack,
+		"excluded", counts.excluded,
+		"carrying_triage", counts.triaged,
+		"by_status_reviewed", reasons.reviewed,
+		"by_status_safe", reasons.safe,
+		"by_status_acknowledged", reasons.acknowledged,
+		"by_status_fixed", reasons.fixed,
+		"by_comment", reasons.comments,
+	)
+
 	// 2. Wait for Cloud indexing — proves the CE task is done. Counted over
 	// issues, not hotspots: the imported findings are issues on the target.
 	// Skipped up front when this run's import submitted zero findings for
 	// the project — the classic case being every hotspot dropped on an
 	// inactive target rule (#597).
-	if input.Submitted.nothingSubmitted(input.CloudKey) {
+	if e.SkipIndexingWait {
+		e.Logger.Debug("syncHotspotMetadata: standalone run, not waiting for Cloud indexing", "project", input.CloudKey)
+	} else if input.Submitted.nothingSubmitted(input.CloudKey) {
 		e.Logger.Info("syncHotspotMetadata: import submitted no findings for this project, nothing to wait for",
 			"project", input.CloudKey)
 	} else {
@@ -579,15 +633,6 @@ func syncProjectHotspots(ctx context.Context, e *Executor, input syncHotspotInpu
 			return e.Cloud.Issues.Count(ctx, params)
 		})
 	}
-
-	e.Logger.Info("syncHotspotMetadata: syncing hotspots as issues",
-		"project", input.CloudKey,
-		"source_total", len(sourceHotspots),
-		"eligible", counts.eligible,
-		"acknowledged", counts.ack,
-		"excluded", counts.excluded,
-		"carrying_triage", counts.triaged,
-	)
 
 	// 3. Bulk-fetch Cloud issue candidates once per (project, branch) —
 	// #527: this replaces the previous one-search-per-hotspot approach,
