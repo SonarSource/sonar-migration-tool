@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
@@ -48,6 +49,11 @@ The deprecated, repeatable --project_key (explicit literal keys) still
 works but logs a warning; --project_key_regexp takes precedence if both
 are set (#592). Target project keys are resolved via the same
 project_key_pattern + organizations.csv convention migrate/transfer use.
+
+--default_organization is only needed when organizations.csv carries no
+sonarcloud_org_key mapping yet. When the mapping is already defined (for
+example by the migrate run being re-synced), every project is synced into its
+own organization and the mapping is kept as is (#701).
 
 Example (flags):
   sonar-migration-tool sync-issues \
@@ -94,7 +100,7 @@ func init() {
 	f.String(flagProjectKeyRegexp, "", "Regexp pattern of project keys to sync, implicitly anchored (^...$) — a plain key matches only itself. Omit to sync every project visible to the source token. #592.")
 	f.String(flagTargetURL, "", scCloudName+" URL (maps to target.url, default: https://sonarcloud.io/)")
 	f.String(flagTargetToken, "", scCloudName+" token (maps to target.token)")
-	f.String(flagDefaultOrg, "", scCloudName+" organization key (maps to target.default_organization)")
+	f.String(flagDefaultOrg, "", scCloudName+" organization key (maps to target.default_organization). Optional: only used when organizations.csv has no sonarcloud_org_key mapping yet (#701)")
 	f.String(flagProjectKeyPattern, "", "Template used to resolve each project's already-migrated target key, built from <ORIGINAL_PROJECT_KEY> and <ORGANIZATION_KEY> (maps to target.project_key_pattern; default: <ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>) — must match the pattern used when the projects were created")
 	f.String(flagEnterpriseKey, "", scCloudName+" enterprise key (maps to target.enterprise_key, defaults to --"+flagDefaultOrg+")")
 	f.String(flagExportDir, "./migration-files/", "Working directory for intermediate files (maps to export_directory)")
@@ -244,8 +250,11 @@ func validateSyncIssuesConfig(cfg syncIssuesConfig) error {
 	if cfg.sourceURL == "" || cfg.sourceToken == "" {
 		return fmt.Errorf("%s URL and token are required (--%s / --%s or source.url / source.token in config file)", sqServerName, flagSourceURL, flagSourceToken)
 	}
-	if cfg.targetToken == "" || cfg.defaultOrganization == "" {
-		return fmt.Errorf("%s token and organization key are required (--%s / --%s or target.token / target.default_organization in config file)", scCloudName, flagTargetToken, flagDefaultOrg)
+	// default_organization is NOT required here (#701): it is only a fallback
+	// for an organizations.csv that carries no mapping, which
+	// requireOrgMappingOrDefault checks against the export directory.
+	if cfg.targetToken == "" {
+		return fmt.Errorf("%s token is required (--%s or target.token in config file)", scCloudName, flagTargetToken)
 	}
 	// #571 — reject an out-of-range cap up front rather than silently
 	// clamping it deep inside the issue/hotspot sync.
@@ -292,6 +301,30 @@ func resolveSyncIssuesProjectKeyRegexp(ctx context.Context, cfg *syncIssuesConfi
 	return nil
 }
 
+// requireOrgMappingOrDefault fails fast, before the (possibly long) extract,
+// when sync-issues would have no organization to sync into: no
+// --default_organization and no sonarcloud_org_key mapping already present in
+// the export directory's organizations.csv (#701). With a mapping defined,
+// every project is synced into its own organization and no default is needed.
+// The same condition is re-checked after the extract by RunSyncIssues, since
+// a fresh export directory only gets its organizations.csv from that extract.
+func requireOrgMappingOrDefault(exportDir, defaultOrg string) error {
+	if defaultOrg != "" {
+		return nil
+	}
+	rows, err := structure.LoadCSV(exportDir, structure.OrganizationsCSVFileName)
+	if err == nil {
+		for _, row := range rows {
+			if v, _ := row["sonarcloud_org_key"].(string); strings.TrimSpace(v) != "" {
+				return nil
+			}
+		}
+	}
+	return common.NewExitError(2, fmt.Errorf(
+		"no %s organization mapping found in %s: pass --%s (or target.default_organization in the config file), or fill in the sonarcloud_org_key column of %s",
+		scCloudName, exportDir, flagDefaultOrg, structure.OrganizationsCSVFileName))
+}
+
 func runSyncIssuesCmd(cmd *cobra.Command, _ []string) error {
 	defer common.LogCommandDuration(slog.Default(), "sync-issues", time.Now())
 
@@ -314,6 +347,10 @@ func runSyncIssuesCmd(cmd *cobra.Command, _ []string) error {
 
 	ctx := cmd.Context()
 
+	if err := requireOrgMappingOrDefault(cfg.exportDir, cfg.defaultOrganization); err != nil {
+		return err
+	}
+
 	printPhase(1, 3, "Extracting from "+sqServerName+"...")
 	skipped, err := extract.RunExtract(ctx, extract.ExtractConfig{
 		URL:                cfg.sourceURL,
@@ -335,7 +372,10 @@ func runSyncIssuesCmd(cmd *cobra.Command, _ []string) error {
 	warnSkippedProjects(skipped)
 
 	printPhase(2, 3, "Building organization structure...")
-	if err := structure.RunStructure(cfg.exportDir, cfg.defaultOrganization); err != nil {
+	// regenerateStructure carries the operator's existing sonarcloud_org_key
+	// mapping over (#664) instead of overwriting it, which is what lets a
+	// sync-issues run reuse the mapping a previous migrate ran with (#701).
+	if err := regenerateStructure(cfg.exportDir, cfg.defaultOrganization, time.Now()); err != nil {
 		return fmt.Errorf("structure failed: %w", err)
 	}
 

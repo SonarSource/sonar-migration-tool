@@ -305,7 +305,7 @@ func TestTier0_SyncIssuesProjectKeyDeprecatedFlagStillWorks(t *testing.T) {
 // TestTier0_ExitCodeMatrix asserts each up-front validation error still fires.
 //
 // Every wantExit and wantContains below was observed by running the real
-// binary — all of these paths exit 1. Exit codes 2 and 3 exist
+// binary — these paths exit 1, except sync_issues_without_default_org_or_mapping (2). Exit codes 2 and 3 exist
 // (common.NewExitError in internal/migrate/org_mapping.go) but are only
 // reachable once org mapping is under way, which needs live data, so they are
 // asserted in Tier 2 rather than here.
@@ -324,6 +324,15 @@ func TestTier0_ExitCodeMatrix(t *testing.T) {
 			args:         []string{"transfer", "--config", cfg},
 			wantExit:     1,
 			wantContains: "project key is required",
+		},
+		{
+			// #701: no --default_organization and no organizations.csv
+			// mapping in the (empty) export directory. Observed: exit 2.
+			name: "sync_issues_without_default_org_or_mapping",
+			args: []string{"sync-issues", "--source_url", "http://127.0.0.1:1", "--source_token", "t",
+				"--target_token", "t", "--export_dir", exportDir},
+			wantExit:     2,
+			wantContains: "organization mapping found",
 		},
 		{
 			name:         "regtest_without_config",
