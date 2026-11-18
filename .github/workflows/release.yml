@@ -349,7 +349,7 @@ jobs:
           path: dist/
 
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: step-security/action-gh-release@44319d37c8b7966bf07f89f0cbf63408141446df # v3.0.3
         with:
           tag_name: ${{ steps.release.outputs.tag }}
           name: ${{ steps.release.outputs.tag }}
