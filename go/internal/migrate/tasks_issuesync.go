@@ -334,6 +334,9 @@ func hasManualChanges(iss matchableIssue) bool {
 // migration cost.
 type actionableReasonBreakdown struct {
 	acceptedOrFP   int
+	accepted       int
+	falsePositive  int
+	wontFix        int
 	customTags     int
 	manualSeverity int
 	comments       int
@@ -342,25 +345,33 @@ type actionableReasonBreakdown struct {
 func classifyActionableReasons(actionable []matchableIssue) actionableReasonBreakdown {
 	var b actionableReasonBreakdown
 	for _, iss := range actionable {
-		status := strings.ToUpper(iss.Status)
-		resolution := strings.ToUpper(iss.Resolution)
-		issueStatus := strings.ToUpper(iss.IssueStatus)
-		if issueStatus == "ACCEPTED" || issueStatus == "FALSE_POSITIVE" ||
-			status == "ACCEPTED" || status == "FALSE_POSITIVE" ||
-			resolution == resolutionFalsePositive || resolution == "WONTFIX" {
-			b.acceptedOrFP++
-		}
-		if len(iss.Tags) > 0 {
-			b.customTags++
-		}
-		if iss.ManualSeverity {
-			b.manualSeverity++
-		}
-		if len(iss.Comments) > 0 {
-			b.comments++
-		}
+		b.addStatus(iss)
+		b.comments += boolToInt(len(iss.Comments) > 0)
+		b.customTags += boolToInt(len(iss.Tags) > 0)
+		b.manualSeverity += boolToInt(iss.ManualSeverity)
 	}
 	return b
+}
+
+// addStatus tallies the triage-status reasons for one issue.
+func (b *actionableReasonBreakdown) addStatus(iss matchableIssue) {
+	status := strings.ToUpper(iss.Status)
+	resolution := strings.ToUpper(iss.Resolution)
+	issueStatus := strings.ToUpper(iss.IssueStatus)
+	isAccepted := issueStatus == "ACCEPTED" || status == "ACCEPTED"
+	isFP := issueStatus == "FALSE_POSITIVE" || status == "FALSE_POSITIVE" || resolution == resolutionFalsePositive
+	isWontFix := resolution == "WONTFIX"
+	b.acceptedOrFP += boolToInt(isAccepted || isFP || isWontFix)
+	b.accepted += boolToInt(isAccepted)
+	b.falsePositive += boolToInt(isFP)
+	b.wontFix += boolToInt(isWontFix && !isAccepted && !isFP)
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }
 
 // countDistinctBranches returns the number of unique branch names in
@@ -667,11 +678,34 @@ func syncProjectIssues(ctx context.Context, e *Executor, input syncIssuesInput) 
 		return stats
 	}
 
+	// Logged before the indexing wait so the operator sees what the sync will
+	// do (and why) even while the wait is running.
+	breakdown := classifyActionableReasons(actionable)
+	e.Logger.Info(fmt.Sprintf("syncIssueMetadata: %d of %d source issues eligible for sync "+
+		"(status: %d [accepted %d, false-positive %d, won't-fix %d], manual severity: %d, tags: %d, comments: %d; "+
+		"an issue is counted under every reason it matches)",
+		len(actionable), len(sourceIssues), breakdown.acceptedOrFP, breakdown.accepted, breakdown.falsePositive,
+		breakdown.wontFix, breakdown.manualSeverity, breakdown.customTags, breakdown.comments),
+		"project", input.CloudKey,
+		"source_total", len(sourceIssues),
+		"eligible", len(actionable),
+		"branches", countDistinctBranches(sourceIssues),
+		"by_status", breakdown.acceptedOrFP,
+		"by_status_accepted", breakdown.accepted,
+		"by_status_false_positive", breakdown.falsePositive,
+		"by_status_wont_fix", breakdown.wontFix,
+		"by_manual_severity", breakdown.manualSeverity,
+		"by_tag", breakdown.customTags,
+		"by_comment", breakdown.comments,
+	)
+
 	// 2. Wait for Cloud indexing — proves the CE task is done so per-
 	// issue searches return real data. Skipped up front when this run's
 	// import submitted zero findings for the project: the target's issue
 	// count can then never rise, so every retry would be pure waste (#597).
-	if input.Submitted.nothingSubmitted(input.CloudKey) {
+	if e.SkipIndexingWait {
+		e.Logger.Debug("syncIssueMetadata: standalone run, not waiting for Cloud indexing", "project", input.CloudKey)
+	} else if input.Submitted.nothingSubmitted(input.CloudKey) {
 		e.Logger.Info("syncIssueMetadata: import submitted no findings for this project, nothing to wait for",
 			"project", input.CloudKey)
 	} else if err := waitForCloudIndexing(ctx, e.Logger, "syncIssueMetadata", input.CloudKey, func() (int, error) {
@@ -683,18 +717,6 @@ func syncProjectIssues(ctx context.Context, e *Executor, input syncIssuesInput) 
 		logAPIWarn(e.Logger, "syncIssueMetadata: indexing wait failed", err, "project", input.CloudKey)
 		return stats
 	}
-
-	breakdown := classifyActionableReasons(actionable)
-	e.Logger.Info("syncIssueMetadata: syncing pairs",
-		"project", input.CloudKey,
-		"source_total", len(sourceIssues),
-		"actionable", len(actionable),
-		"branches", countDistinctBranches(sourceIssues),
-		"accepted_or_false_positive", breakdown.acceptedOrFP,
-		"custom_tags", breakdown.customTags,
-		"manual_severity", breakdown.manualSeverity,
-		"comments", breakdown.comments,
-	)
 
 	// 3 + 4. Per-actionable-source: targeted search, resolve by line,
 	// dispatch. Counted via atomics on the shared stats. Race-safety:

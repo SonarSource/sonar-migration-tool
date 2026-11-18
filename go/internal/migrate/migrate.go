@@ -402,6 +402,12 @@ type Executor struct {
 	// FastSync — see MigrateConfig.FastSync (#527).
 	FastSync bool
 
+	// SkipIndexingWait makes syncIssueMetadata / syncHotspotMetadata skip
+	// waitForCloudIndexing. Set by the standalone sync-issues command: it
+	// runs after a finished migrate, so every finding is already indexed
+	// on the target and there is no CE task to wait past (#700).
+	SkipIndexingWait bool
+
 	// ProjectKeyPattern is the resolved target-key template (issue #138),
 	// consumed by every task that derives a SonarQube Cloud project key
 	// (createProjects, matchProjectRepos, permission templates, portfolios).

@@ -50,7 +50,7 @@ Projects whose organization has no SonarQube Cloud mapping (see [Target project 
 
 `sync-issues` resolves each source project's target SonarQube Cloud key with the **same `project_key_pattern` convention** used by `migrate` and `transfer`:
 
-- The target organization for a project comes from `structure`'s `organizations.csv` mapping (server → organization), falling back to `--default_organization` when no per-server mapping is set.
+- The target organization for a project comes from `structure`'s `organizations.csv` mapping (server → organization), falling back to `--default_organization` only when that file carries no mapping. When a mapping is already defined (for example by the `migrate` run being re-synced), `--default_organization` is not needed: every project is synced into its own organization, and the mapping is preserved rather than regenerated.
 - The target project key is rendered from `--project_key_pattern` (default `<ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>`), the same template used across the tool — see [Project key renaming strategy in ADVANCED-CONFIG.md](ADVANCED-CONFIG.md#project-key-renaming-strategy) for the full placeholder reference and validation rules.
 - `sync-issues` runs its own `extract` + `structure` pass internally (producing `organizations.csv` / `projects.csv` in `--export_dir`), so you don't need to run either command yourself first. It does not run `mappings` — the profile/gate/group/template/portfolio mapping CSVs it produces aren't needed for a triage-state-only sync.
 
@@ -113,7 +113,7 @@ sonar-migration-tool sync-issues -c config.json
 | `--project_key_regexp` | `project_key_regexp` | Regexp pattern of project keys to sync, implicitly anchored (`^...$`) — a plain key matches only itself. Omit to sync every project visible to the source token. Also settable via `source.project_key_regexp`. The deprecated, repeatable `--project_key` / `project_key` (explicit literal keys) still works but logs a warning; `--project_key_regexp` takes precedence if both are set. (#592) |
 | `--target_url` | `target.url` | SonarQube Cloud URL (default: `https://sonarcloud.io/`) |
 | `--target_token` | `target.token` | SonarQube Cloud token |
-| `--default_organization` | `target.default_organization` | SonarQube Cloud organization key, used as a fallback when `organizations.csv` has no mapping for a source project |
+| `--default_organization` | `target.default_organization` | SonarQube Cloud organization key. Optional: only used as a fallback when `organizations.csv` has no `sonarcloud_org_key` mapping (#701) |
 | `--project_key_pattern` | `target.project_key_pattern` | Template for target project keys, built from `<ORIGINAL_PROJECT_KEY>` and `<ORGANIZATION_KEY>` (default: `<ORGANIZATION_KEY>_<ORIGINAL_PROJECT_KEY>`) |
 | `--export_dir` | `export_directory` | Working directory for intermediate files (default: `./migration-files/`) |
 | `--concurrency` | `concurrency` | Max concurrent HTTP requests (default: `25`) |

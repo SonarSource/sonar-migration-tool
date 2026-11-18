@@ -201,6 +201,7 @@ func RunSyncIssues(ctx context.Context, cfg SyncIssuesConfig) (SyncIssuesSummary
 		ProjectKeyPattern:  cfg.ProjectKeyPattern,
 		FastSync:           cfg.FastSync,
 		MaxIssueComments:   cfg.MaxIssueComments,
+		SkipIndexingWait:   true,
 		Logger:             logger,
 	}
 
@@ -219,8 +220,9 @@ func RunSyncIssues(ctx context.Context, cfg SyncIssuesConfig) (SyncIssuesSummary
 		func(gctx context.Context, t syncTarget) {
 			logger.Info("sync-issues: syncing project", "source_key", t.Key, "cloud_project_key", t.CloudProjectKey, "org", t.OrgKey)
 
-			// No importProjectData runs here, so there is nothing to index: the
-			// zero submittedIssueIndex keeps the original always-wait path (#597).
+			// No importProjectData runs here, so there is nothing to index and
+			// e.SkipIndexingWait bypasses the backoff wait (#700). The zero
+			// submittedIssueIndex is therefore never consulted.
 			iStats := syncProjectIssues(gctx, e, syncIssuesInput{
 				CloudKey: t.CloudProjectKey, OrgKey: t.OrgKey, ServerURL: t.ServerURL, ServerKey: t.Key,
 				Counter: counter, RuleDefaults: ruleDefaults, Submitted: submittedIssueIndex{},

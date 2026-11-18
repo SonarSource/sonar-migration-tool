@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 	"github.com/spf13/cobra"
 )
 
@@ -506,6 +507,49 @@ func TestResolveSyncIssuesConfig_InsecureFlag(t *testing.T) {
 		}
 		if cfg.insecure {
 			t.Error("expected --insecure=false to override config-file insecure:true")
+		}
+	})
+}
+
+// #701: --default_organization is not mandatory; only the target token is.
+func TestValidateSyncIssuesConfig_DefaultOrganizationNotRequired(t *testing.T) {
+	cfg := syncIssuesConfig{sourceURL: "u", sourceToken: "t", targetToken: "tt"}
+	if err := validateSyncIssuesConfig(cfg); err != nil {
+		t.Fatalf("unexpected error without default organization: %v", err)
+	}
+}
+
+func TestRequireOrgMappingOrDefault(t *testing.T) {
+	write := func(t *testing.T, dir, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, structure.OrganizationsCSVFileName), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const header = "sonarqube_org_key,sonarcloud_org_key,binding_key,server_url,alm,url,is_cloud,project_count\n"
+
+	t.Run("default org given", func(t *testing.T) {
+		if err := requireOrgMappingOrDefault(t.TempDir(), "org"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+	t.Run("no file and no default", func(t *testing.T) {
+		if err := requireOrgMappingOrDefault(t.TempDir(), ""); err == nil {
+			t.Fatal("expected an error")
+		}
+	})
+	t.Run("file without mapping and no default", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, header+"gh,,k,http://s,github,http://g,false,3\n")
+		if err := requireOrgMappingOrDefault(dir, ""); err == nil {
+			t.Fatal("expected an error")
+		}
+	})
+	t.Run("file with mapping and no default", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, header+"gh,my-org,k,http://s,github,http://g,false,3\n")
+		if err := requireOrgMappingOrDefault(dir, ""); err != nil {
+			t.Fatalf("unexpected error: %v", err)
 		}
 	})
 }
