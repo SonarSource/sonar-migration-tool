@@ -245,240 +245,271 @@ func parseConfigFile(path string) (configFileShape, error) {
 func (s configFileShape) toMigrateConfig() MigrateConfig {
 	switch {
 	case s.Source != nil || s.Target != nil:
-		// #266 unified shape. Migrate pulls from the "target"
-		// sub-object; top-level concurrency / timeout /
-		// export_directory supply defaults. The "source" block is
-		// ignored. organization_key is provisional and ignored.
-		var cfg MigrateConfig
-		if s.Target != nil {
-			cfg.URL = s.Target.URL
-			cfg.Token = s.Target.Token
-			cfg.EnterpriseKey = s.Target.EnterpriseKey
-			cfg.Edition = s.Target.Edition
-			cfg.RunID = s.Target.RunID
-			cfg.TargetTask = s.Target.TargetTask
-			cfg.Concurrency = s.Target.Concurrency
-			cfg.BuildConcurrency = s.Target.BuildConcurrency
-			cfg.Timeout = s.Target.Timeout
-			cfg.DefaultOrganization = s.Target.DefaultOrganization
-			cfg.ProjectKeyPattern = s.Target.ProjectKeyPattern
-			cfg.ExcludeBranches = s.Target.ExcludeBranches
-			cfg.UnsupportedLanguages = s.Target.UnsupportedLanguages
-			cfg.MaxIssueComments = s.Target.MaxIssueComments
-			cfg.BranchRegexp = s.Target.BranchRegexp
-			cfg.GroupNameRegexp = s.Target.GroupNameRegexp
-		}
-		// #474 — target.unsupported_languages wins, else the top-level field.
-		cfg.UnsupportedLanguages = resolveUnsupportedLanguages(
-			cfg.UnsupportedLanguages, s.UnsupportedLanguages)
-		// #582 — target.branch_regexp wins, else the top-level field.
-		cfg.BranchRegexp = common.FirstNonEmpty(cfg.BranchRegexp, s.BranchRegexp)
-		// #666 — resolve the pair as a whole so a target-level key does not
-		// conflict with a top-level name (or vice versa).
-		if s.Target != nil && (s.Target.PortfolioKeyRegexp != "" || s.Target.PortfolioNameRegexp != "") {
-			cfg.PortfolioKeyRegexp, cfg.PortfolioNameRegexp = s.Target.PortfolioKeyRegexp, s.Target.PortfolioNameRegexp
-		} else {
-			cfg.PortfolioKeyRegexp, cfg.PortfolioNameRegexp = s.PortfolioKeyRegexp, s.PortfolioNameRegexp
-		}
-		// #669 — target.group_name_regexp wins, else the top-level field.
-		cfg.GroupNameRegexp = common.FirstNonEmpty(cfg.GroupNameRegexp, s.GroupNameRegexp)
-		// #665 — target.permission_template_regexp wins, else the top-level field.
-		var targetPT string
-		if s.Target != nil {
-			targetPT = common.FirstNonEmpty(s.Target.PermissionTemplateRegexp, s.Target.PTRegexp)
-		}
-		cfg.PermissionTemplateRegexp = common.FirstNonEmpty(targetPT, s.ptRegexp())
-		// #527 — target.fast_sync wins, else the top-level field, else false.
-		var targetFastSync *FlexibleBool
-		if s.Target != nil {
-			targetFastSync = s.Target.FastSync
-		}
-		cfg.FastSync = resolveFastSync(targetFastSync, s.FastSync)
-		// #554 — target.migrate_history wins, else the top-level field, else false.
-		var targetMigrateHistory *FlexibleBool
-		if s.Target != nil {
-			targetMigrateHistory = s.Target.MigrateHistory
-		}
-		cfg.MigrateHistory = resolveMigrateHistory(targetMigrateHistory, s.MigrateHistory)
-		// #655 — target.use_slb_for_reference_branch_new_code wins, else the
-		// top-level field, else false.
-		var targetUseSLB *FlexibleBool
-		if s.Target != nil {
-			targetUseSLB = s.Target.UseSLBForReferenceBranchNewCode
-		}
-		cfg.UseSLBForReferenceBranchNewCode = resolveUseSLBForReferenceBranchNewCode(targetUseSLB, s.UseSLBForReferenceBranchNewCode)
-		// #583 — target.branch_analyzed_after wins when explicitly present
-		// (even if empty, meaning "no filter for migrate"), else the
-		// top-level field, else "" (no filter).
-		var targetBranchAnalyzedAfter *string
-		if s.Target != nil {
-			targetBranchAnalyzedAfter = s.Target.BranchAnalyzedAfter
-		}
-		cfg.BranchAnalyzedAfter = resolveBranchAnalyzedAfter(targetBranchAnalyzedAfter, s.BranchAnalyzedAfter)
-		if cfg.Concurrency == 0 {
-			cfg.Concurrency = s.Concurrency
-		}
-		if cfg.BuildConcurrency == 0 {
-			cfg.BuildConcurrency = s.BuildConcurrency
-		}
-		if cfg.Timeout == 0 {
-			cfg.Timeout = s.Timeout
-		}
-		if cfg.MaxIssueComments == 0 {
-			cfg.MaxIssueComments = s.MaxIssueComments
-		}
-		cfg.ExportDirectory = s.ExportDirectory
-		// Top-level skip_issue_sync applies to every shape (#299).
-		// The field name matches the MigrateConfig field one-for-one
-		// so there's no inversion.
-		if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
-			cfg.SkipIssueSync = s.SkipIssueSync.Value
-		}
-		if s.SkipProjectDataMigration != nil && s.SkipProjectDataMigration.Set {
-			cfg.SkipProjectDataMigration = s.SkipProjectDataMigration.Value
-		}
-		cfg.objectsRaw = s.Objects
-		// #592: target.project_key_regexp wins over the top-level
-		// project_key_regexp, which in turn wins over the deprecated
-		// project_key (top-level only — it never had a target override).
-		var targetProjectKeyRegexp string
-		if s.Target != nil {
-			targetProjectKeyRegexp = s.Target.ProjectKeyRegexp
-		}
-		cfg.ProjectKeyFilter = common.ResolveDeprecatedProjectKey(s.ProjectKey, common.FirstNonEmpty(targetProjectKeyRegexp, s.ProjectKeyRegexp))
-		return cfg
+		return s.unifiedMigrateConfig()
 	case s.SonarCloud != nil:
-		cfg := s.SonarCloud.toMigrateConfig(s.Settings)
-		cfg.UnsupportedLanguages = resolveUnsupportedLanguages(
-			cfg.UnsupportedLanguages, s.UnsupportedLanguages)
-		// #582 — sonarCloudBlock.toMigrateConfig never sets BranchRegexp, so
-		// this is just the top-level field, but written with FirstNonEmpty
-		// for consistency with the unified-shape resolution above.
-		cfg.BranchRegexp = common.FirstNonEmpty(cfg.BranchRegexp, s.BranchRegexp)
-		cfg.PortfolioKeyRegexp = common.FirstNonEmpty(cfg.PortfolioKeyRegexp, s.PortfolioKeyRegexp)
-		cfg.PortfolioNameRegexp = common.FirstNonEmpty(cfg.PortfolioNameRegexp, s.PortfolioNameRegexp)
-		cfg.GroupNameRegexp = common.FirstNonEmpty(cfg.GroupNameRegexp, s.GroupNameRegexp)
-		cfg.PermissionTemplateRegexp = s.ptRegexp()
-		if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
-			cfg.SkipIssueSync = s.SkipIssueSync.Value
-		}
-		if s.SkipProjectDataMigration != nil && s.SkipProjectDataMigration.Set {
-			cfg.SkipProjectDataMigration = s.SkipProjectDataMigration.Value
-		}
-		if s.FastSync != nil && s.FastSync.Set {
-			cfg.FastSync = s.FastSync.Value
-		}
-		if s.MigrateHistory != nil && s.MigrateHistory.Set {
-			cfg.MigrateHistory = s.MigrateHistory.Value
-		}
-		if s.UseSLBForReferenceBranchNewCode != nil && s.UseSLBForReferenceBranchNewCode.Set {
-			cfg.UseSLBForReferenceBranchNewCode = s.UseSLBForReferenceBranchNewCode.Value
-		}
-		cfg.objectsRaw = s.Objects
-		cfg.ProjectKeyFilter = common.ResolveDeprecatedProjectKey(s.ProjectKey, s.ProjectKeyRegexp)
-		cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
-		return cfg
+		return s.sonarCloudMigrateConfig()
 	case s.Migrate != nil:
-		cfg := s.Migrate.toMigrateConfig()
-		cfg.UnsupportedLanguages = resolveUnsupportedLanguages(
-			cfg.UnsupportedLanguages, s.UnsupportedLanguages)
-		// Outer-level skip_issue_sync wins when both outer and inner
-		// set it (#299). If only outer is set, propagate it down.
-		if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
-			cfg.SkipIssueSync = s.SkipIssueSync.Value
-		}
-		if s.SkipProjectDataMigration != nil && s.SkipProjectDataMigration.Set {
-			cfg.SkipProjectDataMigration = s.SkipProjectDataMigration.Value
-		}
-		// Same outer-wins-else-inner semantics for fast_sync (#527).
-		if s.FastSync != nil && s.FastSync.Set {
-			cfg.FastSync = s.FastSync.Value
-		}
-		// Same outer-wins-else-inner semantics for migrate_history (#554).
-		if s.MigrateHistory != nil && s.MigrateHistory.Set {
-			cfg.MigrateHistory = s.MigrateHistory.Value
-		}
-		if s.UseSLBForReferenceBranchNewCode != nil && s.UseSLBForReferenceBranchNewCode.Set {
-			cfg.UseSLBForReferenceBranchNewCode = s.UseSLBForReferenceBranchNewCode.Value
-		}
-		// #536: outer-level "objects" / "project_key" win over the same
-		// fields nested inside "migrate" — but fall back to the nested
-		// value (already captured above by the recursive call) when the
-		// outer level didn't set them.
-		if len(s.Objects) > 0 {
-			cfg.objectsRaw = s.Objects
-		}
-		if outer := common.ResolveDeprecatedProjectKey(s.ProjectKey, s.ProjectKeyRegexp); outer != "" {
-			cfg.ProjectKeyFilter = outer
-		}
-		// #582: same outer-wins-else-nested semantics for branch_regexp.
-		if s.BranchRegexp != "" {
-			cfg.BranchRegexp = s.BranchRegexp
-		}
-		// #666: the outer portfolio regexp pair wins as a whole when set.
-		if s.PortfolioKeyRegexp != "" || s.PortfolioNameRegexp != "" {
-			cfg.PortfolioKeyRegexp, cfg.PortfolioNameRegexp = s.PortfolioKeyRegexp, s.PortfolioNameRegexp
-		}
-		if s.GroupNameRegexp != "" {
-			cfg.GroupNameRegexp = s.GroupNameRegexp
-		}
-		// #665: same outer-wins-else-nested semantics for permission_template_regexp.
-		if pt := s.ptRegexp(); pt != "" {
-			cfg.PermissionTemplateRegexp = pt
-		}
-		// Same outer-wins-else-inner semantics for branch_analyzed_after (#583).
-		if s.BranchAnalyzedAfter != "" {
-			cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
-		}
-		return cfg
+		return s.commandSectionedMigrateConfig()
 	default:
-		cfg := MigrateConfig{
-			Token:              s.Token,
-			EnterpriseKey:      s.EnterpriseKey,
-			URL:                s.URL,
-			Edition:            s.Edition,
-			ExportDirectory:    s.ExportDirectory,
-			Concurrency:        s.Concurrency,
-			BuildConcurrency:   s.BuildConcurrency,
-			Timeout:            s.Timeout,
-			MaxIssueComments:   s.MaxIssueComments,
-			RunID:              s.RunID,
-			TargetTask:         s.TargetTask,
-			SkipProfiles:       s.SkipProfiles,
-			IncludeProjectData: s.IncludeProjectData,
-			Debug:              s.Debug,
-			ExcludeBranches:    s.ExcludeBranches,
-			// #474 — flat shape reads the field directly.
-			UnsupportedLanguages: s.UnsupportedLanguages,
-			BranchRegexp:         s.BranchRegexp,
-			// #666 — flat shape reads the fields directly.
-			PortfolioKeyRegexp:  s.PortfolioKeyRegexp,
-			PortfolioNameRegexp: s.PortfolioNameRegexp,
-			GroupNameRegexp:     s.GroupNameRegexp,
-			// #665 — flat shape reads the field directly.
-			PermissionTemplateRegexp: s.ptRegexp(),
-			// #583 — flat shape reads the field directly.
-			BranchAnalyzedAfter: s.BranchAnalyzedAfter,
-		}
-		if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
-			cfg.SkipIssueSync = s.SkipIssueSync.Value
-		}
-		if s.SkipProjectDataMigration != nil && s.SkipProjectDataMigration.Set {
-			cfg.SkipProjectDataMigration = s.SkipProjectDataMigration.Value
-		}
-		if s.FastSync != nil && s.FastSync.Set {
-			cfg.FastSync = s.FastSync.Value
-		}
-		if s.MigrateHistory != nil && s.MigrateHistory.Set {
-			cfg.MigrateHistory = s.MigrateHistory.Value
-		}
-		if s.UseSLBForReferenceBranchNewCode != nil && s.UseSLBForReferenceBranchNewCode.Set {
-			cfg.UseSLBForReferenceBranchNewCode = s.UseSLBForReferenceBranchNewCode.Value
-		}
-		cfg.objectsRaw = s.Objects
-		cfg.ProjectKeyFilter = common.ResolveDeprecatedProjectKey(s.ProjectKey, s.ProjectKeyRegexp)
-		return cfg
+		return s.flatMigrateConfig()
 	}
+}
+
+// targetFieldOrZero reads a field off the unified shape's "target" block,
+// returning the zero value when target is nil. It centralizes the
+// "only read from target when present" check so the per-shape resolvers
+// below don't each need their own nil guard.
+func targetFieldOrZero[T any](target *unifiedTargetBlock, get func(*unifiedTargetBlock) T) T {
+	if target != nil {
+		return get(target)
+	}
+	var zero T
+	return zero
+}
+
+// applyTargetBaseFields copies the "target" sub-object's directly-mapped
+// fields (#266) onto cfg. Fields with target-wins-else-top-level
+// resolution (unsupported_languages, branch_regexp, ...) are handled
+// separately in unifiedMigrateConfig.
+func applyTargetBaseFields(cfg *MigrateConfig, target *unifiedTargetBlock) {
+	if target == nil {
+		return
+	}
+	cfg.URL = target.URL
+	cfg.Token = target.Token
+	cfg.EnterpriseKey = target.EnterpriseKey
+	cfg.Edition = target.Edition
+	cfg.RunID = target.RunID
+	cfg.TargetTask = target.TargetTask
+	cfg.Concurrency = target.Concurrency
+	cfg.BuildConcurrency = target.BuildConcurrency
+	cfg.Timeout = target.Timeout
+	cfg.DefaultOrganization = target.DefaultOrganization
+	cfg.ProjectKeyPattern = target.ProjectKeyPattern
+	cfg.ExcludeBranches = target.ExcludeBranches
+	cfg.UnsupportedLanguages = target.UnsupportedLanguages
+	cfg.MaxIssueComments = target.MaxIssueComments
+	cfg.BranchRegexp = target.BranchRegexp
+	cfg.GroupNameRegexp = target.GroupNameRegexp
+}
+
+// resolvePortfolioRegexpFromTarget implements #666's "resolve the pair as a
+// whole" rule for the unified shape: target's portfolio key/name regexps
+// win together when either is set, else the top-level pair is used.
+func resolvePortfolioRegexpFromTarget(target *unifiedTargetBlock, key, name string) (string, string) {
+	if target != nil && (target.PortfolioKeyRegexp != "" || target.PortfolioNameRegexp != "") {
+		return target.PortfolioKeyRegexp, target.PortfolioNameRegexp
+	}
+	return key, name
+}
+
+// applyPortfolioOuterOverride implements #666's outer-wins-as-a-whole rule
+// for the command-sectioned shape: the outer portfolio key/name regexp
+// pair overrides the nested "migrate" value only when either is set.
+func applyPortfolioOuterOverride(cfg *MigrateConfig, s configFileShape) {
+	if s.PortfolioKeyRegexp != "" || s.PortfolioNameRegexp != "" {
+		cfg.PortfolioKeyRegexp, cfg.PortfolioNameRegexp = s.PortfolioKeyRegexp, s.PortfolioNameRegexp
+	}
+}
+
+// fillConcurrencyDefaults fills cfg's zero-valued concurrency / timeout /
+// max-issue-comments fields from the top-level config (used by the unified
+// shape, where the "target" block supplies these when present).
+func fillConcurrencyDefaults(cfg *MigrateConfig, s configFileShape) {
+	if cfg.Concurrency == 0 {
+		cfg.Concurrency = s.Concurrency
+	}
+	if cfg.BuildConcurrency == 0 {
+		cfg.BuildConcurrency = s.BuildConcurrency
+	}
+	if cfg.Timeout == 0 {
+		cfg.Timeout = s.Timeout
+	}
+	if cfg.MaxIssueComments == 0 {
+		cfg.MaxIssueComments = s.MaxIssueComments
+	}
+}
+
+// applySkipSyncOverrides applies the top-level skip_issue_sync /
+// skip_project_data_migration overrides (#299, #303), shared by every
+// shape. Field names match MigrateConfig one-for-one, so there's no
+// inversion.
+func applySkipSyncOverrides(cfg *MigrateConfig, s configFileShape) {
+	if s.SkipIssueSync != nil && s.SkipIssueSync.Set {
+		cfg.SkipIssueSync = s.SkipIssueSync.Value
+	}
+	if s.SkipProjectDataMigration != nil && s.SkipProjectDataMigration.Set {
+		cfg.SkipProjectDataMigration = s.SkipProjectDataMigration.Value
+	}
+}
+
+// applyFlexibleBoolOverrides applies the outer-wins-else-inner
+// FlexibleBool overrides shared by the sonarcloud and command-sectioned
+// shapes (#527 fast_sync, #554 migrate_history, #655
+// use_slb_for_reference_branch_new_code).
+func applyFlexibleBoolOverrides(cfg *MigrateConfig, s configFileShape) {
+	if s.FastSync != nil && s.FastSync.Set {
+		cfg.FastSync = s.FastSync.Value
+	}
+	if s.MigrateHistory != nil && s.MigrateHistory.Set {
+		cfg.MigrateHistory = s.MigrateHistory.Value
+	}
+	if s.UseSLBForReferenceBranchNewCode != nil && s.UseSLBForReferenceBranchNewCode.Set {
+		cfg.UseSLBForReferenceBranchNewCode = s.UseSLBForReferenceBranchNewCode.Value
+	}
+}
+
+// unifiedMigrateConfig builds a MigrateConfig for the #266 unified shape.
+// Migrate pulls from the "target" sub-object; top-level concurrency /
+// timeout / export_directory supply defaults. The "source" block is
+// ignored. organization_key is provisional and ignored.
+func (s configFileShape) unifiedMigrateConfig() MigrateConfig {
+	var cfg MigrateConfig
+	applyTargetBaseFields(&cfg, s.Target)
+	// #474 — target.unsupported_languages wins, else the top-level field.
+	cfg.UnsupportedLanguages = resolveUnsupportedLanguages(cfg.UnsupportedLanguages, s.UnsupportedLanguages)
+	// #582 — target.branch_regexp wins, else the top-level field.
+	cfg.BranchRegexp = common.FirstNonEmpty(cfg.BranchRegexp, s.BranchRegexp)
+	// #666 — resolve the pair as a whole so a target-level key does not
+	// conflict with a top-level name (or vice versa).
+	cfg.PortfolioKeyRegexp, cfg.PortfolioNameRegexp = resolvePortfolioRegexpFromTarget(s.Target, s.PortfolioKeyRegexp, s.PortfolioNameRegexp)
+	// #669 — target.group_name_regexp wins, else the top-level field.
+	cfg.GroupNameRegexp = common.FirstNonEmpty(cfg.GroupNameRegexp, s.GroupNameRegexp)
+	// #665 — target.permission_template_regexp wins, else the top-level field.
+	targetPT := targetFieldOrZero(s.Target, func(t *unifiedTargetBlock) string {
+		return common.FirstNonEmpty(t.PermissionTemplateRegexp, t.PTRegexp)
+	})
+	cfg.PermissionTemplateRegexp = common.FirstNonEmpty(targetPT, s.ptRegexp())
+	// #527 — target.fast_sync wins, else the top-level field, else false.
+	cfg.FastSync = resolveFastSync(targetFieldOrZero(s.Target, func(t *unifiedTargetBlock) *FlexibleBool { return t.FastSync }), s.FastSync)
+	// #554 — target.migrate_history wins, else the top-level field, else false.
+	cfg.MigrateHistory = resolveMigrateHistory(targetFieldOrZero(s.Target, func(t *unifiedTargetBlock) *FlexibleBool { return t.MigrateHistory }), s.MigrateHistory)
+	// #655 — target.use_slb_for_reference_branch_new_code wins, else the
+	// top-level field, else false.
+	cfg.UseSLBForReferenceBranchNewCode = resolveUseSLBForReferenceBranchNewCode(
+		targetFieldOrZero(s.Target, func(t *unifiedTargetBlock) *FlexibleBool { return t.UseSLBForReferenceBranchNewCode }),
+		s.UseSLBForReferenceBranchNewCode)
+	// #583 — target.branch_analyzed_after wins when explicitly present
+	// (even if empty, meaning "no filter for migrate"), else the
+	// top-level field, else "" (no filter).
+	cfg.BranchAnalyzedAfter = resolveBranchAnalyzedAfter(
+		targetFieldOrZero(s.Target, func(t *unifiedTargetBlock) *string { return t.BranchAnalyzedAfter }),
+		s.BranchAnalyzedAfter)
+	fillConcurrencyDefaults(&cfg, s)
+	cfg.ExportDirectory = s.ExportDirectory
+	// Top-level skip_issue_sync / skip_project_data_migration apply to
+	// every shape (#299, #303).
+	applySkipSyncOverrides(&cfg, s)
+	cfg.objectsRaw = s.Objects
+	// #592: target.project_key_regexp wins over the top-level
+	// project_key_regexp, which in turn wins over the deprecated
+	// project_key (top-level only — it never had a target override).
+	targetProjectKeyRegexp := targetFieldOrZero(s.Target, func(t *unifiedTargetBlock) string { return t.ProjectKeyRegexp })
+	cfg.ProjectKeyFilter = common.ResolveDeprecatedProjectKey(s.ProjectKey, common.FirstNonEmpty(targetProjectKeyRegexp, s.ProjectKeyRegexp))
+	return cfg
+}
+
+// sonarCloudMigrateConfig builds a MigrateConfig for the side-sectioned
+// "sonarcloud" shape.
+func (s configFileShape) sonarCloudMigrateConfig() MigrateConfig {
+	cfg := s.SonarCloud.toMigrateConfig(s.Settings)
+	cfg.UnsupportedLanguages = resolveUnsupportedLanguages(cfg.UnsupportedLanguages, s.UnsupportedLanguages)
+	// sonarCloudBlock.toMigrateConfig never sets BranchRegexp, so this is
+	// just the top-level field, but written with FirstNonEmpty for
+	// consistency with the unified-shape resolution above (#582).
+	cfg.BranchRegexp = common.FirstNonEmpty(cfg.BranchRegexp, s.BranchRegexp)
+	cfg.PortfolioKeyRegexp = common.FirstNonEmpty(cfg.PortfolioKeyRegexp, s.PortfolioKeyRegexp)
+	cfg.PortfolioNameRegexp = common.FirstNonEmpty(cfg.PortfolioNameRegexp, s.PortfolioNameRegexp)
+	cfg.GroupNameRegexp = common.FirstNonEmpty(cfg.GroupNameRegexp, s.GroupNameRegexp)
+	cfg.PermissionTemplateRegexp = s.ptRegexp()
+	applySkipSyncOverrides(&cfg, s)
+	applyFlexibleBoolOverrides(&cfg, s)
+	cfg.objectsRaw = s.Objects
+	cfg.ProjectKeyFilter = common.ResolveDeprecatedProjectKey(s.ProjectKey, s.ProjectKeyRegexp)
+	cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
+	return cfg
+}
+
+// commandSectionedMigrateConfig builds a MigrateConfig for the
+// command-sectioned "migrate" shape, where outer-level fields win over the
+// same fields nested inside "migrate" when set, else fall back to the
+// value already resolved by the recursive call.
+func (s configFileShape) commandSectionedMigrateConfig() MigrateConfig {
+	cfg := s.Migrate.toMigrateConfig()
+	cfg.UnsupportedLanguages = resolveUnsupportedLanguages(cfg.UnsupportedLanguages, s.UnsupportedLanguages)
+	// Outer-level skip_issue_sync / skip_project_data_migration win when
+	// both outer and inner set them (#299, #303). If only outer is set,
+	// propagate it down.
+	applySkipSyncOverrides(&cfg, s)
+	// Same outer-wins-else-inner semantics for fast_sync (#527),
+	// migrate_history (#554), and use_slb_for_reference_branch_new_code (#655).
+	applyFlexibleBoolOverrides(&cfg, s)
+	// #536: outer-level "objects" / "project_key" win over the same
+	// fields nested inside "migrate" — but fall back to the nested
+	// value (already captured above by the recursive call) when the
+	// outer level didn't set them.
+	if len(s.Objects) > 0 {
+		cfg.objectsRaw = s.Objects
+	}
+	if outer := common.ResolveDeprecatedProjectKey(s.ProjectKey, s.ProjectKeyRegexp); outer != "" {
+		cfg.ProjectKeyFilter = outer
+	}
+	// #582: same outer-wins-else-nested semantics for branch_regexp.
+	if s.BranchRegexp != "" {
+		cfg.BranchRegexp = s.BranchRegexp
+	}
+	// #666: the outer portfolio regexp pair wins as a whole when set.
+	applyPortfolioOuterOverride(&cfg, s)
+	if s.GroupNameRegexp != "" {
+		cfg.GroupNameRegexp = s.GroupNameRegexp
+	}
+	// #665: same outer-wins-else-nested semantics for permission_template_regexp.
+	if pt := s.ptRegexp(); pt != "" {
+		cfg.PermissionTemplateRegexp = pt
+	}
+	// Same outer-wins-else-inner semantics for branch_analyzed_after (#583).
+	if s.BranchAnalyzedAfter != "" {
+		cfg.BranchAnalyzedAfter = s.BranchAnalyzedAfter
+	}
+	return cfg
+}
+
+// flatMigrateConfig builds a MigrateConfig for the flat (shape 1) config
+// file, the default when none of the other shapes' marker fields are set.
+func (s configFileShape) flatMigrateConfig() MigrateConfig {
+	cfg := MigrateConfig{
+		Token:              s.Token,
+		EnterpriseKey:      s.EnterpriseKey,
+		URL:                s.URL,
+		Edition:            s.Edition,
+		ExportDirectory:    s.ExportDirectory,
+		Concurrency:        s.Concurrency,
+		BuildConcurrency:   s.BuildConcurrency,
+		Timeout:            s.Timeout,
+		MaxIssueComments:   s.MaxIssueComments,
+		RunID:              s.RunID,
+		TargetTask:         s.TargetTask,
+		SkipProfiles:       s.SkipProfiles,
+		IncludeProjectData: s.IncludeProjectData,
+		Debug:              s.Debug,
+		ExcludeBranches:    s.ExcludeBranches,
+		// #474 — flat shape reads the field directly.
+		UnsupportedLanguages: s.UnsupportedLanguages,
+		BranchRegexp:         s.BranchRegexp,
+		// #666 — flat shape reads the fields directly.
+		PortfolioKeyRegexp:  s.PortfolioKeyRegexp,
+		PortfolioNameRegexp: s.PortfolioNameRegexp,
+		GroupNameRegexp:     s.GroupNameRegexp,
+		// #665 — flat shape reads the field directly.
+		PermissionTemplateRegexp: s.ptRegexp(),
+		// #583 — flat shape reads the field directly.
+		BranchAnalyzedAfter: s.BranchAnalyzedAfter,
+	}
+	applySkipSyncOverrides(&cfg, s)
+	applyFlexibleBoolOverrides(&cfg, s)
+	cfg.objectsRaw = s.Objects
+	cfg.ProjectKeyFilter = common.ResolveDeprecatedProjectKey(s.ProjectKey, s.ProjectKeyRegexp)
+	return cfg
 }
 
 // ptRegexp returns the permission_template_regexp value, falling back to its

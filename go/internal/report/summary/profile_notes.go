@@ -39,6 +39,10 @@ type profileFindings struct {
 	HasOrangeCriterion bool
 }
 
+// ruleEntry pairs a rule key with its (possibly empty) detail string —
+// the unit collectProfileFindings buckets per (cloud_profile_key, kind).
+type ruleEntry struct{ key, detail string }
+
 // collectProfileFindings reads analyzeProfileRules JSONL and folds
 // the per-rule rows into one Issues list per cloud_profile_key. Each
 // of the six #226 yellow criteria becomes a single bullet, prefixed
@@ -51,9 +55,38 @@ func collectProfileFindings(store *common.DataStore) map[string]*profileFindings
 	}
 
 	// Bucket findings: cloud_profile_key → kind → []rule-with-detail.
-	type ruleEntry struct{ key, detail string }
-	byProfile := make(map[string]map[string][]ruleEntry)
+	byProfile := bucketProfileFindings(items)
 
+	out := make(map[string]*profileFindings, len(byProfile))
+	for cloudKey, kinds := range byProfile {
+		// Instantiated rules (template-instance criterion) always
+		// have a custom severity, so they'd also appear under the
+		// custom-severity criterion. Suppress them there since the
+		// template-instance message already says the rule is not
+		// migrated at all — reporting a severity revert for the
+		// same rule is misleading.
+		suppressTemplateInstanceDuplicates(kinds)
+
+		// Render in a stable order — matches the criterion order in
+		// the issue so the report reads the same way every time.
+		lines := buildProfileLines(kinds)
+		if len(lines) == 0 {
+			continue
+		}
+		_, hasOrange := kinds[kindThirdParty]
+		out[cloudKey] = &profileFindings{
+			Issues:             lines,
+			HasOrangeCriterion: hasOrange,
+		}
+	}
+	return out
+}
+
+// bucketProfileFindings groups analyzeProfileRules rows into
+// cloud_profile_key → kind → []rule-with-detail, dropping rows missing
+// any of the three required fields.
+func bucketProfileFindings(items []json.RawMessage) map[string]map[string][]ruleEntry {
+	byProfile := make(map[string]map[string][]ruleEntry)
 	for _, raw := range items {
 		var f profileFinding
 		if err := json.Unmarshal(raw, &f); err != nil {
@@ -70,119 +103,128 @@ func collectProfileFindings(store *common.DataStore) map[string]*profileFindings
 			ruleEntry{key: f.RuleKey, detail: f.Detail},
 		)
 	}
+	return byProfile
+}
 
-	out := make(map[string]*profileFindings, len(byProfile))
-	for cloudKey, kinds := range byProfile {
-		// Instantiated rules (template-instance criterion) always
-		// have a custom severity, so they'd also appear under the
-		// custom-severity criterion. Suppress them there since the
-		// template-instance message already says the rule is not
-		// migrated at all — reporting a severity revert for the
-		// same rule is misleading.
-		if templateEntries, hasTemplate := kinds[kindTemplateInstance]; hasTemplate {
-			instantiated := make(map[string]bool, len(templateEntries))
-			for _, e := range templateEntries {
-				instantiated[e.key] = true
-			}
-			if csEntries := kinds[kindCustomSeverity]; len(csEntries) > 0 {
-				filtered := csEntries[:0]
-				for _, e := range csEntries {
-					if instantiated[e.key] {
-						continue
-					}
-					filtered = append(filtered, e)
-				}
-				if len(filtered) == 0 {
-					delete(kinds, kindCustomSeverity)
-				} else {
-					kinds[kindCustomSeverity] = filtered
-				}
-			}
-		}
-
-		var lines []string
-		// Render in a stable order — matches the criterion order in
-		// the issue so the report reads the same way every time.
-		for _, kind := range profileFindingKindOrder {
-			entries, ok := kinds[kind]
-			if !ok || len(entries) == 0 {
-				continue
-			}
-			// Dedup by rule key — the analyzer can emit several rows
-			// per rule (one per parameter for criterion #4, one per
-			// source-org-mapped profile when several SQS orgs migrate
-			// into the same SQC org). Fold onto a single bullet per
-			// rule with deduplicated detail strings inlined.
-			sort.SliceStable(entries, func(i, j int) bool { return entries[i].key < entries[j].key })
-			byRule := make(map[string][]string)
-			seenDetail := make(map[string]map[string]bool)
-			var order []string
-			for _, e := range entries {
-				if _, seen := byRule[e.key]; !seen {
-					order = append(order, e.key)
-					byRule[e.key] = nil
-					seenDetail[e.key] = make(map[string]bool)
-				}
-				if e.detail == "" || seenDetail[e.key][e.detail] {
-					continue
-				}
-				seenDetail[e.key][e.detail] = true
-				byRule[e.key] = append(byRule[e.key], e.detail)
-			}
-			// Per-criterion rendering: a few criteria collapse to a
-			// single sentence with the rule keys comma-separated.
-			// custom-severity drops the severity-transition detail
-			// (the message itself states the outcome — revert to
-			// default), and third-party drops the repo name (the
-			// message itself says the rules will be removed).
-			// All issue messages here describe what migrate ACTUALLY
-			// did to the profile, so they are written in past tense.
-			// The predictive report swaps "were X" → "will be X" via
-			// toPredictiveTense at render time (#167).
-			if kind == kindCustomSeverity {
-				lines = append(lines, "Because rules custom severities are not supported in SQC, the following rules were reverted to their default severities: "+strings.Join(order, ", "))
-				continue
-			}
-			if kind == kindThirdParty {
-				lines = append(lines, "Because SQC does not support 3rd party plugins, the following 3rd party rules were removed from the quality profile: "+strings.Join(order, ", "))
-				continue
-			}
-			if kind == "prioritized" {
-				lines = append(lines, "Since SQC does not support prioritized rules, the following rules were migrated in the profile as regular rules: "+strings.Join(order, ", "))
-				continue
-			}
-			if kind == kindTemplateInstance {
-				lines = append(lines, "Because rule templates and instantiated rules are not supported in SQC, the following rules were not migrated: "+strings.Join(order, ", "))
-				continue
-			}
-			if kind == kindCustomParams {
-				lines = append(lines, "The following rules custom parameters could not be migrated due to an unexpected error: "+strings.Join(order, ", "))
-				continue
-			}
-			if kind == kindDisabledInherited {
-				lines = append(lines, "Since SQC does not support parent profile rules disabled in child profiles, the following rules were enabled in the profile: "+strings.Join(order, ", "))
-				continue
-			}
-			var ruleLines []string
-			for _, k := range order {
-				if details := byRule[k]; len(details) > 0 {
-					ruleLines = append(ruleLines, fmt.Sprintf("%s (%s)", k, strings.Join(details, ", ")))
-				} else {
-					ruleLines = append(ruleLines, k)
-				}
-			}
-			lines = append(lines, profileFindingKindLabel[kind]+":\n"+strings.Join(ruleLines, "\n"))
-		}
-		if len(lines) == 0 {
+// suppressTemplateInstanceDuplicates drops, from kindCustomSeverity, any
+// rule key that also appears under kindTemplateInstance: instantiated
+// rules always carry a custom severity, so they'd otherwise double up —
+// the template-instance message already says the rule is not migrated at
+// all, making a severity-revert note for the same rule misleading.
+func suppressTemplateInstanceDuplicates(kinds map[string][]ruleEntry) {
+	templateEntries, hasTemplate := kinds[kindTemplateInstance]
+	if !hasTemplate {
+		return
+	}
+	instantiated := make(map[string]bool, len(templateEntries))
+	for _, e := range templateEntries {
+		instantiated[e.key] = true
+	}
+	csEntries := kinds[kindCustomSeverity]
+	if len(csEntries) == 0 {
+		return
+	}
+	filtered := csEntries[:0]
+	for _, e := range csEntries {
+		if instantiated[e.key] {
 			continue
 		}
-		_, hasOrange := kinds[kindThirdParty]
-		out[cloudKey] = &profileFindings{
-			Issues:             lines,
-			HasOrangeCriterion: hasOrange,
+		filtered = append(filtered, e)
+	}
+	if len(filtered) == 0 {
+		delete(kinds, kindCustomSeverity)
+	} else {
+		kinds[kindCustomSeverity] = filtered
+	}
+}
+
+// buildProfileLines renders one Issues bullet per non-empty criterion in
+// kinds, in the fixed profileFindingKindOrder so the Issues column reads
+// consistently across reports.
+func buildProfileLines(kinds map[string][]ruleEntry) []string {
+	var lines []string
+	for _, kind := range profileFindingKindOrder {
+		entries, ok := kinds[kind]
+		if !ok || len(entries) == 0 {
+			continue
+		}
+		lines = append(lines, renderProfileFindingLine(kind, entries))
+	}
+	return lines
+}
+
+// dedupRuleEntries sorts entries by rule key and folds them onto one
+// ordered list of distinct rule keys plus their deduplicated detail
+// strings. The analyzer can emit several rows per rule (one per parameter
+// for criterion #4, one per source-org-mapped profile when several SQS
+// orgs migrate into the same SQC org).
+func dedupRuleEntries(entries []ruleEntry) (order []string, byRule map[string][]string) {
+	sort.SliceStable(entries, func(i, j int) bool { return entries[i].key < entries[j].key })
+	byRule = make(map[string][]string)
+	seenDetail := make(map[string]map[string]bool)
+	for _, e := range entries {
+		if _, seen := byRule[e.key]; !seen {
+			order = append(order, e.key)
+			byRule[e.key] = nil
+			seenDetail[e.key] = make(map[string]bool)
+		}
+		if e.detail == "" || seenDetail[e.key][e.detail] {
+			continue
+		}
+		seenDetail[e.key][e.detail] = true
+		byRule[e.key] = append(byRule[e.key], e.detail)
+	}
+	return order, byRule
+}
+
+// renderProfileFindingLine renders the single Issues bullet for one
+// criterion. A few criteria collapse to a fixed sentence with the rule
+// keys comma-separated (see profileFindingKindMessage); the rest render
+// one line per rule, with deduplicated detail strings inlined in
+// parentheses. All messages describe what migrate ACTUALLY did to the
+// profile, so they are written in past tense — the predictive report
+// swaps "were X" → "will be X" via toPredictiveTense at render time
+// (#167).
+func renderProfileFindingLine(kind string, entries []ruleEntry) string {
+	order, byRule := dedupRuleEntries(entries)
+	if msg := profileFindingKindMessage(kind, order); msg != "" {
+		return msg
+	}
+	var ruleLines []string
+	for _, k := range order {
+		if details := byRule[k]; len(details) > 0 {
+			ruleLines = append(ruleLines, fmt.Sprintf("%s (%s)", k, strings.Join(details, ", ")))
+		} else {
+			ruleLines = append(ruleLines, k)
 		}
 	}
-	return out
+	return profileFindingKindLabel[kind] + ":\n" + strings.Join(ruleLines, "\n")
+}
+
+// profileFindingKindMessage returns the fixed single-sentence bullet for
+// the criteria that collapse to one message instead of a per-rule list,
+// or "" for the criteria that render per-rule via renderProfileFindingLine.
+// custom-severity drops the severity-transition detail (the message
+// itself states the outcome — revert to default), and third-party drops
+// the repo name (the message itself says the rules will be removed).
+func profileFindingKindMessage(kind string, order []string) string {
+	joined := strings.Join(order, ", ")
+	switch kind {
+	case kindCustomSeverity:
+		return "Because rules custom severities are not supported in SQC, the following rules were reverted to their default severities: " + joined
+	case kindThirdParty:
+		return "Because SQC does not support 3rd party plugins, the following 3rd party rules were removed from the quality profile: " + joined
+	case "prioritized":
+		return "Since SQC does not support prioritized rules, the following rules were migrated in the profile as regular rules: " + joined
+	case kindTemplateInstance:
+		return "Because rule templates and instantiated rules are not supported in SQC, the following rules were not migrated: " + joined
+	case kindCustomParams:
+		return "The following rules custom parameters could not be migrated due to an unexpected error: " + joined
+	case kindDisabledInherited:
+		return "Since SQC does not support parent profile rules disabled in child profiles, the following rules were enabled in the profile: " + joined
+	default:
+		return ""
+	}
 }
 
 // applyProfileFindings moves Quality Profile entries from Succeeded
@@ -313,7 +355,7 @@ var profileFindingKindOrder = []string{
 // short enough to fit at the head of a multi-line Detail block.
 var profileFindingKindLabel = map[string]string{
 	kindCustomSeverity:    "Rules with custom severities (not portable to SonarQube Cloud)",
-	"prioritized":        "Prioritized rules (no equivalent on SonarQube Cloud)",
+	"prioritized":         "Prioritized rules (no equivalent on SonarQube Cloud)",
 	kindThirdParty:        "Third-party plugin rules (not available on SonarQube Cloud)",
 	kindCustomParams:      "Rules with customised parameter values (revert to defaults on SonarQube Cloud)",
 	kindTemplateInstance:  "Rule-template instantiations (not migratable to SonarQube Cloud)",

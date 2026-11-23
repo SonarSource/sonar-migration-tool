@@ -558,18 +558,7 @@ func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 	// createPermissionTemplates writes the SQS-side id under
 	// "source_template_key" (Template.SourceTemplateKey).
 	templates, _ := e.Store.ReadAll("createPermissionTemplates")
-	templateMap := make(map[string]struct{ cloudID, org string }, len(templates))
-	for _, t := range templates {
-		srvURL := extractField(t, "server_url")
-		srcID := extractField(t, "source_template_key")
-		if srvURL == "" || srcID == "" {
-			continue
-		}
-		templateMap[srvURL+"\x00"+srcID] = struct{ cloudID, org string }{
-			cloudID: extractField(t, "cloud_template_id"),
-			org:     extractField(t, "sonarcloud_org_key"),
-		}
-	}
+	templateMap := buildTemplateGroupPermTemplateMap(templates)
 	if len(templateMap) == 0 {
 		e.Logger.Info("setTemplateGroupPermissions: no permission templates in scope, nothing to migrate")
 		return nil
@@ -579,14 +568,7 @@ func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 	// (org, group) pairs are safe to reference.
 	createdGroups, _ := e.Store.ReadAll("createGroups")
 	resolver := newTargetEntityResolver(e, "setTemplateGroupPermissions", !e.Store.TaskDirExists("createGroups"))
-	groupExists := make(map[string]bool, len(createdGroups))
-	for _, g := range createdGroups {
-		name := extractField(g, "name")
-		org := extractField(g, "sonarcloud_org_key")
-		if name != "" && org != "" {
-			groupExists[org+"\x00"+name] = true
-		}
-	}
+	groupExists := buildTemplateGroupExistsSet(createdGroups)
 
 	// sonar-users is intentionally NOT in skipGroups (issue #269): the
 	// apply closure remaps it to SQC's built-in `Members` group via
@@ -601,8 +583,7 @@ func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 	// Dedup applied (templateId, group, permission) triples — each
 	// extract feed surfaces the same row in both "scanners" and
 	// "viewers" responses when the group has both permissions.
-	type triple struct{ cloudTemplate, group, perm string }
-	applied := make(map[triple]bool)
+	applied := make(map[templateGroupPermTriple]bool)
 	var appliedMu sync.Mutex
 
 	// #551: track attempted/succeeded per (template, group) pair ACROSS
@@ -612,98 +593,31 @@ func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 	// for the SAME pair carries one additional permission that fails —
 	// each feed's row was previously tallied independently, so the
 	// earlier feed's success was invisible to the later one.
-	type pairKey struct{ cloudTemplate, group string }
-	type pairStat struct{ attempted, succeeded int }
-	pairStats := make(map[pairKey]*pairStat)
+	pairStats := make(map[templateGroupPairKey]*templateGroupPairStat)
 	// (template, group) pairs whose group the resolver did not find, so
 	// each counts as one failure rather than one per feed row, and is
 	// written once to templateGroupUnresolvedKey.
-	unresolved := make(map[pairKey]bool)
+	unresolved := make(map[templateGroupPairKey]bool)
 	var unresolvedRecs []json.RawMessage
 	var statsMu sync.Mutex
 
 	counter := TaskCounterFromContext(ctx)
 
+	tgp := &templateGroupPermApplier{
+		e:           e,
+		templateMap: templateMap,
+		groupExists: groupExists,
+		skipGroups:  skipGroups,
+		resolver:    resolver,
+		applied:     applied,
+		appliedMu:   &appliedMu,
+		pairStats:   pairStats,
+		unresolved:  unresolved,
+		statsMu:     &statsMu,
+		counter:     counter,
+	}
 	apply := func(ctx context.Context, srvURL string, data json.RawMessage) error {
-		srcTemplateID := extractField(data, "templateId")
-		groupName := extractField(data, "name")
-		if srcTemplateID == "" || groupName == "" || skipGroups[groupName] || !e.groupSelected(groupName) {
-			return nil
-		}
-		tmpl, ok := templateMap[srvURL+"\x00"+srcTemplateID]
-		if !ok || tmpl.cloudID == "" || tmpl.org == "" {
-			return nil
-		}
-		// Issue #269: remap SQS built-in groups (sonar-users → Members).
-		// Aliased built-ins exist on SQC by default and won't appear in
-		// the createGroups output, so the groupExists check is skipped
-		// for them.
-		cloudGroup, mapOK := MapGroupNameToCloud(groupName)
-		if !mapOK {
-			return nil
-		}
-		aliased := cloudGroup != groupName
-		if !aliased && !groupExists[tmpl.org+"\x00"+groupName] {
-			if !resolver.byName {
-				return nil
-			}
-			if st := resolver.groupState(ctx, tmpl.org, groupName); st != entityFound {
-				pk := pairKey{tmpl.cloudID, cloudGroup}
-				statsMu.Lock()
-				if !unresolved[pk] {
-					unresolved[pk] = true
-					counter.Fail()
-					unresolvedRecs = append(unresolvedRecs, unresolvedTemplateGroupRecord(tmpl.cloudID, tmpl.org, groupName, st))
-				}
-				statsMu.Unlock()
-				return nil
-			}
-		}
-		perms := extractStringArray(data, "permissions")
-		for _, perm := range perms {
-			if perm == "" {
-				continue
-			}
-			// Issue #550: never auto-escalate the sonar-users → Members
-			// alias into an admin grant on the permission template. The
-			// other permissions for this group/template still apply.
-			if skipAdminForBuiltInAlias(groupName, perm) {
-				// #551: a deliberate security skip, not a failure — no
-				// counter increment (Logger.Warn already surfaces it).
-				e.Logger.Warn("setTemplateGroupPermissions: admin NOT auto-granted to Members — source aliased it from sonar-users; grant manually if genuinely intended",
-					"template", tmpl.cloudID, "group", cloudGroup)
-				continue
-			}
-			k := triple{tmpl.cloudID, cloudGroup, perm}
-			appliedMu.Lock()
-			if applied[k] {
-				appliedMu.Unlock()
-				continue
-			}
-			applied[k] = true
-			appliedMu.Unlock()
-
-			pk := pairKey{tmpl.cloudID, cloudGroup}
-			statsMu.Lock()
-			stat, ok := pairStats[pk]
-			if !ok {
-				stat = &pairStat{}
-				pairStats[pk] = stat
-			}
-			stat.attempted++
-			statsMu.Unlock()
-
-			if err := e.Cloud.Permissions.AddGroupToTemplate(ctx, tmpl.cloudID, cloudGroup, perm, tmpl.org); err != nil {
-				failAPI(counter, e.Logger, "setTemplateGroupPermissions failed", err,
-					"template", tmpl.cloudID, "group", cloudGroup, "perm", perm)
-				continue
-			}
-			statsMu.Lock()
-			stat.succeeded++
-			statsMu.Unlock()
-			counter.Success()
-		}
-		return nil
+		return tgp.apply(ctx, srvURL, data, &unresolvedRecs)
 	}
 
 	// #551: run both feeds to completion (don't abort the second on the
@@ -737,4 +651,195 @@ func runSetTemplateGroupPermissions(ctx context.Context, e *Executor) error {
 			len(totalFailures), strings.Join(totalFailures, "; "))
 	}
 	return nil
+}
+
+// templateGroupRef is the (SQC templateId, sonarcloud_org_key) pair a SQS
+// template resolves to; see runSetTemplateGroupPermissions.
+type templateGroupRef struct{ cloudID, org string }
+
+// templateGroupPermTriple dedups applied (templateId, group, permission)
+// triples — each extract feed surfaces the same row in both "scanners" and
+// "viewers" responses when the group has both permissions.
+type templateGroupPermTriple struct{ cloudTemplate, group, perm string }
+
+// templateGroupPairKey/templateGroupPairStat track attempted/succeeded
+// grants per (template, group) pair ACROSS both feeds (#551): see
+// runSetTemplateGroupPermissions for why this can't be tallied per feed.
+type templateGroupPairKey struct{ cloudTemplate, group string }
+type templateGroupPairStat struct{ attempted, succeeded int }
+
+// buildTemplateGroupPermTemplateMap builds the SQS templateId → (SQC
+// templateId, sonarcloud_org_key) lookup used by
+// runSetTemplateGroupPermissions. createPermissionTemplates writes the
+// SQS-side id under "source_template_key" (Template.SourceTemplateKey).
+func buildTemplateGroupPermTemplateMap(templates []json.RawMessage) map[string]templateGroupRef {
+	templateMap := make(map[string]templateGroupRef, len(templates))
+	for _, t := range templates {
+		srvURL := extractField(t, "server_url")
+		srcID := extractField(t, "source_template_key")
+		if srvURL == "" || srcID == "" {
+			continue
+		}
+		templateMap[srvURL+"\x00"+srcID] = templateGroupRef{
+			cloudID: extractField(t, "cloud_template_id"),
+			org:     extractField(t, "sonarcloud_org_key"),
+		}
+	}
+	return templateMap
+}
+
+// buildTemplateGroupExistsSet builds the set of migrated SQS group names
+// per cloud org so runSetTemplateGroupPermissions knows which (org, group)
+// pairs are safe to reference.
+func buildTemplateGroupExistsSet(createdGroups []json.RawMessage) map[string]bool {
+	groupExists := make(map[string]bool, len(createdGroups))
+	for _, g := range createdGroups {
+		name := extractField(g, "name")
+		org := extractField(g, "sonarcloud_org_key")
+		if name != "" && org != "" {
+			groupExists[org+"\x00"+name] = true
+		}
+	}
+	return groupExists
+}
+
+// templateGroupPermApplier holds the state shared across every
+// (template, group) row processed by runSetTemplateGroupPermissions, so
+// its per-row logic can live in a standalone method instead of a large
+// closure.
+type templateGroupPermApplier struct {
+	e           *Executor
+	templateMap map[string]templateGroupRef
+	groupExists map[string]bool
+	skipGroups  map[string]bool
+	resolver    *targetEntityResolver
+	applied     map[templateGroupPermTriple]bool
+	appliedMu   *sync.Mutex
+	pairStats   map[templateGroupPairKey]*templateGroupPairStat
+	unresolved  map[templateGroupPairKey]bool
+	statsMu     *sync.Mutex
+	counter     *TaskCounter
+}
+
+// apply processes one getTemplateGroups* row: it resolves the SQS
+// (template, group) pair to its SQC equivalents and, once the target group
+// is known to exist (or resolvable), grants each listed permission.
+func (a *templateGroupPermApplier) apply(ctx context.Context, srvURL string, data json.RawMessage, unresolvedRecs *[]json.RawMessage) error {
+	srcTemplateID := extractField(data, "templateId")
+	groupName := extractField(data, "name")
+	if srcTemplateID == "" || groupName == "" || a.skipGroups[groupName] || !a.e.groupSelected(groupName) {
+		return nil
+	}
+	tmpl, ok := a.templateMap[srvURL+"\x00"+srcTemplateID]
+	if !ok || tmpl.cloudID == "" || tmpl.org == "" {
+		return nil
+	}
+	// Issue #269: remap SQS built-in groups (sonar-users → Members).
+	// Aliased built-ins exist on SQC by default and won't appear in
+	// the createGroups output, so the groupExists check is skipped
+	// for them.
+	cloudGroup, mapOK := MapGroupNameToCloud(groupName)
+	if !mapOK {
+		return nil
+	}
+	aliased := cloudGroup != groupName
+	if !a.groupResolvable(ctx, tmpl, groupName, cloudGroup, aliased, unresolvedRecs) {
+		return nil
+	}
+	perms := extractStringArray(data, "permissions")
+	return a.applyPermissions(ctx, perms, tmpl, groupName, cloudGroup)
+}
+
+// groupResolvable reports whether the target group is known to exist (or,
+// when createGroups did not run at all, #685, can be resolved by name in
+// the target organization). A group that resolution cannot find counts as
+// one failure per (template, group) pair and is written once to
+// unresolvedRecs, so the report can name it on the template's row.
+func (a *templateGroupPermApplier) groupResolvable(ctx context.Context, tmpl templateGroupRef, groupName, cloudGroup string, aliased bool, unresolvedRecs *[]json.RawMessage) bool {
+	if aliased || a.groupExists[tmpl.org+"\x00"+groupName] {
+		return true
+	}
+	if !a.resolver.byName {
+		return false
+	}
+	st := a.resolver.groupState(ctx, tmpl.org, groupName)
+	if st == entityFound {
+		return true
+	}
+	pk := templateGroupPairKey{tmpl.cloudID, cloudGroup}
+	a.statsMu.Lock()
+	defer a.statsMu.Unlock()
+	if !a.unresolved[pk] {
+		a.unresolved[pk] = true
+		a.counter.Fail()
+		*unresolvedRecs = append(*unresolvedRecs, unresolvedTemplateGroupRecord(tmpl.cloudID, tmpl.org, groupName, st))
+	}
+	return false
+}
+
+// applyPermissions grants each of perms to cloudGroup on tmpl's SQC
+// permission template, deduping (template, group, permission) triples
+// already applied by an earlier feed and tallying attempted/succeeded
+// counts per (template, group) pair (#551).
+func (a *templateGroupPermApplier) applyPermissions(ctx context.Context, perms []string, tmpl templateGroupRef, groupName, cloudGroup string) error {
+	for _, perm := range perms {
+		if perm == "" {
+			continue
+		}
+		// Issue #550: never auto-escalate the sonar-users → Members
+		// alias into an admin grant on the permission template. The
+		// other permissions for this group/template still apply.
+		if skipAdminForBuiltInAlias(groupName, perm) {
+			// #551: a deliberate security skip, not a failure — no
+			// counter increment (Logger.Warn already surfaces it).
+			a.e.Logger.Warn("setTemplateGroupPermissions: admin NOT auto-granted to Members — source aliased it from sonar-users; grant manually if genuinely intended",
+				"template", tmpl.cloudID, "group", cloudGroup)
+			continue
+		}
+		if a.alreadyApplied(tmpl, cloudGroup, perm) {
+			continue
+		}
+		stat := a.pairStat(tmpl, cloudGroup)
+		a.statsMu.Lock()
+		stat.attempted++
+		a.statsMu.Unlock()
+
+		if err := a.e.Cloud.Permissions.AddGroupToTemplate(ctx, tmpl.cloudID, cloudGroup, perm, tmpl.org); err != nil {
+			failAPI(a.counter, a.e.Logger, "setTemplateGroupPermissions failed", err,
+				"template", tmpl.cloudID, "group", cloudGroup, "perm", perm)
+			continue
+		}
+		a.statsMu.Lock()
+		stat.succeeded++
+		a.statsMu.Unlock()
+		a.counter.Success()
+	}
+	return nil
+}
+
+// alreadyApplied reports whether (template, group, permission) was already
+// granted by an earlier feed row, marking it applied otherwise.
+func (a *templateGroupPermApplier) alreadyApplied(tmpl templateGroupRef, cloudGroup, perm string) bool {
+	k := templateGroupPermTriple{tmpl.cloudID, cloudGroup, perm}
+	a.appliedMu.Lock()
+	defer a.appliedMu.Unlock()
+	if a.applied[k] {
+		return true
+	}
+	a.applied[k] = true
+	return false
+}
+
+// pairStat returns the attempted/succeeded counters for (template, group),
+// creating them on first use.
+func (a *templateGroupPermApplier) pairStat(tmpl templateGroupRef, cloudGroup string) *templateGroupPairStat {
+	pk := templateGroupPairKey{tmpl.cloudID, cloudGroup}
+	a.statsMu.Lock()
+	defer a.statsMu.Unlock()
+	stat, ok := a.pairStats[pk]
+	if !ok {
+		stat = &templateGroupPairStat{}
+		a.pairStats[pk] = stat
+	}
+	return stat
 }

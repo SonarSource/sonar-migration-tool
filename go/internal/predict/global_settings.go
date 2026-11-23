@@ -40,17 +40,9 @@ func synthesizeSetGlobalSettings(exportDir, runDir string, extractMapping struct
 	if len(rawItems) == 0 {
 		return nil
 	}
-	defItems, err := structure.ReadExtractData(exportDir, extractMapping, "getServerSettingsDefinitions")
+	defaults, err := loadSettingDefaults(exportDir, extractMapping)
 	if err != nil {
-		return fmt.Errorf("reading getServerSettingsDefinitions extract: %w", err)
-	}
-	defaults := make(map[string]string, len(defItems))
-	for _, di := range defItems {
-		key := jsonStringField(di.Data, "key")
-		if key == "" {
-			continue
-		}
-		defaults[key] = jsonStringField(di.Data, "defaultValue")
+		return err
 	}
 
 	// Target SQC orgs — same source the real-migrate setup uses.
@@ -82,67 +74,9 @@ func synthesizeSetGlobalSettings(exportDir, runDir string, extractMapping struct
 
 	// #363: all sonar.auth.* keys collapse to a single Skipped row,
 	// emitted once after the main loop.
-	hasConsolidatedAuth := false
-
-	for _, it := range rawItems {
-		key := jsonStringField(it.Data, "key")
-		if key == "" || seenKey[key] {
-			continue
-		}
-		// Drop internal settings (#244) — sonar-tools _SQ_INTERNAL_SETTINGS.
-		if migrate.IsInternalSqsSetting(key) {
-			continue
-		}
-		if !migrate.IsSettingCustomized(it.Data, defaults[key]) {
-			continue
-		}
-		seenKey[key] = true
-
-		// #363: defer all sonar.auth.* keys; the consolidated row is
-		// written once after both loops. Honor the empty-value
-		// silent-skip rule by consulting EvaluateSQSOnlyGlobalSetting —
-		// when it returns isSQSOnly=false the key carries no value
-		// worth surfacing, so it shouldn't trigger the consolidated row.
-		if strings.HasPrefix(key, "sonar.auth.") {
-			if _, isSQSOnly := migrate.EvaluateSQSOnlyGlobalSetting(key, it.Data); isSQSOnly {
-				hasConsolidatedAuth = true
-			}
-			continue
-		}
-
-		// #249: sonar.dbcleaner.branchesToKeepWhenInactive migrates as
-		// a regex into the SQC org-scope sonar.branch.longLivedBranches
-		// .regex setting. Predict the same Applied outcome here so the
-		// report shows it green.
-		if key == "sonar.dbcleaner.branchesToKeepWhenInactive" {
-			rec := buildPredictedDbCleanerRecord(key, it.Data)
-			b, _ := json.Marshal(rec)
-			if err := w.WriteOne(b); err != nil {
-				return err
-			}
-			continue
-		}
-
-		// Honor the curated silent-skip list (read-only keys like
-		// sonar.core.startTime, plus SQS-only feature flags whose
-		// value matches SQS's default). Real-migrate drops these in
-		// partitionSQSOnlySettings; predict mirrors that so the two
-		// reports stay consistent.
-		if migrate.IsSilentlySkippedGlobalSetting(key, it.Data) {
-			continue
-		}
-
-		rec, ok := buildPredictedOutcomeRecord(key, it.Data, orgs)
-		if !ok {
-			continue
-		}
-		b, err := json.Marshal(rec)
-		if err != nil {
-			continue
-		}
-		if err := w.WriteOne(b); err != nil {
-			return err
-		}
+	hasConsolidatedAuth, err := writeCustomizedSettingRows(rawItems, defaults, orgs, w, seenKey)
+	if err != nil {
+		return err
 	}
 
 	// Default-value sweep (#244). For every non-internal key in the
@@ -151,65 +85,182 @@ func synthesizeSetGlobalSettings(exportDir, runDir string, extractMapping struct
 	// from getServerSettings entirely), emit a section-level Skipped
 	// outcome so the predictive report inventories the full settings
 	// catalog.
-	defItems, _ = structure.ReadExtractData(exportDir, extractMapping, "getServerSettingsDefinitions")
-	for _, di := range defItems {
-		key := jsonStringField(di.Data, "key")
-		if key == "" || seenKey[key] {
-			continue
-		}
-		if migrate.IsInternalSqsSetting(key) {
-			continue
-		}
-		// Honor the curated SQS-only list — its per-key handlers
-		// decide silent-skip vs surface-as-Skipped based on value.
-		// For a setting at the SQS default, the handler returns
-		// SkipSilently and we should NOT emit a default-value row
-		// here either.
-		if _, isSQSOnly := migrate.EvaluateSQSOnlyGlobalSetting(key, di.Data); isSQSOnly {
-			continue
-		}
-		if migrate.IsSilentlySkippedGlobalSetting(key, di.Data) {
-			continue
-		}
-		seenKey[key] = true
-		rec := map[string]any{
-			"key": key,
-			"outcomes": []map[string]string{{
-				"org":    "",
-				"status": "skipped",
-				"reason": "default-value",
-				"detail": migrate.SkipDetailDefaultValue,
-			}},
-		}
-		b, err := json.Marshal(rec)
-		if err != nil {
-			continue
-		}
-		if err := w.WriteOne(b); err != nil {
-			return err
-		}
+	if err := writeDefaultValueSweepRows(exportDir, extractMapping, seenKey, w); err != nil {
+		return err
 	}
 
 	// #363: single consolidated sonar.auth.* row, emitted once if any
 	// auth setting carried a value worth surfacing.
 	if hasConsolidatedAuth {
-		rec := map[string]any{
-			"key": migrate.SonarAuthConsolidatedKey,
-			"outcomes": []map[string]string{{
-				"org":    "",
-				"status": "skipped",
-				"reason": "sqs-only",
-				"detail": migrate.SkipDetailSonarAuthConsolidated,
-			}},
+		return writeConsolidatedAuthRow(w)
+	}
+	return nil
+}
+
+// loadSettingDefaults reads the getServerSettingsDefinitions extract and
+// returns a key → defaultValue lookup, used to decide whether a
+// getServerSettings row is customised.
+func loadSettingDefaults(exportDir string, extractMapping structure.ExtractMapping) (map[string]string, error) {
+	defItems, err := structure.ReadExtractData(exportDir, extractMapping, "getServerSettingsDefinitions")
+	if err != nil {
+		return nil, fmt.Errorf("reading getServerSettingsDefinitions extract: %w", err)
+	}
+	defaults := make(map[string]string, len(defItems))
+	for _, di := range defItems {
+		key := jsonStringField(di.Data, "key")
+		if key == "" {
+			continue
 		}
-		b, err := json.Marshal(rec)
-		if err == nil {
-			if err := w.WriteOne(b); err != nil {
-				return err
-			}
+		defaults[key] = jsonStringField(di.Data, "defaultValue")
+	}
+	return defaults, nil
+}
+
+// writeCustomizedSettingRows writes one JSONL record per customised
+// getServerSettings key (see processCustomizedSetting), and reports
+// whether any sonar.auth.* key carried a value worth surfacing in the
+// #363 consolidated row.
+func writeCustomizedSettingRows(rawItems []structure.ExtractItem, defaults map[string]string, orgs []string, w *common.ChunkWriter, seenKey map[string]bool) (bool, error) {
+	hasConsolidatedAuth := false
+	for _, it := range rawItems {
+		consolidated, err := processCustomizedSetting(it, defaults, orgs, w, seenKey)
+		if err != nil {
+			return hasConsolidatedAuth, err
+		}
+		if consolidated {
+			hasConsolidatedAuth = true
+		}
+	}
+	return hasConsolidatedAuth, nil
+}
+
+// processCustomizedSetting evaluates a single getServerSettings row,
+// writing its predicted outcome row (if any) via w, and reports whether
+// the row is a sonar.auth.* key that should trigger the #363 consolidated
+// row.
+func processCustomizedSetting(it structure.ExtractItem, defaults map[string]string, orgs []string, w *common.ChunkWriter, seenKey map[string]bool) (bool, error) {
+	key := jsonStringField(it.Data, "key")
+	if key == "" || seenKey[key] {
+		return false, nil
+	}
+	// Drop internal settings (#244) — sonar-tools _SQ_INTERNAL_SETTINGS.
+	if migrate.IsInternalSqsSetting(key) {
+		return false, nil
+	}
+	if !migrate.IsSettingCustomized(it.Data, defaults[key]) {
+		return false, nil
+	}
+	seenKey[key] = true
+
+	// #363: defer all sonar.auth.* keys; the consolidated row is
+	// written once after both loops. Honor the empty-value
+	// silent-skip rule by consulting EvaluateSQSOnlyGlobalSetting —
+	// when it returns isSQSOnly=false the key carries no value
+	// worth surfacing, so it shouldn't trigger the consolidated row.
+	if strings.HasPrefix(key, "sonar.auth.") {
+		_, isSQSOnly := migrate.EvaluateSQSOnlyGlobalSetting(key, it.Data)
+		return isSQSOnly, nil
+	}
+
+	// #249: sonar.dbcleaner.branchesToKeepWhenInactive migrates as
+	// a regex into the SQC org-scope sonar.branch.longLivedBranches
+	// .regex setting. Predict the same Applied outcome here so the
+	// report shows it green.
+	if key == "sonar.dbcleaner.branchesToKeepWhenInactive" {
+		return false, writeJSONRow(w, buildPredictedDbCleanerRecord(key, it.Data))
+	}
+
+	// Honor the curated silent-skip list (read-only keys like
+	// sonar.core.startTime, plus SQS-only feature flags whose
+	// value matches SQS's default). Real-migrate drops these in
+	// partitionSQSOnlySettings; predict mirrors that so the two
+	// reports stay consistent.
+	if migrate.IsSilentlySkippedGlobalSetting(key, it.Data) {
+		return false, nil
+	}
+
+	rec, ok := buildPredictedOutcomeRecord(key, it.Data, orgs)
+	if !ok {
+		return false, nil
+	}
+	b, err := json.Marshal(rec)
+	if err != nil {
+		return false, nil
+	}
+	return false, w.WriteOne(b)
+}
+
+// writeDefaultValueSweepRows performs the #244 default-value sweep: for
+// every non-internal key in the getServerSettingsDefinitions catalog not
+// already surfaced by writeCustomizedSettingRows, it emits a
+// section-level Skipped outcome so the predictive report inventories the
+// full settings catalog.
+func writeDefaultValueSweepRows(exportDir string, extractMapping structure.ExtractMapping, seenKey map[string]bool, w *common.ChunkWriter) error {
+	defItems, _ := structure.ReadExtractData(exportDir, extractMapping, "getServerSettingsDefinitions")
+	for _, di := range defItems {
+		rec, ok := buildDefaultValueSweepRecord(di, seenKey)
+		if !ok {
+			continue
+		}
+		if err := writeJSONRow(w, rec); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// buildDefaultValueSweepRecord returns the default-value Skipped row for
+// di, or (nil, false) when di should not be surfaced: already seen,
+// internal, SQS-only (its own handler decides silent-skip vs
+// surface-as-Skipped), or otherwise silently-skipped.
+func buildDefaultValueSweepRecord(di structure.ExtractItem, seenKey map[string]bool) (map[string]any, bool) {
+	key := jsonStringField(di.Data, "key")
+	if key == "" || seenKey[key] {
+		return nil, false
+	}
+	if migrate.IsInternalSqsSetting(key) {
+		return nil, false
+	}
+	// Honor the curated SQS-only list — its per-key handlers
+	// decide silent-skip vs surface-as-Skipped based on value.
+	// For a setting at the SQS default, the handler returns
+	// SkipSilently and we should NOT emit a default-value row
+	// here either.
+	if _, isSQSOnly := migrate.EvaluateSQSOnlyGlobalSetting(key, di.Data); isSQSOnly {
+		return nil, false
+	}
+	if migrate.IsSilentlySkippedGlobalSetting(key, di.Data) {
+		return nil, false
+	}
+	seenKey[key] = true
+	return map[string]any{
+		"key": key,
+		"outcomes": []map[string]string{{
+			"org":    "",
+			"status": "skipped",
+			"reason": "default-value",
+			"detail": migrate.SkipDetailDefaultValue,
+		}},
+	}, true
+}
+
+// writeConsolidatedAuthRow writes the #363 single consolidated
+// sonar.auth.* Skipped row.
+func writeConsolidatedAuthRow(w *common.ChunkWriter) error {
+	rec := map[string]any{
+		"key": migrate.SonarAuthConsolidatedKey,
+		"outcomes": []map[string]string{{
+			"org":    "",
+			"status": "skipped",
+			"reason": "sqs-only",
+			"detail": migrate.SkipDetailSonarAuthConsolidated,
+		}},
+	}
+	b, err := json.Marshal(rec)
+	if err != nil {
+		return nil
+	}
+	return w.WriteOne(b)
 }
 
 // buildPredictedDbCleanerRecord builds the predictive Applied outcome
