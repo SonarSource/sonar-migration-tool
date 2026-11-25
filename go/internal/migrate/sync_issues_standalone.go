@@ -217,9 +217,15 @@ func RunSyncIssues(ctx context.Context, cfg SyncIssuesConfig) (SyncIssuesSummary
 	var issuesActionable, issuesSynced, issuesMismatch, issuesNotFound atomic.Int64
 	var hotspotsActionable, hotspotsSynced, hotspotsMismatch, hotspotsNotFound, hotspotsAck atomic.Int64
 
-	runProjectSyncLoop(ctx, e, targets, "sync-issues: projects", 5,
+	// Two phases over the same project list — every project's issues, then
+	// every project's hotspots — so the run-wide progress is 50% when all
+	// issues are synced and 100% when all hotspots are too (#702).
+	progress := newSyncProgress(logger, len(targets))
+	stopProgress := progress.Run(ctx, syncProgressInterval)
+
+	runProjectSyncLoop(ctx, e, targets, "sync-issues: issues, projects", 5,
 		func(gctx context.Context, t syncTarget) {
-			logger.Info("sync-issues: syncing project", "source_key", t.Key, "cloud_project_key", t.CloudProjectKey, "org", t.OrgKey)
+			logger.Info("sync-issues: syncing project issues", "source_key", t.Key, "cloud_project_key", t.CloudProjectKey, "org", t.OrgKey)
 
 			// No importProjectData runs here, so there is nothing to index and
 			// e.SkipIndexingWait bypasses the backoff wait (#700). The zero
@@ -232,7 +238,11 @@ func RunSyncIssues(ctx context.Context, cfg SyncIssuesConfig) (SyncIssuesSummary
 			issuesSynced.Add(iStats.A)
 			issuesMismatch.Add(iStats.B)
 			issuesNotFound.Add(iStats.C)
+			progress.IssuesDone()
+		})
 
+	runProjectSyncLoop(ctx, e, targets, "sync-issues: hotspots, projects", 5,
+		func(gctx context.Context, t syncTarget) {
 			hResult := syncProjectHotspots(gctx, e, syncHotspotInput{
 				CloudKey:  t.CloudProjectKey,
 				OrgKey:    t.OrgKey,
@@ -244,7 +254,9 @@ func RunSyncIssues(ctx context.Context, cfg SyncIssuesConfig) (SyncIssuesSummary
 			hotspotsMismatch.Add(hResult.Stats.B)
 			hotspotsNotFound.Add(hResult.Stats.C)
 			hotspotsAck.Add(hResult.Stats.AckDemoted)
+			progress.HotspotsDone()
 		})
+	stopProgress()
 
 	summary = SyncIssuesSummary{
 		ProjectsSynced:       len(targets),
