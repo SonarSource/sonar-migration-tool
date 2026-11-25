@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/redact"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 	sqapi "github.com/sonar-solutions/sq-api-go"
 	"github.com/sonar-solutions/sq-api-go/cloud"
@@ -138,7 +139,7 @@ func RunSyncIssues(ctx context.Context, cfg SyncIssuesConfig) (SyncIssuesSummary
 	if cfg.Debug {
 		level = slog.LevelDebug
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	logger := slog.New(redact.NewHandler(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 
 	if err := ValidateProjectKeyPattern(cfg.ProjectKeyPattern); err != nil {
 		return summary, common.NewExitError(2, fmt.Errorf("invalid project_key_pattern: %w", err))

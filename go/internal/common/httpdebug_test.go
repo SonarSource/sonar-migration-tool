@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/redact"
 )
 
 // swapBodyWriter redirects debugBodyWriter for the duration of the test
@@ -221,3 +223,42 @@ func TestNewHTTPDebugLogger_LargeBodyTerminatesQuickly(t *testing.T) {
 type dnsError struct{}
 
 func (dnsError) Error() string { return "lookup x: no such host" }
+
+// With redaction on (the default), --debug payload dumps must not leak
+// e-mails, source code or SCM authors (#713).
+func TestNewHTTPDebugLogger_RedactsSensitivePayloads(t *testing.T) {
+	prev := redact.Enabled()
+	t.Cleanup(func() { redact.SetEnabled(prev) })
+
+	run := func(url string, hdrs map[string][]string, resp string) (string, string) {
+		body := swapBodyWriter(t)
+		var meta bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&meta, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		NewHTTPDebugLogger(logger)("GET", url, hdrs, nil, 200, []byte(resp), time.Millisecond, nil)
+		return body.String(), meta.String()
+	}
+
+	redact.SetEnabled(true)
+	out, _ := run("https://x/api/sources/raw?key=p:f.go", nil, "package secret\nfunc topSecretLogic() {}\n")
+	if strings.Contains(out, "topSecretLogic") || !strings.Contains(out, "redacted") {
+		t.Errorf("source code not replaced by placeholder:\n%s", out)
+	}
+	out, _ = run("https://x/api/sources/scm?key=p:f.go", nil, `{"scm":[[1,"johnd","2024-01-01T00:00:00+0000","abc"]]}`)
+	if strings.Contains(out, `"johnd"`) {
+		t.Errorf("SCM author leaked:\n%s", out)
+	}
+	out, _ = run("https://x/api/users/search", nil, `{"users":[{"login":"janedoe","email":"jane.doe@acme.com"}]}`)
+	if strings.Contains(out, "janedoe") || strings.Contains(out, "jane.doe@acme.com") {
+		t.Errorf("JSON user data leaked:\n%s", out)
+	}
+	out, meta := run("https://x/api/y?q=jane.doe@acme.com", map[string][]string{"X-User": {"jane.doe@acme.com"}}, "contact jane.doe@acme.com now")
+	if strings.Contains(out, "jane.doe@acme.com") || strings.Contains(meta, "jane.doe@acme.com") {
+		t.Errorf("e-mail leaked in text body/url/headers:\nbody=%s\nmeta=%s", out, meta)
+	}
+
+	redact.SetEnabled(false)
+	out, meta = run("https://x/api/y?q=jane.doe@acme.com", nil, `{"users":[{"login":"janedoe"}]}`)
+	if !strings.Contains(out, "janedoe") || !strings.Contains(meta, "jane.doe@acme.com") {
+		t.Errorf("disabled redaction must leave payloads untouched:\nbody=%s\nmeta=%s", out, meta)
+	}
+}

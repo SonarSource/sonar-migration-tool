@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/sonar-solutions/sonar-migration-tool/internal/redact"
 	sqapi "github.com/sonar-solutions/sq-api-go"
 )
 
@@ -39,8 +40,8 @@ func NewHTTPDebugLogger(logger *slog.Logger) sqapi.DebugLogFunc {
 	return func(method, url string, headers map[string][]string, reqBody []byte, respStatus int, respBody []byte, duration time.Duration, err error) {
 		args := []any{
 			"method", method,
-			"url", url,
-			"headers", headers,
+			"url", redactURL(url),
+			"headers", redactHeaders(headers),
 			"duration_ms", duration.Milliseconds(),
 		}
 		if err != nil {
@@ -51,16 +52,69 @@ func NewHTTPDebugLogger(logger *slog.Logger) sqapi.DebugLogFunc {
 			logger.Debug("http request", args...)
 		}
 		if len(reqBody) > 0 {
-			writeBody("request_body", reqBody)
+			writeBody("request_body", url, reqBody)
 		}
 		if len(respBody) > 0 {
-			writeBody("response_body", respBody)
+			writeBody("response_body", url, respBody)
 		}
 	}
 }
 
-func writeBody(label string, body []byte) {
-	fmt.Fprintf(debugBodyWriter, "  %s:\n%s\n", label, indentBlock(formatBody(body), "    "))
+func writeBody(label, url string, body []byte) {
+	fmt.Fprintf(debugBodyWriter, "  %s:\n%s\n", label, indentBlock(formatBody(redactBody(url, body)), "    "))
+}
+
+// redactURL masks e-mail addresses embedded in a logged URL (query strings
+// such as ?q=jane@acme.com). A no-op when redaction is disabled.
+func redactURL(url string) string {
+	if !redact.Enabled() {
+		return url
+	}
+	return redact.Text(url)
+}
+
+// redactHeaders masks e-mail addresses in header values. Authorization
+// headers are already redacted by the SDK and are passed through untouched.
+func redactHeaders(headers map[string][]string) map[string][]string {
+	if !redact.Enabled() {
+		return headers
+	}
+	out := make(map[string][]string, len(headers))
+	for k, vals := range headers {
+		if strings.EqualFold(k, "Authorization") {
+			out[k] = vals
+			continue
+		}
+		masked := make([]string, len(vals))
+		for i, v := range vals {
+			masked[i] = redact.Text(v)
+		}
+		out[k] = masked
+	}
+	return out
+}
+
+// redactBody masks a request/response body for the debug log (#713): raw
+// source files collapse to a size placeholder, SCM and other JSON bodies are
+// redacted by key, and any remaining text has e-mail addresses masked.
+// Binary payloads are returned as-is: formatBody already reduces them to a
+// "<binary, N bytes>" placeholder. A no-op when redaction is disabled.
+func redactBody(url string, body []byte) []byte {
+	if !redact.Enabled() {
+		return body
+	}
+	switch {
+	case strings.Contains(url, "/api/sources/raw"):
+		return redact.SourceCode(body)
+	case strings.Contains(url, "/api/sources/scm"):
+		return redact.SCMJSON(body)
+	case json.Valid(body):
+		return redact.JSON(body)
+	case isPrintableText(body):
+		return []byte(redact.Text(string(body)))
+	default:
+		return body
+	}
 }
 
 // formatBody returns the body indented as JSON when it parses, otherwise
