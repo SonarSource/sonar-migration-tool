@@ -188,6 +188,10 @@ func writeBranchSourcePurgedRow(w *common.ChunkWriter, pk branchSourcePurgedProj
 
 // writeJSONRow marshals rec and writes it as one JSONL record via w.
 func writeJSONRow(w *common.ChunkWriter, rec map[string]any) error {
-	b, _ := json.Marshal(rec)
+	b, err := json.Marshal(rec)
+	if err != nil {
+		// Skip rows that cannot be serialised rather than writing an empty line.
+		return nil
+	}
 	return w.WriteOne(b)
 }
