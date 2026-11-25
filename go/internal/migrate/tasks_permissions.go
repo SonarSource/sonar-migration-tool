@@ -164,6 +164,27 @@ var migrationUserProjectPermissions = []string{
 	"securityhotspotadmin",
 }
 
+// grantMigrationUserProjectPermissionSet grants every permission in
+// migrationUserProjectPermissions to login on cloudKey/orgKey, logging and
+// counting each attempt. It reports how many grants were attempted and how
+// many succeeded so the caller can detect a project where every grant
+// failed.
+func grantMigrationUserProjectPermissionSet(ctx context.Context, e *Executor, counter *TaskCounter, login, orgKey, cloudKey string) (attempted, succeeded int) {
+	for _, perm := range migrationUserProjectPermissions {
+		attempted++
+		e.Logger.Debug("grantMigrationUserProjectPermissions: POST /api/permissions/add_user",
+			"login", login, "perm", perm, "project", cloudKey, "org", orgKey)
+		if err := e.Cloud.Permissions.AddUser(ctx, login, perm, orgKey, cloudKey); err != nil {
+			failAPI(counter, e.Logger, "grantMigrationUserProjectPermissions failed", err,
+				"login", login, "project", cloudKey, "perm", perm)
+			continue
+		}
+		succeeded++
+		counter.Success()
+	}
+	return attempted, succeeded
+}
+
 func runGrantMigrationUserProjectPermissions(ctx context.Context, e *Executor) error {
 	userItems, _ := e.Store.ReadAll("getMigrationUser")
 	if len(userItems) == 0 {
@@ -200,20 +221,7 @@ func runGrantMigrationUserProjectPermissions(ctx context.Context, e *Executor) e
 			if cloudKey == "" {
 				return nil
 			}
-			var attempted, succeeded int
-			for _, perm := range migrationUserProjectPermissions {
-				attempted++
-				e.Logger.Debug("grantMigrationUserProjectPermissions: POST /api/permissions/add_user",
-					"login", login, "perm", perm, "project", cloudKey, "org", orgKey)
-				err := e.Cloud.Permissions.AddUser(ctx, login, perm, orgKey, cloudKey)
-				if err != nil {
-					failAPI(counter, e.Logger, "grantMigrationUserProjectPermissions failed", err,
-						"login", login, "project", cloudKey, "perm", perm)
-					continue
-				}
-				succeeded++
-				counter.Success()
-			}
+			attempted, succeeded := grantMigrationUserProjectPermissionSet(ctx, e, counter, login, orgKey, cloudKey)
 			// Issue #550: partial failure is expected and swallowed above
 			// so the other permissions still get applied — but if EVERY
 			// grant on this project failed, the migration user very

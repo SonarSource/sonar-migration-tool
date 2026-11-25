@@ -80,6 +80,36 @@ func projectRow(t *testing.T, key, cloud string) json.RawMessage {
 	return b
 }
 
+// assertBranchSourcePurgedRow writes a single branchSourcePurgedRow for
+// branch and checks it against wantStatus/wantPurged. wantStatus == ""
+// means no row should have been written.
+func assertBranchSourcePurgedRow(t *testing.T, pk branchSourcePurgedProjectKey, branch, wantStatus string, wantPurged bool, lookups branchSourcePurgedLookups) {
+	t.Helper()
+	w, read := newHelperWriter(t, "importProjectData")
+	if err := writeBranchSourcePurgedRow(w, pk, branch, "cloud", lookups); err != nil {
+		t.Fatal(err)
+	}
+	rows := read()
+	if wantStatus == "" {
+		if len(rows) != 0 {
+			t.Fatalf("expected no row, got %s", rows)
+		}
+		return
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d", len(rows))
+	}
+	if common.ExtractField(rows[0], "branch") != branch || common.ExtractField(rows[0], "cloud_project_key") != "cloud" {
+		t.Errorf("row = %s", rows[0])
+	}
+	if got := common.ExtractField(rows[0], "status"); got != wantStatus {
+		t.Errorf("status = %q, want %q", got, wantStatus)
+	}
+	if common.ExtractBool(rows[0], "source_purged") != wantPurged {
+		t.Errorf("source_purged mismatch in %s", rows[0])
+	}
+}
+
 func TestWriteBranchSourcePurgedRow(t *testing.T) {
 	pk := branchSourcePurgedProjectKey{testServerURL, "p"}
 	bk := func(b string) branchSourcePurgedBranchKey { return branchSourcePurgedBranchKey{testServerURL, "p", b} }
@@ -106,29 +136,7 @@ func TestWriteBranchSourcePurgedRow(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.branch, func(t *testing.T) {
-			w, read := newHelperWriter(t, "importProjectData")
-			if err := writeBranchSourcePurgedRow(w, pk, tc.branch, "cloud", lookups); err != nil {
-				t.Fatal(err)
-			}
-			rows := read()
-			if tc.wantStatus == "" {
-				if len(rows) != 0 {
-					t.Fatalf("expected no row, got %s", rows)
-				}
-				return
-			}
-			if len(rows) != 1 {
-				t.Fatalf("rows = %d", len(rows))
-			}
-			if common.ExtractField(rows[0], "branch") != tc.branch || common.ExtractField(rows[0], "cloud_project_key") != "cloud" {
-				t.Errorf("row = %s", rows[0])
-			}
-			if got := common.ExtractField(rows[0], "status"); got != tc.wantStatus {
-				t.Errorf("status = %q, want %q", got, tc.wantStatus)
-			}
-			if common.ExtractBool(rows[0], "source_purged") != tc.wantPurged {
-				t.Errorf("source_purged mismatch in %s", rows[0])
-			}
+			assertBranchSourcePurgedRow(t, pk, tc.branch, tc.wantStatus, tc.wantPurged, lookups)
 		})
 	}
 

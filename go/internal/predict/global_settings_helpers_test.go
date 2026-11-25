@@ -47,20 +47,70 @@ func rawItem(t *testing.T, v map[string]any) structure.ExtractItem {
 	return structure.ExtractItem{ServerURL: testServerURL, Data: b}
 }
 
+// processCustomizedSettingCase is one TestProcessCustomizedSetting table
+// entry.
+type processCustomizedSettingCase struct {
+	name          string
+	item          map[string]any
+	seen          map[string]bool
+	wantAuth      bool
+	wantRows      int
+	wantSeenKey   string
+	wantStatus    string
+	wantNotInSeen string
+}
+
+// assertCustomizedSettingRowStatus checks that rows[0] carries a single
+// outcome whose status is wantStatus.
+func assertCustomizedSettingRowStatus(t *testing.T, row json.RawMessage, wantStatus string) {
+	t.Helper()
+	var rec struct {
+		Outcomes []map[string]string `json:"outcomes"`
+	}
+	if err := json.Unmarshal(row, &rec); err != nil || len(rec.Outcomes) != 1 {
+		t.Fatalf("bad row %s: %v", row, err)
+	}
+	if rec.Outcomes[0]["status"] != wantStatus {
+		t.Errorf("status = %q, want %q", rec.Outcomes[0]["status"], wantStatus)
+	}
+}
+
+// runProcessCustomizedSettingCase runs processCustomizedSetting for tc and
+// checks every expectation it carries.
+func runProcessCustomizedSettingCase(t *testing.T, tc processCustomizedSettingCase, defaults map[string]string, orgs []string) {
+	t.Helper()
+	w, read := newHelperWriter(t, "setGlobalSettings")
+	seen := tc.seen
+	if seen == nil {
+		seen = map[string]bool{}
+	}
+	got, err := processCustomizedSetting(rawItem(t, tc.item), defaults, orgs, w, seen)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got != tc.wantAuth {
+		t.Errorf("consolidated = %v, want %v", got, tc.wantAuth)
+	}
+	rows := read()
+	if len(rows) != tc.wantRows {
+		t.Fatalf("rows = %d, want %d", len(rows), tc.wantRows)
+	}
+	if tc.wantStatus != "" {
+		assertCustomizedSettingRowStatus(t, rows[0], tc.wantStatus)
+	}
+	if tc.wantSeenKey != "" && !seen[tc.wantSeenKey] {
+		t.Errorf("expected %q marked seen", tc.wantSeenKey)
+	}
+	if tc.wantNotInSeen != "" && seen[tc.wantNotInSeen] {
+		t.Errorf("%q must not be marked seen", tc.wantNotInSeen)
+	}
+}
+
 func TestProcessCustomizedSetting(t *testing.T) {
 	defaults := map[string]string{"custom.key": "def", "same.key": "def"}
 	orgs := []string{"org"}
 
-	cases := []struct {
-		name          string
-		item          map[string]any
-		seen          map[string]bool
-		wantAuth      bool
-		wantRows      int
-		wantSeenKey   string
-		wantStatus    string
-		wantNotInSeen string
-	}{
+	cases := []processCustomizedSettingCase{
 		{name: "empty key", item: map[string]any{"value": "x"}, wantRows: 0},
 		{name: "already seen", item: map[string]any{"key": "custom.key", "value": "x"}, seen: map[string]bool{"custom.key": true}, wantRows: 0},
 		{name: "internal", item: map[string]any{"key": "sonar.core.id", "value": "x"}, wantRows: 0, wantNotInSeen: "sonar.core.id"},
@@ -73,39 +123,7 @@ func TestProcessCustomizedSetting(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			w, read := newHelperWriter(t, "setGlobalSettings")
-			seen := tc.seen
-			if seen == nil {
-				seen = map[string]bool{}
-			}
-			got, err := processCustomizedSetting(rawItem(t, tc.item), defaults, orgs, w, seen)
-			if err != nil {
-				t.Fatalf("err: %v", err)
-			}
-			if got != tc.wantAuth {
-				t.Errorf("consolidated = %v, want %v", got, tc.wantAuth)
-			}
-			rows := read()
-			if len(rows) != tc.wantRows {
-				t.Fatalf("rows = %d, want %d", len(rows), tc.wantRows)
-			}
-			if tc.wantStatus != "" {
-				var rec struct {
-					Outcomes []map[string]string `json:"outcomes"`
-				}
-				if err := json.Unmarshal(rows[0], &rec); err != nil || len(rec.Outcomes) != 1 {
-					t.Fatalf("bad row %s: %v", rows[0], err)
-				}
-				if rec.Outcomes[0]["status"] != tc.wantStatus {
-					t.Errorf("status = %q, want %q", rec.Outcomes[0]["status"], tc.wantStatus)
-				}
-			}
-			if tc.wantSeenKey != "" && !seen[tc.wantSeenKey] {
-				t.Errorf("expected %q marked seen", tc.wantSeenKey)
-			}
-			if tc.wantNotInSeen != "" && seen[tc.wantNotInSeen] {
-				t.Errorf("%q must not be marked seen", tc.wantNotInSeen)
-			}
+			runProcessCustomizedSettingCase(t, tc, defaults, orgs)
 		})
 	}
 }
@@ -169,6 +187,33 @@ func TestWriteCustomizedSettingRows(t *testing.T) {
 	}
 }
 
+// assertDefaultValueSweepRecord runs buildDefaultValueSweepRecord for item
+// and checks the result against want. When want is true, it additionally
+// checks the emitted record's key/seen-marking/outcome.
+func assertDefaultValueSweepRecord(t *testing.T, item map[string]any, seen map[string]bool, want bool) {
+	t.Helper()
+	if seen == nil {
+		seen = map[string]bool{}
+	}
+	rec, ok := buildDefaultValueSweepRecord(rawItem(t, item), seen)
+	if ok != want {
+		t.Fatalf("ok = %v, want %v", ok, want)
+	}
+	if !ok {
+		if rec != nil {
+			t.Errorf("rec should be nil")
+		}
+		return
+	}
+	if rec["key"] != "a.b" || !seen["a.b"] {
+		t.Errorf("rec=%v seen=%v", rec, seen)
+	}
+	oc := rec["outcomes"].([]map[string]string)
+	if oc[0]["reason"] != "default-value" || oc[0]["status"] != "skipped" {
+		t.Errorf("outcome = %v", oc[0])
+	}
+}
+
 func TestBuildDefaultValueSweepRecord(t *testing.T) {
 	cases := []struct {
 		name string
@@ -185,27 +230,7 @@ func TestBuildDefaultValueSweepRecord(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			seen := tc.seen
-			if seen == nil {
-				seen = map[string]bool{}
-			}
-			rec, ok := buildDefaultValueSweepRecord(rawItem(t, tc.item), seen)
-			if ok != tc.want {
-				t.Fatalf("ok = %v, want %v", ok, tc.want)
-			}
-			if !ok {
-				if rec != nil {
-					t.Errorf("rec should be nil")
-				}
-				return
-			}
-			if rec["key"] != "a.b" || !seen["a.b"] {
-				t.Errorf("rec=%v seen=%v", rec, seen)
-			}
-			oc := rec["outcomes"].([]map[string]string)
-			if oc[0]["reason"] != "default-value" || oc[0]["status"] != "skipped" {
-				t.Errorf("outcome = %v", oc[0])
-			}
+			assertDefaultValueSweepRecord(t, tc.item, tc.seen, tc.want)
 		})
 	}
 }
