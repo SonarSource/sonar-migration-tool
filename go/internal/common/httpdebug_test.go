@@ -251,9 +251,13 @@ func TestNewHTTPDebugLogger_RedactsSensitivePayloads(t *testing.T) {
 	if strings.Contains(out, "janedoe") || strings.Contains(out, "jane.doe@acme.com") {
 		t.Errorf("JSON user data leaked:\n%s", out)
 	}
-	out, meta := run("https://x/api/y?q=jane.doe@acme.com", map[string][]string{"X-User": {"jane.doe@acme.com"}}, "contact jane.doe@acme.com now")
-	if strings.Contains(out, "jane.doe@acme.com") || strings.Contains(meta, "jane.doe@acme.com") {
-		t.Errorf("e-mail leaked in text body/url/headers:\nbody=%s\nmeta=%s", out, meta)
+	out, meta := run("https://x/api/y?login=abcdef&q=jane.doe@acme.com", map[string][]string{"X-User": {"jane.doe@acme.com"}}, "contact jane.doe@acme.com now")
+	if strings.Contains(out, "jane.doe@acme.com") || strings.Contains(meta, "jane.doe@acme.com") || strings.Contains(meta, "abcdef") || !strings.Contains(meta, "login=ab%2A%2A%2A") {
+		t.Errorf("sensitive value or e-mail leaked in text body/url/headers:\nbody=%s\nmeta=%s", out, meta)
+	}
+	out, _ = run("https://x/api/y", nil, "login=abcdef&email=jane.doe%40acme.com")
+	if strings.Contains(out, "abcdef") || strings.Contains(out, "jane.doe") || !strings.Contains(out, "login=ab%2A%2A%2A") {
+		t.Errorf("sensitive form values leaked:\n%s", out)
 	}
 
 	redact.SetEnabled(false)

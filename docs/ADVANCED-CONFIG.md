@@ -542,7 +542,7 @@ Logs can end up in tickets, CI output and support bundles, so by default the too
 - Users and assignee changes in issue changelogs.
 - E-mail addresses appearing in free text (messages, URLs, header values).
 
-**Masking rules.** About one third of the characters are kept, at most 3, followed by `***`:
+**Masking rules.** About one third of the characters are kept, at most 3, followed by `***`; e-mail addresses apply this rule to the local part and keep the domain:
 
 | Original | Logged as |
 |---|---|

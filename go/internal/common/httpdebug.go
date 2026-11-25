@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	neturl "net/url"
 	"os"
 	"strings"
 	"time"
@@ -66,11 +67,26 @@ func writeBody(label, url string, body []byte) {
 
 // redactURL masks e-mail addresses embedded in a logged URL (query strings
 // such as ?q=jane@acme.com). A no-op when redaction is disabled.
-func redactURL(url string) string {
+func redactURL(raw string) string {
 	if !redact.Enabled() {
-		return url
+		return raw
 	}
-	return redact.Text(url)
+	if u, err := neturl.Parse(raw); err == nil && u.RawQuery != "" {
+		q := u.Query()
+		redactParams(q)
+		u.RawQuery = q.Encode()
+		raw = u.String()
+	}
+	return redact.Text(raw)
+}
+
+func redactParams(values neturl.Values) {
+	for key, vals := range values {
+		for i, value := range vals {
+			vals[i] = redact.Text(redact.Value(key, value))
+		}
+		values[key] = vals
+	}
 }
 
 // redactHeaders masks e-mail addresses in header values. Authorization
@@ -111,7 +127,14 @@ func redactBody(url string, body []byte) []byte {
 	case json.Valid(body):
 		return redact.JSON(body)
 	case isPrintableText(body):
-		return []byte(redact.Text(string(body)))
+		raw := string(body)
+		if strings.Contains(raw, "=") {
+			if values, err := neturl.ParseQuery(raw); err == nil {
+				redactParams(values)
+				return []byte(values.Encode())
+			}
+		}
+		return []byte(redact.Text(raw))
 	default:
 		return body
 	}

@@ -35,8 +35,8 @@ func TestValue(t *testing.T) {
 		{"three runes", "user", "abc", "a***"},
 		{"unicode", "user", "éàüöñß", "éà***"},
 		{"empty", "user", "", ""},
-		{"email under user", "user", "jo@x.org", "***jo***@x.org"},
-		{"plain email", "author", "bob@example.com", "***bob***@example.com"},
+		{"email under user", "user", "jo@x.org", "******@x.org"},
+		{"plain email", "author", "bob@example.com", "***b***@example.com"},
 		{"code", "code", "fmt.Println(1)", "<redacted code, 14 bytes>"},
 		{"code empty", "code", "", ""},
 		{"non-sensitive", "project", "johnd", "johnd"},
@@ -56,8 +56,8 @@ func TestText(t *testing.T) {
 		{"none", "hello world", "hello world"},
 		{"at only", "a @ b", "a @ b"},
 		{"single", "contact john.doe@example.com now", "contact ***joh***@example.com now"},
-		{"multiple", "a@b.io, 123+carol@users.noreply.github.com", "***a***@b.io, ***car***@users.noreply.github.com"},
-		{"url", "https://x/api?author=bob@corp.com&p=1", "https://x/api?author=***bob***@corp.com&p=1"},
+		{"multiple", "a@b.io, 123+carol@users.noreply.github.com", "******@b.io, ***ca***@users.noreply.github.com"},
+		{"url", "https://x/api?author=bob@corp.com&p=1", "https://x/api?author=***b***@corp.com&p=1"},
 		{"empty", "", ""},
 	}
 	for _, tc := range tests {
@@ -72,12 +72,12 @@ func TestText(t *testing.T) {
 func TestJSON(t *testing.T) {
 	tests := []struct{ name, in, want string }{
 		{"flat", `{"user":"johnd","n":12345678901234567890,"ok":true,"x":null}`, `{"user":"jo***","n":12345678901234567890,"ok":true,"x":null}`},
-		{"nested", `{"a":[{"email":"bob@x.com","login":"abcdef"}],"b":{"assignee":"Jane Doe"}}`, `{"a":[{"email":"***bob***@x.com","login":"ab***"}],"b":{"assignee":"jan***"}}`},
+		{"nested", `{"a":[{"email":"bob@x.com","login":"abcdef"}],"b":{"assignee":"Jane Doe"}}`, `{"a":[{"email":"***b***@x.com","login":"ab***"}],"b":{"assignee":"jan***"}}`},
 		{"non-string sensitive", `{"user":5,"author":false,"code":{"author":"abc"}}`, `{"user":5,"author":false,"code":{"author":"a***"}}`},
 		{"code string", `{"code":"x := 1"}`, `{"code":"<redacted code, 6 bytes>"}`},
-		{"free text email", `{"msg":"mail bob@x.com <ok> & done","list":["a@b.io"]}`, `{"msg":"mail ***bob***@x.com <ok> & done","list":["***a***@b.io"]}`},
+		{"free text email", `{"msg":"mail bob@x.com <ok> & done","list":["a@b.io"]}`, `{"msg":"mail ***b***@x.com <ok> & done","list":["******@b.io"]}`},
 		{"changelog", `{"changelog":[{"user":"jdoe1","userName":"Jane Doe","diffs":[{"key":"assignee","oldValue":"alice","newValue":"bobby"},{"key":"status","oldValue":"OPEN","newValue":"x@y.com"}]}]}`,
-			`{"changelog":[{"user":"jd***","userName":"jan***","diffs":[{"key":"assignee","oldValue":"al***","newValue":"bo***"},{"key":"status","oldValue":"OPEN","newValue":"***x***@y.com"}]}]}`},
+			`{"changelog":[{"user":"jd***","userName":"jan***","diffs":[{"key":"assignee","oldValue":"al***","newValue":"bo***"},{"key":"status","oldValue":"OPEN","newValue":"******@y.com"}]}]}`},
 		{"diff key after values", `{"oldValue":"alice","key":"author"}`, `{"oldValue":"al***","key":"author"}`},
 		{"scm ignored in JSON", `{"scm":[[1,"alice","d","r"]]}`, `{"scm":[[1,"alice","d","r"]]}`},
 		{"empty array", `[]`, `[]`},
@@ -98,7 +98,7 @@ func TestJSON(t *testing.T) {
 
 func TestSCMJSON(t *testing.T) {
 	in := `{"scm":[[1,"alice@x.com","2020","abc"],[2,"Bob Smith","2020","def"],[3],[4,7],"x"],"user":"jdoe1"}`
-	want := `{"scm":[[1,"***ali***@x.com","2020","abc"],[2,"bob***","2020","def"],[3],[4,7],"x"],"user":"jd***"}`
+	want := `{"scm":[[1,"***al***@x.com","2020","abc"],[2,"bob***","2020","def"],[3],[4,7],"x"],"user":"jd***"}`
 	if got := string(SCMJSON([]byte(in))); got != want {
 		t.Fatalf("got  %s\nwant %s", got, want)
 	}
@@ -161,12 +161,12 @@ func TestHandler(t *testing.T) {
 		"url", "http://h/?e=zed@z.io", "n", 3, slog.Group("g", "email", "carol@c.com", "login", "abcdef"))
 	l.With("author", "Jane Doe").WithGroup("grp").Warn("w", "assignee", "abcdefghi", "code", "x := 1")
 	out := buf.String()
-	for _, leak := range []string{"bob@x.com", "johnd", "amy@y.org", "zed@z.io", "carol@c.com", "abcdef\"", "Jane Doe", "abcdefghi", "x := 1"} {
+	for _, leak := range []string{"bob@x.com", "johnd", "amy@y.org", "zed@z.io", "carol@c.com", "g.login=abcdef", "Jane Doe", "abcdefghi", "x := 1"} {
 		if strings.Contains(out, leak) {
 			t.Errorf("leaked %q in %s", leak, out)
 		}
 	}
-	for _, want := range []string{"level=INFO", "level=WARN", "project=p1", "n=3", "user=jo***", "***bob***@x.com", "g.email=***car***@c.com", "grp.assignee=abc***", "author=jan***", "grp.code=\"<redacted code, 6 bytes>\""} {
+	for _, want := range []string{"level=INFO", "level=WARN", "project=p1", "n=3", "user=jo***", "***b***@x.com", "g.email=***ca***@c.com", "grp.assignee=abc***", "author=jan***", "grp.code=\"<redacted code, 6 bytes>\""} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in %s", want, out)
 		}
@@ -201,7 +201,7 @@ func TestHandlerMisc(t *testing.T) {
 		t.Fatal("empty WithAttrs/WithGroup must return same handler")
 	}
 	slog.New(h).Error("x", "v", slog.AnyValue(struct{ A int }{1}), "s", any("a@b.com"), "nilv", nil)
-	if !strings.Contains(buf.String(), "***a***@b.com") {
+	if !strings.Contains(buf.String(), "******@b.com") {
 		t.Fatalf("got %s", buf.String())
 	}
 }

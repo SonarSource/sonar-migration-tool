@@ -88,7 +88,7 @@ func maskEmail(e string) string {
 	if stripped := noreplyPrefix.ReplaceAllString(local, ""); stripped != "" {
 		local = stripped
 	}
-	return maskSuffix + keepPrefix(local, min(3, utf8.RuneCountInString(local))) + maskSuffix + domain
+	return maskSuffix + keepPrefix(local, keepCount(utf8.RuneCountInString(local))) + maskSuffix + domain
 }
 
 func maskEmailsInText(s string) string {
