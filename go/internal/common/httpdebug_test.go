@@ -255,9 +255,28 @@ func TestNewHTTPDebugLogger_RedactsSensitivePayloads(t *testing.T) {
 	if strings.Contains(out, "jane.doe@acme.com") || strings.Contains(meta, "jane.doe@acme.com") || strings.Contains(meta, "abcdef") || !strings.Contains(meta, "login=ab%2A%2A%2A") {
 		t.Errorf("sensitive value or e-mail leaked in text body/url/headers:\nbody=%s\nmeta=%s", out, meta)
 	}
+
+	for _, tc := range []struct {
+		name string
+		url  string
+	}{
+		{name: "semicolon query separator", url: "https://x/api/y?login=abcdef;other=kept"},
+		{name: "malformed value escape", url: "https://x/api/y?login=abcdef%zz&other=kept"},
+		{name: "malformed path escape", url: "https://x/api/%zz?login=abcdef&other=kept"},
+	} {
+		_, meta := run(tc.url, nil, "")
+		if strings.Contains(meta, "abcdef") || !strings.Contains(meta, "other=kept") {
+			t.Errorf("%s: sensitive value leaked or other query param was lost: %s", tc.name, meta)
+		}
+	}
+
 	out, _ = run("https://x/api/y", nil, "login=abcdef&email=jane.doe%40acme.com")
 	if strings.Contains(out, "abcdef") || strings.Contains(out, "jane.doe") || !strings.Contains(out, "login=ab%2A%2A%2A") {
 		t.Errorf("sensitive form values leaked:\n%s", out)
+	}
+	out, _ = run("https://x/api/y", nil, "note jane.doe@acme.com?x=y")
+	if strings.Contains(out, "jane.doe@acme.com") || strings.Contains(out, "jane.doe%40acme.com") {
+		t.Errorf("e-mail in non-form text containing '=' was not masked:\n%s", out)
 	}
 
 	redact.SetEnabled(false)

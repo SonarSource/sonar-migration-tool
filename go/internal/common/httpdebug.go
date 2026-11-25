@@ -71,22 +71,72 @@ func redactURL(raw string) string {
 	if !redact.Enabled() {
 		return raw
 	}
-	if u, err := neturl.Parse(raw); err == nil && u.RawQuery != "" {
-		q := u.Query()
-		redactParams(q)
-		u.RawQuery = q.Encode()
-		raw = u.String()
+	queryStart := strings.IndexByte(raw, '?')
+	fragmentStart := strings.IndexByte(raw, '#')
+	if queryStart >= 0 && (fragmentStart < 0 || queryStart < fragmentStart) {
+		queryEnd := len(raw)
+		if fragmentStart > queryStart {
+			queryEnd = fragmentStart
+		}
+		raw = raw[:queryStart+1] + redactQuery(raw[queryStart+1:queryEnd]) + raw[queryEnd:]
 	}
 	return redact.Text(raw)
 }
 
-func redactParams(values neturl.Values) {
-	for key, vals := range values {
-		for i, value := range vals {
-			vals[i] = redact.Text(redact.Value(key, value))
+// redactQuery preserves the raw query structure while masking decoded values.
+// Unlike url.Values, it tolerates semicolon separators and malformed escapes.
+func redactQuery(raw string) string {
+	var result strings.Builder
+	for start := 0; start < len(raw); {
+		end := start
+		for end < len(raw) && raw[end] != '&' && raw[end] != ';' {
+			end++
 		}
-		values[key] = vals
+		pair := raw[start:end]
+		if key, value, ok := strings.Cut(pair, "="); ok {
+			decodedKey := unescapeQueryPart(key)
+			decodedValue := unescapeQueryPart(value)
+			maskedValue := redact.Text(redact.Value(decodedKey, decodedValue))
+			if maskedValue != decodedValue {
+				result.WriteString(key)
+				result.WriteByte('=')
+				result.WriteString(neturl.QueryEscape(maskedValue))
+			} else {
+				result.WriteString(pair)
+			}
+		} else {
+			result.WriteString(pair)
+		}
+		if end < len(raw) {
+			result.WriteByte(raw[end])
+		}
+		start = end + 1
 	}
+	return result.String()
+}
+
+// unescapeQueryPart decodes valid query escapes while leaving malformed '%'s
+// as literal characters, so a bad escape cannot prevent key-based redaction.
+func unescapeQueryPart(raw string) string {
+	var escaped strings.Builder
+	for i := 0; i < len(raw); i++ {
+		if raw[i] == '%' {
+			if i+2 < len(raw) && isHexByte(raw[i+1]) && isHexByte(raw[i+2]) {
+				escaped.WriteString(raw[i : i+3])
+				i += 2
+			} else {
+				escaped.WriteString("%25")
+			}
+		} else {
+			escaped.WriteByte(raw[i])
+		}
+	}
+	value, _ := neturl.QueryUnescape(escaped.String())
+	return value
+}
+
+func isHexByte(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
 }
 
 // redactHeaders masks e-mail addresses in header values. Authorization
@@ -130,14 +180,7 @@ func redactBody(url string, body []byte) []byte {
 	case redact.IsForm(body):
 		return redact.Form(body)
 	case isPrintableText(body):
-		raw := string(body)
-		if strings.Contains(raw, "=") {
-			if values, err := neturl.ParseQuery(raw); err == nil {
-				redactParams(values)
-				return []byte(values.Encode())
-			}
-		}
-		return []byte(redact.Text(raw))
+		return []byte(redact.Text(string(body)))
 	default:
 		return body
 	}
