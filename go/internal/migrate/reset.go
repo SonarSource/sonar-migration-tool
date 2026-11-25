@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/redact"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/version"
 	sqapi "github.com/sonar-solutions/sq-api-go"
 	"github.com/sonar-solutions/sq-api-go/cloud"
@@ -81,7 +82,7 @@ func RunReset(ctx context.Context, cfg ResetConfig) error {
 	if cfg.Debug {
 		level = slog.LevelDebug
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	logger := slog.New(redact.NewHandler(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 	// End-of-command timing line (#311). Defer so it fires on every
 	// exit path — success or any of the validate/plan/execute errors.
 	defer common.LogCommandDuration(logger, "reset", cmdStart)

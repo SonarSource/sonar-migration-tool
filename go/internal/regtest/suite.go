@@ -20,6 +20,7 @@ import (
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/extract"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/migrate"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/redact"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 	sqapi "github.com/sonar-solutions/sq-api-go"
 )
@@ -113,7 +114,7 @@ func NewSuite(cfg Config) (*Suite, error) {
 	if cfg.Verbose {
 		level = slog.LevelDebug
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	logger := slog.New(redact.NewHandler(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 
 	cloudKeyByProject, err := loadCloudProjectKeyMap(cfg.ExportDir)
 	if err != nil {
