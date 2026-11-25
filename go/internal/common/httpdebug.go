@@ -112,7 +112,8 @@ func redactHeaders(headers map[string][]string) map[string][]string {
 
 // redactBody masks a request/response body for the debug log (#713): raw
 // source files collapse to a size placeholder, SCM and other JSON bodies are
-// redacted by key, and any remaining text has e-mail addresses masked.
+// redacted by key, form-encoded bodies are redacted field by field, and any
+// remaining text has e-mail addresses masked.
 // Binary payloads are returned as-is: formatBody already reduces them to a
 // "<binary, N bytes>" placeholder. A no-op when redaction is disabled.
 func redactBody(url string, body []byte) []byte {
@@ -126,6 +127,8 @@ func redactBody(url string, body []byte) []byte {
 		return redact.SCMJSON(body)
 	case json.Valid(body):
 		return redact.JSON(body)
+	case redact.IsForm(body):
+		return redact.Form(body)
 	case isPrintableText(body):
 		raw := string(body)
 		if strings.Contains(raw, "=") {

@@ -540,6 +540,10 @@ Logs can end up in tickets, CI output and support bundles, so by default the too
 - Source code fetched from `/api/sources/raw`: the body is replaced by a size placeholder such as `<redacted source code, 1234 bytes>`.
 - SCM authors from `/api/sources/scm`.
 - Users and assignee changes in issue changelogs.
+- Display names of users (the `name` of any object that has a `login`), plus `externalIdentity`, `submitterLogin` and `noteLogin`.
+- Issue and hotspot comments (`markdown`, `htmlText`, `htmlComment`, `comment`): replaced by a size placeholder such as `<redacted comment, 42 bytes>`.
+- Form-encoded request bodies (`--debug`): `login`, `user` and the other sensitive fields are masked, comment `text` / `markdown_note` become a size placeholder, and URL-encoded (`%40`) e-mail addresses in any other field are masked.
+- Home-directory user names (`/Users/jdoe/...` becomes `/Users/***/...`) and ALM integration identifiers (`Client Id`, `App Id`, `Workspace Id`, Azure DevOps organization).
 - E-mail addresses appearing in free text (messages, URLs, header values).
 
 **Masking rules.** About one third of the characters are kept, at most 3, followed by `***`; e-mail addresses apply this rule to the local part and keep the domain:

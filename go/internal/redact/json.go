@@ -123,10 +123,28 @@ func redactNode(v any, scm bool) any {
 
 func redactObject(obj object, scm bool) object {
 	diffKey := changelogKey(obj)
+	isUser := hasUserIdentity(obj)
 	for i, m := range obj {
+		if isUser && m.key == "name" {
+			if s, ok := m.val.(string); ok {
+				obj[i].val = maskPlain(s)
+				continue
+			}
+		}
 		obj[i].val = redactMember(m, diffKey, scm)
 	}
 	return obj
+}
+
+// hasUserIdentity reports whether obj is a user record (it carries a string
+// "login"), whose "name" is a person's display name.
+func hasUserIdentity(obj object) bool {
+	for _, m := range obj {
+		if _, ok := m.val.(string); ok && normalizeKey(m.key) == "login" {
+			return true
+		}
+	}
+	return false
 }
 
 func redactMember(m member, diffKey string, scm bool) any {

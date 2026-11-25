@@ -80,6 +80,14 @@ func TestJSON(t *testing.T) {
 			`{"changelog":[{"user":"jd***","userName":"jan***","diffs":[{"key":"assignee","oldValue":"al***","newValue":"bo***"},{"key":"status","oldValue":"OPEN","newValue":"******@y.com"}]}]}`},
 		{"diff key after values", `{"oldValue":"alice","key":"author"}`, `{"oldValue":"al***","key":"author"}`},
 		{"scm ignored in JSON", `{"scm":[[1,"alice","d","r"]]}`, `{"scm":[[1,"alice","d","r"]]}`},
+		{"user display name", `{"login":"jdoe1","name":"Jane Doe","externalIdentity":"jdoe-ext","managed":false}`,
+			`{"login":"jd***","name":"jan***","externalIdentity":"jdo***","managed":false}`},
+		{"name without login untouched", `{"key":"grp","name":"Anyone"}`, `{"key":"grp","name":"Anyone"}`},
+		{"submitter and note login", `{"submitterLogin":"admin","params":[{"noteLogin":"admin"}]}`, `{"submitterLogin":"ad***","params":[{"noteLogin":"ad***"}]}`},
+		{"comments", `{"comments":[{"markdown":"secret *text*","htmlText":"secret <em>text</em>","login":"bob"}],"comment":"hi","comment2":[]}`,
+			`{"comments":[{"markdown":"<redacted comment, 13 bytes>","htmlText":"<redacted comment, 20 bytes>","login":"b***"}],"comment":"<redacted comment, 2 bytes>","comment2":[]}`},
+		{"home path and alm", `{"p":"/Users/jdoe/code","a":"Alm:github, App Id:946159, Client Id:Iv23ligl0iLhGRRvwFGO","z":"Url:https://dev.azure.com/acme-org"}`,
+			`{"p":"/Users/***/code","a":"Alm:github, App Id:94***, Client Id:iv2***","z":"Url:https://dev.azure.com/***"}`},
 		{"empty array", `[]`, `[]`},
 		{"escapes", "{\"s\":\"a\\n\\\"q\\\"\"}", "{\"s\":\"a\\n\\\"q\\\"\"}"},
 		{"invalid", `{"user":`, `{"user":`},
@@ -217,5 +225,30 @@ func TestHandlerTypedNilError(t *testing.T) {
 	l.Info("boom", "err", err)
 	if !strings.Contains(buf.String(), "err=") {
 		t.Fatalf("typed-nil error not logged: %q", buf.String())
+	}
+}
+
+func TestForm(t *testing.T) {
+	tests := []struct{ name, in, want string }{
+		{"login", "login=okorach-sonar-kgZGw%40github&name=migration-viewers&organization=latest-gh", "login=oko%2A%2A%2A&name=migration-viewers&organization=latest-gh"},
+		{"comment text", "issue=AaIT&text=%5BMigrated+from+admin%5D%0A%0ABecause+I+am+lazy", "issue=AaIT&text=%3Credacted+comment%2C+40+bytes%3E"},
+		{"encoded email in url", "name=Home&url=olivier.korach%40sonarsource.com", "name=Home&url=%2A%2A%2Aoli%2A%2A%2A%40sonarsource.com"},
+		{"untouched keeps encoding", "description=Test+permission+%28group%29&name=x", "description=Test+permission+%28group%29&name=x"},
+		{"markdown_note", "markdown_note=secret", "markdown_note=%3Credacted+comment%2C+6+bytes%3E"},
+		{"empty text", "text=&a=b", "text=&a=b"},
+		{"not a form", "plain text", "plain text"},
+		{"json not a form", `{"a":"b=c"}`, `{"a":"b=c"}`},
+		{"multipart not a form", "--abc\r\nContent-Disposition: x=y", "--abc\r\nContent-Disposition: x=y"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := string(Form([]byte(tc.in))); got != tc.want {
+				t.Fatalf("got  %s\nwant %s", got, tc.want)
+			}
+		})
+	}
+	setEnabled(t, false)
+	if got := string(Form([]byte("login=bob"))); got != "login=bob" {
+		t.Fatalf("disabled: got %s", got)
 	}
 }

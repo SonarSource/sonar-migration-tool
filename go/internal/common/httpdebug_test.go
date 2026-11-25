@@ -266,3 +266,32 @@ func TestNewHTTPDebugLogger_RedactsSensitivePayloads(t *testing.T) {
 		t.Errorf("disabled redaction must leave payloads untouched:\nbody=%s\nmeta=%s", out, meta)
 	}
 }
+
+func TestNewHTTPDebugLogger_RedactsFormRequestBody(t *testing.T) {
+	prev := redact.Enabled()
+	t.Cleanup(func() { redact.SetEnabled(prev) })
+
+	run := func(req string) string {
+		body := swapBodyWriter(t)
+		logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		NewHTTPDebugLogger(logger)("POST", "https://x/api/issues/add_comment", nil, []byte(req), 200, nil, time.Millisecond, nil)
+		return body.String()
+	}
+	req := "issue=AaIT&login=jdoe-sonar%40github&text=Because+I+am+lazy&url=jane.doe%40acme.com"
+
+	redact.SetEnabled(true)
+	out := run(req)
+	for _, leak := range []string{"jdoe-sonar", "lazy", "jane.doe", "acme.com%40", "jane.doe%40"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("form body leaked %q:\n%s", leak, out)
+		}
+	}
+	if !strings.Contains(out, "issue=AaIT") {
+		t.Errorf("non-sensitive field lost:\n%s", out)
+	}
+
+	redact.SetEnabled(false)
+	if out := run(req); !strings.Contains(out, "login=jdoe-sonar%40github") {
+		t.Errorf("disabled redaction must leave form untouched:\n%s", out)
+	}
+}
