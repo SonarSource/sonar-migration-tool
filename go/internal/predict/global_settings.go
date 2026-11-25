@@ -183,11 +183,7 @@ func processCustomizedSetting(it structure.ExtractItem, defaults map[string]stri
 	if !ok {
 		return false, nil
 	}
-	b, err := json.Marshal(rec)
-	if err != nil {
-		return false, nil
-	}
-	return false, w.WriteOne(b)
+	return false, writeJSONRow(w, rec)
 }
 
 // writeDefaultValueSweepRows performs the #244 default-value sweep: for
@@ -256,11 +252,7 @@ func writeConsolidatedAuthRow(w *common.ChunkWriter) error {
 			"detail": migrate.SkipDetailSonarAuthConsolidated,
 		}},
 	}
-	b, err := json.Marshal(rec)
-	if err != nil {
-		return nil
-	}
-	return w.WriteOne(b)
+	return writeJSONRow(w, rec)
 }
 
 // buildPredictedDbCleanerRecord builds the predictive Applied outcome

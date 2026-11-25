@@ -332,3 +332,85 @@ func TestRunSetTemplateGroupPermissionsFeedError(t *testing.T) {
 		t.Fatalf("expected aggregated feed error, got %v", err)
 	}
 }
+
+// grantRecordingExecutor returns an Executor whose target accepts every
+// add_group_to_template call and records it as "group:permission".
+func grantRecordingExecutor(t *testing.T) (*Executor, func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var grants []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/permissions/add_group_to_template", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		mu.Lock()
+		grants = append(grants, r.FormValue("groupName")+":"+r.FormValue("permission"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	return newCustomCloudTest(t, mux), func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), grants...)
+	}
+}
+
+// newApplyGuardApplier builds an applier with a populated template map,
+// one created group ("dev") and one skipped group ("skipped").
+func newApplyGuardApplier(e *Executor) *templateGroupPermApplier {
+	a := newTemplateGroupApplier(e, false, map[string]bool{"org\x00dev": true})
+	a.templateMap = map[string]templateGroupRef{
+		"srv\x00tplA":    {cloudID: "tpl", org: "org"},
+		"srv\x00noCloud": {cloudID: "", org: "org"},
+		"srv\x00noOrg":   {cloudID: "tpl", org: ""},
+	}
+	a.skipGroups = map[string]bool{"skipped": true}
+	return a
+}
+
+func TestTemplateGroupApplierApply(t *testing.T) {
+	cases := []struct {
+		name string
+		row  string
+		want []string
+	}{
+		{"blank template id", `{"templateId":"","name":"dev","permissions":["user"]}`, nil},
+		{"blank group name", `{"templateId":"tplA","name":"","permissions":["user"]}`, nil},
+		{"skipped group", `{"templateId":"tplA","name":"skipped","permissions":["user"]}`, nil},
+		{"unknown template", `{"templateId":"other","name":"dev","permissions":["user"]}`, nil},
+		{"template without cloud id", `{"templateId":"noCloud","name":"dev","permissions":["user"]}`, nil},
+		{"template without org", `{"templateId":"noOrg","name":"dev","permissions":["user"]}`, nil},
+		{"group not created and no by-name lookup", `{"templateId":"tplA","name":"ghost","permissions":["user"]}`, nil},
+		{"created group", `{"templateId":"tplA","name":"dev","permissions":["user","scan"]}`, []string{"dev:user", "dev:scan"}},
+		{"aliased built-in group", `{"templateId":"tplA","name":"` + testSonarUsers + `","permissions":["user"]}`, []string{"Members:user"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertTemplateGroupApply(t, tc.row, tc.want)
+		})
+	}
+}
+
+// assertTemplateGroupApply runs apply for one feed row and checks the
+// grants it issued.
+func assertTemplateGroupApply(t *testing.T, row string, want []string) {
+	t.Helper()
+	e, grants := grantRecordingExecutor(t)
+	a := newApplyGuardApplier(e)
+	var recs []json.RawMessage
+	if err := a.apply(context.Background(), "srv", json.RawMessage(row), &recs); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	got := grants()
+	if len(got) != len(want) {
+		t.Fatalf("grants = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("grants = %v, want %v", got, want)
+			break
+		}
+	}
+	if len(recs) != 0 {
+		t.Errorf("no unresolved record expected, got %v", recs)
+	}
+}
