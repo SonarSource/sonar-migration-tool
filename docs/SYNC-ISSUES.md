@@ -181,6 +181,7 @@ Because of this, `sync-issues` is safe to run repeatedly — on a schedule, afte
 
 - **Intermediate files** — written to `--export_dir` (default `./migration-files/`): the extract data plus `organizations.csv` / `projects.csv` from the internal `structure` pass.
 - **Stdout** — a final summary of projects synced and issue/hotspot counts (actionable, synced, skipped), followed by `Sync complete.`.
+- **Progress** — every 30 seconds the log shows the run-wide progress across all projects, with an ETA: `sync-issues progress: 58.7% (issues 329/329 projects, hotspots 57/329 projects), ETA 12m3s`. Issues of every project are synced first (0-50%), then hotspots of every project (50-100%): `50% * issues_done/total + 50% * hotspots_done/total`. The ETA extrapolates from the time the completed work took, and reads `unknown` until a first project completes. (#702)
 - Skipped projects (no resolvable target) and skipped findings (ambiguous or no match) are logged so you can review them; pass `--debug` for verbose per-finding detail.
 
 ---
