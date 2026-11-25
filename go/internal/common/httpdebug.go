@@ -65,8 +65,8 @@ func writeBody(label, url string, body []byte) {
 	fmt.Fprintf(debugBodyWriter, "  %s:\n%s\n", label, indentBlock(formatBody(redactBody(url, body)), "    "))
 }
 
-// redactURL masks e-mail addresses embedded in a logged URL (query strings
-// such as ?q=jane@acme.com). A no-op when redaction is disabled.
+// redactURL masks sensitive query values and e-mail addresses embedded in a
+// logged URL. A no-op when redaction is disabled.
 func redactURL(raw string) string {
 	if !redact.Enabled() {
 		return raw
