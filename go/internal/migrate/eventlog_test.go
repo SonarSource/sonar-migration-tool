@@ -208,7 +208,8 @@ func TestEventHandler_CollectsRedactedRecords(t *testing.T) {
 	base := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})
 	logger := slog.New(redact.NewHandler(newEventHandler(base, c))).With("author", "Jane Doe")
 
-	logger.Info("mail jane.doe@acme.com", "login", "johndoe", "project", "p1")
+	logger.Info("mail jane.doe@acme.com", "login", "johndoe", "project", "p1",
+		"branch", "feature/home/dashboard", "targetBranch", "fix/Users/export")
 
 	events := c.snapshot()
 	if len(events) != 1 {
@@ -220,7 +221,18 @@ func TestEventHandler_CollectsRedactedRecords(t *testing.T) {
 			t.Errorf("leaked %q: event=%s stderr=%s", leak, raw, buf.String())
 		}
 	}
-	if events[0].Attrs["project"] != "p1" {
-		t.Errorf("non-sensitive attr lost: %v", events[0].Attrs)
-	}
+    if events[0].Attrs["project"] != "p1" {
+        t.Errorf("non-sensitive attr lost: %v", events[0].Attrs)
+    }
+    for key, want := range map[string]string{
+        "branch":       "feature/home/dashboard",
+        "targetBranch": "fix/Users/export",
+    } {
+        if got := events[0].Attrs[key]; got != want {
+            t.Errorf("%s: got %v, want %q", key, got, want)
+        }
+        if !strings.Contains(buf.String(), key+"="+want) {
+            t.Errorf("stderr did not preserve %s: %s", key, buf.String())
+        }
+    }
 }

@@ -23,6 +23,9 @@ var (
 		"submitterlogin": true, "notelogin": true, "externalidentity": true,
 		"markdown": true, "htmltext": true, "htmlcomment": true, "comment": true,
 	}
+	// branchKeys identify git branch names, which should not be mistaken for
+	// home-directory paths when their names contain path-like segments.
+	branchKeys = map[string]bool{"branch": true, "targetbranch": true}
 	// freeTextKeys hold user-authored prose (issue and hotspot comments); they
 	// are replaced by a size placeholder like source code.
 	freeTextKeys  = map[string]bool{"markdown": true, "htmltext": true, "htmlcomment": true, "comment": true}
@@ -44,6 +47,8 @@ func normalizeKey(key string) string {
 }
 
 func isSensitiveKey(key string) bool { return sensitiveKeys[normalizeKey(key)] }
+
+func isBranchKey(key string) bool { return branchKeys[normalizeKey(key)] }
 
 func isCodeKey(key string) bool { return normalizeKey(key) == "code" }
 
@@ -111,11 +116,17 @@ func maskEmail(e string) string {
 
 // maskEmailsInText masks e-mail addresses, home-directory user names and ALM
 // integration identifiers embedded in free text.
-func maskEmailsInText(s string) string {
+func maskEmailsInText(s string) string { return maskText(s, true) }
+
+// maskBranchName masks personal identifiers in a branch name without treating
+// path-like branch segments as home-directory paths.
+func maskBranchName(s string) string { return maskText(s, false) }
+
+func maskText(s string, maskHomePath bool) string {
 	if strings.Contains(s, "@") {
 		s = emailPattern.ReplaceAllStringFunc(s, maskEmail)
 	}
-	if strings.Contains(s, "Users") || strings.Contains(s, "/home/") {
+	if maskHomePath && (strings.Contains(s, "Users") || strings.Contains(s, "/home/")) {
 		s = homePathPattern.ReplaceAllString(s, "${1}"+maskSuffix)
 	}
 	if strings.Contains(s, " Id:") {

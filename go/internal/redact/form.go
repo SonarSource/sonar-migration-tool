@@ -55,11 +55,11 @@ func Form(body []byte) []byte {
 		rawKey, rawVal, _ := strings.Cut(pair, "=")
 		key, err := url.QueryUnescape(rawKey)
 		if err != nil {
-			continue
+			key = rawKey
 		}
 		val, err := url.QueryUnescape(rawVal)
 		if err != nil {
-			continue
+			val = rawVal
 		}
 		if masked := maskFormValue(key, val); masked != val {
 			pairs[i] = rawKey + "=" + url.QueryEscape(masked)

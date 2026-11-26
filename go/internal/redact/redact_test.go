@@ -169,7 +169,8 @@ func TestHandler(t *testing.T) {
 	var buf bytes.Buffer
 	l := newBufLogger(&buf)
 	l.Info("sent to bob@x.com", "user", "johnd", "project", "p1", "err", errors.New("fail for amy@y.org"),
-		"url", "http://h/?e=zed@z.io", "n", 3, slog.Group("g", "email", "carol@c.com", "login", "abcdef"))
+		"url", "http://h/?e=zed@z.io", "n", 3, "branch", "feature/home/dashboard", "targetBranch", "fix/Users/export",
+		slog.Group("g", "email", "carol@c.com", "login", "abcdef"))
 	l.With("author", "Jane Doe").WithGroup("grp").Warn("w", "assignee", "abcdefghi", "code", "x := 1")
 	out := buf.String()
 	for _, leak := range []string{"bob@x.com", "johnd", "amy@y.org", "zed@z.io", "carol@c.com", "g.login=abcdef", "Jane Doe", "abcdefghi", "x := 1"} {
@@ -177,7 +178,7 @@ func TestHandler(t *testing.T) {
 			t.Errorf("leaked %q in %s", leak, out)
 		}
 	}
-	for _, want := range []string{"level=INFO", "level=WARN", "project=p1", "n=3", "user=jo***", "***b***@x.com", "g.email=***ca***@c.com", "grp.assignee=abc***", "author=jan***", "grp.code=\"<redacted code, 6 bytes>\""} {
+	for _, want := range []string{"level=INFO", "level=WARN", "project=p1", "n=3", "user=jo***", "***b***@x.com", "branch=feature/home/dashboard", "targetBranch=fix/Users/export", "g.email=***ca***@c.com", "grp.assignee=abc***", "author=jan***", "grp.code=\"<redacted code, 6 bytes>\""} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in %s", want, out)
 		}
@@ -238,6 +239,8 @@ func TestForm(t *testing.T) {
 		{"encoded email in url", "name=Home&url=olivier.korach%40sonarsource.com", "name=Home&url=%2A%2A%2Aoli%2A%2A%2A%40sonarsource.com"},
 		{"untouched keeps encoding", "description=Test+permission+%28group%29&name=x", "description=Test+permission+%28group%29&name=x"},
 		{"markdown_note", "markdown_note=secret", "markdown_note=%3Credacted+comment%2C+6+bytes%3E"},
+		{"malformed login escape", "login=abcdef%zz&name=x", "login=abc%2A%2A%2A&name=x"},
+		{"malformed comment escape", "text=secret%", "text=%3Credacted+comment%2C+7+bytes%3E"},
 		{"empty text", "text=&a=b", "text=&a=b"},
 		{"not a form", "plain text", "plain text"},
 		{"json not a form", `{"a":"b=c"}`, `{"a":"b=c"}`},

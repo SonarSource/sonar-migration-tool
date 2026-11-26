@@ -309,6 +309,16 @@ func TestNewHTTPDebugLogger_RedactsFormRequestBody(t *testing.T) {
 		t.Errorf("non-sensitive field lost:\n%s", out)
 	}
 
+	out = run("issue=AaIT&login=abcdef%zz&text=secret%")
+	for _, leak := range []string{"abcdef", "secret"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("malformed form escape leaked %q:\n%s", leak, out)
+		}
+	}
+	if !strings.Contains(out, "issue=AaIT") {
+		t.Errorf("non-sensitive field lost from malformed form:\n%s", out)
+	}
+
 	redact.SetEnabled(false)
 	if out := run(req); !strings.Contains(out, "login=jdoe-sonar%40github") {
 		t.Errorf("disabled redaction must leave form untouched:\n%s", out)

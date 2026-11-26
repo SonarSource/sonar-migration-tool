@@ -169,7 +169,13 @@ func redactString(key, s, diffKey string) string {
 		return maskByKey(key, s)
 	}
 	if diffKey != "" && (key == "oldValue" || key == "newValue") {
+		if isBranchKey(diffKey) {
+			return maskBranchName(s)
+		}
 		return maskByKey(diffKey, s)
+	}
+	if isBranchKey(key) {
+		return maskBranchName(s)
 	}
 	return maskEmailsInText(s)
 }
