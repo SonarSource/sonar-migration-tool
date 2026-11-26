@@ -205,7 +205,7 @@ func projectExtractItems(e *Executor, extractKey string, scope extractScope) fun
 	if e.ExtractIndex == nil {
 		return serverExtractItems(e, extractKey, scope.ServerURL)
 	}
-	return e.ExtractIndex.ProjectItems(extractKey, scope.ServerURL, scope.ProjectKey)
+	return e.ExtractIndex.ProjectBranchItems(extractKey, scope.ServerURL, scope.ProjectKey, scope.Branch)
 }
 
 // serverExtractItems streams the records of extractKey belonging to one
