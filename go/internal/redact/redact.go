@@ -9,9 +9,13 @@
 // tool LOGS only; extracted and migrated data is never altered.
 //
 // Sensitive keys are matched case-insensitively with '_', '-' and '.'
-// ignored, so userName, user_name and user-name are equivalent. The set is
-// user, userName, email, login, author, scmAuthor, assignee, code, plus the
-// compounds userLogin, userEmail, authorLogin and authorEmail.
+// ignored, so userName, user_name and user-name are equivalent. They cover
+// users and logins (user, userName, login, email, author, scmAuthor,
+// assignee, their plurals, scmAccounts, submitterLogin, noteLogin,
+// externalIdentity and the userLogin/userEmail/authorLogin/authorEmail
+// compounds), source code (code, replaced by a size placeholder) and
+// user-authored comments (markdown, htmlText, htmlComment, comment). See
+// mask.go for the authoritative list.
 package redact
 
 import (

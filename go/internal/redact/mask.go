@@ -19,6 +19,7 @@ var (
 		"user": true, "username": true, "email": true, "login": true,
 		"author": true, "scmauthor": true, "assignee": true, "code": true,
 		"userlogin": true, "useremail": true, "authorlogin": true, "authoremail": true,
+		"assignees": true, "authors": true, "logins": true, "scmaccounts": true,
 		"submitterlogin": true, "notelogin": true, "externalidentity": true,
 		"markdown": true, "htmltext": true, "htmlcomment": true, "comment": true,
 	}

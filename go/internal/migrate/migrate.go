@@ -552,8 +552,10 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 		level = slog.LevelDebug
 	}
 	collector := &eventCollector{}
-	base := redact.NewHandler(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
-	logger := slog.New(newEventHandler(base, collector))
+	// Redaction wraps the event collector, so run_events.jsonl receives the
+	// same masked records as stderr (#713).
+	base := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})
+	logger := slog.New(redact.NewHandler(newEventHandler(base, collector)))
 
 	// Installed on the HTTP clients now and pointed at the run directory
 	// once it exists; entries are buffered until then.

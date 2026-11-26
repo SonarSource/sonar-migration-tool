@@ -88,6 +88,9 @@ func TestJSON(t *testing.T) {
 			`{"comments":[{"markdown":"<redacted comment, 13 bytes>","htmlText":"<redacted comment, 20 bytes>","login":"b***"}],"comment":"<redacted comment, 2 bytes>","comment2":[]}`},
 		{"home path and alm", `{"p":"/Users/jdoe/code","a":"Alm:github, App Id:946159, Client Id:Iv23ligl0iLhGRRvwFGO","z":"Url:https://dev.azure.com/acme-org"}`,
 			`{"p":"/Users/***/code","a":"Alm:github, App Id:94***, Client Id:iv2***","z":"Url:https://dev.azure.com/***"}`},
+		{"string arrays under sensitive keys", `{"scmAccounts":["jdoe","john.d"],"tags":["jdoe"]}`, `{"scmAccounts":["j***","jo***"],"tags":["jdoe"]}`},
+		{"assignee facet", `{"facets":[{"property":"assignees","values":[{"val":"admin","count":3}]},{"property":"types","values":[{"val":"BUG","count":1}]}]}`,
+			`{"facets":[{"property":"assignees","values":[{"val":"ad***","count":3}]},{"property":"types","values":[{"val":"BUG","count":1}]}]}`},
 		{"empty array", `[]`, `[]`},
 		{"escapes", "{\"s\":\"a\\n\\\"q\\\"\"}", "{\"s\":\"a\\n\\\"q\\\"\"}"},
 		{"invalid", `{"user":`, `{"user":`},
@@ -250,5 +253,20 @@ func TestForm(t *testing.T) {
 	setEnabled(t, false)
 	if got := string(Form([]byte("login=bob"))); got != "login=bob" {
 		t.Fatalf("disabled: got %s", got)
+	}
+}
+
+func TestHandlerNonPrimitiveValues(t *testing.T) {
+	var buf bytes.Buffer
+	l := newBufLogger(&buf)
+	l.Info("m", "users", []string{"a@b.com", "x"}, "author", struct{ N string }{"Jane Doe"}, "ok", []int{1, 2})
+	out := buf.String()
+	for _, leak := range []string{"a@b.com", "Jane Doe"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("leaked %q in %s", leak, out)
+		}
+	}
+	if !strings.Contains(out, "[1 2]") {
+		t.Errorf("harmless value altered: %s", out)
 	}
 }

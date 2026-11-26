@@ -314,3 +314,30 @@ func TestNewHTTPDebugLogger_RedactsFormRequestBody(t *testing.T) {
 		t.Errorf("disabled redaction must leave form untouched:\n%s", out)
 	}
 }
+
+func TestRedactHeaders_HidesSessionHeaders(t *testing.T) {
+	prev := redact.Enabled()
+	t.Cleanup(func() { redact.SetEnabled(prev) })
+
+	in := map[string][]string{
+		"Cookie":              {"JWT-SESSION=abc"},
+		"Set-Cookie":          {"XSRF-TOKEN=def"},
+		"Proxy-Authorization": {"Basic Zm9v"},
+		"Authorization":       {"<redacted>"},
+		"User-Agent":          {"sonar-migration-tool"},
+	}
+	redact.SetEnabled(true)
+	out := redactHeaders(in)
+	for _, k := range []string{"Cookie", "Set-Cookie", "Proxy-Authorization"} {
+		if len(out[k]) != 1 || out[k][0] != "<redacted>" {
+			t.Errorf("%s not hidden: %v", k, out[k])
+		}
+	}
+	if out["User-Agent"][0] != "sonar-migration-tool" || out["Authorization"][0] != "<redacted>" {
+		t.Errorf("other headers altered: %v", out)
+	}
+	redact.SetEnabled(false)
+	if redactHeaders(in)["Cookie"][0] != "JWT-SESSION=abc" {
+		t.Error("disabled redaction must leave headers untouched")
+	}
+}

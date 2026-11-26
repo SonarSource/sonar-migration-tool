@@ -124,7 +124,11 @@ func redactNode(v any, scm bool) any {
 func redactObject(obj object, scm bool) object {
 	diffKey := changelogKey(obj)
 	isUser := hasUserIdentity(obj)
+	facet := facetField(obj)
 	for i, m := range obj {
+		if facet != "" && m.key == "values" {
+			redactFacetValues(facet, m.val)
+		}
 		if isUser && m.key == "name" {
 			if s, ok := m.val.(string); ok {
 				obj[i].val = maskPlain(s)
@@ -151,6 +155,9 @@ func redactMember(m member, diffKey string, scm bool) any {
 	if s, ok := m.val.(string); ok {
 		return redactString(m.key, s, diffKey)
 	}
+	if arr, ok := m.val.([]any); ok && isSensitiveKey(m.key) {
+		return redactStringArray(m.key, arr, scm)
+	}
 	if scm && m.key == "scm" {
 		maskSCMAuthors(m.val)
 	}
@@ -165,6 +172,50 @@ func redactString(key, s, diffKey string) string {
 		return maskByKey(diffKey, s)
 	}
 	return maskEmailsInText(s)
+}
+
+// redactStringArray masks the string elements of an array held under a
+// sensitive key (e.g. "scmAccounts": ["jdoe"]); other elements are redacted
+// as usual.
+func redactStringArray(key string, arr []any, scm bool) []any {
+	for i, e := range arr {
+		if s, ok := e.(string); ok {
+			arr[i] = maskByKey(key, s)
+		} else {
+			arr[i] = redactNode(e, scm)
+		}
+	}
+	return arr
+}
+
+// facetField returns the sensitive "property" of a facet object, or "".
+func facetField(obj object) string {
+	for _, m := range obj {
+		if s, ok := m.val.(string); ok && m.key == "property" && isSensitiveKey(s) {
+			return s
+		}
+	}
+	return ""
+}
+
+// redactFacetValues masks the "val" of each entry of a facet on a sensitive
+// property (e.g. assignees, authors).
+func redactFacetValues(field string, v any) {
+	entries, ok := v.([]any)
+	if !ok {
+		return
+	}
+	for _, e := range entries {
+		entry, ok := e.(object)
+		if !ok {
+			continue
+		}
+		for i, m := range entry {
+			if s, ok := m.val.(string); ok && m.key == "val" {
+				entry[i].val = maskByKey(field, s)
+			}
+		}
+	}
 }
 
 // changelogKey returns the sensitive "key" of a changelog diff entry, or "".

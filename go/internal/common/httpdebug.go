@@ -139,8 +139,12 @@ func isHexByte(b byte) bool {
 	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
 }
 
-// redactHeaders masks e-mail addresses in header values. Authorization
-// headers are already redacted by the SDK and are passed through untouched.
+// secretHeaders carry credentials or session tokens and are never logged.
+var secretHeaders = []string{"Proxy-Authorization", "Cookie", "Set-Cookie"}
+
+// redactHeaders masks e-mail addresses in header values and hides credential
+// and session headers. Authorization headers are already redacted by the SDK
+// and are passed through untouched.
 func redactHeaders(headers map[string][]string) map[string][]string {
 	if !redact.Enabled() {
 		return headers
@@ -151,6 +155,10 @@ func redactHeaders(headers map[string][]string) map[string][]string {
 			out[k] = vals
 			continue
 		}
+		if isSecretHeader(k) {
+			out[k] = []string{"<redacted>"}
+			continue
+		}
 		masked := make([]string, len(vals))
 		for i, v := range vals {
 			masked[i] = redact.Text(v)
@@ -158,6 +166,15 @@ func redactHeaders(headers map[string][]string) map[string][]string {
 		out[k] = masked
 	}
 	return out
+}
+
+func isSecretHeader(name string) bool {
+	for _, h := range secretHeaders {
+		if strings.EqualFold(name, h) {
+			return true
+		}
+	}
+	return false
 }
 
 // redactBody masks a request/response body for the debug log (#713): raw

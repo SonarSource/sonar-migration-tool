@@ -6,6 +6,7 @@ package redact
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 )
 
@@ -75,7 +76,22 @@ func redactAny(key string, x any) slog.Attr {
 	case string:
 		return slog.String(key, redactString(key, t, ""))
 	}
+	text := anyText(x)
+	if red := redactString(key, text, ""); red != text {
+		return slog.String(key, red)
+	}
 	return slog.Any(key, x)
+}
+
+// anyText renders a non-string value (slice, map, struct, Stringer) the way
+// the text handler would, tolerating panicking String methods.
+func anyText(x any) (text string) {
+	defer func() {
+		if recover() != nil {
+			text = ""
+		}
+	}()
+	return fmt.Sprintf("%v", x)
 }
 
 // errorText renders err, tolerating typed-nil errors whose Error method
