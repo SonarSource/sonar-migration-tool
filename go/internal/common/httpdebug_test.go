@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/redact"
 )
 
 // swapBodyWriter redirects debugBodyWriter for the duration of the test
@@ -221,3 +223,131 @@ func TestNewHTTPDebugLogger_LargeBodyTerminatesQuickly(t *testing.T) {
 type dnsError struct{}
 
 func (dnsError) Error() string { return "lookup x: no such host" }
+
+// With redaction on (the default), --debug payload dumps must not leak
+// e-mails, source code or SCM authors (#713).
+func TestNewHTTPDebugLogger_RedactsSensitivePayloads(t *testing.T) {
+	prev := redact.Enabled()
+	t.Cleanup(func() { redact.SetEnabled(prev) })
+
+	run := func(url string, hdrs map[string][]string, resp string) (string, string) {
+		body := swapBodyWriter(t)
+		var meta bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&meta, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		NewHTTPDebugLogger(logger)("GET", url, hdrs, nil, 200, []byte(resp), time.Millisecond, nil)
+		return body.String(), meta.String()
+	}
+
+	redact.SetEnabled(true)
+	out, _ := run("https://x/api/sources/raw?key=p:f.go", nil, "package secret\nfunc topSecretLogic() {}\n")
+	if strings.Contains(out, "topSecretLogic") || !strings.Contains(out, "redacted") {
+		t.Errorf("source code not replaced by placeholder:\n%s", out)
+	}
+	out, _ = run("https://x/api/sources/scm?key=p:f.go", nil, `{"scm":[[1,"johnd","2024-01-01T00:00:00+0000","abc"]]}`)
+	if strings.Contains(out, `"johnd"`) {
+		t.Errorf("SCM author leaked:\n%s", out)
+	}
+	out, _ = run("https://x/api/users/search", nil, `{"users":[{"login":"janedoe","email":"jane.doe@acme.com"}]}`)
+	if strings.Contains(out, "janedoe") || strings.Contains(out, "jane.doe@acme.com") {
+		t.Errorf("JSON user data leaked:\n%s", out)
+	}
+	out, meta := run("https://x/api/y?login=abcdef&q=jane.doe@acme.com", map[string][]string{"X-User": {"jane.doe@acme.com"}}, "contact jane.doe@acme.com now")
+	if strings.Contains(out, "jane.doe@acme.com") || strings.Contains(meta, "jane.doe@acme.com") || strings.Contains(meta, "abcdef") || !strings.Contains(meta, "login=ab%2A%2A%2A") {
+		t.Errorf("sensitive value or e-mail leaked in text body/url/headers:\nbody=%s\nmeta=%s", out, meta)
+	}
+
+	for _, tc := range []struct {
+		name string
+		url  string
+	}{
+		{name: "semicolon query separator", url: "https://x/api/y?login=abcdef;other=kept"},
+		{name: "malformed value escape", url: "https://x/api/y?login=abcdef%zz&other=kept"},
+		{name: "malformed path escape", url: "https://x/api/%zz?login=abcdef&other=kept"},
+	} {
+		_, meta := run(tc.url, nil, "")
+		if strings.Contains(meta, "abcdef") || !strings.Contains(meta, "other=kept") {
+			t.Errorf("%s: sensitive value leaked or other query param was lost: %s", tc.name, meta)
+		}
+	}
+
+	out, _ = run("https://x/api/y", nil, "login=abcdef&email=jane.doe%40acme.com")
+	if strings.Contains(out, "abcdef") || strings.Contains(out, "jane.doe") || !strings.Contains(out, "login=ab%2A%2A%2A") {
+		t.Errorf("sensitive form values leaked:\n%s", out)
+	}
+	out, _ = run("https://x/api/y", nil, "note jane.doe@acme.com?x=y")
+	if strings.Contains(out, "jane.doe@acme.com") || strings.Contains(out, "jane.doe%40acme.com") {
+		t.Errorf("e-mail in non-form text containing '=' was not masked:\n%s", out)
+	}
+
+	redact.SetEnabled(false)
+	out, meta = run("https://x/api/y?q=jane.doe@acme.com", nil, `{"users":[{"login":"janedoe"}]}`)
+	if !strings.Contains(out, "janedoe") || !strings.Contains(meta, "jane.doe@acme.com") {
+		t.Errorf("disabled redaction must leave payloads untouched:\nbody=%s\nmeta=%s", out, meta)
+	}
+}
+
+func TestNewHTTPDebugLogger_RedactsFormRequestBody(t *testing.T) {
+	prev := redact.Enabled()
+	t.Cleanup(func() { redact.SetEnabled(prev) })
+
+	run := func(req string) string {
+		body := swapBodyWriter(t)
+		logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		NewHTTPDebugLogger(logger)("POST", "https://x/api/issues/add_comment", nil, []byte(req), 200, nil, time.Millisecond, nil)
+		return body.String()
+	}
+	req := "issue=AaIT&login=jdoe-sonar%40github&text=Because+I+am+lazy&url=jane.doe%40acme.com"
+
+	redact.SetEnabled(true)
+	out := run(req)
+	for _, leak := range []string{"jdoe-sonar", "lazy", "jane.doe", "acme.com%40", "jane.doe%40"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("form body leaked %q:\n%s", leak, out)
+		}
+	}
+	if !strings.Contains(out, "issue=AaIT") {
+		t.Errorf("non-sensitive field lost:\n%s", out)
+	}
+
+	out = run("issue=AaIT&login=abcdef%zz&text=secret%")
+	for _, leak := range []string{"abcdef", "secret"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("malformed form escape leaked %q:\n%s", leak, out)
+		}
+	}
+	if !strings.Contains(out, "issue=AaIT") {
+		t.Errorf("non-sensitive field lost from malformed form:\n%s", out)
+	}
+
+	redact.SetEnabled(false)
+	if out := run(req); !strings.Contains(out, "login=jdoe-sonar%40github") {
+		t.Errorf("disabled redaction must leave form untouched:\n%s", out)
+	}
+}
+
+func TestRedactHeaders_HidesSessionHeaders(t *testing.T) {
+	prev := redact.Enabled()
+	t.Cleanup(func() { redact.SetEnabled(prev) })
+
+	in := map[string][]string{
+		"Cookie":              {"JWT-SESSION=abc"},
+		"Set-Cookie":          {"XSRF-TOKEN=def"},
+		"Proxy-Authorization": {"Basic Zm9v"},
+		"Authorization":       {"<redacted>"},
+		"User-Agent":          {"sonar-migration-tool"},
+	}
+	redact.SetEnabled(true)
+	out := redactHeaders(in)
+	for _, k := range []string{"Cookie", "Set-Cookie", "Proxy-Authorization"} {
+		if len(out[k]) != 1 || out[k][0] != "<redacted>" {
+			t.Errorf("%s not hidden: %v", k, out[k])
+		}
+	}
+	if out["User-Agent"][0] != "sonar-migration-tool" || out["Authorization"][0] != "<redacted>" {
+		t.Errorf("other headers altered: %v", out)
+	}
+	redact.SetEnabled(false)
+	if redactHeaders(in)["Cookie"][0] != "JWT-SESSION=abc" {
+		t.Error("disabled redaction must leave headers untouched")
+	}
+}

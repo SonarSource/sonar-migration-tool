@@ -9,11 +9,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	neturl "net/url"
 	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/sonar-solutions/sonar-migration-tool/internal/redact"
 	sqapi "github.com/sonar-solutions/sq-api-go"
 )
 
@@ -39,8 +41,8 @@ func NewHTTPDebugLogger(logger *slog.Logger) sqapi.DebugLogFunc {
 	return func(method, url string, headers map[string][]string, reqBody []byte, respStatus int, respBody []byte, duration time.Duration, err error) {
 		args := []any{
 			"method", method,
-			"url", url,
-			"headers", headers,
+			"url", redactURL(url),
+			"headers", redactHeaders(headers),
 			"duration_ms", duration.Milliseconds(),
 		}
 		if err != nil {
@@ -51,16 +53,154 @@ func NewHTTPDebugLogger(logger *slog.Logger) sqapi.DebugLogFunc {
 			logger.Debug("http request", args...)
 		}
 		if len(reqBody) > 0 {
-			writeBody("request_body", reqBody)
+			writeBody("request_body", url, reqBody)
 		}
 		if len(respBody) > 0 {
-			writeBody("response_body", respBody)
+			writeBody("response_body", url, respBody)
 		}
 	}
 }
 
-func writeBody(label string, body []byte) {
-	fmt.Fprintf(debugBodyWriter, "  %s:\n%s\n", label, indentBlock(formatBody(body), "    "))
+func writeBody(label, url string, body []byte) {
+	fmt.Fprintf(debugBodyWriter, "  %s:\n%s\n", label, indentBlock(formatBody(redactBody(url, body)), "    "))
+}
+
+// redactURL masks sensitive query values and e-mail addresses embedded in a
+// logged URL. A no-op when redaction is disabled.
+func redactURL(raw string) string {
+	if !redact.Enabled() {
+		return raw
+	}
+	queryStart := strings.IndexByte(raw, '?')
+	fragmentStart := strings.IndexByte(raw, '#')
+	if queryStart >= 0 && (fragmentStart < 0 || queryStart < fragmentStart) {
+		queryEnd := len(raw)
+		if fragmentStart > queryStart {
+			queryEnd = fragmentStart
+		}
+		raw = raw[:queryStart+1] + redactQuery(raw[queryStart+1:queryEnd]) + raw[queryEnd:]
+	}
+	return redact.Text(raw)
+}
+
+// redactQuery preserves the raw query structure while masking decoded values.
+// Unlike url.Values, it tolerates semicolon separators and malformed escapes.
+func redactQuery(raw string) string {
+	var result strings.Builder
+	for start := 0; start < len(raw); {
+		end := start
+		for end < len(raw) && raw[end] != '&' && raw[end] != ';' {
+			end++
+		}
+		pair := raw[start:end]
+		if key, value, ok := strings.Cut(pair, "="); ok {
+			decodedKey := unescapeQueryPart(key)
+			decodedValue := unescapeQueryPart(value)
+			maskedValue := redact.Text(redact.Value(decodedKey, decodedValue))
+			if maskedValue != decodedValue {
+				result.WriteString(key)
+				result.WriteByte('=')
+				result.WriteString(neturl.QueryEscape(maskedValue))
+			} else {
+				result.WriteString(pair)
+			}
+		} else {
+			result.WriteString(pair)
+		}
+		if end < len(raw) {
+			result.WriteByte(raw[end])
+		}
+		start = end + 1
+	}
+	return result.String()
+}
+
+// unescapeQueryPart decodes valid query escapes while leaving malformed '%'s
+// as literal characters, so a bad escape cannot prevent key-based redaction.
+func unescapeQueryPart(raw string) string {
+	var escaped strings.Builder
+	for i := 0; i < len(raw); i++ {
+		if raw[i] == '%' {
+			if i+2 < len(raw) && isHexByte(raw[i+1]) && isHexByte(raw[i+2]) {
+				escaped.WriteString(raw[i : i+3])
+				i += 2
+			} else {
+				escaped.WriteString("%25")
+			}
+		} else {
+			escaped.WriteByte(raw[i])
+		}
+	}
+	value, _ := neturl.QueryUnescape(escaped.String())
+	return value
+}
+
+func isHexByte(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
+}
+
+// secretHeaders carry credentials or session tokens and are never logged.
+var secretHeaders = []string{"Proxy-Authorization", "Cookie", "Set-Cookie"}
+
+// redactHeaders masks e-mail addresses in header values and hides credential
+// and session headers. Authorization headers are already redacted by the SDK
+// and are passed through untouched.
+func redactHeaders(headers map[string][]string) map[string][]string {
+	if !redact.Enabled() {
+		return headers
+	}
+	out := make(map[string][]string, len(headers))
+	for k, vals := range headers {
+		if strings.EqualFold(k, "Authorization") {
+			out[k] = vals
+			continue
+		}
+		if isSecretHeader(k) {
+			out[k] = []string{"<redacted>"}
+			continue
+		}
+		masked := make([]string, len(vals))
+		for i, v := range vals {
+			masked[i] = redact.Text(v)
+		}
+		out[k] = masked
+	}
+	return out
+}
+
+func isSecretHeader(name string) bool {
+	for _, h := range secretHeaders {
+		if strings.EqualFold(name, h) {
+			return true
+		}
+	}
+	return false
+}
+
+// redactBody masks a request/response body for the debug log (#713): raw
+// source files collapse to a size placeholder, SCM and other JSON bodies are
+// redacted by key, form-encoded bodies are redacted field by field, and any
+// remaining text has e-mail addresses masked.
+// Binary payloads are returned as-is: formatBody already reduces them to a
+// "<binary, N bytes>" placeholder. A no-op when redaction is disabled.
+func redactBody(url string, body []byte) []byte {
+	if !redact.Enabled() {
+		return body
+	}
+	switch {
+	case strings.Contains(url, "/api/sources/raw"):
+		return redact.SourceCode(body)
+	case strings.Contains(url, "/api/sources/scm"):
+		return redact.SCMJSON(body)
+	case json.Valid(body):
+		return redact.JSON(body)
+	case redact.IsForm(body):
+		return redact.Form(body)
+	case isPrintableText(body):
+		return []byte(redact.Text(string(body)))
+	default:
+		return body
+	}
 }
 
 // formatBody returns the body indented as JSON when it parses, otherwise

@@ -13,6 +13,7 @@ This page lists **every** option `sonar-migration-tool` accepts — JSON config 
 - [Per-command CLI flags](#per-command-cli-flags)
 - [SonarQube Cloud API rate limiting handling](#sonarqube-cloud-api-rate-limiting-handling)
 - [HTTP User-Agent](#http-user-agent)
+- [Log redaction (`--redact_logs`)](#log-redaction---redact_logs)
 - [Legacy config shapes](#legacy-config-shapes)
 - [Security tips](#security-tips)
 
@@ -46,6 +47,7 @@ Only `source.url` / `source.token` (for `extract`) and `target.url` / `target.to
 |---|---|---|---|:--:|---|
 | `concurrency` | `--concurrency` | all | `10` | No | Max parallel HTTP calls. Overridable per block via `source`/`target`. |
 | `project_data_build_concurrency` | `--project_data_build_concurrency` | migrate | `4` | No | Max number of scanner reports built at once during project-data migration. Lower it if the migration runs out of memory on a large instance; raise it toward `concurrency` if report building is the bottleneck. Overridable via `target.project_data_build_concurrency`. |
+| `redact_logs` | `--redact_logs` | all | `true` | No | Mask personal data and source code in log output. Accepts a JSON boolean or a string (`"false"`, `"off"`, `"no"`, `"0"`). The CLI flag wins over the config file. See [Log redaction](#log-redaction---redact_logs). |
 | `timeout` | `--timeout` | extract, migrate, sync-issues, transfer | `60` | No | HTTP request timeout in seconds. Paginated reads by `extract` (and the extract step of `transfer` and `sync-issues`), and `migrate`'s project lookup and profile comparison, wait up to twice this; `migrate`'s issue and hotspot sync does not. Overridable per block. |
 | `export_directory` | `--export_directory` (`--export_dir` on `transfer`) | all | `./migration-files` | No | Root directory for extract / migrate output. |
 | `skip_issue_sync` | `--skip_issue_sync` | extract, migrate, transfer | `false` | No | Skip the final per-issue / per-hotspot metadata sync (#299). Accepts `true`/`on`/`yes`/`1` (case-insensitive). CLI flag is a one-way override. |
@@ -115,12 +117,13 @@ Only `source.url` / `source.token` (for `extract`) and `target.url` / `target.to
 
 ### CLI-only / global flags
 
-These have no config-file field.
+These have no config-file field, except `--redact_logs` (`redact_logs`).
 
 | Flag | Commands | Default | Role |
 |---|---|---|---|
 | `-c, --config <path>` | all | — | Path to the JSON configuration file. |
 | `--debug` | all | off | Verbose request/response logging for troubleshooting. |
+| `--redact_logs <true\|false>` | all | `true` | Mask personal data and source code in logs. Takes an explicit value: `--redact_logs false` or `--redact_logs=false`. See [Log redaction](#log-redaction---redact_logs). |
 | `-h, --help` | all | — | Help for the command. |
 | `-v, --version` | all | — | Print version and exit. |
 
@@ -423,6 +426,7 @@ Available on every command:
 | Flag | Description |
 |---|---|
 | `--debug` | Verbose request/response logging. |
+| `--redact_logs <true\|false>` | Mask personal data and source code in logs (default `true`). |
 | `-h, --help` | Help for the command. |
 | `-v, --version` | Print version and exit. |
 
@@ -523,6 +527,46 @@ server-side/audit logs when diagnosing a migration. The header is not configurab
 
 When `--debug` is enabled, the request headers logged for each call include this `User-Agent`
 value alongside the (redacted) `Authorization` header.
+
+---
+
+## Log redaction (`--redact_logs`)
+
+Logs can end up in tickets, CI output and support bundles, so by default the tool masks personal data and source code in everything it logs, including the `--debug` request/response payload dumps. Redaction is **on by default**.
+
+**What is redacted**
+
+- Values logged under the keys `user`, `userName`, `email`, `login`, `author`, `scmAuthor`, `assignee` and `code`.
+- Source code fetched from `/api/sources/raw`: the body is replaced by a size placeholder such as `<redacted source code, 1234 bytes>`.
+- SCM authors from `/api/sources/scm`.
+- Users and assignee changes in issue changelogs.
+- Display names of users (the `name` of any object that has a `login`), plus `externalIdentity`, `submitterLogin` and `noteLogin`.
+- Issue and hotspot comments (`markdown`, `htmlText`, `htmlComment`, `comment`): replaced by a size placeholder such as `<redacted comment, 42 bytes>`.
+- Form-encoded request bodies (`--debug`): `login`, `user` and the other sensitive fields are masked, comment `text` / `markdown_note` become a size placeholder, and URL-encoded (`%40`) e-mail addresses in any other field are masked.
+- Home-directory user names (`/Users/jdoe/...` becomes `/Users/***/...`) and ALM integration identifiers (`Client Id`, `App Id`, `Workspace Id`, Azure DevOps organization).
+- E-mail addresses appearing in free text (messages, URLs, header values).
+
+**Masking rules.** About one third of the characters are kept, at most 3, followed by `***`; e-mail addresses apply this rule to the local part and keep the domain:
+
+| Original | Logged as |
+|---|---|
+| `johnd` | `jo***` |
+| `Jane Doe` | `jan***` |
+| `70779906+john-doe-sonarsource@users.noreply.github.com` | `***joh***@users.noreply.github.com` |
+
+**Disabling it**
+
+```bash
+sonar-migration-tool extract --config config.json --redact_logs false   # or --redact_logs=false
+```
+
+```json
+{ "redact_logs": false }
+```
+
+The config field accepts a JSON boolean or a string (`"false"`, `"off"`, `"no"`, `"0"`). Precedence: explicit `--redact_logs` flag, then the config file, then the default (`true`). Any other value is rejected with exit code 1. The config field is read from the top level of the file, for every command that takes `--config`.
+
+Only **logs** are redacted. Extracted data, migrated data and generated artifacts (CSV, JSON and PDF files, the export directory) are never altered.
 
 ---
 

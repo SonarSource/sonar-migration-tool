@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/sonar-solutions/sonar-migration-tool/internal/redact"
 )
 
 // newTestLogger wires the teeing eventHandler around a TextHandler whose
@@ -195,4 +197,42 @@ func TestEventHandler_WithAttrsTees(t *testing.T) {
 	if got := last.Attrs["grp.nested"]; got != "x" {
 		t.Errorf("grouped attr grp.nested: got %v, want %q (attrs=%+v)", got, "x", last.Attrs)
 	}
+}
+
+// TestEventHandler_CollectsRedactedRecords guards #713: with the production
+// wiring (redaction wrapping the collector), run_events.jsonl receives masked
+// records, not raw logins and e-mails.
+func TestEventHandler_CollectsRedactedRecords(t *testing.T) {
+	var buf bytes.Buffer
+	c := &eventCollector{}
+	base := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})
+	logger := slog.New(redact.NewHandler(newEventHandler(base, c))).With("author", "Jane Doe")
+
+	logger.Info("mail jane.doe@acme.com", "login", "johndoe", "project", "p1",
+		"branch", "feature/home/dashboard", "targetBranch", "fix/Users/export")
+
+	events := c.snapshot()
+	if len(events) != 1 {
+		t.Fatalf("want 1 event, got %d", len(events))
+	}
+	raw := fmt.Sprintf("%v", events[0])
+	for _, leak := range []string{"jane.doe@acme.com", "johndoe", "Jane Doe"} {
+		if strings.Contains(raw, leak) || strings.Contains(buf.String(), leak) {
+			t.Errorf("leaked %q: event=%s stderr=%s", leak, raw, buf.String())
+		}
+	}
+    if events[0].Attrs["project"] != "p1" {
+        t.Errorf("non-sensitive attr lost: %v", events[0].Attrs)
+    }
+    for key, want := range map[string]string{
+        "branch":       "feature/home/dashboard",
+        "targetBranch": "fix/Users/export",
+    } {
+        if got := events[0].Attrs[key]; got != want {
+            t.Errorf("%s: got %v, want %q", key, got, want)
+        }
+        if !strings.Contains(buf.String(), key+"="+want) {
+            t.Errorf("stderr did not preserve %s: %s", key, buf.String())
+        }
+    }
 }

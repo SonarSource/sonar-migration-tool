@@ -9,6 +9,7 @@ import (
 	"os"
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/redact"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/version"
 	"github.com/spf13/cobra"
 )
@@ -31,9 +32,12 @@ Extracts configuration from a Server instance, transforms it, and applies
 it to a Cloud organization. Also updates CI/CD pipelines post-migration.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
-	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		debug, _ := cmd.Flags().GetBool("debug")
 		configureDefaultLogger(debug)
+		if err := applyRedactLogs(cmd); err != nil {
+			return err
+		}
 		logStartupVersion()
 		// Derive a soft heap ceiling from the cgroup / system memory so
 		// large migrations collect early instead of being OOM-killed.
@@ -42,6 +46,7 @@ it to a Cloud organization. Also updates CI/CD pipelines post-migration.`,
 		if debug {
 			slog.Default().Debug("debug mode enabled", "command", cmd.Name())
 		}
+		return nil
 	},
 }
 
@@ -49,6 +54,7 @@ func init() {
 	rootCmd.SetVersionTemplate(versionTemplate)
 	rootCmd.SetHelpTemplate(helpTemplate)
 	rootCmd.PersistentFlags().Bool("debug", false, "Enable debug-level logging (verbose request payloads on commands that hit the API)")
+	rootCmd.PersistentFlags().String(flagRedactLogs, "true", redactLogsUsage)
 	addCommands()
 }
 
@@ -79,7 +85,7 @@ func configureDefaultLogger(debug bool) {
 		level = slog.LevelDebug
 	}
 	h := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})
-	slog.SetDefault(slog.New(h))
+	slog.SetDefault(slog.New(redact.NewHandler(h)))
 }
 
 func logStartupVersion() {

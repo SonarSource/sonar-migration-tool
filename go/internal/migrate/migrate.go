@@ -17,6 +17,7 @@ import (
 
 	"github.com/sonar-solutions/sonar-migration-tool/internal/common"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/extract"
+	"github.com/sonar-solutions/sonar-migration-tool/internal/redact"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/structure"
 	"github.com/sonar-solutions/sonar-migration-tool/internal/version"
 	sqapi "github.com/sonar-solutions/sq-api-go"
@@ -551,8 +552,10 @@ func RunMigrate(ctx context.Context, cfg MigrateConfig) (runIDOut string, retErr
 		level = slog.LevelDebug
 	}
 	collector := &eventCollector{}
+	// Redaction wraps the event collector, so run_events.jsonl receives the
+	// same masked records as stderr (#713).
 	base := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})
-	logger := slog.New(newEventHandler(base, collector))
+	logger := slog.New(redact.NewHandler(newEventHandler(base, collector)))
 
 	// Installed on the HTTP clients now and pointed at the run directory
 	// once it exists; entries are buffered until then.

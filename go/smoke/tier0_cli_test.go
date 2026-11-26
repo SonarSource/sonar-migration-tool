@@ -57,8 +57,8 @@ const expectedCommandCount = 13
 // take --export_dir, while every other command takes --export_directory.
 // Do not "fix" one to match the other in this table — it documents reality.
 //
-// --help and --debug are registered on every command and are asserted
-// separately rather than repeated in each row.
+// --help, --debug and --redact_logs are registered on every command and are
+// asserted separately rather than repeated in each row.
 var commandFlags = map[string][]string{
 	"analysis_report": {"--export_directory"},
 	"extract": {
@@ -234,7 +234,7 @@ func TestTier0_FlagRegistration(t *testing.T) {
 			help := res.combined()
 
 			// Registered on every command via the root persistent flags.
-			for _, universal := range []string{"--help", "--debug"} {
+			for _, universal := range []string{"--help", "--debug", "--redact_logs"} {
 				if !strings.Contains(help, universal) {
 					t.Errorf("%s --help is missing the universal flag %s", cmd, universal)
 				}
@@ -312,6 +312,10 @@ func TestTier0_SyncIssuesProjectKeyDeprecatedFlagStillWorks(t *testing.T) {
 func TestTier0_ExitCodeMatrix(t *testing.T) {
 	cfg := scratchConfig(t)
 	exportDir := t.TempDir()
+	redactBadCfg := filepath.Join(t.TempDir(), "bad-redact.json")
+	if err := os.WriteFile(redactBadCfg, []byte(`{"redact_logs": "maybe"}`), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
 
 	cases := []struct {
 		name         string
@@ -476,6 +480,25 @@ func TestTier0_ExitCodeMatrix(t *testing.T) {
 			wantExit:     1,
 			wantContains: "--api_max_rate_per_min must be between 100 and 1500",
 		},
+		{
+			// #713: --redact_logs takes an explicit true/false value.
+			name:         "extract_with_invalid_redact_logs_flag",
+			args:         []string{"extract", "--config", cfg, "--export_directory", exportDir, "--redact_logs", "maybe"},
+			wantExit:     1,
+			wantContains: `invalid --redact_logs value "maybe": expected true or false`,
+		},
+		{
+			name:         "reset_with_invalid_redact_logs_equals_form",
+			args:         []string{"reset", "--redact_logs=maybe"},
+			wantExit:     1,
+			wantContains: `invalid --redact_logs value "maybe": expected true or false`,
+		},
+		{
+			name:         "extract_with_invalid_redact_logs_config_field",
+			args:         []string{"extract", "--config", redactBadCfg, "--export_directory", exportDir},
+			wantExit:     1,
+			wantContains: `invalid redact_logs value in config file`,
+		},
 	}
 
 	for _, tc := range cases {
@@ -491,6 +514,54 @@ func TestTier0_ExitCodeMatrix(t *testing.T) {
 				t.Errorf("output does not contain %q\n--- output ---\n%s", tc.wantContains, res.combined())
 			}
 		})
+	}
+}
+
+// TestTier0_RedactLogs proves log redaction (#713) end to end without a
+// server: the e-mail in the --source_url path is logged by the --debug HTTP
+// dump of the (refused) connection attempt, masked by default and visible
+// with --redact_logs false (flag form with a space, "=" form, and config file).
+func TestTier0_RedactLogs(t *testing.T) {
+	defer track(t, "0", "redact logs")()
+
+	const email = "jane.doe@acme.com"
+	base := []string{"extract", "--debug", "--source_url", "http://127.0.0.1:1/" + email,
+		"--source_token", "t", "--export_directory", t.TempDir(), "--timeout", "5"}
+	run := func(extra ...string) string {
+		res := runCLI(t, append(append([]string{}, base...), extra...)...)
+		// The final "Error:" line echoes the user's own URL on stdout/stderr
+		// by design; assert on the structured debug log line only.
+		var logged []string
+		for _, line := range strings.Split(res.combined(), "\n") {
+			if strings.Contains(line, "http request failed") {
+				logged = append(logged, line)
+			}
+		}
+		if len(logged) == 0 {
+			t.Fatalf("no \"http request failed\" debug line found:\n%s", res.combined())
+		}
+		return strings.Join(logged, "\n")
+	}
+
+	if out := run(); strings.Contains(out, email) || !strings.Contains(out, "***") {
+		t.Errorf("default run must mask the e-mail in debug logs:\n%s", out)
+	}
+	cfgOff := filepath.Join(t.TempDir(), "redact-off.json")
+	if err := os.WriteFile(cfgOff, []byte(`{"redact_logs": "false"}`), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+	for name, extra := range map[string][]string{
+		"flag_space":  {"--redact_logs", "false"},
+		"flag_equals": {"--redact_logs=false"},
+		"config_file": {"--config", cfgOff},
+	} {
+		if out := run(extra...); !strings.Contains(out, email) {
+			t.Errorf("%s: redaction should be off, e-mail missing from debug log:\n%s", name, out)
+		}
+	}
+	// Explicit flag beats the config file.
+	if out := run("--config", cfgOff, "--redact_logs", "true"); strings.Contains(out, email) {
+		t.Errorf("--redact_logs true must override config \"false\":\n%s", out)
 	}
 }
 

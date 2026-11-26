@@ -9,6 +9,7 @@ This guide covers common issues when using the SonarQube to SonarCloud migration
 <!-- updated: 2026-06-04_01:14:00.000 by Claude -->
 
 - **Request logs**: `./files/<extract_id>/requests.log` -- Detailed log of every HTTP request and response. Check here first when diagnosing issues.
+- **Redaction**: logs, including `--debug` payload dumps, mask personal data and source code by default (`jo***`, `***joh***@users.noreply.github.com`). Rerun with `--redact_logs false` to see raw values while troubleshooting. See [Log redaction](ADVANCED-CONFIG.md#log-redaction---redact_logs).
 - **Analysis report**: Run `sonar-migration-tool analysis_report <RUN_ID> --export_directory ./files/` to generate a CSV summary of a migration run.
 
 ---

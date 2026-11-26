@@ -254,6 +254,8 @@ It opens the same workflow in your default browser with progress bars, an event 
 Most errors fall into a few common buckets — see [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for the full list.
 You may want to rerun the command with the extra `--debug` flag to get more troubleshooting logs.
 
+Logs mask personal data (users, e-mails, logins, authors, assignees) and source code by default, including `--debug` payload dumps. Pass `--redact_logs false` (or set `"redact_logs": false` in the config file) to see the raw values when you need them; extracted and migrated data is never affected. See [Log redaction](docs/ADVANCED-CONFIG.md#log-redaction---redact_logs).
+
 ---
 
 ## All commands

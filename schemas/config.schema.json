@@ -29,6 +29,15 @@
       "default": "./migration-files",
       "description": "Root directory for extract / migrate output."
     },
+    "redact_logs": {
+      "oneOf": [
+        { "type": "boolean" },
+        { "type": "integer", "enum": [0, 1] },
+        { "type": "string", "pattern": "^(?i)(true|false|on|off|yes|no|0|1)$" }
+      ],
+      "default": true,
+      "description": "When false (or off / no / 0), disable masking of personal data and source code in log output. Defaults to true. The --redact_logs flag overrides it. Issue #713."
+    },
     "skip_issue_sync": {
       "oneOf": [
         { "type": "boolean" },

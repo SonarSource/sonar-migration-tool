@@ -79,3 +79,10 @@ func parseFlexibleBoolString(s string) (bool, bool) {
 		return false, false
 	}
 }
+
+// ParseFlexibleBool reports the boolean carried by s using the same aliases
+// as FlexibleBool (true/false, on/off, yes/no, 1/0, case-insensitive). The
+// second result is false when s is not a recognised boolean.
+func ParseFlexibleBool(s string) (value, ok bool) {
+	return parseFlexibleBoolString(s)
+}
