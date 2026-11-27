@@ -55,6 +55,10 @@ type taskIndex struct {
 	// when they differ from its recordProjectKey, so readers that match on
 	// a different field (hotspotHeader) still find the record.
 	alias map[string][]int
+	// branches[fi] is the set of branch values carried by the records of
+	// files[fi]; "" stands for a record with no branch. It lets a
+	// per-branch read skip the files that hold only other branches (#708).
+	branches []map[string]bool
 }
 
 // readPlan is planServerReads for one (server, task), computed once.
@@ -82,6 +86,17 @@ func NewExtractIndex(directory string, mapping ExtractMapping) *ExtractIndex {
 // Portfolio- and group-scoped tasks, and an empty projectKey, fall back to
 // filtering a full ExtractItems stream.
 func (x *ExtractIndex) ProjectItems(key, serverURL, projectKey string) func(yield func(ExtractItem) bool) {
+	return x.ProjectBranchItems(key, serverURL, projectKey, "")
+}
+
+// ProjectBranchItems is ProjectItems that also skips the chunk files holding
+// no record of branch, so a project with many branches is not re-read in
+// full once per branch (#708). A file is skipped only when none of its
+// records carries that branch or lacks a branch altogether, so every record
+// ProjectItems would yield for the branch is still yielded; records of other
+// branches inside a kept file are still yielded, and the caller filters them
+// as before. An empty branch is ProjectItems.
+func (x *ExtractIndex) ProjectBranchItems(key, serverURL, projectKey, branch string) func(yield func(ExtractItem) bool) {
 	if projectKey == "" || extract.IsPortfolioScopedTask(key) || extract.IsGroupScopedTask(key) {
 		return x.filteredItems(key, serverURL, projectKey)
 	}
@@ -95,7 +110,7 @@ func (x *ExtractIndex) ProjectItems(key, serverURL, projectKey string) func(yiel
 			if sup.all {
 				continue // a later extract re-extracted every project
 			}
-			if !yieldProjectRecords(x.task(id, key), serverURL, projectKey, sup, yield) {
+			if !yieldProjectRecords(x.task(id, key), serverURL, projectKey, branch, sup, yield) {
 				return
 			}
 		}
@@ -104,8 +119,8 @@ func (x *ExtractIndex) ProjectItems(key, serverURL, projectKey string) func(yiel
 
 // yieldProjectRecords yields the records of one task index that belong to
 // projectKey and are not superseded. It returns false once yield stops.
-func yieldProjectRecords(idx *taskIndex, serverURL, projectKey string, sup supersession, yield func(ExtractItem) bool) bool {
-	for _, f := range idx.filesFor(projectKey, sup.keys[projectKey]) {
+func yieldProjectRecords(idx *taskIndex, serverURL, projectKey, branch string, sup supersession, yield func(ExtractItem) bool) bool {
+	for _, f := range idx.filesFor(projectKey, branch, sup.keys[projectKey]) {
 		for _, r := range readChunkFile(f) {
 			h := decodeProjectSpellings(r)
 			if !h.has(projectKey) || sup.keys[h.primary()] {
@@ -194,6 +209,7 @@ func (t *taskIndex) build(dir string) {
 		}
 		fi := len(t.files)
 		t.files = append(t.files, filepath.Join(dir, entry.Name()))
+		t.branches = append(t.branches, make(map[string]bool))
 		t.indexFile(fi)
 	}
 }
@@ -203,6 +219,7 @@ func (t *taskIndex) build(dir string) {
 func (t *taskIndex) indexFile(fi int) {
 	for _, r := range readChunkFile(t.files[fi]) {
 		h := decodeProjectSpellings(r)
+		t.branches[fi][h.Branch] = true
 		primary := h.primary()
 		if primary != "" {
 			t.owned[primary] = appendFile(t.owned[primary], fi)
@@ -218,7 +235,9 @@ func (t *taskIndex) indexFile(fi int) {
 // filesFor returns, in ascending order, the chunk files that may hold
 // records of projectKey. When the project's own records are all superseded
 // only the files reaching it through an alias spelling are left to check.
-func (t *taskIndex) filesFor(projectKey string, superseded bool) []string {
+// A non-empty branch drops the files that hold no record of that branch and
+// none without a branch.
+func (t *taskIndex) filesFor(projectKey, branch string, superseded bool) []string {
 	var picked []int
 	if !superseded {
 		picked = append(picked, t.owned[projectKey]...)
@@ -226,9 +245,12 @@ func (t *taskIndex) filesFor(projectKey string, superseded bool) []string {
 	picked = append(picked, t.alias[projectKey]...)
 	slices.Sort(picked)
 	picked = slices.Compact(picked)
-	files := make([]string, len(picked))
-	for i, fi := range picked {
-		files[i] = t.files[fi]
+	files := make([]string, 0, len(picked))
+	for _, fi := range picked {
+		if branch != "" && !t.branches[fi][branch] && !t.branches[fi][""] {
+			continue
+		}
+		files = append(files, t.files[fi])
 	}
 	return files
 }
@@ -249,6 +271,7 @@ type projectSpellings struct {
 	ProjectKey string `json:"projectKey"`
 	Project    string `json:"project"`
 	Key        string `json:"key"`
+	Branch     string `json:"branch"`
 }
 
 // decodeProjectSpellings returns no spelling for a record that does not

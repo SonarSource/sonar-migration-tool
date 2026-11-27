@@ -705,3 +705,54 @@ func TestExtractIndexPartlyDecodableRecord(t *testing.T) {
 	}
 	assertIndexMatchesScan(t, root, mapping, []string{"a"}, "")
 }
+
+// TestExtractIndexBranchReadSkipsOtherBranchFiles pins #708: a per-branch read
+// opens only the chunk files that can hold that branch, yet still yields every
+// record the project-wide read would yield for it, including records with no
+// branch (which belong to every branch).
+func TestExtractIndexBranchReadSkipsOtherBranchFiles(t *testing.T) {
+	root := t.TempDir()
+	writeLayout(t, root, []layoutExtract{{
+		id: runA, url: streamTestURL, meta: map[string]any{"url": streamTestURL},
+		tasks: []layoutTask{{name: taskIssuesFull, output: true, chunks: [][]string{
+			{`{"projectKey":"a","branch":"main","n":1}`, `{"projectKey":"a","branch":"main","n":2}`},
+			{`{"projectKey":"a","branch":"dev","n":3}`},
+			{`{"projectKey":"a","n":4}`},
+			{`{"projectKey":"b","branch":"dev","n":5}`},
+		}}},
+	}})
+	mapping, err := GetUniqueExtracts(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx := NewExtractIndex(root, mapping)
+	tidx := idx.task(runA, taskIssuesFull)
+
+	if got := tidx.filesFor("a", "", false); len(got) != 3 {
+		t.Fatalf("no branch: want 3 files, got %v", got)
+	}
+	// dev: its own file plus the branchless one; the main-only file is skipped.
+	if got := tidx.filesFor("a", "dev", false); len(got) != 2 {
+		t.Fatalf("dev: want 2 files, got %v", got)
+	}
+	if got := tidx.filesFor("a", "no-such-branch", false); len(got) != 1 {
+		t.Fatalf("unknown branch: want only the branchless file, got %v", got)
+	}
+
+	count := func(branch string) (n int) {
+		for item := range idx.ProjectBranchItems(taskIssuesFull, streamTestURL, "a", branch) {
+			var h struct{ Branch string }
+			_ = json.Unmarshal(item.Data, &h)
+			if branch == "" || h.Branch == branch || h.Branch == "" {
+				n++
+			}
+		}
+		return n
+	}
+	if got := count("dev"); got != 2 { // dev record + branchless record
+		t.Fatalf("dev records: want 2, got %d", got)
+	}
+	if got := count("main"); got != 3 { // two main records + branchless record
+		t.Fatalf("main records: want 3, got %d", got)
+	}
+}
